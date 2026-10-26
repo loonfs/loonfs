@@ -86,14 +86,23 @@ fn range_quarter_units(start: u64, end: u64) -> ByteRange {
     }
 }
 
-/// Checks that a sequential reader of a 32-unit file fetches windows that
-/// grow from 1 unit, each the smallest of twice the last window, 64 units,
-/// and the bytes read less the bytes fetched but not read yet, with one
-/// window ahead once that's at least half the current window. Windows of at
-/// most 8 units are ranged reads, and the larger one is a grant that fetches at
-/// most one signed range past its window. After every read, the engine has
-/// fetched at most twice the bytes read plus the first window (scaling
-/// invariant 2) plus that one range, and no byte is fetched twice.
+/// Checks the windows that a sequential reader of a 32-unit file fetches,
+/// in reads of an eighth of a unit:
+///
+/// 1. The windows follow the rules of the engine's read window, scaled to
+///    units: the first window is 1 unit, each next window is the smallest of
+///    twice the current one, 64 units, and the bytes read minus the bytes
+///    fetched but not read yet, and the handle asks for it once that's at
+///    least half the current window.
+/// 2. A window of at most 8 units is a ranged read, and a larger one is a
+///    grant, which fetches at most one signed range past its window.
+/// 3. After every read, the engine has fetched at most twice the bytes read
+///    plus the first window (scaling invariant 2) plus that one range.
+/// 4. No byte is fetched twice.
+///
+/// The windows, in quarter units, are [0, 4), [4, 6), [6, 10), [10, 16),
+/// [16, 26), [26, 42), and [42, 68) as ranged reads, then one grant for
+/// [68, 110), and a ranged read of [112, 128) at the end of the file.
 #[tokio::test]
 async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read() {
     let fixture = fixture_with(SimulatedServerConfig {

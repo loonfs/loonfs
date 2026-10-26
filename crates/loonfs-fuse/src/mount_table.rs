@@ -1,11 +1,11 @@
-//! The host's mount table, which tells whether a directory has a mount that
-//! a loonfs daemon made.
+//! The host's mount table, which shows whether a directory has a mount that
+//! a LoonFS daemon made.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 
-/// The source name of every loonfs mount, which `mount` shows.
+/// The source name of every LoonFS mount, which `mount` shows.
 pub(crate) const MOUNT_SOURCE: &str = "loonfs";
 
 const MOUNT_INFO_PATH: &str = "/proc/self/mountinfo";
@@ -18,7 +18,7 @@ struct MountInfo {
     source: String,
 }
 
-/// Returns whether `directory` has a mount that a loonfs daemon made.
+/// Returns whether `directory` has a mount that a LoonFS daemon made.
 pub(crate) fn has_loonfs_mount(directory: &Path) -> std::io::Result<bool> {
     let table = std::fs::read_to_string(MOUNT_INFO_PATH)?;
     Ok(table
@@ -78,7 +78,7 @@ mod tests {
     use super::*;
 
     /// Checks that a line's mount point is unescaped and that only a FUSE
-    /// mount with the loonfs source counts as a loonfs mount.
+    /// mount with the `loonfs` source counts as a LoonFS mount.
     #[test]
     fn mount_info_lines_identify_loonfs_mounts() {
         let ours = parse_line(

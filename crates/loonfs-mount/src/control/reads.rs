@@ -86,7 +86,7 @@ impl ControlTask {
         })
     }
 
-    /// Answers a read once its bytes are in the cache, fetching the window
+    /// Replies to a read once its bytes are in the cache, fetching the window
     /// that contains it first.
     pub(super) fn on_read(
         &mut self,
@@ -239,8 +239,8 @@ impl ControlTask {
         let Some(partial) = entry.state.partial_mut() else {
             return Ok(());
         };
-        // A read of a file that's fetched again waits for all of it, so a
-        // request fetches what's missing of all of it.
+        // A read of a file that's fetched again waits for the whole file, so
+        // a request fetches every missing byte of the file's target.
         let range = match partial.attempt {
             FillAttempt::First => range,
             FillAttempt::Refetch => 0..partial.target.size_bytes.min(size_bytes),
@@ -411,7 +411,8 @@ impl ControlTask {
     }
 
     /// Fails the reads that wait for the bytes of `range`, or every read of
-    /// a file that's fetched again, since those wait for all of it.
+    /// a file that's fetched again, since those reads wait for the whole
+    /// file.
     pub(super) fn fail_waiters(
         &mut self,
         content_id: &ContentId,

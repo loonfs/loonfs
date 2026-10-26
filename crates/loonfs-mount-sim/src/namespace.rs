@@ -41,7 +41,7 @@ pub(crate) struct NamespaceState {
     pub(crate) namespace_id: NamespaceId,
     pub(crate) naming: NamespaceNaming,
     pub(crate) created_at_ms: u64,
-    /// The model's rows for every commit, which answer reads at any sequence.
+    /// The model's rows for every commit, which serve a read at any sequence.
     pub(crate) metadata: MetadataState,
     /// Every commit, where `commits[i]` is the commit at sequence `i + 1`.
     pub(crate) commits: Vec<CommitRecord>,

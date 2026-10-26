@@ -60,7 +60,7 @@ pub enum Operation {
 }
 
 impl Operation {
-    /// Reports whether the operation returns file bytes: a read through the server or a signed
+    /// Returns whether the operation returns file bytes: a read through the server or a signed
     /// range of a download grant.
     pub fn is_content_read(self) -> bool {
         matches!(
@@ -164,7 +164,7 @@ impl Trace {
     pub(crate) fn next_step(&mut self) -> u64 {
         assert!(
             self.records.len() < self.capacity,
-            "the request trace is full at {} records; drain it with `take_trace`",
+            "the request trace is full at {} records, so drain it with `take_trace`",
             self.capacity
         );
         let step = self.next_step;

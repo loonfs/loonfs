@@ -1,8 +1,9 @@
 //! A simulated LoonFS server for the mount's tests.
 //!
-//! [`SimulatedServer`] serves the part of the v0 HTTP API that `loonfs mount` uses, as a tower
+//! [`SimulatedServer`] serves the part of the v0 HTTP API that `loonfs mount` uses, as a `tower`
 //! service that `loonfs_client::Client::with_transport` accepts, so the real client code runs
-//! against it unchanged ([Testing] in the mount's design note says what the simulation is for).
+//! against it unchanged ("Testing" in the mount's design note, `docs/design/mount.md`, says what
+//! the simulation is for).
 //! Each namespace's metadata is a `loonfs-model` [`MetadataState`]. The server turns every request
 //! operation into the format's WAL deltas (create an inode, bind and unbind a name, append a
 //! revision, set or revoke a tombstone, append an attribute revision) and applies them with the
@@ -52,7 +53,6 @@
 //!   of the namespace's row count. A simulated namespace should stay within a few thousand
 //!   entries.
 //!
-//! [Testing]: https://github.com/loonfs/loonfs/blob/main/docs/design/mount.md#testing
 //! [`MetadataState`]: loonfs_model::metadata::MetadataState
 
 #![warn(missing_docs)]

@@ -17,8 +17,8 @@ pub(crate) struct VerifyJob {
     pub(crate) file: Arc<CacheFile>,
     /// The revision whose bytes the file should contain.
     pub(crate) target: ContentRef,
-    /// A prefix whose checksum is known, so verification reads only the
-    /// bytes after it.
+    /// A prefix with a verified checksum, so verification reads only the
+    /// bytes after the prefix.
     pub(crate) verified_prefix: Option<VerifiedPrefix>,
 }
 
@@ -31,9 +31,9 @@ pub(crate) enum Verification {
 
 /// Reads a cache file and compares its checksum with the revision's.
 ///
-/// With a verified prefix, it computes the checksum of the bytes after the
-/// prefix and combines it with the prefix's checksum, as the server does for
-/// an append, so it doesn't read the prefix again.
+/// With a verified prefix, the checksum of the bytes after the prefix is
+/// combined with the prefix's checksum, as the server does for an append, so
+/// the prefix isn't read again.
 pub(crate) fn verify(job: &VerifyJob) -> std::io::Result<Verification> {
     let algorithm = job.target.checksum.algorithm;
     let prefix = job.verified_prefix.as_ref().filter(|prefix| {

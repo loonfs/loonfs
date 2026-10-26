@@ -46,7 +46,7 @@ pub(super) enum Source {
     /// that time as its modification time, and so does each directory that
     /// the commit changes, so the tree follows from the feed alone.
     Commit { committed_at_ms: u64 },
-    /// A page of a listing, whose entries carry their own times.
+    /// A page of a listing, whose entries include their own times.
     Listing,
 }
 
@@ -61,7 +61,7 @@ pub(super) struct AppliedChanges {
 /// How a newer state of a file's content relates to the state it replaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentChange {
-    /// The newer state isn't newer.
+    /// The content didn't change.
     None,
     /// The newer revision extends the same chain.
     Extended,
@@ -134,7 +134,7 @@ impl<'a> Changes<'a> {
     }
 
     /// Sets a directory's modification time to the time of the commit that
-    /// changed an entry in it. A listing's entries carry their own times, so
+    /// changed an entry in it. A listing's entries include their own times, so
     /// a listing doesn't change it.
     fn touch(&mut self, directory: ItemId) -> Result<()> {
         let Source::Commit { committed_at_ms } = self.source else {

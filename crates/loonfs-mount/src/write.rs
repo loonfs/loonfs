@@ -14,7 +14,7 @@ pub enum WriteTarget {
     Existing(ItemId),
     /// A new file, created by the open.
     New {
-        /// The directory to create it in.
+        /// The new file's parent directory.
         parent: ItemId,
         /// The new file's name.
         name: OsString,
@@ -44,7 +44,7 @@ pub struct OpenWrite {
 /// A request to create a directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mkdir {
-    /// The directory to create it in.
+    /// The new directory's parent directory.
     pub parent: ItemId,
     /// The new directory's name.
     pub name: OsString,
@@ -55,7 +55,7 @@ pub struct Mkdir {
 /// A request to create a symlink.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symlink {
-    /// The directory to create it in.
+    /// The new symlink's parent directory.
     pub parent: ItemId,
     /// The new symlink's name.
     pub name: OsString,
@@ -71,7 +71,7 @@ pub struct Rename {
     pub parent: ItemId,
     /// The item's name.
     pub name: OsString,
-    /// The directory to move it to.
+    /// The directory to move the item to.
     pub new_parent: ItemId,
     /// The item's new name.
     pub new_name: OsString,
@@ -93,7 +93,8 @@ pub struct SetAttr {
 
 /// One open descriptor of a file that a program writes.
 ///
-/// A read-only mount has no working files, so no write handle exists yet.
+/// A read-only mount has no working files, so the engine never creates a
+/// write handle.
 #[derive(Debug)]
 pub struct WriteHandle {
     never: Infallible,

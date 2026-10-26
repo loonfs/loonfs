@@ -51,8 +51,8 @@ impl Daemon {
     /// Takes the state directory's lock and listens on the socket.
     ///
     /// A second daemon for the same state directory fails with
-    /// [`DaemonError::AlreadyRunning`]. It must be called from a Tokio
-    /// runtime.
+    /// [`DaemonError::AlreadyRunning`]. It must be called from the daemon's
+    /// async runtime.
     pub fn bind(paths: DaemonPaths, kernel: Arc<dyn Kernel>) -> Result<Self, DaemonError> {
         create_private_directory(paths.state_directory())?;
         let state_directory = std::fs::canonicalize(paths.state_directory())
@@ -229,7 +229,7 @@ async fn respond(
         }
         DaemonRequest::Sync(_) => Err(DaemonFailure::new(
             DaemonErrorCode::NotSupported,
-            "`sync` isn't available yet, because mounts are read-only",
+            "`sync` isn't supported, because mounts are read-only",
         )),
         DaemonRequest::Refresh(request) => mounts
             .refresh(request)

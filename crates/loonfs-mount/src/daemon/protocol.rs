@@ -38,7 +38,7 @@ pub enum DaemonRequest {
     Sync(DirectoryRequest),
     /// Reads a mount's change feed now, and waits for a sequence.
     Refresh(RefreshRequest),
-    /// Reports the state of one mount, or of every mount.
+    /// Returns the state of one mount, or of every mount.
     Status(StatusRequest),
     /// Lists the daemon's mounts.
     List(DaemonScope),
@@ -47,8 +47,8 @@ pub enum DaemonRequest {
 }
 
 impl DaemonRequest {
-    /// The `op` of every request, which tells an unknown operation from a
-    /// request that doesn't decode.
+    /// The `op` of every request, which lets the daemon distinguish an
+    /// unknown operation from a request that doesn't decode.
     const OPERATIONS: [&'static str; 7] = [
         "mount", "unmount", "sync", "refresh", "status", "list", "shutdown",
     ];
@@ -100,21 +100,24 @@ pub struct MountRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MountOptions {
-    /// `--max-entries`.
+    /// The entry budget that admission checks (`--max-entries`).
     pub max_entries: Option<u64>,
-    /// `--poll-interval-ms`.
+    /// How often the mount reads the change feed (`--poll-interval-ms`).
     pub poll_interval_ms: Option<u64>,
-    /// `--cache-max-bytes`.
+    /// The eviction target for cached content that nothing uses
+    /// (`--cache-max-bytes`).
     pub max_cache_bytes: Option<u64>,
-    /// `--cache-min-free`.
+    /// The free space that the mount keeps on the state directory's
+    /// filesystem (`--cache-min-free`).
     pub min_free_bytes: Option<u64>,
-    /// `--pinned-max-bytes`.
+    /// The limit on cached bytes that open files keep (`--pinned-max-bytes`).
     pub max_pinned_bytes: Option<u64>,
-    /// `--uid`.
+    /// The owner that every item shows (`--uid`).
     pub uid: Option<u32>,
-    /// `--gid`.
+    /// The group that every item shows (`--gid`).
     pub gid: Option<u32>,
-    /// `--sync-timeout-ms`, which also bounds how long `refresh` waits.
+    /// How long a barrier waits for publication, which also bounds how long
+    /// `refresh` waits (`--sync-timeout-ms`).
     pub sync_timeout_ms: Option<u64>,
 }
 
@@ -381,11 +384,11 @@ impl DaemonFailure {
     }
 }
 
-/// The kinds of failure that the daemon reports.
+/// The kinds of failure that the daemon returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonErrorCode {
-    /// The request's `op` isn't one that this daemon knows.
+    /// The request's `op` isn't one that this version supports.
     UnknownOperation,
     /// The request didn't decode, or its values are invalid.
     InvalidRequest,
@@ -407,11 +410,11 @@ pub enum DaemonErrorCode {
     RefreshTimedOut,
     /// A refresh waited for a sequence past the namespace's head.
     SequenceNotCommitted,
-    /// The operation isn't available yet.
+    /// This daemon doesn't support the operation.
     NotSupported,
     /// The daemon is stopping.
     ShuttingDown,
-    /// A failure that a newer daemon reports.
+    /// A failure that a newer daemon returns.
     #[serde(other)]
     Unknown,
 }
@@ -444,7 +447,7 @@ pub fn encode_line<T: Serialize>(message: &T) -> Vec<u8> {
     line
 }
 
-/// Decodes a request line, and reports an `op` that no request has as an
+/// Decodes a request line, and returns an `op` that no request has as an
 /// unknown operation.
 pub fn decode_request(line: &[u8]) -> Result<DaemonRequest, DaemonFailure> {
     serde_json::from_slice(line).map_err(|error| {

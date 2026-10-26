@@ -264,8 +264,8 @@ fn attributes_changed(
     Ok(None)
 }
 
-/// `moved` and `undeleted`: rebinds an item that's in the mount, removes one
-/// that left it, and reads one that entered it.
+/// `moved` and `undeleted`: rebinds an item that's in the mount, removes an
+/// item that left the mount, and reads an item that entered the mount.
 fn bound(
     changes: &mut Changes<'_>,
     inode_id: InodeId,

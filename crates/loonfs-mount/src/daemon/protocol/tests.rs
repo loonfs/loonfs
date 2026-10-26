@@ -188,7 +188,7 @@ fn a_mount_request_includes_the_token_and_debug_redacts_it() {
 /// Checks that an `op` that no request has is an unknown operation, and that
 /// a known `op` with bad fields is an invalid request.
 #[test]
-fn an_unknown_operation_is_reported_apart_from_an_invalid_request() {
+fn an_unknown_operation_is_distinguished_from_an_invalid_request() {
     let unknown = decode_request(br#"{"op":"remount","directory":"/mnt"}"#)
         .expect_err("an unknown operation");
     assert_eq!(unknown.code, DaemonErrorCode::UnknownOperation);

@@ -43,7 +43,7 @@ impl SimulatedServer {
         }
     }
 
-    /// Returns the tower service that serves the HTTP API, for
+    /// Returns the `tower` service that serves the HTTP API, for
     /// `loonfs_client::Client::with_transport`.
     pub fn service(&self) -> SimulatedService {
         SimulatedService::new(self.shared.clone())
@@ -95,7 +95,7 @@ impl SimulatedServer {
         );
     }
 
-    /// Changes a namespace's naming mode, which `GET /v0/namespaces/{ns}` reports.
+    /// Changes a namespace's naming mode, which `GET /v0/namespaces/{ns}` returns.
     ///
     /// # Panics
     ///
@@ -120,7 +120,8 @@ impl SimulatedServer {
     }
 
     /// Admits and publishes a commit without HTTP, as a request from `actor` with no subject
-    /// would, and returns the commit. A commit ID that the namespace keeps a receipt for replays.
+    /// would, and returns the commit. If the namespace has a receipt for the commit ID, the
+    /// call replays the original commit.
     pub fn commit(
         &self,
         namespace_id: &NamespaceId,
@@ -199,7 +200,7 @@ impl SimulatedServer {
     }
 
     /// Orders the next commit's response and its echo in the change feed, and returns the hold
-    /// that releases the later one.
+    /// that delays the later of the two.
     ///
     /// The order applies to the next request that makes a new commit. A request that a receipt
     /// replays, or that fails, doesn't use it. Each call queues one order. While a commit is kept

@@ -90,7 +90,7 @@ impl ContentTokens {
         }
     }
 
-    /// Reports whether one of `tokens` proves that `content_ref` was prepared for
+    /// Returns whether one of `tokens` proves that `content_ref` was prepared for
     /// `namespace_id`, and hasn't expired at `now_ms`.
     pub(crate) fn proves(
         &self,

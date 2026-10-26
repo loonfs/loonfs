@@ -38,7 +38,8 @@ impl DiskSpace for EveryByteFree {
     }
 }
 
-/// Workers that record the work they're given and run none of it.
+/// Workers that record the work that the task starts, and run none of the
+/// work.
 #[derive(Clone, Default)]
 struct RecordedWork(Arc<Mutex<Vec<Work>>>);
 

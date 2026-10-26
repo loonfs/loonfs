@@ -1,5 +1,5 @@
-//! The tower service that the client sends its requests to, and the dispatch of each request to
-//! its handler.
+//! The `tower` service that the client sends its requests to, and the dispatch of each request
+//! to its handler.
 
 use crate::commits::{self, CommitIdentity, CommitOutcome, MAX_COMMIT_REQUEST_BODY_BYTES};
 use crate::content_reads::{self, requested_range};
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tower::Service;
 
-/// The simulated server as a tower service, which `loonfs_client::Client::with_transport`
+/// The simulated server as a `tower` service, which `loonfs_client::Client::with_transport`
 /// accepts.
 ///
 /// Clones share one server.
@@ -84,7 +84,8 @@ struct Exchange {
 }
 
 impl ServerState {
-    /// Handles one request, records it in the trace, and decides how its response is delivered.
+    /// Handles one request, records it in the trace, and returns how the client receives the
+    /// reply.
     fn respond(&mut self, parts: &Parts, body: &Bytes) -> Exchange {
         let request_id = self.ids.request_id();
         let step = self.trace.next_step();

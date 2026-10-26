@@ -10,8 +10,8 @@ use std::ffi::OsStr;
 
 /// The first inode number of the control directory's items.
 ///
-/// The engine numbers its items upward from one and stores each number in a
-/// signed 64-bit database column, so it never reaches the top half of the
+/// The engine assigns item numbers upward from one and stores each number in
+/// a signed 64-bit database column, so it never reaches the top half of the
 /// numbers, where the control directory's items are.
 const FIRST_CONTROL_ITEM: u64 = 1 << 63;
 

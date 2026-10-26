@@ -104,8 +104,7 @@ fn added_entries(directory: ItemId) -> Vec<Listed> {
     entries
 }
 
-/// Returns the kind of a listed entry, given the kind of the directory that
-/// `.` and `..` show.
+/// Returns the kind of a listed entry. `.` and `..` are always directories.
 pub(crate) fn listed_kind(entry: &Listed) -> ItemKind {
     match entry {
         Listed::Dot { .. } => ItemKind::Directory,

@@ -1,7 +1,7 @@
 //! The content store: the bytes of every chain, keyed by the chain's owner and content ID.
 //!
-//! A chain's bytes are kept whole. A revision's content reference reads a prefix of its chain, so
-//! one chain serves every revision that an append extended it for.
+//! A chain's bytes are kept whole. A revision's content reference points to a prefix of its chain,
+//! so one chain serves every revision that an append extended it for.
 
 use loonfs_types::{ContentId, ContentRef, NamespaceId};
 use std::collections::BTreeMap;

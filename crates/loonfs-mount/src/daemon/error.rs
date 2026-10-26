@@ -6,7 +6,7 @@ use thiserror::Error;
 
 /// Error returned by the daemon's setup and by its client.
 ///
-/// A request that the daemon refuses isn't one of these: the daemon reports
+/// A request that the daemon refuses isn't one of these: the daemon returns
 /// it as a [`DaemonFailure`](super::protocol::DaemonFailure) response.
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]

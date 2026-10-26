@@ -10,11 +10,11 @@ use std::sync::Arc;
 
 /// Starts kernel mounts of engines.
 ///
-/// The daemon calls every method from a blocking thread of its Tokio
-/// runtime, so an implementation can block, and can read the runtime's
+/// The daemon calls every method from a blocking thread of the daemon's
+/// async runtime, so an implementation can block, and can read the runtime's
 /// handle with `tokio::runtime::Handle::current`.
 pub trait Kernel: Send + Sync + 'static {
-    /// Checks the host checks that belong to the kernel: that the daemon can
+    /// Runs the host checks that depend on the kernel: that the daemon can
     /// open the device that serves mounts, and that it can mount.
     ///
     /// The error's message says what's missing, and the daemon refuses the
@@ -44,12 +44,12 @@ pub enum StaleMountOutcome {
 /// One kernel mount that [`Kernel::mount`] started.
 pub trait KernelMount: Send + 'static {
     /// Detaches the mount from its directory, so no new program can reach
-    /// it. Programs that have files open in it keep using them. A second
-    /// call does nothing.
+    /// the mount. Programs that have files open in the mount keep using
+    /// those files. A second call does nothing.
     fn detach(&mut self) -> io::Result<()>;
 
-    /// Waits until the kernel releases the mount, which happens once it's
-    /// detached and the last program closes its files in it, and drops
-    /// every reference to the engine that the mount kept.
+    /// Waits until the kernel releases the mount, which happens once the
+    /// mount is detached and the last program closes its files in the mount,
+    /// and drops every reference to the engine that the mount kept.
     fn wait(self: Box<Self>);
 }

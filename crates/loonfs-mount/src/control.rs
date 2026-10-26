@@ -138,7 +138,8 @@ pub(crate) struct Environment {
     pub(crate) reflinks: ReflinkSupport,
 }
 
-/// The state that one mount's control task owns.
+/// The state of one mount's control task, which only the control task
+/// changes.
 pub(crate) struct ControlTask {
     database: Database,
     config: MountConfig,
@@ -171,7 +172,7 @@ pub(crate) struct ControlTask {
     relist_on_tick: HashSet<InodeId>,
     publication_stop: Option<PublicationStop>,
     reserved_name: Option<InodeId>,
-    /// The owner that every item shows, which status reports.
+    /// The owner that every item shows, which status shows too.
     owner: Owner,
     feed_error: Option<String>,
     dropped_invalidations: u64,
@@ -280,8 +281,9 @@ impl ControlTask {
     /// Starts following the feed. The task's first message would do the
     /// same, and a test calls this instead of `run`.
     pub(crate) fn start(&mut self) {
-        // A restart between a commit and the transaction that shows the
-        // directories it reached leaves them to show now.
+        // If the daemon restarted after a commit but before the transaction
+        // that shows the directories the commit brought in, this call shows
+        // those directories.
         if let Err(error) = self.reveal_entering(None) {
             tracing::error!(%error, "showing directories that entered the mount failed");
         }

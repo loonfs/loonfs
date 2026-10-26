@@ -16,8 +16,8 @@ pub enum MountAccess {
     Writable,
 }
 
-/// How the engine resolves a local change that conflicts with a remote one
-/// (`--conflict`).
+/// How the engine resolves a local change that conflicts with a remote one.
+/// The write path uses it, so a read-only mount keeps the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictPolicy {
@@ -48,14 +48,15 @@ pub struct MountConfig {
     pub state_directory: PathBuf,
     /// The entry budget that admission checks (`--max-entries`).
     pub max_entries: u64,
-    /// How often the planner publishes changes (`--publish-interval-ms`).
+    /// How often the write path's planner publishes changes. A read-only
+    /// mount publishes nothing.
     pub publish_interval_ms: u64,
-    /// How often the planner publishes files whose only change is an append
-    /// (`--append-interval-ms`).
+    /// How often the write path's planner publishes files whose only change
+    /// is an append. A read-only mount publishes nothing.
     pub append_interval_ms: u64,
     /// How often the engine reads the change feed (`--poll-interval-ms`).
     pub poll_interval_ms: u64,
-    /// The conflict policy (`--conflict`).
+    /// The conflict policy of the write path.
     pub conflict: ConflictPolicy,
     /// The eviction target for cached content that nothing uses
     /// (`--cache-max-bytes`).
@@ -72,8 +73,8 @@ pub struct MountConfig {
     /// The group that every item shows (`--gid`), or `None` for the group of
     /// the user that runs the daemon.
     pub gid: Option<u32>,
-    /// How long a barrier waits for publication before it fails
-    /// (`--sync-timeout-ms`).
+    /// How long a barrier waits for publication before it fails, and how
+    /// long the daemon's `refresh` waits (`--sync-timeout-ms`).
     pub sync_timeout_ms: u64,
     /// The largest file that the first read fetches whole.
     pub max_whole_file_bytes: u64,
@@ -125,7 +126,7 @@ impl MountConfig {
         }
     }
 
-    /// Checks the fetch sizes: each one fetch fits the shared limit on
+    /// Checks the fetch sizes: every fetch size fits the shared limit on
     /// fetches in flight, so a fetch never waits for room that can't exist,
     /// and the first window is at most the largest one.
     pub(crate) fn validate(&self) -> Result<()> {

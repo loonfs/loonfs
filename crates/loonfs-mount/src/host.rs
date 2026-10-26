@@ -13,7 +13,7 @@ use std::path::Path;
 /// it.
 const SPARSE_CHECK_BYTES: u64 = 16 << 20;
 
-/// Reports the free space of a filesystem.
+/// A source of a filesystem's free space.
 pub(crate) trait DiskSpace: std::fmt::Debug + Send + Sync {
     /// Returns the bytes that the daemon's user can still write on the
     /// filesystem that contains `path`.
@@ -157,7 +157,8 @@ fn check_reflinks(directory: &Path) -> Result<ReflinkSupport> {
     })
 }
 
-/// Reports no reflinks, because mounts run on Linux only.
+/// Returns that the filesystem has no reflinks, because mounts run on Linux
+/// only.
 #[cfg(not(target_os = "linux"))]
 fn check_reflinks(_directory: &Path) -> Result<ReflinkSupport> {
     Ok(ReflinkSupport::Unsupported)

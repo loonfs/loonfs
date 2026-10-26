@@ -42,7 +42,7 @@ fn commit_nested_tree(fixture: &Fixture) -> u64 {
 /// it, and deletes it, with no other request, and that the tree it builds
 /// equals a listing of the namespace at the sequence it applied.
 #[tokio::test]
-async fn a_nested_namespace_admits_at_a_snapshot_with_the_requests_the_note_describes() {
+async fn admitting_a_nested_namespace_lists_it_at_a_snapshot_with_no_other_requests() {
     let fixture = fixture();
     let entries = commit_nested_tree(&fixture);
     let head = fixture.head_seq();
@@ -183,10 +183,10 @@ async fn a_stopped_engine_refuses_calls_through_every_reference() {
     engine.stop();
 }
 
-/// Checks that status reports the owner that the mount's settings set, the
+/// Checks that status shows the owner that the mount's settings set, the
 /// state directory, and the free space on the state directory's filesystem.
 #[tokio::test]
-async fn status_reports_the_owner_the_state_directory_and_the_free_space() {
+async fn status_shows_the_owner_the_state_directory_and_the_free_space() {
     let fixture = fixture();
     let mut config = fixture.config();
     config.uid = Some(1234);

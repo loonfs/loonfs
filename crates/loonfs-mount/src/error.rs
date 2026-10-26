@@ -41,7 +41,7 @@ pub enum MountError {
     /// keeps free.
     #[error(
         "state directory `{path}` has {available_bytes} bytes free, and the mount keeps at least \
-         {min_free_bytes} bytes free"
+         {min_free_bytes} bytes free, so free space or pass a lower `--cache-min-free`"
     )]
     InsufficientFreeSpace {
         /// The directory whose filesystem was checked.
@@ -76,7 +76,7 @@ pub enum MountError {
     /// The mounted tree has more entries than the entry budget.
     #[error(
         "mount path `{path}` has more than {max_entries} entries (the scan stopped after \
-         {listed_entries}), so it doesn't fit the entry budget"
+         {listed_entries}), so pass a larger `--max-entries` or mount a subdirectory"
     )]
     EntryBudgetExceeded {
         /// The mount's path in the namespace.
@@ -151,8 +151,8 @@ pub enum MountError {
         /// Which limit was reached.
         reason: String,
     },
-    /// `refresh_at_least` didn't see the mount apply the sequence before its
-    /// timeout passed.
+    /// The mount didn't apply the sequence that `refresh_at_least` waited
+    /// for before the timeout passed.
     #[error(
         "the mount applied sequence {}, not {}, within {timeout_ms} ms",
         .applied_seq.0,

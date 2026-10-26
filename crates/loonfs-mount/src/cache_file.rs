@@ -16,7 +16,7 @@ pub(crate) struct CacheFile {
     file: File,
     /// The bytes below this offset are present and don't change, so a read
     /// handle reads them without asking the control task. The control task
-    /// sets it after the fetch that wrote the bytes reported them.
+    /// sets the offset after a fetch reports the bytes that it wrote.
     present_prefix: AtomicU64,
 }
 

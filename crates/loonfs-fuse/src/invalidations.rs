@@ -15,8 +15,9 @@ pub(crate) fn start(
         .spawn(move || {
             while let Some(invalidation) = invalidations.blocking_recv() {
                 // The kernel refuses an invalidation of what it doesn't
-                // cache, and once the mount is released it refuses all of
-                // them, so a failure needs nothing more.
+                // cache, and once the mount is released it refuses every
+                // invalidation, so the adapter logs a failed invalidation and
+                // drops it.
                 if let Err(error) = send(&notifier, &invalidation) {
                     tracing::debug!(%error, ?invalidation, "the kernel refused an invalidation");
                 }

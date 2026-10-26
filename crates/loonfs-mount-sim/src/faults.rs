@@ -173,7 +173,7 @@ impl Faults {
             self.feed_hold
                 .as_ref()
                 .is_none_or(|hold| hold.is_released()),
-            "a test should release the feed hold it has before it holds feed pages again"
+            "a test should release the feed hold it has before it delays feed pages again"
         );
         let (hold, state) = Hold::new();
         self.feed_hold = Some(state);
@@ -189,7 +189,7 @@ impl Faults {
             self.content_read_hold
                 .as_ref()
                 .is_none_or(|held| held.hold.is_released()),
-            "a test should release the content-read hold it has before it holds content reads again"
+            "a test should release the content-read hold it has before it delays content reads again"
         );
         let (hold, state) = Hold::new();
         self.content_read_hold = Some(ContentReadHold {
@@ -211,7 +211,7 @@ impl Faults {
             .min()
     }
 
-    /// Decides how the client receives `reply`, and changes the reply's body for a content read
+    /// Returns how the client receives `reply`, and changes the reply's body for a content read
     /// fault.
     pub(crate) fn deliver(
         &mut self,

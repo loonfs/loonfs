@@ -8,14 +8,14 @@
 use crate::invalidation::Invalidation;
 use tokio::sync::oneshot;
 
-/// One thing that waits to be sent.
+/// One reply or invalidation batch that waits to be sent.
 enum Outgoing {
     Reply(Box<dyn FnOnce() + Send>),
     Invalidations(Vec<Invalidation>),
 }
 
-/// The replies and invalidations of the message being handled. It holds at
-/// most what one message produces: the reads that one fetch satisfied, the
+/// The replies and invalidations of the message being handled. It contains
+/// at most what one message produces: the reads that one fetch satisfied, the
 /// refresh calls that one poll ends, and the pages of one feed poll.
 #[derive(Default)]
 pub(super) struct Outbox(Vec<Outgoing>);

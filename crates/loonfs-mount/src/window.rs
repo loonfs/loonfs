@@ -1,10 +1,10 @@
-//! The read window of one read handle, which decides what a read fetches and
+//! The read window of one read handle, which sets what a read fetches and
 //! what the handle reads ahead.
 
 use crate::config::MountConfig;
 use std::ops::Range;
 
-/// The sizes that decide what a read fetches, from the mount's settings.
+/// The sizes that set what a read fetches, from the mount's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FetchSizes {
     /// The largest file that the first read fetches whole.
@@ -52,21 +52,31 @@ struct Run {
 
 /// The read window of one handle.
 ///
-/// The sizes below are the defaults of the mount's settings. A file of at
-/// most 8 MiB is fetched whole. A larger file starts with a window of 1 MiB,
-/// aligned to 1 MiB, and a read at another offset than where the last one
-/// ended starts again with a window of 1 MiB. Once a sequential
-/// reader has read half of its window, the handle asks for the next window,
-/// so one window stays in flight ahead of the reader.
+/// The window follows these rules, shown with the defaults of the mount's
+/// settings:
 ///
-/// The next window is the smallest of twice the current window, 64 MiB, and
-/// the bytes the reader has consumed less the bytes fetched that it hasn't
-/// read yet. So the bytes fetched ahead of the reader never exceed the bytes
-/// it consumed, and a run of reads that consumes `c` bytes fetches at most
-/// `2c` bytes plus the part of its first window before its first read, which
-/// is less than the first window. The handle waits until that allows a
-/// window of at least half the current one, so the windows don't shrink to a
-/// few bytes after a read that starts in the middle of its first window.
+/// 1. The first read of a file of at most 8 MiB fetches the whole file.
+/// 2. A larger file is read in windows. The first window is 1 MiB, aligned
+///    to 1 MiB. A read that starts somewhere other than where the last read
+///    ended starts a new run with a new 1 MiB window.
+/// 3. Once a sequential reader has read half of its window, the handle asks
+///    for the next window, so one window is in flight ahead of the reader.
+/// 4. The next window is the smallest of three sizes: twice the current
+///    window, 64 MiB, and the bytes that the reader has consumed minus the
+///    bytes fetched that it hasn't read yet. So the bytes fetched ahead of
+///    the reader never exceed the bytes it consumed, and a run of reads that
+///    consumes `c` bytes fetches at most `2c` bytes plus the part of its
+///    first window before its first read.
+/// 5. The handle asks for the next window only once rule 4 allows a window
+///    of at least half the current one, so the windows don't shrink to a few
+///    bytes after a run that starts in the middle of its first window.
+///
+/// For example, a program that reads a 24 MiB file from the start in
+/// 128 KiB reads gets these windows, in MiB: [0, 1), [1, 1.5), [1.5, 2.5),
+/// [2.5, 4), [4, 6.5), [6.5, 10.5), [10.5, 17), and [17, 24), where the
+/// last one stops at the end of the file. The second window is 0.5 MiB
+/// because, when the reader has consumed 0.75 MiB, 0.25 MiB of the first
+/// window is still unread, and rule 5 delays the request until then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadWindow {
     sizes: FetchSizes,

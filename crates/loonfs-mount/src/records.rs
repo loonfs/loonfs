@@ -43,8 +43,8 @@ pub(crate) struct AttributeState {
     /// The modification time that the item shows.
     pub(crate) mtime_ms: u64,
     pub(crate) target: Option<String>,
-    /// The raw `fs.mtime_ms` and `fs.mtime_revision_no`, which decide
-    /// `mtime_ms` again when the content changes.
+    /// The raw `fs.mtime_ms` and `fs.mtime_revision_no`, which the engine
+    /// uses to recompute `mtime_ms` when the content changes.
     pub(crate) mtime_attribute: Option<MtimeAttribute>,
 }
 
@@ -61,10 +61,11 @@ pub(crate) struct RemoteState {
 
 impl RemoteState {
     /// Returns the kind and state of an entry that a listing or a read
-    /// returned, or `None` for an inode kind that this engine doesn't know.
+    /// returned, or `None` for an inode kind that this version doesn't
+    /// support.
     ///
-    /// A directory shows its creation time until the mount sees a change in
-    /// it.
+    /// A directory shows its creation time until the mount applies a change
+    /// to the directory's entries.
     pub(crate) fn from_entry(
         entry: &PathEntry,
         binding: Option<Binding>,
@@ -125,7 +126,7 @@ impl RemoteState {
     }
 
     /// Sets the attributes that an attribute revision recorded, and returns
-    /// the item's kind after them.
+    /// the item's kind with the new attributes.
     pub(crate) fn set_attributes(
         &mut self,
         kind: ItemKind,
@@ -152,7 +153,7 @@ impl RemoteState {
     }
 }
 
-/// The tree that the kernel shows for one item.
+/// What the Local tree shows for one item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalState {
     /// The parent and name, or `None` for the root, an item that was unlinked
@@ -249,8 +250,8 @@ impl ItemRecord {
     }
 
     /// Moves the server-observed binding into the Committed and Local
-    /// columns when the binding has no local change, and returns whether it
-    /// did.
+    /// columns when the binding has no local change, and returns whether the
+    /// binding moved.
     pub(crate) fn adopt_binding(&mut self, visibility: Visibility) -> bool {
         if !self.is_clean(BINDING_DIRTY) {
             return false;
@@ -261,7 +262,8 @@ impl ItemRecord {
     }
 
     /// Moves the server-observed content into the Committed and Local columns
-    /// when the content has no local change, and returns whether it did.
+    /// when the content has no local change, and returns whether the content
+    /// moved.
     pub(crate) fn adopt_content(&mut self) -> bool {
         if !self.is_clean(CONTENT_DIRTY) {
             return false;
@@ -275,7 +277,7 @@ impl ItemRecord {
 
     /// Moves the server-observed attributes into the Committed and Local
     /// columns when the attributes have no local change, and returns whether
-    /// it did.
+    /// the attributes moved.
     pub(crate) fn adopt_attributes(&mut self) -> bool {
         if !self.is_clean(ATTRIBUTES_DIRTY) {
             return false;

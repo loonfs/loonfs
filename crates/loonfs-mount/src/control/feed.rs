@@ -1,5 +1,6 @@
-//! Following the change feed: strong polls every poll interval and after a
-//! page that ends before the head, and one transaction per commit.
+//! Following the change feed. The engine reads the feed with strong polls,
+//! one every poll interval and another at once after a page that ends
+//! before the head, and it applies each commit in a transaction of its own.
 
 use super::changes::{Changes, Source};
 use super::events::{apply_commit_events, CommitOutcome, ReadKey, ReadResult, ReadResults};
@@ -206,9 +207,10 @@ impl ControlTask {
         self.end_poll(Some(error));
     }
 
-    /// Ends the current poll, and replies to the `refresh_at_least` calls that
-    /// it satisfies, or fails the ones it was for: with the poll's error, or
-    /// because the head that the poll read is below the call's sequence.
+    /// Ends the current poll, and replies to the `refresh_at_least` calls
+    /// that the poll satisfies, or fails the calls that the poll was for:
+    /// with the poll's error, or because the head that the poll read is below
+    /// the call's sequence.
     pub(super) fn end_poll(&mut self, error: Option<MountError>) {
         self.feed = FeedState::Idle;
         self.completed_polls = self.started_polls;

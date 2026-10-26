@@ -69,8 +69,9 @@ impl Kernel for FuseKernel {
         if engine.config().access == MountAccess::ReadOnly {
             options.mount_options.push(MountOption::RO);
         }
-        // `allow_other`, so users other than the daemon's can use the mount.
-        // Without it, `fuser` also refuses their requests itself.
+        // The session sets `allow_other`, so users other than the daemon's
+        // can use the mount. Without it, `fuser` also refuses their requests
+        // itself.
         options.acl = SessionACL::All;
         let invalidations = engine.subscribe_invalidations();
         let filesystem = MountFilesystem::new(engine.clone(), tokio::runtime::Handle::current());
@@ -109,8 +110,8 @@ impl KernelMount for FuseMount {
             }
             Err(error) => return Err(error),
         }
-        // `fuser` ignores a failure of `fusermount3`, so the table tells
-        // whether the mount is gone.
+        // `fuser` ignores a failure of `fusermount3`, so the adapter reads the
+        // mount table to check that the mount is gone.
         if has_loonfs_mount(&self.directory)? {
             return Err(io::Error::other(format!(
                 "`{}` is still mounted",
@@ -177,14 +178,16 @@ fn check_mount_helper() -> io::Result<()> {
     let found = Command::new(MOUNT_HELPER).arg("--version").output().is_ok();
     if !found {
         return Err(io::Error::other(format!(
-            "the daemon isn't root, and `{MOUNT_HELPER}` isn't installed"
+            "the daemon isn't root, and `{MOUNT_HELPER}` isn't installed, so install \
+             `{MOUNT_HELPER}` or run the daemon as root"
         )));
     }
     let config = std::fs::read_to_string(FUSE_CONFIG).unwrap_or_default();
     if !allows_other_users(&config) {
         return Err(io::Error::other(format!(
-            "the daemon isn't root, so it mounts with `{MOUNT_HELPER}`, and the mount's \
-             `allow_other` option needs `user_allow_other` in `{FUSE_CONFIG}`"
+            "the daemon isn't root, so it mounts with `{MOUNT_HELPER}`, which allows other users \
+             only with `user_allow_other` in `{FUSE_CONFIG}`, so add that line to `{FUSE_CONFIG}` \
+             or run the daemon as root"
         )));
     }
     Ok(())

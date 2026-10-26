@@ -7,7 +7,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 /// How long the kernel caches the entry and attributes of an item without
 /// local changes. The engine invalidates a cached item as soon as the feed
-/// changes it, so this only bounds how long a lost invalidation lasts.
+/// changes the item, so this bounds how long the kernel can show stale
+/// attributes after an invalidation is lost.
 pub(crate) const CLEAN_ITEM_LIFETIME: Duration = Duration::from_secs(1);
 
 /// The generation of every inode number, because the engine never reuses a

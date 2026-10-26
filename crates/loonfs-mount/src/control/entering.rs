@@ -74,7 +74,7 @@ pub(super) fn load(database: &mut Database) -> Result<Vec<EnteringState>> {
 
 impl ControlTask {
     /// Records what a worker read for an item that entered the mount, and
-    /// continues the page that waited for it.
+    /// continues the page that waited for the read.
     ///
     /// A read at a waiting directory's snapshot fails with
     /// `snapshot_not_found` once that snapshot expires, for example after the
@@ -362,7 +362,8 @@ impl ControlTask {
         Ok(())
     }
 
-    /// Forgets directories that a commit removed before they were shown.
+    /// Drops the directories that a commit removed before they were shown,
+    /// and releases their snapshots.
     pub(super) fn forget_entering(&mut self, roots: &[ItemId]) {
         for root in roots {
             if let Some(position) = self
@@ -377,9 +378,10 @@ impl ControlTask {
     }
 
     /// Shows the directories whose snapshot the applied sequence reached.
-    /// Each one's parent takes `committed_at_ms`, the time of the commit
-    /// that the feed just applied, as its modification time, or keeps its
-    /// time when it's `None`, at a restart.
+    /// Each directory's parent takes `committed_at_ms`, the time of the
+    /// commit that the feed just applied, as its modification time. At a
+    /// restart, `committed_at_ms` is `None`, and the parent keeps the time
+    /// that it had.
     pub(super) fn reveal_entering(&mut self, committed_at_ms: Option<u64>) -> Result<()> {
         let applied_seq = self.applied_seq;
         let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.entering)
@@ -412,7 +414,7 @@ impl ControlTask {
     }
 
     /// Deletes a snapshot once no directory that entered the mount reads at
-    /// it.
+    /// the snapshot.
     fn release_snapshot(&mut self, snapshot_id: PinId) {
         if self
             .entering

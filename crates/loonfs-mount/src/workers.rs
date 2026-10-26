@@ -147,8 +147,8 @@ pub(crate) enum WorkOutcome {
     },
 }
 
-/// Starts work. The control task's only way to make a request or a slow
-/// file read, so a test can replace the workers with a recorder and drive
+/// Starts work. Workers are the control task's only way to make a request
+/// or a slow file read, so a test can replace them with a recorder and drive
 /// the control task as a deterministic state machine.
 pub(crate) trait Workers: Send {
     /// Starts `work`, whose outcome arrives later as a message.

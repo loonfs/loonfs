@@ -57,7 +57,7 @@ pub(crate) struct OpenedRead {
 /// One open descriptor of a file, which reads the revision that was current
 /// when it opened, and follows the file as appends extend that revision.
 ///
-/// Dropping the handle closes it.
+/// Dropping the handle closes the descriptor.
 #[derive(Debug)]
 pub struct ReadHandle {
     handle: HandleId,
@@ -110,8 +110,8 @@ impl ReadHandle {
     /// Reads up to `length` bytes from `offset`, and returns fewer only at the
     /// end of the revision.
     ///
-    /// A read of bytes that the cache has returns at once. Otherwise it
-    /// waits for the fetch of the window that contains it.
+    /// A read of bytes that the cache has returns at once. Any other read
+    /// waits for the fetch of the window that contains the read's bytes.
     pub async fn read(&self, offset: u64, length: u64) -> Result<Bytes> {
         let (size_bytes, file) = {
             let view = self.view();

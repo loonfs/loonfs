@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The state of one mount, as `loonfs status` and `.loonfs/status.json`
-/// report it.
+/// show it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     /// The mounted namespace.

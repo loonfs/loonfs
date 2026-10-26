@@ -182,10 +182,11 @@ fn an_access_change_changes_nothing_but_the_applied_sequence() {
     assert!(workers.take().is_empty());
 }
 
-/// Checks that a refresh is judged by a poll that starts after it: a page of
-/// the poll in flight when it arrives doesn't fail it, the next poll replies
-/// to a refresh that it reached, and fails one whose sequence is past the
-/// head that it read.
+/// Checks that only a poll that starts after a refresh can reply to the
+/// refresh: a page of the poll that was in flight when the refresh arrived
+/// doesn't fail the refresh, and the next poll replies to a refresh whose sequence
+/// the poll reached and fails a refresh whose sequence is past the head that
+/// the poll read.
 #[test]
 fn a_refresh_past_the_head_that_a_later_poll_reads_fails_at_once() {
     let directory = tempfile::tempdir().expect("a state directory");

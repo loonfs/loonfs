@@ -1,7 +1,8 @@
-//! The content cache: one file per content ID in `cache/`, partial while its
-//! present ranges don't cover the revision it's filling, and complete once
-//! they do and its checksum matches. A file that no descriptor has open,
-//! partial or complete, can be evicted.
+//! The content cache: one file per content ID in `cache/`. A file is partial
+//! while its present ranges don't cover the revision that it fills, and
+//! complete once the ranges cover the revision and the file's checksum
+//! matches. A file that no descriptor has open, partial or complete, can be
+//! evicted.
 
 mod entry;
 

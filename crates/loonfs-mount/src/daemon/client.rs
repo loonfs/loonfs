@@ -89,7 +89,7 @@ impl DaemonClient {
             match decode_response(&line) {
                 Ok(DaemonResponse::Progress { step }) => progress(step),
                 Ok(response) => return Ok(response),
-                // A newer daemon's step, which this command doesn't know.
+                // A newer daemon's step, which this command doesn't support.
                 Err(_) if is_progress_line(&line) => {}
                 Err(error) => {
                     return Err(DaemonError::protocol(format!(

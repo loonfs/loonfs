@@ -403,7 +403,7 @@ pub(crate) fn write_cache_file(
     Ok(())
 }
 
-/// Forgets a cache file.
+/// Deletes the row of a cache file.
 pub(crate) fn delete_cache_file(
     connection: &Connection,
     content_id: &ContentId,
@@ -460,7 +460,8 @@ pub(crate) fn write_entering_directory(
     Ok(())
 }
 
-/// Forgets a directory that entered the mount, once it's shown or gone.
+/// Deletes the row of a directory that entered the mount, once it's shown or
+/// gone.
 pub(crate) fn delete_entering_directory(
     connection: &Connection,
     root_item_id: ItemId,

@@ -233,7 +233,7 @@ impl Mounts {
         Ok(engine.status().applied_seq)
     }
 
-    /// Reports the state of the mount at `directory`, or of every ready
+    /// Returns the state of the mount at `directory`, or of every ready
     /// mount.
     pub(crate) fn status(
         &self,
@@ -331,7 +331,7 @@ async fn admit(
         .map_err(|error| mount_failed(error.to_string()))
 }
 
-/// Reports why a refresh failed, with a code of its own for a timeout and
+/// Returns why a refresh failed, with a code of its own for a timeout and
 /// for a sequence that the namespace hasn't committed.
 fn refresh_failed(directory: &Path, error: MountError) -> DaemonFailure {
     let directory = directory.display();

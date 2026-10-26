@@ -8,7 +8,8 @@ use tokio::sync::mpsc;
 
 /// The most invalidations that wait for one subscriber. A subscriber that
 /// falls further behind loses invalidations, and the kernel's one-second
-/// cache lifetime for clean items bounds how long a lost one lasts.
+/// cache lifetime for clean items bounds how long the kernel can show stale
+/// attributes after an invalidation is lost.
 const MAX_QUEUED_INVALIDATIONS: usize = 4_096;
 
 /// One change that the kernel's caches have to drop.
@@ -17,26 +18,26 @@ pub enum Invalidation {
     /// The kernel's cached lookup of `name` in `parent` is stale, including a
     /// cached absence of the name.
     Entry {
-        /// The directory.
+        /// The directory whose lookup is stale.
         parent: ItemId,
-        /// The name.
+        /// The name that the kernel looked up.
         name: OsString,
     },
     /// The item's cached attributes are stale, and so are its cached pages
     /// in `pages`.
     Inode {
-        /// The item.
+        /// The item whose attributes are stale.
         item: ItemId,
         /// The cached pages that are stale.
         pages: CachedPages,
     },
     /// `name` in `parent` no longer refers to `child`.
     Delete {
-        /// The directory.
+        /// The directory that had the name.
         parent: ItemId,
         /// The item that the name referred to.
         child: ItemId,
-        /// The name.
+        /// The name that no longer refers to `child`.
         name: OsString,
     },
 }

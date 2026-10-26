@@ -71,7 +71,7 @@ async fn a_held_feed_page_delays_the_change_and_refresh_waits_for_it() {
 /// names that appeared and disappeared, and the items and directories whose
 /// attributes changed, in the order the page's events changed them.
 #[tokio::test]
-async fn invalidations_report_the_entries_and_inodes_that_each_page_changed() {
+async fn each_page_invalidates_the_entries_and_inodes_it_changed() {
     let fixture = fixture();
     fixture.commit(vec![
         put("docs/notes.txt", b"notes"),

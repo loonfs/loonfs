@@ -1,5 +1,6 @@
-//! The kernel's requests: each one either calls the mount's handler for it,
-//! or refuses it as the design note's table of unsupported requests says.
+//! The kernel's requests. Each request either calls the matching
+//! `MountFilesystem` method or is refused with the error that the design
+//! note's table lists.
 
 use super::MountFilesystem;
 use crate::attributes::GENERATION;
@@ -230,7 +231,9 @@ impl Filesystem for MountFilesystem {
     }
 
     /// Lets the kernel handle `poll` itself, which reports a file as always
-    /// ready, as a local file is. `fuser`'s own reply logs a warning.
+    /// ready, as a local file is. This method replies with `ENOSYS` itself,
+    /// because `fuser`'s default implementation logs a warning on every
+    /// call.
     fn poll(
         &self,
         _request: &Request,
@@ -245,7 +248,8 @@ impl Filesystem for MountFilesystem {
     }
 
     /// Lets the kernel handle `lseek` itself, which finds no holes in a
-    /// file. `fuser`'s own reply logs a warning.
+    /// file. This method replies with `ENOSYS` itself, because `fuser`'s
+    /// default implementation logs a warning on every call.
     fn lseek(
         &self,
         _request: &Request,

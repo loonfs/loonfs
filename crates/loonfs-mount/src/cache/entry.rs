@@ -7,7 +7,7 @@ use loonfs_types::{Checksum, ContentRef};
 use std::ops::Range;
 use std::sync::Arc;
 
-/// A prefix of a cache file whose checksum the engine knows, so verifying
+/// A prefix of a cache file with a verified checksum, so verifying
 /// the file after an append reads only the appended bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedPrefix {
@@ -91,7 +91,7 @@ impl CacheEntry {
     }
 
     /// Returns whether the file is being fetched again after a mismatch, so
-    /// its reads wait for every byte of it.
+    /// its reads wait for every byte of the file.
     pub(crate) fn is_refetching(&self) -> bool {
         matches!(&self.state, CacheEntryState::Partial(partial) if partial.attempt == FillAttempt::Refetch)
     }

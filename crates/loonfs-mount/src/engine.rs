@@ -56,9 +56,9 @@ impl Engine {
     ///
     /// A mount that the host or the namespace can't serve fails with the
     /// reason (see "Admitting a mount" in the design note). A resumed mount
-    /// keeps the settings it was admitted with. It must be called from a
-    /// Tokio runtime, which runs the engine's requests. The future is `Send`,
-    /// so a daemon can spawn it.
+    /// keeps the settings it was admitted with. It must be called from the
+    /// daemon's async runtime, which runs the engine's requests. The future
+    /// is `Send`, so a daemon can spawn it.
     ///
     /// When `progress` is set, the engine sends each step it reaches to it
     /// (see [`MountProgress`]), and a closed receiver doesn't stop the mount.
@@ -170,43 +170,53 @@ impl Engine {
         Ok(ReadHandle::new(opened, self.control.clone()))
     }
 
-    /// Opens a file for writing.
+    /// The write path's call for opening a file for writing. It fails with
+    /// [`MountError::ReadOnly`], because this version has no write path.
     pub async fn open_write(&self, _request: OpenWrite) -> Result<WriteHandle> {
         Err(read_only("open_write"))
     }
 
-    /// Waits until every write to `items` is published, and returns the
-    /// sequence of the last commit that it waited for.
+    /// The write path's call for waiting until every write to `items` is
+    /// published, with the sequence of the last commit that it waited for. It
+    /// fails with [`MountError::ReadOnly`], because this version has no write
+    /// path.
     pub async fn barrier(&self, _items: &[ItemId]) -> Result<ChangeSeq> {
         Err(read_only("barrier"))
     }
 
-    /// Creates a directory.
+    /// The write path's call for creating a directory. It fails with
+    /// [`MountError::ReadOnly`], because this version has no write path.
     pub async fn mkdir(&self, _request: Mkdir) -> Result<Entry> {
         Err(read_only("mkdir"))
     }
 
-    /// Creates a symlink.
+    /// The write path's call for creating a symlink. It fails with
+    /// [`MountError::ReadOnly`], because this version has no write path.
     pub async fn symlink(&self, _request: Symlink) -> Result<Entry> {
         Err(read_only("symlink"))
     }
 
-    /// Moves or renames an item.
+    /// The write path's call for moving or renaming an item. It fails with
+    /// [`MountError::ReadOnly`], because this version has no write path.
     pub async fn rename(&self, _request: Rename) -> Result<()> {
         Err(read_only("rename"))
     }
 
-    /// Removes a file's name.
+    /// The write path's call for removing a file's name. It fails with
+    /// [`MountError::ReadOnly`], because this version has no write path.
     pub async fn unlink(&self, _parent: ItemId, _name: &OsStr) -> Result<()> {
         Err(read_only("unlink"))
     }
 
-    /// Removes an empty directory.
+    /// The write path's call for removing an empty directory. It fails with
+    /// [`MountError::ReadOnly`], because this version has no write path.
     pub async fn rmdir(&self, _parent: ItemId, _name: &OsStr) -> Result<()> {
         Err(read_only("rmdir"))
     }
 
-    /// Changes an item's size, mode, or modification time.
+    /// The write path's call for changing an item's size, mode, or modification
+    /// time. It fails with [`MountError::ReadOnly`], because this version has no
+    /// write path.
     pub async fn setattr(&self, _request: SetAttr) -> Result<Attr> {
         Err(read_only("setattr"))
     }
@@ -221,8 +231,10 @@ impl Engine {
         }
     }
 
-    /// Waits until every change in the mount is published, and returns the
-    /// sequence of the last commit that it waited for.
+    /// The write path's call for waiting until every change in the mount is
+    /// published, with the sequence of the last commit that it waited for. It
+    /// fails with [`MountError::ReadOnly`], because this version has no write
+    /// path.
     pub async fn sync(&self) -> Result<ChangeSeq> {
         Err(read_only("sync"))
     }
@@ -265,7 +277,7 @@ impl Engine {
         self.shared.subscribers.subscribe()
     }
 
-    /// Returns the mount's state, as `loonfs status` reports it, with the
+    /// Returns the mount's state, as `loonfs status` shows it, with the
     /// state directory's free space measured now.
     pub fn status(&self) -> Status {
         let mut status = self
@@ -282,7 +294,7 @@ impl Engine {
         status
     }
 
-    /// Records how the adapter mounted the directory, which status reports.
+    /// Records how the adapter mounted the directory, which status shows.
     pub fn record_mount_method(&self, method: MountMethod) {
         *self
             .mount_method
@@ -295,8 +307,8 @@ impl Engine {
     }
 }
 
-/// Refuses a change to the tree. The engine's write path isn't built yet,
-/// so every mount refuses changes the way a read-only mount does.
+/// Refuses a change to the tree. Every mount refuses changes, because the
+/// engine has no write path.
 fn read_only(operation: &'static str) -> MountError {
     MountError::ReadOnly { operation }
 }
