@@ -113,7 +113,8 @@ fn a_read_only_mount_shows_the_namespace_and_follows_other_hosts_changes() {
     let owner = std::fs::metadata(harness.directory.path()).expect("the test's directory");
     let (uid, gid) = (owner.uid().to_string(), owner.gid().to_string());
     let directory = mount.to_str().expect("a UTF-8 directory");
-    let mounted = harness.loonfs_ok([
+    let mounted = harness.loonfs([
+        "--json",
         "mount",
         NAMESPACE,
         directory,
@@ -125,13 +126,16 @@ fn a_read_only_mount_shows_the_namespace_and_follows_other_hosts_changes() {
         "--poll-interval-ms",
         "100",
     ]);
-    assert!(mounted.starts_with("mounted mounted:/ at "), "{mounted}");
+    assert!(mounted.status.success(), "{mounted:?}");
+    check_mount_steps(&mounted);
     assert!(harness.is_mounted());
     let again = harness.loonfs_ok(["mount", NAMESPACE, directory, "--ro"]);
     assert!(again.contains("already has the mount"), "{again}");
 
     check_listing_and_reads(&mount, &owner);
     check_control_directory(&harness, &mount, populated_seq);
+    check_dots_and_free_space(&mount);
+    check_refresh(&harness, directory, populated_seq);
     check_refused_writes(&mount);
     check_append(&runtime, &writer, &mount);
     check_replacement(&runtime, &writer, &mount);
@@ -142,6 +146,43 @@ fn a_read_only_mount_shows_the_namespace_and_follows_other_hosts_changes() {
     assert_eq!(harness.loonfs_ok(["status"]).trim(), "no mounts");
     let repeated = harness.loonfs_ok(["unmount", directory]);
     assert!(repeated.contains("has no mount"), "{repeated}");
+}
+
+/// Checks that `loonfs mount --json` reported each step of mounting, in
+/// order, with the scan's entries against the budget.
+fn check_mount_steps(mounted: &std::process::Output) {
+    let steps: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&mounted.stderr)
+        .into_iter::<serde_json::Value>()
+        .map(|event| event.expect("a JSON event"))
+        .filter(|event| event["kind"] == "step")
+        .collect();
+    let mut names: Vec<&str> = steps
+        .iter()
+        .map(|step| step["step"].as_str().expect("a step name"))
+        .collect();
+    names.dedup();
+    assert_eq!(
+        names,
+        [
+            "checking_kernel",
+            "checking_host",
+            "reading_capabilities",
+            "creating_snapshot",
+            "scanning",
+            "starting_feed",
+            "mounting"
+        ]
+    );
+    let scanned = steps
+        .iter()
+        .rev()
+        .find(|step| step["step"] == "scanning")
+        .expect("a scanning step");
+    // `docs`, `docs/nested`, `empty`, and five files.
+    assert_eq!(scanned["listed_entries"], 8, "{scanned}");
+    assert_eq!(scanned["max_entries"], 100_000, "{scanned}");
+    let mounted: serde_json::Value = serde_json::from_slice(&mounted.stdout).expect("JSON");
+    assert_eq!(mounted["data"]["outcome"], "mounted", "{mounted}");
 }
 
 /// Checks `ls`, `cat`, `readlink`, and `stat` of the mounted tree.
@@ -220,6 +261,69 @@ fn check_control_directory(harness: &Harness, mount: &Path, populated_seq: Chang
     assert_eq!(mounts.len(), 1);
     assert_eq!(mounts[0]["directory"], mount.to_str().expect("UTF-8"));
     assert_eq!(mounts[0]["status"]["namespace_id"], NAMESPACE);
+}
+
+/// Checks that a listing's `..` is the directory above, and that `statfs`
+/// reports the state directory's free space, which `status.json` reports
+/// too.
+fn check_dots_and_free_space(mount: &Path) {
+    let listing = std::process::Command::new("ls")
+        .arg("-ai1")
+        .arg(mount.join("docs/nested"))
+        .output()
+        .expect("`ls` runs");
+    let listing = String::from_utf8(listing.stdout).expect("UTF-8");
+    let parent_inode = listing
+        .lines()
+        .find_map(|line| line.trim().strip_suffix(" ..").map(str::trim))
+        .expect("a `..` entry")
+        .parse::<u64>()
+        .expect("an inode number");
+    let docs = std::fs::metadata(mount.join("docs")).expect("stat");
+    assert_eq!(parent_inode, docs.ino(), "{listing}");
+
+    let statfs = std::process::Command::new("stat")
+        .args(["-f", "-c", "%a %S"])
+        .arg(mount)
+        .output()
+        .expect("`stat -f` runs");
+    let statfs = String::from_utf8(statfs.stdout).expect("UTF-8");
+    let (blocks, block_bytes) = statfs.trim().split_once(' ').expect("two numbers");
+    let free_bytes =
+        blocks.parse::<u64>().expect("a number") * block_bytes.parse::<u64>().expect("a number");
+    let status: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(mount.join(".loonfs/status.json")).expect("the status file"),
+    )
+    .expect("the status decodes");
+    let available = status["available_bytes"].as_u64().expect("the free space");
+    // The two reads are moments apart, while other programs write to the
+    // same filesystem.
+    assert!(
+        free_bytes.abs_diff(available) < 256 << 20,
+        "{free_bytes} and {available}"
+    );
+}
+
+/// Checks that `loonfs refresh` waits for one poll, and that it refuses at
+/// once a sequence that the namespace hasn't committed.
+fn check_refresh(harness: &Harness, directory: &str, populated_seq: ChangeSeq) {
+    let refreshed: serde_json::Value =
+        serde_json::from_str(&harness.loonfs_ok(["--json", "refresh", directory]))
+            .expect("refresh JSON");
+    let applied_seq = refreshed["data"]["applied_seq"]
+        .as_u64()
+        .expect("a sequence");
+    assert!(applied_seq >= populated_seq.0, "{refreshed}");
+
+    let future = (applied_seq + 1_000).to_string();
+    let refused = harness.loonfs(["--json", "refresh", directory, "--at-least", &future]);
+    assert_eq!(refused.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::Deserializer::from_slice(&refused.stderr)
+        .into_iter::<serde_json::Value>()
+        .last()
+        .expect("an error envelope")
+        .expect("JSON");
+    assert_eq!(error["error"]["code"], "sequence_not_committed", "{error}");
 }
 
 /// Checks that a read-only mount refuses changes with `EROFS`.
