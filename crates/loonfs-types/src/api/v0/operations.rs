@@ -1588,8 +1588,8 @@ impl RetainedCandidates {
 /// A request to advance the retention floor to the folded manifest head, or to the one target that
 /// the request sets.
 ///
-/// Whatever the target, the floor stops at the newest commit at or below the target that's at
-/// least one hour old (the default garbage collection grace window).
+/// Whatever the target, the floor doesn't pass a commit that's less than one hour old (the
+/// default garbage collection grace window).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -1614,7 +1614,8 @@ pub struct AdvanceRetentionResponse {
     /// The namespace whose retention floor was advanced.
     pub namespace_id: NamespaceId,
     /// The retention floor that the advance reached, which is the minimum sequence for incremental
-    /// replay. It's below the target when the commit at the target is less than one hour old.
+    /// replay. It's below the target when LoonFS reads a commit that's less than one hour old
+    /// before it reaches the target.
     pub retention_floor_seq: ChangeSeq,
 }
 
@@ -1659,7 +1660,7 @@ pub enum RunMaintenanceRequest {
     /// A job that advances the retention floor toward the folded manifest head, or toward the
     /// target that the request sets.
     ///
-    /// The floor stops at the newest commit at or below the target that's at least one hour old.
+    /// The floor doesn't pass a commit that's less than one hour old.
     Retention(AdvanceRetentionRequest),
     /// A job that sets or clears the namespace's retention window.
     RetentionWindow(SetRetentionWindowRequest),
