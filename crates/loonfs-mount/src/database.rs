@@ -189,7 +189,8 @@ impl Database {
 
     /// Opens the `tree.db` at `path`, or returns `None` when there's none,
     /// or when admission didn't finish writing it, in which case the file is
-    /// deleted.
+    /// deleted. A file without a schema is one that admission created and
+    /// stopped before it wrote the schema.
     pub(crate) fn open(path: &Path) -> Result<Option<Self>> {
         if !path.exists() {
             return Ok(None);
@@ -198,6 +199,11 @@ impl Database {
         let version: i64 = database
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version == 0 {
+            drop(database);
+            remove_files(path)?;
+            return Ok(None);
+        }
         if version != SCHEMA_VERSION {
             return Err(MountError::Database {
                 message: format!(
@@ -482,3 +488,6 @@ pub(crate) fn count_items(connection: &Connection) -> rusqlite::Result<u64> {
         .query_row("SELECT COUNT(*) FROM items", [], |row| row.get::<_, i64>(0))
         .map(from_sql_u64)
 }
+
+#[cfg(test)]
+mod tests;
