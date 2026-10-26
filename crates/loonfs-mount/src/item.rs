@@ -73,6 +73,10 @@ pub enum LocalChanges {
 pub struct Attr {
     /// What kind of item it is.
     pub kind: ItemKind,
+    /// The directory that contains the item, which a listing shows as `..`.
+    /// The root's parent is the root, and an item that left the tree keeps
+    /// the directory it was last in.
+    pub parent: ItemId,
     /// The file's size, the length of a symlink's target, or zero for a
     /// directory.
     pub size_bytes: u64,

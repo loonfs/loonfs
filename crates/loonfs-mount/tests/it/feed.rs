@@ -108,6 +108,12 @@ async fn moves_within_out_of_and_into_the_mount_rebind_remove_and_read_items() {
         Some(readme),
         "a move keeps the item"
     );
+    let docs = item(&engine, "docs").expect("docs");
+    assert_eq!(engine.getattr(readme).map(|attr| attr.parent), Some(docs));
+    assert_eq!(
+        engine.getattr(ItemId::ROOT).map(|attr| attr.parent),
+        Some(ItemId::ROOT)
+    );
     assert_eq!(item(&engine, "readme.md"), None);
     assert_eq!(item(&engine, "docs/sub"), None);
     assert!(

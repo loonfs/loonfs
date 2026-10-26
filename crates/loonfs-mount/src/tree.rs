@@ -47,6 +47,9 @@ impl ItemView {
 
 struct TreeItem {
     binding: Option<(ItemId, OsString)>,
+    /// The directory that the item is in, or was last in. The root's parent
+    /// is the root.
+    parent: ItemId,
     kind: ItemKind,
     size_bytes: u64,
     mode: u32,
@@ -74,6 +77,7 @@ impl TreeItem {
     fn attr(&self) -> Attr {
         Attr {
             kind: self.kind,
+            parent: self.parent,
             size_bytes: self.size_bytes,
             mode: self.mode,
             mtime_ms: self.mtime_ms,
@@ -109,6 +113,7 @@ impl Tree {
         }
         let item = self.items.entry(view.item).or_insert_with(|| TreeItem {
             binding: None,
+            parent: ItemId::ROOT,
             kind: view.kind,
             size_bytes: 0,
             mode: 0,
@@ -128,6 +133,9 @@ impl Tree {
         item.mtime_ms = view.mtime_ms;
         item.target = view.target;
         item.changes = view.changes;
+        if let Some((parent, _)) = &view.binding {
+            item.parent = *parent;
+        }
         if view.kind == ItemKind::Directory && item.children.is_none() {
             item.children = Some(Box::default());
         }
@@ -377,5 +385,26 @@ mod tests {
         tree.sweep(|_| false);
         assert!(tree.getattr(ItemId(3)).is_none());
         assert!(tree.getattr(ItemId(4)).is_some());
+    }
+
+    /// Checks that the root's parent is the root, that an item's parent
+    /// follows its moves, and that an item that left the tree keeps the
+    /// directory it was last in.
+    #[test]
+    fn an_items_parent_follows_its_moves_and_stays_after_it_leaves() {
+        let mut tree = Tree::default();
+        tree.show(view(1, None, ItemKind::Directory));
+        tree.show(view(2, Some((1, "src")), ItemKind::Directory));
+        tree.show(view(3, Some((1, "a.txt")), ItemKind::File));
+        let parent = |tree: &Tree, item| tree.getattr(ItemId(item)).expect("an item").parent;
+        assert_eq!(parent(&tree, 1), ItemId::ROOT);
+        assert_eq!(parent(&tree, 2), ItemId::ROOT);
+        assert_eq!(parent(&tree, 3), ItemId::ROOT);
+
+        tree.show(view(3, Some((2, "a.txt")), ItemKind::File));
+        assert_eq!(parent(&tree, 3), ItemId(2));
+        tree.lookup(ItemId(2), OsStr::new("a.txt"));
+        tree.detach(ItemId(3));
+        assert_eq!(parent(&tree, 3), ItemId(2));
     }
 }

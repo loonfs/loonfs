@@ -100,6 +100,7 @@ mod tests {
         };
         let attr = Attr {
             kind: ItemKind::File,
+            parent: ItemId::ROOT,
             size_bytes: 1025,
             mode: 0o100_640,
             mtime_ms: 1_500,

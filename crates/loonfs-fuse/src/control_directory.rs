@@ -104,6 +104,10 @@ impl ControlItem {
         };
         Attr {
             kind: self.kind(),
+            parent: match self {
+                Self::Directory => ItemId::ROOT,
+                Self::StatusFile | Self::SeqFile => Self::Directory.item(),
+            },
             size_bytes,
             mode,
             mtime_ms: root_mtime_ms,
