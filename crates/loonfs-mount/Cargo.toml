@@ -1,0 +1,33 @@
+[package]
+name = "loonfs-mount"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The engine of a LoonFS namespace mount: local trees, a content cache, and change-feed application."
+repository.workspace = true
+homepage.workspace = true
+keywords = ["filesystem", "fuse", "mount"]
+categories = ["filesystem"]
+
+[dependencies]
+bytes.workspace = true
+fs4.workspace = true
+futures.workspace = true
+loonfs-client.workspace = true
+loonfs-types.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
