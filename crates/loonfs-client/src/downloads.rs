@@ -48,7 +48,9 @@ impl From<&ReadAt> for ReadAtFields {
 ///
 /// Verification completes only when [`Self::next_chunk`] returns `None`.
 /// A caller that stops earlier has received provisional bytes, just as with
-/// any streaming read whose digest cannot be known until the end.
+/// any streaming read whose digest cannot be known until the end. A stream
+/// from [`Client::open_unverified_direct_download_by_inode`] checks only the
+/// length of each range.
 ///
 /// The ranges after the current one are requested while it is read, up to a
 /// fixed window of open responses.
@@ -60,10 +62,18 @@ pub struct DirectDownloadStream {
     range_remaining: u64,
     expected: ContentRef,
     target: String,
-    verifier: ContentVerifier,
+    check: DownloadCheck,
     /// The first error a read returned. The stream is over once it fails,
     /// so every later read returns it again.
     failed: Option<ClientError>,
+}
+
+/// What a download stream checks besides the length of each range.
+enum DownloadCheck {
+    /// The complete revision's length and checksum, at the end of the stream.
+    Verify(ContentVerifier),
+    /// Nothing more, for a caller that verifies the complete content itself.
+    RangeLengths,
 }
 
 enum NextRange {
@@ -91,8 +101,16 @@ impl DirectDownloadStream {
     /// start offset, or that arrives after the stream has fetched content or
     /// reached its end, is refused. Incorrect prefix bytes cause final
     /// checksum verification to fail.
+    ///
+    /// An unverified stream has no checksum, so it refuses every prefix.
     pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<()> {
-        self.verifier.fold_resumed_prefix(bytes).map_err(|refused| {
+        let DownloadCheck::Verify(verifier) = &mut self.check else {
+            return Err(ClientError::Http(format!(
+                "download of `{}` isn't verified, so it takes no resumed prefix",
+                self.target
+            )));
+        };
+        verifier.fold_resumed_prefix(bytes).map_err(|refused| {
             ClientError::Http(format!("download of `{}`: {refused}", self.target))
         })
     }
@@ -103,11 +121,13 @@ impl DirectDownloadStream {
     /// After a read fails, whether a range open, a body read, or a check, every
     /// later call returns the same error.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
-        self.verifier
-            .ensure_resumed_prefix_complete()
-            .map_err(|incomplete| {
-                ClientError::Http(format!("download of `{}`: {incomplete}", self.target))
-            })?;
+        if let DownloadCheck::Verify(verifier) = &self.check {
+            verifier
+                .ensure_resumed_prefix_complete()
+                .map_err(|incomplete| {
+                    ClientError::Http(format!("download of `{}`: {incomplete}", self.target))
+                })?;
+        }
         if let Some(error) = &self.failed {
             return Err(error.clone());
         }
@@ -135,12 +155,14 @@ impl DirectDownloadStream {
                         )));
                     }
                     self.range_remaining -= length;
-                    self.verifier.update(&chunk).map_err(|after_end| {
-                        ClientError::Protocol(format!(
-                            "direct read of `{}`: {after_end}",
-                            self.target
-                        ))
-                    })?;
+                    if let DownloadCheck::Verify(verifier) = &mut self.check {
+                        verifier.update(&chunk).map_err(|after_end| {
+                            ClientError::Protocol(format!(
+                                "direct read of `{}`: {after_end}",
+                                self.target
+                            ))
+                        })?;
+                    }
                     return Ok(Some(chunk));
                 }
                 Some(Err(error)) => {
@@ -167,7 +189,10 @@ impl DirectDownloadStream {
                         self.request_next_range();
                         continue;
                     }
-                    return self.verifier.finish().map(|()| None).map_err(|mismatch| {
+                    let DownloadCheck::Verify(verifier) = &mut self.check else {
+                        return Ok(None);
+                    };
+                    return verifier.finish().map(|()| None).map_err(|mismatch| {
                         ClientError::Protocol(format!(
                             "direct download of `{}` is not what the grant named: {mismatch}",
                             self.target
@@ -422,13 +447,31 @@ impl Client {
         self.open_direct_download_target(
             &download.ranges,
             &download.content_ref,
-            format!(
-                "inode {} revision {}",
-                loonfs_types::public_inode_id::encode(download.inode_id),
-                download.revision_no
-            ),
+            inode_download_target(download),
         )
         .await
+    }
+
+    /// Opens an inode download grant without checking the revision's
+    /// checksum, for a caller that reads part of a revision from the grant's
+    /// offset and verifies the complete content another way.
+    ///
+    /// The stream still fails when a range returns more or fewer bytes than
+    /// the grant lists, and it takes no resumed prefix, so a grant from any
+    /// offset can be read at once.
+    pub async fn open_unverified_direct_download_by_inode(
+        &self,
+        download: &CreateDownloadByInodeResponse,
+    ) -> Result<DirectDownloadStream> {
+        let mut stream = self
+            .open_direct_download_target(
+                &download.ranges,
+                &download.content_ref,
+                inode_download_target(download),
+            )
+            .await?;
+        stream.check = DownloadCheck::RangeLengths;
+        Ok(stream)
     }
 
     async fn open_direct_download_target(
@@ -450,7 +493,7 @@ impl Client {
             range_remaining: first.length,
             expected: content_ref.clone(),
             target,
-            verifier: ContentVerifier::new(content_ref, start_offset),
+            check: DownloadCheck::Verify(ContentVerifier::new(content_ref, start_offset)),
             failed: None,
         };
         stream.request_next_range();
@@ -506,6 +549,15 @@ impl Client {
             .map_err(|err| ClientError::Io(format!("write of `{path}` failed: {err}")))?;
         Ok(size_bytes)
     }
+}
+
+/// Describes an inode download grant in errors.
+fn inode_download_target(download: &CreateDownloadByInodeResponse) -> String {
+    format!(
+        "inode {} revision {}",
+        loonfs_types::public_inode_id::encode(download.inode_id),
+        download.revision_no
+    )
 }
 
 fn granted_start(ranges: &[DownloadRange], content_ref: &ContentRef, target: &str) -> Result<u64> {

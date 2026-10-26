@@ -101,6 +101,27 @@ impl Client {
         .await
     }
 
+    /// Streams one byte range of one retained revision of a file through the
+    /// server, by inode identity and without requiring a current path.
+    ///
+    /// A revision's bytes don't change, so a caller can read one revision
+    /// range by range while later commits change the file. The server doesn't
+    /// verify the range. A range that starts at or past the end of the
+    /// revision returns `range_not_satisfiable`.
+    pub async fn read_file_revision_range_stream_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        range: ReadRange,
+    ) -> Result<FileRangeStream> {
+        self.read_range(
+            &self.inode_revision_content_url(namespace_id, inode_id, revision_no),
+            range,
+        )
+        .await
+    }
+
     async fn read_range(&self, url: &str, range: ReadRange) -> Result<FileRangeStream> {
         let request = self
             .get(url)
