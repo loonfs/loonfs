@@ -22,6 +22,11 @@ pub(super) struct EnteringState {
     record: EnteringDirectory,
     inode_id: InodeId,
     extended_at_ms: u64,
+    /// The items that the listing found in the tree already, and the
+    /// entries below them. The feed moves each such item into the directory
+    /// at the commit that moved it, so the listing leaves their rows as they
+    /// are until then. Empty once the listing is done.
+    staged: HashSet<InodeId>,
 }
 
 impl EnteringState {
@@ -54,6 +59,7 @@ pub(super) fn load(database: &mut Database) -> Result<Vec<EnteringState>> {
                 record,
                 inode_id,
                 extended_at_ms: 0,
+                staged: HashSet::new(),
             }),
             _ => {
                 changes.remove_subtree(record.root_item_id, InodeId(0))?;
@@ -177,6 +183,7 @@ impl ControlTask {
             return Ok(());
         };
         entering.record.listed = true;
+        entering.staged = HashSet::new();
         database::write_entering_directory(self.database.connection(), &entering.record)?;
         Ok(())
     }
@@ -244,6 +251,7 @@ impl ControlTask {
             record,
             inode_id,
             extended_at_ms: self.environment.timer.monotonic_now_ms(),
+            staged: HashSet::new(),
         });
         self.apply_effects(applied.effects);
         Ok(())
@@ -260,7 +268,7 @@ impl ControlTask {
     ) -> Result<()> {
         let written = match listing {
             Listing::Rebuild => self.write_rebuild_page(entries),
-            Listing::Entering(_) => self.write_entering_page(entries),
+            Listing::Entering(inode_id) => self.write_entering_page(inode_id, entries),
         };
         if let Err(error) = &written {
             tracing::error!(%error, "writing a listing page failed");
@@ -269,15 +277,40 @@ impl ControlTask {
         written
     }
 
-    fn write_entering_page(&mut self, entries: &[PathEntry]) -> Result<()> {
+    /// Writes a page of the listing of the directory `inode_id`. An item that
+    /// the tree has already, and every entry below it, is staged instead:
+    /// a later commit in the feed moved it into the directory, and the feed
+    /// moves its row when it applies that commit, so the item stays where
+    /// the tree shows it until then.
+    fn write_entering_page(&mut self, inode_id: InodeId, entries: &[PathEntry]) -> Result<()> {
+        let mut staged = self
+            .entering
+            .iter_mut()
+            .find(|entering| entering.inode_id == inode_id)
+            .map(|entering| std::mem::take(&mut entering.staged))
+            .unwrap_or_default();
         let withheld = HashSet::new();
         let transaction = self.database.transaction()?;
         let mut changes = Changes::new(&transaction, ChangeSeq(0), Source::Listing, &withheld);
         for entry in entries {
+            let below_staged = entry
+                .parent_inode_id
+                .is_some_and(|parent| staged.contains(&parent));
+            if below_staged || find_item_id_by_inode(&transaction, entry.inode_id)?.is_some() {
+                staged.insert(entry.inode_id);
+                continue;
+            }
             changes.upsert_entry(entry, None)?;
         }
         let applied = changes.finish();
         transaction.commit()?;
+        if let Some(entering) = self
+            .entering
+            .iter_mut()
+            .find(|entering| entering.inode_id == inode_id)
+        {
+            entering.staged = staged;
+        }
         self.entries = self.entries.saturating_add_signed(applied.entry_change);
         self.apply_effects(applied.effects);
         Ok(())

@@ -427,3 +427,40 @@ async fn an_expired_snapshot_of_a_waiting_directory_is_replaced_and_the_feed_con
     assert_eq!(names, ["a.txt"]);
     assert_eq!(engine_tree(&engine), fixture.listed_tree().await);
 }
+
+/// Checks that the listing of a directory that entered the mount leaves an
+/// item that the tree has already where the tree shows it, when a commit
+/// that the feed hasn't applied yet moved the item into the directory, and
+/// that the item moves when the feed applies that commit.
+#[tokio::test]
+async fn an_item_moved_into_a_waiting_directory_stays_until_its_move_applies() {
+    let fixture = project();
+    let engine = fixture.mount().await;
+    let readme = item(&engine, "readme.md").expect("the readme");
+    let moved = fixture.commit(vec![move_path("/elsewhere/incoming", "incoming")]);
+    let hold = fixture
+        .server
+        .order_next_commit_echo(EchoOrder::ResponseFirst);
+    let later = fixture
+        .client
+        .commit(
+            &fixture.namespace_id,
+            &fixture.actor,
+            &request(vec![move_path("readme.md", "incoming/readme.md")]),
+        )
+        .await
+        .expect("the commit's response comes before its echo");
+    refresh(&engine, moved.committed_seq).await;
+    assert_eq!(item(&engine, "incoming"), None, "the directory waits");
+    assert_eq!(
+        item(&engine, "readme.md"),
+        Some(readme),
+        "the readme's move isn't applied yet"
+    );
+
+    hold.release();
+    refresh(&engine, later.committed_seq).await;
+    assert_eq!(item(&engine, "readme.md"), None);
+    assert_eq!(item(&engine, "incoming/readme.md"), Some(readme));
+    assert_eq!(engine_tree(&engine), fixture.listed_tree().await);
+}
