@@ -75,6 +75,7 @@ fn entry(inode: u64, parent: u64, path: &str, kind: PathEntryKind) -> PathEntry 
     }
 }
 
+/// Returns a file whose content is its path's bytes, at revision 1.
 fn file(inode: u64, parent: u64, path: &str) -> PathEntry {
     let content_ref = ContentRef::blob_v1(
         namespace_id(),
@@ -82,12 +83,22 @@ fn file(inode: u64, parent: u64, path: &str) -> PathEntry {
         path.as_bytes(),
         ChecksumAlgorithm::Crc64nvme,
     );
+    file_with(inode, parent, path, RevisionNo(1), content_ref)
+}
+
+fn file_with(
+    inode: u64,
+    parent: u64,
+    path: &str,
+    revision_no: RevisionNo,
+    content_ref: ContentRef,
+) -> PathEntry {
     entry(
         inode,
         parent,
         path,
         PathEntryKind::File {
-            revision_no: RevisionNo(1),
+            revision_no,
             size_bytes: content_ref.size_bytes,
             content_ref,
             revision_committed_by: ActorId::parse("tester").expect("an actor"),

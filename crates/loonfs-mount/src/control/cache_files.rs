@@ -142,19 +142,38 @@ impl ControlTask {
             return;
         }
         self.set_view_files(content_id);
+        let Some(target_size) = self
+            .cache
+            .entry_mut(content_id)
+            .and_then(|entry| entry.state.partial_mut())
+            .map(|partial| partial.target.size_bytes)
+        else {
+            return;
+        };
+        // The file is verified against its own target, so the second fetch
+        // reads the target's bytes from a revision that has all of them.
         let revision = self
             .handles
             .values()
             .map(|open| open.view().revision.clone())
-            .filter(|revision| &revision.content_ref.content_id == content_id)
-            .max_by_key(|revision| revision.revision_no);
+            .filter(|revision| {
+                &revision.content_ref.content_id == content_id
+                    && revision.content_ref.size_bytes >= target_size
+            })
+            .min_by_key(|revision| revision.content_ref.size_bytes);
         let Some(revision) = revision else {
+            // The handles that read the file read shorter revisions only,
+            // so no fetch can fill the file for its verification, and its
+            // reads fail.
+            tracing::warn!(%content_id, "no open revision covers a cache file that's fetched again");
+            self.cache.fail(content_id);
+            self.set_view_files(content_id);
+            self.wake_waiters(content_id);
             return;
         };
-        let size_bytes = revision.content_ref.size_bytes;
         if let Err(error) = self.request(
             &revision,
-            0..size_bytes,
+            0..target_size,
             FetchPriority::Demand,
             None,
             RequestShape::Windows,

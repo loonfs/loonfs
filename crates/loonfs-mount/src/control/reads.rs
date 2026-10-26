@@ -249,7 +249,7 @@ impl ControlTask {
         // request fetches what's missing of all of it.
         let range = match partial.attempt {
             FillAttempt::First => range,
-            FillAttempt::Refetch => 0..size_bytes,
+            FillAttempt::Refetch => 0..partial.target.size_bytes.min(size_bytes),
         };
         let missing: Vec<Range<u64>> = partial
             .present

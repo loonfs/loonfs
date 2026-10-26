@@ -3,14 +3,14 @@
 
 use super::*;
 
-/// Opens a read handle on `a.txt`.
-fn open_a_txt(task: &mut ControlTask, shared: &SharedState) -> OpenedRead {
+/// Opens a read handle on `name` in the root.
+fn open(task: &mut ControlTask, shared: &SharedState, name: &str) -> OpenedRead {
     let item = shared
         .tree
         .read()
         .expect("the tree lock")
-        .lookup(ItemId::ROOT, OsStr::new("a.txt"))
-        .expect("a.txt is shown")
+        .lookup(ItemId::ROOT, OsStr::new(name))
+        .expect("the file is shown")
         .item;
     let (reply, opened) = oneshot::channel();
     task.handle(ControlMessage::OpenRead { item, reply });
@@ -77,7 +77,7 @@ fn read_and_mismatch() -> (
     let (mut task, shared, workers) = task(directory.path(), &[file(11, 10, "/project/a.txt")]);
     task.start();
     workers.take();
-    let opened = open_a_txt(&mut task, &shared);
+    let opened = open(&mut task, &shared, "a.txt");
     let size = size_of(&opened);
     let read = |task: &mut ControlTask| read_all(task, &opened);
 
@@ -176,7 +176,7 @@ fn a_handle_that_closes_during_its_grant_fetch_drops_the_stream() {
     );
     task.start();
     workers.take();
-    let opened = open_a_txt(&mut task, &shared);
+    let opened = open(&mut task, &shared, "a.txt");
     let size = size_of(&opened);
     let _read = read_all(&mut task, &opened);
     let fetch = only_fetch(workers.take());
@@ -201,4 +201,55 @@ fn a_handle_that_closes_during_its_grant_fetch_drops_the_stream() {
         1,
         "the end of the fetch drops the stream that it kept"
     );
+}
+
+/// Checks that the second fetch after a mismatch reads the file's own
+/// target from a revision that has all of its bytes, when two handles read
+/// the same content at revisions of two sizes, and not the bytes of the
+/// handle with the highest revision number.
+#[test]
+fn the_second_fetch_reads_the_files_target_from_a_revision_that_covers_it() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let content_id = ContentId::generate();
+    let content = |bytes: &[u8]| {
+        ContentRef::blob_v1(
+            namespace_id(),
+            content_id.clone(),
+            bytes,
+            ChecksumAlgorithm::Crc64nvme,
+        )
+    };
+    let (mut task, shared, workers) = task(
+        directory.path(),
+        &[
+            file_with(
+                11,
+                10,
+                "/project/long.txt",
+                RevisionNo(1),
+                content(b"0123456789abcd"),
+            ),
+            file_with(
+                12,
+                10,
+                "/project/short.txt",
+                RevisionNo(5),
+                content(b"0123456789"),
+            ),
+        ],
+    );
+    task.start();
+    workers.take();
+    let long = open(&mut task, &shared, "long.txt");
+    let _short = open(&mut task, &shared, "short.txt");
+    let _read = read_all(&mut task, &long);
+    let fetch = only_fetch(workers.take());
+    task.handle(done(WorkOutcome::Fetched {
+        fetch_id: fetch.fetch_id,
+        result: Ok(Fetched { written: 0..14 }),
+    }));
+    verify(&mut task, workers.take(), Verification::Mismatch);
+    let refetch = only_fetch(workers.take());
+    assert_eq!(refetch.inode_id, InodeId(11));
+    assert_eq!(refetch.range, 0..14);
 }
