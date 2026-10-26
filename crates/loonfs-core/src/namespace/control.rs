@@ -216,23 +216,12 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
             if previous.state.envelope.payload().status.is_deleted() {
                 return Ok(current.map(|manifest| (manifest, hint)));
             }
-            let Ok(next) = manifest_no.successor() else {
+            let Some(manifest) = load_successor_manifest(store, namespace_id, previous).await?
+            else {
                 break;
             };
-            let Some(manifest) = load_manifest_by_no(store, namespace_id, next).await? else {
-                break;
-            };
-            previous
-                .state
-                .envelope
-                .payload()
-                .ensure_successor(manifest.state.envelope.payload())
-                .map_err(|error| ControlObjectLoadError::Codec {
-                    object_key: manifest.object_key.clone(),
-                    message: error.to_string(),
-                })?;
+            manifest_no = manifest.state.envelope.payload().manifest_no;
             current = Some(manifest);
-            manifest_no = next;
         }
 
         // A newer hint lets GC remove an old discovery path. Recheck after a
@@ -250,6 +239,34 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
         }
         return Ok(current.map(|manifest| (manifest, hint)));
     }
+}
+
+/// Loads the manifest after `previous`, and checks that it's a valid
+/// successor of `previous` (format spec, "Resolving the metadata basis").
+///
+/// Returns `None` when the next number is missing, or when `previous` has
+/// the largest possible manifest number.
+pub(crate) async fn load_successor_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    previous: &LoadedManifest,
+) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
+    let Ok(next) = previous.state.envelope.payload().manifest_no.successor() else {
+        return Ok(None);
+    };
+    let Some(manifest) = load_manifest_by_no(store, namespace_id, next).await? else {
+        return Ok(None);
+    };
+    previous
+        .state
+        .envelope
+        .payload()
+        .ensure_successor(manifest.state.envelope.payload())
+        .map_err(|error| ControlObjectLoadError::Codec {
+            object_key: manifest.object_key.clone(),
+            message: error.to_string(),
+        })?;
+    Ok(Some(manifest))
 }
 
 pub(crate) async fn load_manifest_by_no<S: ObjectStore + ?Sized>(

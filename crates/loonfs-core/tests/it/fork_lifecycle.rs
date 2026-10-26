@@ -118,6 +118,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     for _ in 0..16 {
         let report = engine
             .compact_metadata_unit(
+                None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
@@ -758,6 +759,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     for _ in 0..16 {
         let report = engine
             .compact_metadata_unit(
+                None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
@@ -850,6 +852,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     for _ in 0..16 {
         match engine
             .compact_metadata_unit(
+                None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),

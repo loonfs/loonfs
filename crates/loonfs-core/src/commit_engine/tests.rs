@@ -1076,6 +1076,7 @@ async fn writer_after_own_compaction(
         store,
         engine.segment_cache.as_deref(),
         namespace_id,
+        None,
         current.state.compactor_epoch(),
         MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,

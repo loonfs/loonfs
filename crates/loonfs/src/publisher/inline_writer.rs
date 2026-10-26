@@ -241,6 +241,9 @@ async fn the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome()
         .create_directory("/warmup", &actor)
         .await
         .expect("acquire writer epoch");
+    // The gate parks the first read after the lost put, so the claim's hint
+    // raise, which reads the hint, finishes first.
+    writer.mode.publisher.wait_for_hint_raises().await;
     let publisher = namespace_writer.session().publisher.clone();
     let folds = hold_every_fold_permit(&writer).await;
     armed.store(true, Ordering::SeqCst);

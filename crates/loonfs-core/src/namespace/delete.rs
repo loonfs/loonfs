@@ -1,9 +1,13 @@
 //! Namespace deletion status published as successive manifests.
 
+use crate::commit_engine::WalFoldInput;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::publish::{update_manifest, ManifestChange};
-use crate::manifest::{MetadataRunPolicy, PublicationReport, PublishedManifest};
+use crate::manifest::{
+    load_position_basis, MetadataRunPolicy, PublicationReport, PublishedManifest,
+};
+use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -13,35 +17,67 @@ use crate::time::Deadline;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::{DeleteNamespaceResponse, NamespaceId};
+use std::sync::Mutex;
 
+/// Publishes the namespace's tombstone, after a fold of the WAL tail when
+/// the current manifest doesn't include the tail.
+///
+/// A writer session passes its writer position as `position`. An attempt
+/// that builds on the position's manifest takes the head from the position
+/// instead of reading the WAL tail, and the attempt's fold folds the
+/// position's tail. After that fold, the position moves onto the fold's
+/// manifest when that manifest has folded the WAL through the position's
+/// head, under the session's writer epoch.
 #[allow(
     clippy::too_many_arguments,
-    reason = "deletion passes the fold policy, the segment cache, and the content write permits to its fold"
+    reason = "deletion passes the session's position, the fold policy, the segment cache, and the content write permits to its fold"
 )]
 pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     options: DeleteNamespaceOptions,
     acquired_writer: AcquiredWriter,
+    position: Option<WalFoldInput>,
     context: &crate::context::MutationContext,
     deadline: &Deadline,
     fold_policy: MetadataRunPolicy,
     segment_cache: Option<&crate::cache::MetadataSegmentCache>,
     content_writes: &crate::PermitPool,
 ) -> Result<PublicationReport<DeleteNamespaceResponse>> {
+    let basis = match &position {
+        Some(position) => load_position_basis(store, segment_cache, position).await?,
+        None => None,
+    };
+    // Each attempt's future reads and updates the position through this
+    // lock, because a future that a closure returns can't borrow the
+    // closure's own state.
+    let position = Mutex::new(position);
     update_manifest(
         store,
         namespace_id,
+        basis,
         deadline,
         MAX_CONTENTION_ATTEMPTS,
         |current: LoadedManifest| {
             let acquired_writer = &acquired_writer;
+            let position = &position;
             async move {
                 let mut payload = current.state.envelope.payload().clone();
-                let anchor = load_read_anchor(store, namespace_id, deadline.observe()).await?;
-                let head = &anchor.read_state;
-                super::control::ensure_namespace_live(head)?;
-                ensure_writer_not_fenced(head, acquired_writer)?;
+                let held = position
+                    .lock()
+                    .expect("the deletion's position lock should not be poisoned")
+                    .clone()
+                    .filter(|held| held.basis.manifest() == &current.state.manifest());
+                let head = match &held {
+                    Some(held) => held.head.clone(),
+                    None => {
+                        load_read_anchor(store, namespace_id, deadline.observe())
+                            .await?
+                            .read_state
+                    }
+                };
+                super::control::ensure_namespace_live(&head)?;
+                ensure_writer_not_fenced(&head, acquired_writer)?;
                 if let Some(expected) = options.expected_head_seq {
                     if head.seq != expected {
                         return Err(CoreError::StaleHeadPrecondition {
@@ -53,16 +89,24 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                 }
                 if payload.folded_wal_no < head.wal_no {
                     deadline.ensure_metadata_publication_budget(namespace_id)?;
-                    crate::manifest::fold_wal_tail(
+                    let folded = crate::manifest::fold_wal_tail(
                         store,
                         segment_cache,
                         namespace_id,
-                        None,
+                        held.clone(),
                         deadline,
                         fold_policy,
                         content_writes,
                     )
                     .await?;
+                    *position
+                        .lock()
+                        .expect("the deletion's position lock should not be poisoned") = held
+                        .filter(|_| folds_head(&folded.manifest, &head))
+                        .map(|held| WalFoldInput {
+                            basis: MetadataBasis(folded.manifest.manifest.clone()),
+                            ..held
+                        });
                     return Ok(ManifestChange::Again);
                 }
                 payload.status = NamespaceStatus::Deleted {
@@ -84,4 +128,16 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             Some(deadline.origin()),
         )),
     })
+}
+
+/// Returns whether `manifest` is an active manifest, with the writer epoch
+/// of `head`, that has folded the WAL through `head`, so `head` is also the
+/// head at `manifest`.
+fn folds_head(
+    manifest: &PublishedManifest,
+    head: &crate::namespace::state::NamespaceReadState,
+) -> bool {
+    !manifest.status.is_deleted()
+        && manifest.writer_epoch == head.writer_epoch
+        && manifest.folded_wal_no == head.wal_no
 }

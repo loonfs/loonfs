@@ -237,7 +237,7 @@ A live read with the `eventual` [consistency](#consistency), which is the defaul
 
 ### Revalidation bound
 
-The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view and to a [writer position](#writer-position). After that, the reader loads the current manifest again before it serves a read. Garbage collection's minimum grace includes this bound, so it doesn't delete a superseded manifest that a reader might still be using. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view, to a [writer position](#writer-position), and to the manifest that a manifest publication builds on. After that, the reader loads the current manifest again before it serves a read, and the publication loads the current manifest through the hint before its put. Garbage collection's minimum grace includes this bound, so it doesn't delete a superseded manifest that a reader might still be using. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Cursor
 

@@ -156,7 +156,8 @@ pub mod cache {
 pub mod control {
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::manifest::{
-        load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,
+        load_checkpoint_statistics, load_namespace_statistics, load_position_basis,
+        NamespaceStatistics,
     };
     pub use crate::namespace::catalog::{
         load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry,
@@ -170,7 +171,7 @@ pub mod control {
         same_epoch_manifests_above, NamespaceReadAnchor,
     };
     pub use crate::namespace::state::NamespaceReadState;
-    pub use crate::namespace::MetadataBasis;
+    pub use crate::namespace::{MetadataBasis, PublicationBasis};
     pub use crate::pin::{load_snapshot_read_basis, SnapshotReadBasis};
     pub use crate::wal::probe_namespace_wal;
 }

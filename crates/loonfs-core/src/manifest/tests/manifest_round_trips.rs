@@ -74,6 +74,8 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         writer_id: context.writer_id.clone(),
         writer_epoch: head.writer_epoch,
     };
+    // The view's discovery confirms its basis after this observation.
+    let basis_checked = crate::test_support::observed_now();
     let position = crate::protocol::load_publish_metadata_view(
         &store,
         None,
@@ -91,6 +93,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         wal_tail_inline_bytes: 0,
         head: position.head.clone(),
         basis: position.basis().clone(),
+        basis_checked,
         tail_state: Arc::clone(&position.tail),
         wal_tail_objects: position.head.unfolded_wal_objects(),
     };

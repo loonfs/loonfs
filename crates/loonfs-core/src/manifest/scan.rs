@@ -10,6 +10,7 @@ use super::scan_load::{ScanDescriptor, ScanLoader};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 #[cfg(test)]
 use crate::metadata::MetadataState;
+use crate::namespace::control::{CurrentManifest, LoadedManifest};
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
@@ -109,7 +110,22 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
     pub(crate) fn manifest(&self) -> &NamespaceManifestEnvelope {
         self.manifest
             .as_deref()
-            .expect("loaded metadata segments should carry their manifest")
+            .expect("loaded metadata segments should include their manifest")
+    }
+
+    /// Returns the manifest that these segments were loaded from.
+    pub(crate) fn loaded_manifest(&self) -> LoadedManifest {
+        LoadedManifest {
+            object_key: self.manifest_object_key.clone(),
+            manifest_bytes: self.manifest_bytes,
+            state: CurrentManifest {
+                envelope: Arc::clone(
+                    self.manifest
+                        .as_ref()
+                        .expect("loaded metadata segments should include their manifest"),
+                ),
+            },
+        }
     }
 
     pub(crate) async fn get_for_lookup(

@@ -3,6 +3,7 @@
 mod access;
 mod active_deletions;
 mod attributes;
+mod basis_publications;
 mod bounded_pages;
 mod cache;
 mod cas_recovery;
@@ -329,6 +330,7 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
             store,
             None,
             namespace_id,
+            None,
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
@@ -405,6 +407,7 @@ async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
     finalize_metadata_compaction(
         store,
         namespace_id,
+        None,
         spec,
         &input_keys,
         merged,
@@ -947,10 +950,15 @@ async fn publish_once_within<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
+    let checked = deadline.observe();
     let current = crate::namespace::control::load_current_manifest(store, &namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    super::publish::publish_manifest_from(store, manifest, deadline, Some(current)).await
+    let basis = crate::namespace::PublicationBasis {
+        manifest: current,
+        checked,
+    };
+    super::publish::publish_manifest_from(store, manifest, deadline, Some(&basis)).await
 }
 
 pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(

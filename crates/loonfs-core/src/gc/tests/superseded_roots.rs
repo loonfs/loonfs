@@ -32,6 +32,7 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
         store,
         None,
         namespace_id,
+        None,
         loonfs_types::CompactorEpoch(0),
         Default::default(),
         MetadataCompactionPolicy::CompactImmediately,

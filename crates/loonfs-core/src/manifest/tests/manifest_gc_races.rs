@@ -233,3 +233,93 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
     assert_eq!(current.state.manifest().manifest_no, ManifestNo(3));
     assert_eq!(hint.state.manifest_no, ManifestNo(3));
 }
+
+/// Checks that a publication whose basis was checked the revalidation bound
+/// ago or longer, and whose basis's successor has been deleted by garbage
+/// collection, loads the current manifest through the hint and publishes
+/// after it.
+///
+/// A HEAD of the basis's successor finds nothing, so a publication that
+/// trusted that HEAD would put the deleted number again, beside the newer
+/// manifests.
+#[tokio::test]
+async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current_manifest() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("stale-basis").expect("namespace");
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::manifest(&namespace_id),
+    );
+    let context = test_context();
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("create");
+    acquire_writer_epoch(&store, &namespace_id, &context)
+        .await
+        .expect("publish manifest 2");
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let basis = crate::namespace::PublicationBasis {
+        manifest: load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("manifest 2"),
+        checked: crate::time::Observation::now(clock.clone()),
+    };
+    // Other processes publish manifests 3 to 5 and raise the hint, and a
+    // garbage collection pass one grace later deletes every manifest below
+    // the hint.
+    for _ in 3..=5 {
+        acquire_writer_epoch(&store, &namespace_id, &context)
+            .await
+            .expect("another process publishes");
+    }
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
+    let options = crate::gc::GcOptions::default();
+    clock.advance_ms(options.grace_window_ms + 1);
+    let report = crate::gc::gc_namespace(
+        &store,
+        None,
+        None,
+        &namespace_id,
+        &options,
+        &MutationContext {
+            now_ms: options.grace_window_ms + 1,
+            ..context.clone()
+        },
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("collect old manifests");
+    assert_eq!(report.deleted.manifests, 4);
+    let successor = metadata_manifest_object(&namespace_id, &ManifestNo(3));
+    assert!(store
+        .head(&successor)
+        .await
+        .expect("the basis's successor")
+        .is_none());
+
+    let ((), published, hint) = crate::manifest::publish::update_manifest(
+        &store,
+        &namespace_id,
+        Some(basis),
+        &Deadline::start(clock),
+        crate::limits::MAX_CONTENTION_ATTEMPTS,
+        |current: crate::namespace::control::LoadedManifest| async move {
+            Ok(crate::manifest::publish::ManifestChange::Next(
+                Box::new(current.state.envelope.payload().clone()),
+                (),
+            ))
+        },
+    )
+    .await
+    .expect("publish");
+    assert_eq!(published.state.manifest().manifest_no, ManifestNo(6));
+    assert_eq!(hint.expect("discovery").state.manifest_no, ManifestNo(5));
+    assert!(
+        store
+            .head(&successor)
+            .await
+            .expect("the basis's successor")
+            .is_none(),
+        "the publication didn't put the deleted number again"
+    );
+}

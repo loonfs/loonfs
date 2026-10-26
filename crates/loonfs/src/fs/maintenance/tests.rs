@@ -1695,11 +1695,15 @@ impl ObjectStore for HeldHintAnswer {
 }
 
 /// Checks that a session's compaction step reads the writer position before
-/// the manifest. The step's manifest read ends with a second read of the
-/// hint, and the answer to that read is held while the session's fold
-/// publishes the next manifest and moves the position onto it. The step must
-/// then plan from a manifest at least as new as the position that it read,
-/// so the tail that it saw unfolded leaves metadata due instead of caught up.
+/// the manifest.
+///
+/// The position's last check is past the revalidation bound, so the step
+/// loads the current manifest through the hint. The step's manifest read
+/// ends with a second read of the hint, and the answer to that read is held
+/// while the session's fold publishes the next manifest and moves the
+/// position onto it. The step must then plan from a manifest at least as new
+/// as the position that it read, so the tail that it saw unfolded leaves
+/// metadata due instead of caught up.
 #[tokio::test]
 async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
     let directory = tempdir().expect("tempdir");
@@ -1711,10 +1715,12 @@ async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
         held: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
     });
+    let clock = Arc::new(ManualClock::new(0));
     // Each write leaves inline bytes in the tail, so the session folds each
     // write.
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .monotonic_timer(clock.clone())
         .inline_content(crate::InlineContentPolicy {
             inline_content_fold_at_bytes: 1,
             ..crate::InlineContentPolicy::default()
@@ -1752,6 +1758,10 @@ async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
     let before = current_manifest_payload(store.as_ref(), &namespace_id)
         .await
         .manifest_no;
+    // A step plans from a position checked within the revalidation bound
+    // without loading the manifest, so the test ages the position past the
+    // bound.
+    clock.advance_ms(loonfs_core::limits::READ_REVALIDATION_BOUND_MS);
 
     store
         .reads_until_held
@@ -1862,9 +1872,12 @@ impl ObjectStore for EarlierManifestView {
 }
 
 /// Checks that a session's compaction step that finds a current manifest
-/// older than the writer position's manifest reports metadata due. The
-/// publish order rules that out, so the store fakes it: it answers with the
-/// hint from before the session's last fold, and hides the fold's manifest.
+/// older than the writer position's manifest reports metadata due.
+///
+/// The publish order rules that out, so the store fakes it: it answers with
+/// the hint from before the session's last fold, and hides the fold's
+/// manifest. The position's last check is past the revalidation bound, so
+/// the step loads the current manifest through the hint.
 #[tokio::test]
 async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
     let directory = tempdir().expect("tempdir");
@@ -1875,10 +1888,12 @@ async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
         hint_key: hint_key.clone(),
         view: std::sync::Mutex::new(None),
     });
+    let clock = Arc::new(ManualClock::new(0));
     // Each write leaves inline bytes in the tail, so the session folds each
     // write.
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .monotonic_timer(clock.clone())
         .inline_content(crate::InlineContentPolicy {
             inline_content_fold_at_bytes: 1,
             ..crate::InlineContentPolicy::default()
@@ -1919,6 +1934,10 @@ async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
     writer.drain().await.expect("nothing else runs");
     writer.mode.publisher.wait_for_hint_raises().await;
 
+    // A step plans from a position checked within the revalidation bound
+    // without loading the manifest, so the test ages the position past the
+    // bound.
+    clock.advance_ms(loonfs_core::limits::READ_REVALIDATION_BOUND_MS);
     *store.view.lock().expect("view lock") = Some((earlier_hint, earlier));
     let step = maintenance
         .metadata_step(

@@ -985,6 +985,7 @@ async fn compact_with_seed<S: ObjectStore + ?Sized>(
     let outcome = finalize_metadata_compaction(
         store,
         namespace_id,
+        None,
         spec,
         &input_keys,
         merged,

@@ -4,7 +4,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
 use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache, PublishedManifest};
-use crate::namespace::basis::MetadataBasis;
+use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::control::{
     load_current_manifest_with_hint, load_manifest_by_no, CurrentManifest, LoadedHint,
     LoadedManifest,
@@ -24,6 +24,9 @@ pub struct NamespaceReadAnchor {
     pub(crate) manifest: LoadedManifest,
     pub(crate) hint: LoadedHint,
     pub(crate) tail: ValidatedWalTail,
+    /// When the anchor's checks began, read before the anchor loaded
+    /// `manifest` and confirmed it with a successor check.
+    pub(crate) checked: crate::time::Observation,
 }
 
 impl NamespaceReadAnchor {
@@ -39,6 +42,15 @@ impl NamespaceReadAnchor {
     /// the WAL tail above that manifest.
     pub fn current_manifest(&self) -> &CurrentManifest {
         &self.manifest.state
+    }
+
+    /// Returns the anchor's manifest, with the time that the anchor's checks
+    /// began, as a basis that a publication can build on.
+    pub fn publication_basis(&self) -> PublicationBasis {
+        PublicationBasis {
+            manifest: self.manifest.clone(),
+            checked: self.checked.clone(),
+        }
     }
 }
 
@@ -91,6 +103,7 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
                     manifest,
                     hint,
                     tail,
+                    checked: observed,
                 });
             }
             Err(error @ ControlObjectLoadError::Codec { .. }) => {

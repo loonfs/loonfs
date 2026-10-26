@@ -220,6 +220,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
                 expected_head_seq: Some(expected_head_seq),
             },
             acquired_writer.clone(),
+            None,
             &context,
             &deadline,
             crate::manifest::MetadataRunPolicy::default(),

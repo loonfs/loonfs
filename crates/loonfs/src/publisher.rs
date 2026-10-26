@@ -487,6 +487,21 @@ impl PublisherRegistry {
         slot.wal_tail_inline_bytes()
     }
 
+    /// Returns the namespace's writer position that reads in this runtime
+    /// start from, as a fold input, or `None` when this runtime has no
+    /// position for the namespace or the namespace's session is fenced.
+    ///
+    /// Unlike [`Self::wal_fold_input`], this function doesn't wait for a
+    /// publication that the session's engine is running, so the position
+    /// doesn't include that publication's commits.
+    pub(crate) fn read_position_fold_input(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Option<WalFoldInput> {
+        let position = self.shared.read_position_slot(namespace_id)?.current()?;
+        Some(position.wal_fold_input())
+    }
+
     /// Returns the namespace's writer position as a fold input: the manifest
     /// it plans against and the unfolded WAL tail above that manifest. Returns
     /// `None` when this runtime has no position for the namespace.

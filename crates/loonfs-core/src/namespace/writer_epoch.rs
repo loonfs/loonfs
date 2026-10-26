@@ -56,6 +56,7 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
     let (acquired, manifest, hint) = update_manifest(
         store,
         namespace_id,
+        None,
         &deadline,
         MAX_CONTENTION_ATTEMPTS,
         |current: LoadedManifest| async move {
@@ -80,6 +81,7 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
         },
     )
     .await?;
+    let hint = hint.expect("a claim starts from no basis, so it loads the hint");
     let claim_manifest_no = manifest.state.manifest().manifest_no;
     let mut tip = deadline.observe();
     let mut anchor =

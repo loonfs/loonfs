@@ -554,6 +554,7 @@ async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
     let ((), published, hint) = crate::manifest::publish::update_manifest(
         &store,
         &namespace_id,
+        None,
         &deadline,
         crate::limits::MAX_CONTENTION_ATTEMPTS,
         |current: crate::namespace::control::LoadedManifest| async move {
@@ -566,13 +567,15 @@ async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
     .await
     .expect("publish");
     assert_eq!(published.state.manifest().manifest_no, ManifestNo(2));
-    assert_eq!(hint, before);
+    assert_eq!(hint.as_ref(), Some(&before));
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(
         hint,
-        crate::namespace::control::load_hint(&store, &namespace_id)
-            .await
-            .expect("stored hint")
+        Some(
+            crate::namespace::control::load_hint(&store, &namespace_id)
+                .await
+                .expect("stored hint")
+        )
     );
 }
 
@@ -592,6 +595,7 @@ async fn a_manifest_update_stops_after_the_contention_limit() {
         let result = update_manifest(
             &store,
             &namespace_id,
+            None,
             &deadline,
             crate::limits::MAX_CONTENTION_ATTEMPTS,
             |current: crate::namespace::control::LoadedManifest| {

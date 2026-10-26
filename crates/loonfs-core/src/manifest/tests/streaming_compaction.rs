@@ -479,6 +479,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     finalize_metadata_compaction(
         store,
         namespace_id,
+        None,
         spec,
         input_keys,
         result.clone(),
@@ -589,6 +590,7 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
         store,
         None,
         namespace_id,
+        None,
         loonfs_types::CompactorEpoch(0),
         merge_everything_policy(),
         MetadataCompactionPolicy::CompactImmediately,
@@ -729,6 +731,7 @@ async fn compact_unit_with<S: ObjectStore + ?Sized>(
         store,
         None,
         namespace_id,
+        None,
         loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
@@ -2718,6 +2721,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             &intercepted,
             None,
             &namespace_id,
+            None,
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::CompactImmediately,
@@ -2847,6 +2851,7 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
             &intercepted,
             None,
             &namespace_id,
+            None,
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::SizeTiered,
@@ -3130,6 +3135,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let outcome = finalize_metadata_compaction(
         &store,
         &namespace,
+        None,
         &spec,
         &input,
         result.clone(),
@@ -3158,6 +3164,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
             &store,
             None,
             &namespace,
+            None,
             epoch,
             merge_everything_policy(),
             MetadataCompactionPolicy::CompactImmediately,
@@ -3176,6 +3183,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let outcome = finalize_metadata_compaction(
         &store,
         &namespace,
+        None,
         &spec,
         &input,
         result.clone(),
@@ -3207,6 +3215,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let outcome = finalize_metadata_compaction(
         &store,
         &namespace,
+        None,
         &spec,
         &input,
         result,
@@ -3303,6 +3312,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
         finalize_metadata_compaction(
             &store,
             &namespace,
+            None,
             &first,
             &first_keys,
             first_output,
@@ -3314,6 +3324,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
             let result = finalize_metadata_compaction(
                 &store,
                 &namespace,
+                None,
                 &second,
                 &second_keys,
                 second_output,
@@ -3401,53 +3412,81 @@ async fn a_finalization_attempt_loads_the_current_manifest_once() {
     assert_eq!(operations.len(), 5, "{operations:?}");
 }
 
-/// Checks that a compaction unit loads the current manifest once to plan and
-/// once to publish, and leaves the hint for the runtime to raise.
+/// Checks that a compaction unit without a basis loads the current manifest
+/// once to plan, that a unit with a basis loads nothing to plan, and that
+/// both publish on the manifest they planned from after one HEAD, leaving the
+/// hint for the runtime to raise.
 #[tokio::test]
-async fn a_unit_loads_the_current_manifest_once_to_plan_and_once_to_publish() {
+async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
     use loonfs_test_support::stores::RecordingStore;
 
-    let directory = tempdir().expect("tempdir");
-    let namespace = NamespaceId::parse("unit-requests").expect("namespace");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    seed_bindings_workload(&store, &namespace).await;
-    let current = current_manifest_number(&store, &namespace).await;
-    // The runtime that published the seed raises the hint afterward, so
-    // discovery starts at the current manifest.
-    crate::namespace::control::raise_namespace_hint(
-        &store,
-        &namespace,
-        current,
-        None,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("raise the hint");
-    let next = current.successor().expect("next manifest number");
-    let store = RecordingStore::new(store, KeyPredicate::any());
-    let outcome = compact_unit_with(
-        &store,
-        &namespace,
-        merge_everything_policy(),
-        CompactionAdmission::AnySize,
-    )
-    .await;
-    assert_matches!(
-        outcome,
-        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest.manifest_no == next
-    );
-    let hint = hint(&namespace);
-    let manifest = |number| metadata_manifest_object(&namespace, &number);
-    let load = [
-        ("get", hint.clone()),
-        ("get", manifest(current)),
-        ("get", manifest(next)),
-        ("get", hint.clone()),
-    ];
-    let mut expected = load.to_vec();
-    expected.extend(load);
-    expected.push(("put", manifest(next)));
-    assert_eq!(control_requests(&namespace, &store.take()), expected);
+    for with_basis in [false, true] {
+        let directory = tempdir().expect("tempdir");
+        let namespace = NamespaceId::parse("unit-requests").expect("namespace");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        seed_bindings_workload(&store, &namespace).await;
+        let current = current_manifest_number(&store, &namespace).await;
+        // The runtime that published the seed raises the hint afterward, so
+        // discovery starts at the current manifest.
+        crate::namespace::control::raise_namespace_hint(
+            &store,
+            &namespace,
+            current,
+            None,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("raise the hint");
+        let basis = match with_basis {
+            true => {
+                let checked = crate::test_support::observed_now();
+                Some(crate::namespace::PublicationBasis {
+                    manifest: load_current_manifest(&store, &namespace)
+                        .await
+                        .expect("current manifest"),
+                    checked,
+                })
+            }
+            false => None,
+        };
+        let next = current.successor().expect("next manifest number");
+        let store = RecordingStore::new(store, KeyPredicate::any());
+        let outcome = super::super::compact_unit(
+            &store,
+            None,
+            &namespace,
+            basis,
+            loonfs_types::CompactorEpoch(0),
+            merge_everything_policy(),
+            MetadataCompactionPolicy::default(),
+            CompactionAdmission::AnySize,
+            &MetadataCompactionCancellation::default(),
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("run a compaction unit");
+        assert_matches!(
+            outcome,
+            CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest.manifest_no == next
+        );
+        let hint = hint(&namespace);
+        let manifest = |number| metadata_manifest_object(&namespace, &number);
+        let mut expected = match with_basis {
+            true => Vec::new(),
+            false => vec![
+                ("get", hint.clone()),
+                ("get", manifest(current)),
+                ("get", manifest(next)),
+                ("get", hint),
+            ],
+        };
+        expected.extend([("head", manifest(next)), ("put", manifest(next))]);
+        assert_eq!(
+            control_requests(&namespace, &store.take()),
+            expected,
+            "with a basis: {with_basis}"
+        );
+    }
 }
 
 /// Checks that a finalization whose put loses to a compaction of the same
@@ -3543,6 +3582,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         &store,
         None,
         &namespace,
+        None,
         epoch,
         small_segment_policy(),
         MetadataCompactionPolicy::CompactImmediately,
@@ -3611,6 +3651,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         &failing,
         None,
         &namespace,
+        None,
         epoch,
         small_segment_policy(),
         MetadataCompactionPolicy::CompactImmediately,
