@@ -83,6 +83,11 @@ pub(crate) enum ControlMessage {
         seq: ChangeSeq,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Replies once the task has handled every message sent before this one
+    /// and published the status that follows them.
+    Barrier {
+        reply: oneshot::Sender<()>,
+    },
     /// The poll interval passed.
     Tick,
     /// The kernel forgot an item that left the tree.
@@ -295,6 +300,7 @@ impl ControlTask {
             ControlMessage::ReadAhead { handle, range } => self.on_read_ahead(handle, range),
             ControlMessage::CloseRead { handle } => self.on_close_read(handle),
             ControlMessage::RefreshAtLeast { seq, reply } => self.on_refresh(seq, reply),
+            ControlMessage::Barrier { reply } => self.outbox.reply(reply, ()),
             ControlMessage::Tick => {
                 self.shared.tick_pending.store(false, Ordering::SeqCst);
                 self.on_tick();

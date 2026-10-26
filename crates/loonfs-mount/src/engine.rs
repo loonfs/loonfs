@@ -247,6 +247,18 @@ impl Engine {
         }
     }
 
+    /// Returns once the control task has handled every call and message that
+    /// reached it before this call, such as the close of a dropped read
+    /// handle or a forget, and has published the status that follows them.
+    ///
+    /// Work that runs outside the control task, such as a fetch or a feed
+    /// poll, can still be running.
+    pub async fn wait_until_handled(&self) -> Result<()> {
+        let (reply, replied) = oneshot::channel();
+        self.send(ControlMessage::Barrier { reply })?;
+        replied.await.map_err(|_| MountError::Stopped)
+    }
+
     /// Returns the changes that the kernel's caches have to drop, sent once
     /// per feed page from now on.
     pub fn subscribe_invalidations(&self) -> mpsc::Receiver<Invalidation> {

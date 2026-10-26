@@ -1,10 +1,11 @@
 //! Content changes from the feed: a replacement makes a new item while open
-//! handles keep the revision they opened, and an append extends the file
-//! that open handles read.
+//! handles keep the revision they opened, an append extends the file that
+//! open handles read, an append that starts a new chain keeps the cached
+//! bytes, and two revisions of one chain share a cache file.
 
 use crate::support::{
-    append, content_reads, fetched_bytes, fixture, item, open, pattern, put, put_replacing,
-    range_header, read, refresh, UNIT,
+    append, content_reads, eventually, fetched_bytes, fixture, item, open, pattern, put,
+    put_replacing, range_header, read, refresh, wait_until_handled, Fixture, UNIT,
 };
 use loonfs_mount::{CachedPages, Invalidation};
 use loonfs_mount_sim::{ByteRange, Operation};
@@ -130,4 +131,95 @@ async fn each_append_extends_an_open_file_and_fetches_only_the_appended_range() 
             }]
         );
     }
+}
+
+/// Puts the same uploaded content at `a.bin` and `b.bin`, so the two files
+/// share one chain.
+async fn two_files_on_one_chain(fixture: &Fixture, bytes: &[u8]) {
+    let prepared = fixture
+        .client
+        .prepare_content(&fixture.namespace_id, bytes)
+        .await
+        .expect("the upload");
+    for relative in ["a.bin", "b.bin"] {
+        fixture
+            .client
+            .put_file_prepared(
+                &fixture.namespace_path(relative),
+                prepared.clone(),
+                &fixture.actor,
+            )
+            .await
+            .expect("the put");
+    }
+}
+
+/// Checks that an append that starts a new chain, because another file
+/// extended the shared chain first, moves the complete cache file to the new
+/// chain, so a read of the new revision fetches only the appended bytes.
+#[tokio::test]
+async fn an_append_that_starts_a_new_chain_keeps_the_cached_bytes() {
+    let fixture = fixture();
+    let bytes = pattern(2 * UNIT);
+    two_files_on_one_chain(&fixture, &bytes).await;
+    let shared = fixture.content_ref("b.bin").await;
+    let engine = fixture.mount().await;
+    let handle = open(&engine, "b.bin").await;
+    assert_eq!(read(&handle, 0, 4 * UNIT).await, bytes);
+    drop(handle);
+    eventually(|| fixture.cache_file(&shared).exists()).await;
+    wait_until_handled(&engine).await;
+
+    fixture.commit(vec![append("a.bin", b"more of a")]);
+    let last = fixture.commit(vec![append("b.bin", b"more of b")]);
+    refresh(&engine, last.committed_seq).await;
+    let current = fixture.content_ref("b.bin").await;
+    assert_ne!(current.content_id, shared.content_id, "a new chain");
+
+    fixture.server.take_trace();
+    let handle = open(&engine, "b.bin").await;
+    let mut expected = bytes.to_vec();
+    expected.extend_from_slice(b"more of b");
+    assert_eq!(read(&handle, 0, 4 * UNIT).await, expected);
+    let trace = fixture.server.take_trace();
+    let reads: Vec<_> = content_reads(&trace)
+        .iter()
+        .map(|record| record.byte_range.expect("a range"))
+        .collect();
+    assert_eq!(
+        reads,
+        [ByteRange {
+            start_offset: 2 * UNIT,
+            end_offset: 2 * UNIT + 9,
+        }],
+        "only the appended bytes"
+    );
+    eventually(|| fixture.cache_file(&current).exists()).await;
+}
+
+/// Checks that two handles that read two revisions of one chain, a shorter
+/// one through `b.bin` and a longer one through `a.bin`, share one cache
+/// file: each byte is fetched once, both reads return their revision's
+/// bytes, and the file is complete and verified once it has every byte.
+#[tokio::test]
+async fn two_handles_on_one_chain_share_the_cache_file() {
+    let fixture = fixture();
+    let bytes = pattern(2 * UNIT);
+    two_files_on_one_chain(&fixture, &bytes).await;
+    let last = fixture.commit(vec![append("a.bin", b"more of a")]);
+    let engine = fixture.mount().await;
+    refresh(&engine, last.committed_seq).await;
+    let longer = fixture.content_ref("a.bin").await;
+
+    fixture.server.take_trace();
+    let shorter_handle = open(&engine, "b.bin").await;
+    let longer_handle = open(&engine, "a.bin").await;
+    assert_eq!(read(&shorter_handle, 0, 4 * UNIT).await, bytes);
+    let mut expected = bytes.to_vec();
+    expected.extend_from_slice(b"more of a");
+    assert_eq!(read(&longer_handle, 0, 4 * UNIT).await, expected);
+    let trace = fixture.server.take_trace();
+    assert_eq!(fetched_bytes(&trace), 2 * UNIT + 9, "each byte once");
+    eventually(|| fixture.cache_file(&longer).exists()).await;
+    assert_eq!(engine.status().cache.mismatched_files, 0);
 }

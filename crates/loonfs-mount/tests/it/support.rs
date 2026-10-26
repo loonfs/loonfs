@@ -428,12 +428,15 @@ pub(crate) async fn refresh(engine: &Engine, seq: ChangeSeq) {
         .expect("the refresh");
 }
 
-/// Waits until the engine has handled every message sent before the call,
-/// such as the close of a dropped handle, by asking it for a refresh. The
-/// engine publishes its status before it replies, so the status describes
-/// those messages.
+/// Waits until the engine's control task has handled every message sent
+/// before the call, such as the close of a dropped handle. The engine
+/// publishes its status before it replies, so the status describes those
+/// messages.
 pub(crate) async fn wait_until_handled(engine: &Engine) {
-    refresh(engine, engine.status().applied_seq).await;
+    engine
+        .wait_until_handled()
+        .await
+        .expect("the engine handles its messages");
 }
 
 /// Waits until `condition` is true, for an effect of work that the engine
