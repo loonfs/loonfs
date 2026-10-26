@@ -304,10 +304,10 @@ pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
 
 /// Default age of an unreachable object before garbage collection may remove it.
 ///
-/// A retention advance also stops at the newest commit at or below its target
-/// that's at least this old, so a replaced revision stays readable until the
-/// replacing commit, or a later one, is this old (format spec, "Advancing the
-/// retention floor").
+/// A retention advance also treats this long before its clock as a cutoff,
+/// so the floor doesn't pass a commit dated after that time, and a replaced
+/// revision stays readable until the replacing commit is this old (format
+/// spec, "Advancing the retention floor").
 pub const GC_DEFAULT_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
 
 const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
