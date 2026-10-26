@@ -13,6 +13,7 @@ mod effects;
 mod entering;
 mod events;
 mod feed;
+mod outbox;
 mod reads;
 mod rebuild;
 #[cfg(test)]
@@ -45,6 +46,7 @@ pub(crate) use changes::write_listing;
 
 use entering::EnteringState;
 use feed::{FeedState, RefreshWaiter};
+use outbox::Outbox;
 use reads::{OpenHandle, ReadWaiter};
 
 /// Sends messages to a control task.
@@ -163,6 +165,8 @@ pub(crate) struct ControlTask {
     read_waiters: Vec<ReadWaiter>,
     next_handle_id: u64,
     mismatched_files: u64,
+
+    outbox: Outbox,
 }
 
 impl ControlTask {
@@ -222,6 +226,7 @@ impl ControlTask {
             read_waiters: Vec::new(),
             next_handle_id: 0,
             mismatched_files: 0,
+            outbox: Outbox::default(),
         };
         task.publish_status();
         Ok((task, shared))
@@ -252,14 +257,15 @@ impl ControlTask {
             tracing::error!(%error, "showing directories that entered the mount failed");
         }
         self.on_tick();
-        self.publish_status();
+        self.publish_and_deliver();
     }
 
     /// Handles one message.
     pub(crate) fn handle(&mut self, message: ControlMessage) {
         match message {
             ControlMessage::OpenRead { item, reply } => {
-                let _ = reply.send(self.open_read(item));
+                let opened = self.open_read(item);
+                self.outbox.reply(reply, opened);
             }
             ControlMessage::Read {
                 handle,
@@ -278,7 +284,19 @@ impl ControlTask {
             ControlMessage::WorkDone(outcome) => self.on_work_done(*outcome),
             ControlMessage::Shutdown => {}
         }
+        self.publish_and_deliver();
+    }
+
+    /// Publishes the status, and then sends the replies and invalidations
+    /// that the message produced.
+    fn publish_and_deliver(&mut self) {
         self.publish_status();
+        let subscribers = &self.shared.subscribers;
+        let dropped = self.outbox.deliver(|batch| subscribers.send(batch));
+        if dropped > 0 {
+            self.dropped_invalidations += dropped;
+            self.publish_status();
+        }
     }
 
     fn on_work_done(&mut self, outcome: WorkOutcome) {
@@ -338,13 +356,11 @@ impl ControlTask {
         self.tree().sweep(|item| open.contains(&item));
     }
 
-    /// Sends the invalidations that the last page queued.
+    /// Queues the invalidations of the last page, which the task sends once
+    /// it has published its status.
     fn flush_invalidations(&mut self) {
-        if self.invalidations.is_empty() {
-            return;
-        }
         let invalidations = std::mem::take(&mut self.invalidations);
-        self.dropped_invalidations += self.shared.subscribers.send(&invalidations);
+        self.outbox.invalidations(invalidations);
     }
 
     fn publish_status(&mut self) {

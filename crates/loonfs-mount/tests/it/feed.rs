@@ -2,8 +2,8 @@
 //! produces, applied to a mount without local changes.
 
 use crate::support::{
-    delete, engine_tree, eventually, fixture, item, mkdir, move_path, open, operations, put, read,
-    refresh, request, undelete, update_attributes, Fixture, MOUNT_PATH,
+    delete, engine_tree, fixture, item, mkdir, move_path, open, operations, put, read, refresh,
+    request, undelete, update_attributes, wait_until_handled, Fixture, MOUNT_PATH,
 };
 use loonfs_mount::{ItemKind, PublicationStop};
 use loonfs_mount_sim::{EchoOrder, Operation, RequestRecord};
@@ -102,7 +102,8 @@ async fn moves_within_out_of_and_into_the_mount_rebind_remove_and_read_items() {
         "an item that left the tree stays while the kernel has a lookup of it"
     );
     engine.forget(deep, 1);
-    eventually(|| engine.getattr(deep).is_none()).await;
+    wait_until_handled(&engine).await;
+    assert_eq!(engine.getattr(deep), None);
     assert_eq!(engine.status().entries, entries - 2 + 1);
     assert_eq!(
         read(&open(&engine, "loose.txt").await, 0, 10).await,

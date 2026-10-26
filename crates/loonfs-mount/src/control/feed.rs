@@ -184,17 +184,14 @@ impl ControlTask {
         self.completed_polls = self.started_polls;
         let completed = self.completed_polls;
         let applied_seq = self.applied_seq;
-        // A caller that reads the status once its refresh returns has to see
-        // the sequence that it waited for.
-        self.publish_status();
         let waiters = std::mem::take(&mut self.refresh_waiters);
         for waiter in waiters {
             if waiter.poll > completed {
                 self.refresh_waiters.push(waiter);
             } else if let Some(error) = &error {
-                let _ = waiter.reply.send(Err(error.clone()));
+                self.outbox.reply(waiter.reply, Err(error.clone()));
             } else if waiter.seq <= applied_seq {
-                let _ = waiter.reply.send(Ok(()));
+                self.outbox.reply(waiter.reply, Ok(()));
             } else {
                 self.refresh_waiters.push(RefreshWaiter {
                     poll: completed + 1,

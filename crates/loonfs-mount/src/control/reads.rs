@@ -100,25 +100,26 @@ impl ControlTask {
             .get(&handle)
             .map(|open| open.view().revision.clone())
         else {
-            let _ = reply.send(Err(MountError::Stopped));
+            self.outbox.reply(reply, Err(MountError::Stopped));
             return;
         };
         let content_id = revision.content_ref.content_id.clone();
         let entry = match self.cache.prepare(&revision.content_ref) {
             Ok(entry) => entry,
             Err(error) => {
-                let _ = reply.send(Err(error));
+                self.outbox.reply(reply, Err(error));
                 return;
             }
         };
         if matches!(entry.state, CacheEntryState::Failed) {
-            let _ = reply.send(Err(MountError::ContentMismatch { content_id }));
+            self.outbox
+                .reply(reply, Err(MountError::ContentMismatch { content_id }));
             return;
         }
         let present = entry.contains(&needed).then(|| entry.file.clone());
         self.set_view_files(&content_id);
         if let Some(file) = present {
-            let _ = reply.send(Ok(file));
+            self.outbox.reply(reply, Ok(file));
             return;
         }
         let range = demand.start.min(needed.start)..demand.end.max(needed.end);
@@ -129,7 +130,7 @@ impl ControlTask {
             Some(handle),
             RequestShape::Windows,
         ) {
-            let _ = reply.send(Err(error));
+            self.outbox.reply(reply, Err(error));
             return;
         }
         self.fetches.promote(&content_id, &needed);
@@ -399,11 +400,14 @@ impl ControlTask {
             if &waiter.content_id != content_id {
                 self.read_waiters.push(waiter);
             } else if failed {
-                let _ = waiter.reply.send(Err(MountError::ContentMismatch {
-                    content_id: content_id.clone(),
-                }));
+                self.outbox.reply(
+                    waiter.reply,
+                    Err(MountError::ContentMismatch {
+                        content_id: content_id.clone(),
+                    }),
+                );
             } else if entry.contains(&waiter.needed) {
-                let _ = waiter.reply.send(Ok(entry.file.clone()));
+                self.outbox.reply(waiter.reply, Ok(entry.file.clone()));
             } else {
                 self.read_waiters.push(waiter);
             }
@@ -420,7 +424,7 @@ impl ControlTask {
         for waiter in waiters {
             let overlaps = waiter.needed.start < range.end && range.start < waiter.needed.end;
             if &waiter.content_id == content_id && overlaps {
-                let _ = waiter.reply.send(Err(error.clone()));
+                self.outbox.reply(waiter.reply, Err(error.clone()));
             } else {
                 self.read_waiters.push(waiter);
             }

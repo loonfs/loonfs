@@ -4,7 +4,7 @@
 
 use crate::support::{
     content_reads, eventually, fetched_bytes, fixture, fixture_with, open, pattern, put, read,
-    Fixture, MIB,
+    wait_until_handled, Fixture, MIB,
 };
 use loonfs_mount::ContentState;
 use loonfs_mount_sim::{
@@ -320,13 +320,11 @@ async fn an_abandoned_partial_file_is_evicted_and_an_open_one_is_not() {
     assert_eq!(read(&handle, 0, 4096).await, first[..4096]);
     let kept = open(&engine, "open.bin").await;
     assert_eq!(read(&kept, 0, 4096).await, second[..4096]);
-    eventually(|| engine.status().cache.pinned_bytes == 2 * MIB).await;
+    assert_eq!(engine.status().cache.pinned_bytes, 2 * MIB);
     drop(handle);
-    eventually(|| {
-        let cache = engine.status().cache;
-        (cache.evictable_bytes, cache.pinned_bytes) == (0, MIB)
-    })
-    .await;
+    wait_until_handled(&engine).await;
+    let cache = engine.status().cache;
+    assert_eq!((cache.evictable_bytes, cache.pinned_bytes), (0, MIB));
     assert!(
         !partial(&abandoned).exists(),
         "the abandoned partial file is evicted"
@@ -371,7 +369,8 @@ async fn eviction_removes_an_unused_complete_file_and_keeps_an_open_one() {
         let handle = open(&engine, name).await;
         read(&handle, 0, 100).await;
     }
-    eventually(|| engine.status().cache.evictable_bytes == 10).await;
+    wait_until_handled(&engine).await;
+    assert_eq!(engine.status().cache.evictable_bytes, 10);
     assert_eq!(engine.status().cache.pinned_bytes, 9, "the open file");
     let present: Vec<bool> = refs
         .iter()
