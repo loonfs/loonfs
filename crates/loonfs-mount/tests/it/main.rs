@@ -7,6 +7,7 @@
 mod admission;
 mod content_changes;
 mod dependencies;
+mod determinism;
 mod feed;
 mod feed_pages;
 mod reads;
