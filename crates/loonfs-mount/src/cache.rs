@@ -1,6 +1,7 @@
 //! The content cache: one file per content ID in `cache/`, partial while its
 //! present ranges don't cover the revision it's filling, and complete once
-//! they do and its checksum matches.
+//! they do and its checksum matches. A file that no descriptor has open,
+//! partial or complete, can be evicted.
 
 use crate::cache_file::{create_sparse, CacheFile};
 use crate::database::CacheFileRow;
@@ -93,18 +94,13 @@ impl CacheEntry {
         }
     }
 
-    /// Returns the bytes on disk that eviction can't remove.
-    fn partial_bytes(&self) -> u64 {
+    /// Returns the bytes that the file occupies: a partial file's present
+    /// ranges, or a complete file's size.
+    fn stored_bytes(&self) -> u64 {
         match &self.state {
             CacheEntryState::Partial(partial) => partial.present.len_bytes(),
-            CacheEntryState::Complete { .. } | CacheEntryState::Failed => 0,
-        }
-    }
-
-    fn complete_bytes(&self) -> u64 {
-        match &self.state {
             CacheEntryState::Complete { size_bytes, .. } => *size_bytes,
-            CacheEntryState::Partial(_) | CacheEntryState::Failed => 0,
+            CacheEntryState::Failed => 0,
         }
     }
 }
@@ -426,41 +422,36 @@ impl Cache {
         }
     }
 
-    /// Returns the bytes of complete files that no descriptor uses.
+    /// Returns the bytes of the files, partial or complete, that no
+    /// descriptor has open.
     pub(crate) fn evictable_bytes(&self, pinned: impl Fn(&ContentId) -> bool) -> u64 {
         self.entries
             .iter()
             .filter(|(content_id, _)| !pinned(content_id))
-            .map(|(_, entry)| entry.complete_bytes())
+            .map(|(_, entry)| entry.stored_bytes())
             .sum()
     }
 
-    /// Returns the bytes that eviction can't remove: partial files, and
-    /// complete files that a descriptor uses.
+    /// Returns the bytes of the files that a descriptor has open, which
+    /// eviction can't remove.
     pub(crate) fn pinned_bytes(&self, pinned: impl Fn(&ContentId) -> bool) -> u64 {
         self.entries
             .iter()
-            .map(|(content_id, entry)| {
-                entry.partial_bytes()
-                    + if pinned(content_id) {
-                        entry.complete_bytes()
-                    } else {
-                        0
-                    }
-            })
+            .filter(|(content_id, _)| pinned(content_id))
+            .map(|(_, entry)| entry.stored_bytes())
             .sum()
     }
 
-    /// Returns the least recently used complete file that no descriptor uses.
+    /// Returns the least recently used file, partial or complete, that no
+    /// descriptor has open. A partial file goes whole, because its present
+    /// ranges are kept in memory only and a restart drops it anyway.
     pub(crate) fn least_recently_used(
         &self,
         pinned: impl Fn(&ContentId) -> bool,
     ) -> Option<ContentId> {
         self.entries
             .iter()
-            .filter(|(content_id, entry)| {
-                matches!(entry.state, CacheEntryState::Complete { .. }) && !pinned(content_id)
-            })
+            .filter(|(content_id, _)| !pinned(content_id))
             .min_by_key(|(_, entry)| entry.last_used)
             .map(|(content_id, _)| content_id.clone())
     }

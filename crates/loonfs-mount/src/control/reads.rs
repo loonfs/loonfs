@@ -293,7 +293,17 @@ impl ControlTask {
     pub(super) fn start_fetches(&mut self) {
         for job in self.fetches.start_ready() {
             let bytes = job.range.end - job.range.start;
-            if self.evict(bytes) {
+            let has_space = self.evict(bytes);
+            let still_cached = self
+                .cache
+                .entry(&job.content_id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.file, &job.file));
+            if !still_cached {
+                // Eviction removed the partial file that the fetch would fill.
+                self.fetches.finish(job.fetch_id);
+                continue;
+            }
+            if has_space {
                 self.workers.start(Work::Fetch(job));
                 continue;
             }

@@ -103,9 +103,9 @@ pub struct Transports {
 /// The content cache's bytes and limits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheStatus {
-    /// Complete cache files that no descriptor uses.
+    /// Cache files, partial or complete, that no descriptor has open.
     pub evictable_bytes: u64,
-    /// Partial cache files and cache files with open descriptors.
+    /// Cache files that a descriptor has open.
     pub pinned_bytes: u64,
     /// The eviction target for evictable bytes.
     pub max_cache_bytes: u64,

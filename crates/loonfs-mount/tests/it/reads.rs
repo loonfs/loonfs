@@ -293,3 +293,53 @@ async fn eviction_keeps_unused_cache_files_under_the_byte_limit() {
         2
     );
 }
+
+/// Checks that a partial file whose handle closed is evicted whole under
+/// `--cache-max-bytes`, that a partial file with an open handle stays and
+/// counts as pinned, and that a later read fetches the evicted window again.
+#[tokio::test]
+async fn an_abandoned_partial_file_is_evicted_and_an_open_one_is_not() {
+    let first = pattern(20 * MIB);
+    let second = pattern(20 * MIB);
+    let abandoned = content(&ContentId::generate(), &first);
+    let open_ref = content(&ContentId::generate(), &second);
+    let namespace = ScriptedNamespace::new(
+        vec![
+            file(14, ROOT, "/work/project/abandoned.bin", &abandoned),
+            file(15, ROOT, "/work/project/open.bin", &open_ref),
+        ],
+        vec![(14, first.clone()), (15, second.clone())],
+    );
+    let mut config = namespace.config();
+    config.max_cache_bytes = MIB / 2;
+    let engine = namespace.mount_with(config).await.expect("the mount");
+    let cache = namespace.state_directory.path().join("cache");
+    let partial =
+        |content_ref: &ContentRef| cache.join(format!("{}.partial", content_ref.content_id));
+
+    let handle = open(&engine, "abandoned.bin").await;
+    assert_eq!(read(&handle, 0, 4096).await, first[..4096]);
+    let kept = open(&engine, "open.bin").await;
+    assert_eq!(read(&kept, 0, 4096).await, second[..4096]);
+    eventually(|| engine.status().cache.pinned_bytes == 2 * MIB).await;
+    drop(handle);
+    eventually(|| {
+        let cache = engine.status().cache;
+        (cache.evictable_bytes, cache.pinned_bytes) == (0, MIB)
+    })
+    .await;
+    assert!(
+        !partial(&abandoned).exists(),
+        "the abandoned partial file is evicted"
+    );
+    assert!(partial(&open_ref).exists(), "the open partial file stays");
+
+    let handle = open(&engine, "abandoned.bin").await;
+    assert_eq!(read(&handle, 0, 4096).await, first[..4096]);
+    assert_eq!(
+        namespace
+            .requests_to("/inodes/ino_14/revisions/1/content")
+            .len(),
+        2
+    );
+}

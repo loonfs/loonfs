@@ -213,6 +213,8 @@ impl ControlTask {
     }
 
     pub(super) fn remove_cache_file(&mut self, content_id: &ContentId) {
+        // A queued fetch of a removed partial file would write a deleted file.
+        self.fetches.drop_queued(content_id);
         let removed = self.cache.remove(content_id).and_then(|()| {
             database::delete_cache_file(self.database.connection(), content_id)
                 .map_err(MountError::from)
@@ -222,10 +224,10 @@ impl ControlTask {
         }
     }
 
-    /// Evicts complete files that no handle uses, least recently used first,
-    /// until evictable bytes are under `--cache-max-bytes` and the
-    /// filesystem has `--cache-min-free` free plus `incoming_bytes`. Returns
-    /// whether it has that much free.
+    /// Evicts files, partial or complete, that no handle has open, least
+    /// recently used first, until evictable bytes are under
+    /// `--cache-max-bytes` and the filesystem has `--cache-min-free` free plus
+    /// `incoming_bytes`. Returns whether it has that much free.
     pub(super) fn evict(&mut self, incoming_bytes: u64) -> bool {
         let needed_free = self.config.min_free_bytes.saturating_add(incoming_bytes);
         loop {
