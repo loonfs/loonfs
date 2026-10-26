@@ -15,6 +15,7 @@ members = [
   "crates/loonfs-cli",
   "crates/loonfs-conformance",
   "crates/loonfs-sim",
+  "crates/loonfs-mount-sim",
 ]
 
 [workspace.package]
@@ -102,6 +103,8 @@ serde_urlencoded = "0.7"
 sha2 = "0.10"
 hmac = "0.12"
 loonfs-model = { path = "crates/loonfs-model" }
+loonfs-mount-sim = { path = "crates/loonfs-mount-sim" }
+loonfs-sim = { path = "crates/loonfs-sim" }
 loonfs-test-support = { path = "crates/loonfs-test-support" }
 # Cargo requires published dependencies to include a registry version even
 # when they also have a local path. These versions must match
