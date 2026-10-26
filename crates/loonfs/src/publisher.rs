@@ -23,6 +23,7 @@
 mod admission;
 mod deletion_expiry;
 mod fold_trigger;
+mod hint_raiser;
 mod inline_content;
 
 use crate::cache::{HeadPositions, ReadPositionSlot};
@@ -39,6 +40,7 @@ use deletion_expiry::{ExpiryTurn, WorkerUnit};
 pub(crate) use fold_trigger::FoldTrigger;
 use futures::future::BoxFuture;
 use futures::FutureExt;
+use hint_raiser::HintRaiser;
 use loonfs_core::commit::CommitFingerprint;
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS, MAX_UNFOLDED_WAL_OBJECTS};
 use loonfs_core::publish::{
@@ -50,7 +52,7 @@ use loonfs_core::{PublicationReport, PublishedManifest};
 use loonfs_objectstore::timing::MonotonicTimer;
 use loonfs_types::api::v0::Commit;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
-use loonfs_types::{ChangeSeq, CommitId, NamespaceId};
+use loonfs_types::{ChangeSeq, CommitId, ManifestNo, NamespaceId};
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -115,7 +117,8 @@ pub(crate) struct PublisherRegistry {
 }
 
 /// State shared by all publishers in this registry: admission status, the
-/// session table, and contained panic count.
+/// session table, contained panic count, and the hint raises that this
+/// runtime's manifest publications left pending.
 struct RegistryShared {
     admission: Arc<PublicationAdmission>,
     state: Mutex<RegistryState>,
@@ -123,6 +126,7 @@ struct RegistryShared {
     /// contain panics to keep the registry usable, so this — not a task
     /// join error — is what a drain reports.
     panicked_units: AtomicUsize,
+    hint_raiser: HintRaiser,
 }
 
 struct RegistryState {
@@ -332,6 +336,11 @@ impl PublisherRegistry {
                     sessions: HashMap::new(),
                 }),
                 panicked_units: AtomicUsize::new(0),
+                hint_raiser: HintRaiser::new(
+                    runtime_core.shared_store(),
+                    Arc::clone(&runtime_core.inner.timer),
+                    runtime.clone(),
+                ),
             }),
             timer: Arc::clone(&runtime_core.inner.timer),
             runtime_core,
@@ -442,15 +451,20 @@ impl PublisherRegistry {
         result
     }
 
-    /// Moves the namespace's publisher to a manifest that this runtime
-    /// published, or drops the publisher's position when it can't move
-    /// there, so that later commits and reads in this runtime start from the
-    /// newest manifest.
+    /// Raises the namespace's hint to a manifest that this runtime published,
+    /// and moves the namespace's publisher to that manifest, or drops the
+    /// publisher's position when it can't move there, so that later commits
+    /// and reads in this runtime start from the newest manifest.
+    ///
+    /// The hint of a namespace without a live session is raised too, because
+    /// a maintenance call or a deletion can publish a manifest in that
+    /// namespace.
     pub(crate) async fn record_manifest_published(
         &self,
         namespace_id: &NamespaceId,
         published: PublishedManifest,
     ) {
+        self.raise_hint(namespace_id, published.manifest.manifest_no);
         if let Some(publisher) = self.live_publisher(namespace_id) {
             publisher
                 .change_position(PositionChange::Move(published))
@@ -510,8 +524,13 @@ impl PublisherRegistry {
     }
 
     /// Waits for all current publisher workers, folds, and compactions to
-    /// finish. Folds are waited for before compactions, because a fold starts
-    /// its session's compaction.
+    /// finish.
+    ///
+    /// Folds are waited for before compactions, because a fold starts its
+    /// session's compaction. The drain doesn't wait for the hint raises that
+    /// this work left pending (see [`Self::wait_for_hint_raises`]), because a
+    /// raise can wait for the store's compare-and-swap write interval, and
+    /// readers tolerate a hint that lags.
     ///
     /// Returns an error if any publication, deletion, fold, or compaction
     /// panicked and its task contained the panic.
@@ -547,6 +566,20 @@ impl PublisherRegistry {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Raises the namespace's hint to `manifest_no`, a manifest that this
+    /// runtime published, after the publication has returned.
+    pub(crate) fn raise_hint(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
+        self.shared.hint_raiser.raise_to(namespace_id, manifest_no);
+    }
+
+    /// Waits until every hint raise that's pending now has finished.
+    ///
+    /// Each raise waits for at most the store's compare-and-swap write
+    /// interval before it starts.
+    pub(crate) async fn wait_for_hint_raises(&self) {
+        self.shared.hint_raiser.wait_for_raises().await;
     }
 }
 
@@ -1068,13 +1101,17 @@ impl NamespacePublisher {
     }
 
     /// Stores the engine's position for reads, records whether the engine
-    /// has deletions to expire, and releases the engine.
+    /// has deletions to expire, raises the hint to a manifest that the
+    /// engine published, and releases the engine.
     ///
     /// Every task that changes the engine releases it here, so a position
     /// move onto a higher retention floor, by a publish, a fold, a
     /// maintenance call, or a read, starts a worker for the expiry through
     /// [`Self::record_expiry_due`].
-    fn release_engine(&self, slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
+    ///
+    /// The engine publishes a manifest when it acquires the session's writer
+    /// epoch and when it deletes the namespace.
+    fn release_engine(&self, mut slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
         if std::thread::panicking() {
             // The engine may be partway through a unit of work. Reads start
             // from the namespace's cached head until the next release.
@@ -1103,7 +1140,22 @@ impl NamespacePublisher {
             .as_ref()
             .is_some_and(NamespaceCommitEngine::expiry_due);
         self.record_expiry_due(expiry_due);
+        let published = slot
+            .engine
+            .as_mut()
+            .and_then(NamespaceCommitEngine::take_published_manifest_no);
         drop(slot);
+        if let Some(manifest_no) = published {
+            self.raise_hint(manifest_no);
+        }
+    }
+
+    /// Raises the namespace's hint to `manifest_no`, a manifest that this
+    /// session published.
+    fn raise_hint(&self, manifest_no: ManifestNo) {
+        if let Some(shared) = self.shared.upgrade() {
+            shared.hint_raiser.raise_to(&self.namespace_id, manifest_no);
+        }
     }
 
     /// Places the candidate's inline content, then admits it before awaiting
@@ -2027,6 +2079,7 @@ impl NamespacePublisher {
                 let published = folded.response.outcome == FoldWalOutcome::Published;
                 if published {
                     self.runtime_core.instruments().publisher_wal_fold();
+                    self.raise_hint(folded.response.manifest_no);
                 }
                 published
             }

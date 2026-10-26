@@ -770,6 +770,10 @@ pub struct NamespaceCommitEngine {
     /// How far this session has expired the deletions that the retention
     /// floor reaches. It stays with the session when the position drops.
     deletion_expiry: DeletionExpiryState,
+    /// The newest manifest that this engine published itself (the claim of
+    /// the session's writer epoch, or a tombstone) and that
+    /// [`Self::take_published_manifest_no`] hasn't returned yet.
+    published_manifest_no: Option<ManifestNo>,
 }
 
 impl NamespaceCommitEngine {
@@ -785,6 +789,7 @@ impl NamespaceCommitEngine {
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
             deletion_expiry: DeletionExpiryState::new(),
+            published_manifest_no: None,
         }
     }
 
@@ -930,6 +935,23 @@ impl NamespaceCommitEngine {
         })
     }
 
+    /// Returns the number of the newest manifest that this engine published
+    /// since the last call, so that the runtime can raise the namespace's hint
+    /// to that manifest.
+    ///
+    /// The engine publishes a manifest when it acquires the session's writer
+    /// epoch and when it deletes the namespace.
+    pub fn take_published_manifest_no(&mut self) -> Option<ManifestNo> {
+        self.published_manifest_no.take()
+    }
+
+    fn record_published_manifest_no(&mut self, manifest_no: ManifestNo) {
+        self.published_manifest_no = Some(
+            self.published_manifest_no
+                .map_or(manifest_no, |newest| newest.max(manifest_no)),
+        );
+    }
+
     /// Returns the session's writer epoch, acquiring it on first use. A fenced
     /// session fails immediately without accessing the store or acquiring a new
     /// epoch.
@@ -948,10 +970,13 @@ impl NamespaceCommitEngine {
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
         }
-        let (acquired_writer, anchor) =
+        let acquisition =
             acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
-        self.deletion_expiry.open_session(&anchor.read_state);
-        self.acquired_anchor = Some(anchor);
+        let acquired_writer = acquisition.writer;
+        self.record_published_manifest_no(acquisition.claim_manifest_no);
+        self.deletion_expiry
+            .open_session(&acquisition.anchor.read_state);
+        self.acquired_anchor = Some(acquisition.anchor);
         let mut session = self.lock_session();
         if let WriterSessionStatus::Fenced(fence) = &*session {
             // Another engine fenced the shared session while this engine was acquiring
@@ -991,10 +1016,20 @@ impl NamespaceCommitEngine {
         )
         .await;
         self.invalidate_projection();
-        if let Err(CoreError::WriterFenced(fence)) = &deleted {
-            *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
+        match deleted {
+            Ok(report) => {
+                if let Some(tombstone) = report.published {
+                    self.record_published_manifest_no(tombstone.manifest.manifest_no);
+                }
+                Ok(report.response)
+            }
+            Err(error) => {
+                if let CoreError::WriterFenced(fence) = &error {
+                    *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
+                }
+                Err(error)
+            }
         }
-        deleted
     }
 
     /// Publishes the writer's commit that expires `deletions`, in a batch of

@@ -27,6 +27,9 @@ async fn superseded_session(store: SharedStore) -> (LoonFs<Writable>, Namespace<
         .await
         .expect("first writer");
     writer.drain().await.expect("first publication ends");
+    // The claim's hint raise runs after the publication returns, so the
+    // fixture waits for the raise before the tests count requests.
+    writer.mode.publisher.wait_for_hint_raises().await;
     let rival = LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id("writer-b"))
         .build()
@@ -257,6 +260,9 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
         .fold_wal(old.id())
         .await
         .expect("explicit fold records its outcome in the fenced session");
+    // The fold's hint raise runs after the fold returns, so the test waits
+    // for the raise before it counts requests.
+    writer.mode.publisher.wait_for_hint_raises().await;
     {
         let state = publisher.lock_state();
         assert_eq!(state.next_task_id, 0);

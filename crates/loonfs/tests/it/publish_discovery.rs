@@ -5,6 +5,7 @@ use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
@@ -43,7 +44,30 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .create_directory("/first", &test_actor())
         .await
         .expect("first publish");
-    let requests = store.take();
+    writer.wait_for_hint_raises().await;
+    let mut requests = store.take();
+    // The runtime raises the hint to the claim after the publish, so the
+    // raise's load and swap of the hint follow the commit's WAL put.
+    let commit_put = requests
+        .iter()
+        .rposition(|request| request.key().starts_with(&wal_prefix(&namespace_id)))
+        .expect("the commit's WAL put");
+    let raise = requests.split_off(commit_put + 1);
+    assert!(
+        matches!(
+            raise.as_slice(),
+            [
+                RecordedOperation::GetWithMetadata { key: loaded, .. },
+                RecordedOperation::CompareAndSwap { key: swapped, .. }
+                    | RecordedOperation::Put {
+                        key: swapped,
+                        mode: PutMode::CompareAndSwap { .. },
+                        ..
+                    },
+            ] if *loaded == hint(&namespace_id) && *swapped == hint(&namespace_id)
+        ),
+        "{raise:?}"
+    );
     let hint_gets = requests
         .iter()
         .filter(|request| is_get(request, &hint(&namespace_id)))
@@ -65,7 +89,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     }
     assert_eq!(
         requests.len(),
-        10,
+        9,
         "one claim, one fence, and one semantic publish share discovery; {requests:?}"
     );
 
@@ -77,6 +101,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     }
     namespace.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("the fold's compaction settles");
+    writer.wait_for_hint_raises().await;
     store.reset();
     namespace
         .create_directory("/after-fold", &test_actor())
@@ -178,6 +203,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
     store.inner().release();
     namespace_writer.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("the fold's compaction settles");
+    writer.wait_for_hint_raises().await;
     store.reset();
 
     namespace_writer

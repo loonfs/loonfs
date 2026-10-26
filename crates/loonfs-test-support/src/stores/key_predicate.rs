@@ -64,6 +64,21 @@ impl KeyPredicate {
         Self::prefix(metadata_manifest_prefix(namespace_id))
     }
 
+    /// Selects the keys that this predicate selects, except every
+    /// namespace's hint.
+    ///
+    /// A runtime raises a namespace's hint in the background after each
+    /// manifest publication, so a test that counts or parks requests leaves
+    /// the hint out when the raise's load and swap would race its count.
+    pub fn except_hints(self) -> Self {
+        let predicate = self.predicate;
+        Self::new(move |key| {
+            predicate(key)
+                && parse_object_key(key)
+                    .is_none_or(|parsed| parsed.family() != DurableObjectFamily::Hint)
+        })
+    }
+
     pub(crate) fn matches(&self, key: &str) -> bool {
         (self.predicate)(key)
     }

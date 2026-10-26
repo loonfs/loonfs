@@ -76,6 +76,7 @@ async fn fixture(name: &str) -> Fixture {
         .await
         .expect("commit file");
     writer.drain().await.expect("finish hints");
+    writer.wait_for_hint_raises().await;
     let clock = Arc::new(ManualClock::new(1_000_000));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let reader = LoonFs::builder_with_store(store)

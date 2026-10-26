@@ -38,6 +38,7 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     namespace_engine(store, source_namespace_id, context)
         .fork_namespace(new_namespace_id, &loonfs_test_support::test_actor(), None)
         .await
+        .map(|report| report.response)
 }
 
 async fn load_pin<S: ObjectStore + ?Sized>(
@@ -153,7 +154,8 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         )
         .await
         .expect("fork snapshot");
-    assert_eq!(fork.head_seq, snapshot.captured_seq);
+    assert_eq!(fork.response.head_seq, snapshot.captured_seq);
+    assert_eq!(fork.published, None, "a fork of a snapshot doesn't fold");
     let head = head_state(&store, &target).await;
     assert_eq!(
         head.fork_basis.as_ref().expect("fork basis").manifest,
@@ -1297,6 +1299,22 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
         .await
         .expect("delete");
+    // The runtime that deleted the namespace raises its hint to the tombstone.
+    let tombstone = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+        .await
+        .expect("tombstone")
+        .state
+        .manifest()
+        .manifest_no;
+    loonfs_core::control::raise_namespace_hint(
+        &store,
+        &namespace_id,
+        tombstone,
+        None,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("raise the hint");
     let report = loonfs_core::gc_namespace(
         &store,
         None,

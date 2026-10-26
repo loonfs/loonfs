@@ -462,8 +462,10 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     .await
     .expect("advance")
     .response;
+    // The advance publishes its manifest and leaves the hint for the
+    // runtime to raise.
     assert_eq!(store.counts().create_if_absent_puts, 1);
-    assert_eq!(store.counts().compare_and_swaps, 1);
+    assert_eq!(store.counts().compare_and_swaps, 0);
     let after = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current");
@@ -495,63 +497,59 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
 }
 
 #[tokio::test]
-async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_hint_put() {
-    for fail_hint in [false, true] {
-        let directory = tempdir().expect("directory");
-        let namespace_id = NamespaceId::parse("demo").expect("namespace");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        let context = test_context();
-        create(&store, &namespace_id, &context)
-            .await
-            .expect("bootstrap");
-        let current = load_current_manifest(&store, &namespace_id)
-            .await
-            .expect("current");
-        let mut payload = current.state.envelope.payload().clone();
-        payload.manifest_no = payload.manifest_no.successor().expect("next");
-        let candidate = encode_manifest(payload);
-        let candidate_manifest_no = candidate.envelope().payload().manifest_no;
-        let keys = if fail_hint {
-            KeyPredicate::hint(&namespace_id)
-        } else {
-            KeyPredicate::manifest(&namespace_id)
-        };
-        let store = FailStore::new(
-            store,
-            keys,
-            OperationSelector::Put,
-            InjectedError::Transport("lost acknowledgment".to_owned()),
-        )
-        .apply_then_fail();
-        store.fail_next(1);
-        let outcome = publish_once(&store, candidate).await.expect("published");
-        if fail_hint {
-            assert_matches!(outcome, ManifestPublicationOutcome::Published(_));
-        } else {
-            // The put landed, but a rival could have written the same bytes,
-            // so the read-back counts as the current manifest.
-            assert_matches!(outcome, ManifestPublicationOutcome::CoveredByCurrent(_));
-        }
-        assert_eq!(
-            load_current_manifest(&store, &namespace_id)
-                .await
-                .expect("discover")
-                .state
-                .manifest()
-                .manifest_no,
-            candidate_manifest_no
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_manifest_update_returns_the_hint_it_raised() {
+async fn manifest_publication_recovers_an_ambiguous_put() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
+    let context = test_context();
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current");
+    let mut payload = current.state.envelope.payload().clone();
+    payload.manifest_no = payload.manifest_no.successor().expect("next");
+    let candidate = encode_manifest(payload);
+    let candidate_manifest_no = candidate.envelope().payload().manifest_no;
+    let store = FailStore::new(
+        store,
+        KeyPredicate::manifest(&namespace_id),
+        OperationSelector::Put,
+        InjectedError::Transport("lost acknowledgment".to_owned()),
+    )
+    .apply_then_fail();
+    store.fail_next(1);
+    let outcome = publish_once(&store, candidate).await.expect("published");
+    // The put succeeded, but a rival could have written the same bytes, so
+    // the read-back counts as the current manifest.
+    assert_matches!(outcome, ManifestPublicationOutcome::CoveredByCurrent(_));
+    assert_eq!(
+        load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("discover")
+            .state
+            .manifest()
+            .manifest_no,
+        candidate_manifest_no
+    );
+}
+
+#[tokio::test]
+async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::hint(&namespace_id),
+    );
     create(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
+    let before = crate::namespace::control::load_hint(&store, &namespace_id)
+        .await
+        .expect("stored hint");
+    store.reset();
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let ((), published, hint) = crate::manifest::publish::update_manifest(
         &store,
@@ -567,10 +565,9 @@ async fn a_manifest_update_returns_the_hint_it_raised() {
     )
     .await
     .expect("publish");
-    assert_eq!(
-        hint.state.manifest_no,
-        published.state.manifest().manifest_no
-    );
+    assert_eq!(published.state.manifest().manifest_no, ManifestNo(2));
+    assert_eq!(hint, before);
+    assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(
         hint,
         crate::namespace::control::load_hint(&store, &namespace_id)

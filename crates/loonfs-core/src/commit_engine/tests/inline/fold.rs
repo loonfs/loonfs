@@ -134,6 +134,8 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
         .expect("fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
         engine.record_manifest_published(folded.manifest);
+        // The runtime that published the fold raises the hint.
+        crate::test_support::raise_hint_to_current_manifest(&store, &engine.namespace_id).await;
         timer.advance_ms(100);
         store.reset();
 

@@ -295,6 +295,11 @@ async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval(
         .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("claim newer compactor");
+    // Each runtime raises the hint after its publications return, so the
+    // test waits for both runtimes' raises before it counts the tick's
+    // requests.
+    other.wait_for_hint_raises().await;
+    server.runtime.wait_for_hint_raises().await;
     store.reset();
     server.tick_after(config.tick_interval_ms).await;
     assert_eq!(store.take().len(), 6);
@@ -592,6 +597,9 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
         .await
         .expect("publish");
     runtime.drain().await.expect("self-maintenance finishes");
+    // The fold's hint raise runs after the fold returns, so the test waits for
+    // the raise before it counts the ticks' requests.
+    runtime.wait_for_hint_raises().await;
     assert!(held.metadata_caught_up());
     assert_eq!(held.last_published_at_ms(), Some(0));
     let recorder = loonfs::metrics::DefaultMetricsRecorder::new();

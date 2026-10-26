@@ -6,7 +6,7 @@ use crate::context::MutationContext;
 use crate::manifest::tests::control_requests;
 use crate::path::read::load_current_metadata_view;
 use crate::test_support::ops::create;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::StdMonotonicTimer;
 use crate::wal::tests::publish;
 use loonfs_objectstore::{
     keys::{hint, metadata_manifest_object},
@@ -145,12 +145,24 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
             ("put", metadata_manifest_object(&target, &ManifestNo(1))),
         ]
     );
-    assert!(forked.fork_basis.is_some());
+    assert!(forked.response.fork_basis.is_some());
     assert_eq!(
-        forked,
+        forked.response,
         super::status::load_namespace(&store, &target, crate::test_support::std_timer())
             .await
             .expect("load the fork")
+    );
+    // The fork folded the source's tail, and the report includes the fold's
+    // manifest so the runtime can raise the source's hint.
+    assert_eq!(
+        forked.published.map(|published| published.manifest),
+        Some(
+            load_current_manifest(&store, &source)
+                .await
+                .expect("source manifest")
+                .state
+                .manifest()
+        )
     );
 }
 
@@ -206,7 +218,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
     )
     .await
     .expect("fork source pin proves authorship from matching bytes");
-    assert!(created.fork_basis.is_some());
+    assert!(created.response.fork_basis.is_some());
     assert_eq!(store.attempts(), 2);
     assert_eq!(store.remaining(), 0);
 }
@@ -359,7 +371,6 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     let known = super::control::load_hint(&store, &namespace_id)
         .await
         .expect("initial hint");
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
         std::sync::Arc::new(crate::test_support::content_writes()),
@@ -367,7 +378,13 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     publish(&mut engine, &store, "seed").await.expect("seed");
     store.block_next();
     let (hint_result, ()) = futures::join!(
-        super::control::raise_hint(&store, &namespace_id, ManifestNo(2), known, &deadline),
+        super::control::raise_namespace_hint(
+            &store,
+            &namespace_id,
+            ManifestNo(2),
+            Some(known),
+            crate::test_support::std_timer()
+        ),
         async {
             store.wait_until_blocked().await;
             crate::manifest::fold_wal(store.inner(), &namespace_id)
@@ -383,6 +400,17 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
             )
             .await
             .expect("advance floor");
+            // The runtime that published the fold and the advance raises the
+            // hint after them, while the raise to manifest 2 is still pending.
+            super::control::raise_namespace_hint(
+                store.inner(),
+                &namespace_id,
+                ManifestNo(4),
+                None,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("raise the hint past the pending raise");
             let aged = MutationContext {
                 now_ms: grace + 1,
                 ..context()
@@ -412,9 +440,15 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     let known = super::control::load_hint(&store, &namespace_id)
         .await
         .expect("hint");
-    super::control::raise_hint(&store, &namespace_id, ManifestNo(1), known, &deadline)
-        .await
-        .expect("refresh hint");
+    super::control::raise_namespace_hint(
+        &store,
+        &namespace_id,
+        ManifestNo(1),
+        Some(known),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("refresh hint");
     let aged = MutationContext {
         now_ms: 2 * grace + 2,
         ..context()

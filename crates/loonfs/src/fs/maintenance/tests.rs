@@ -1111,6 +1111,10 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             .await
             .expect("collect what the setup left behind");
     }
+    // The hint raises of the setup's folds and claim run after those
+    // publications return, so the test waits for the raises before it counts
+    // requests.
+    maintenance.publisher.wait_for_hint_raises().await;
 
     store.reset();
     let cancelled = crate::MaintenanceCancellation::new();
@@ -1175,15 +1179,19 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         }
     }
 
-    LoonFs::builder_with_store(store.clone())
+    let other = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
-        .expect("another process")
+        .expect("another process");
+    other
         .maintenance(loonfs_test_support::ids::writer_id("other"))
         .compactor_epoch(&claimed)
         .await
         .expect("another process claims the namespace");
+    // The claim's hint raise runs after the claim returns, so the test waits
+    // for the raise before it counts requests.
+    other.mode.publisher.wait_for_hint_raises().await;
     store.reset();
     let fenced = maintenance
         .maintain_metadata(&claimed)
@@ -1263,8 +1271,8 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
             ],
         ),
     ] {
-        maintenance()
-            .await
+        let advancing = maintenance().await;
+        advancing
             .advance_retention_floor_with_options(
                 &namespace,
                 &AdvanceRetentionFloorOptions {
@@ -1273,6 +1281,9 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
             )
             .await
             .expect("advance the floor");
+        // The advance's hint raise runs after the advance returns, so the
+        // test waits for the raise before it counts requests.
+        advancing.publisher.wait_for_hint_raises().await;
         let manifest = metadata_manifest_object(
             &namespace,
             &current_manifest_payload(store.as_ref(), &namespace)
@@ -1726,6 +1737,7 @@ async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
         .expect("put a file");
     namespace.wait_for_fold().await.expect("the fold settles");
     writer.drain().await.expect("nothing else runs");
+    writer.mode.publisher.wait_for_hint_raises().await;
 
     // With the fold permits held, the next write waits unfolded in the
     // session's position.
@@ -1889,6 +1901,7 @@ async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
         .expect("put a file");
     namespace.wait_for_fold().await.expect("the fold settles");
     writer.drain().await.expect("nothing else runs");
+    writer.mode.publisher.wait_for_hint_raises().await;
     let earlier_hint = store
         .inner
         .get_with_metadata(&hint_key)
@@ -1904,6 +1917,7 @@ async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
         .expect("put a file");
     namespace.wait_for_fold().await.expect("the fold settles");
     writer.drain().await.expect("nothing else runs");
+    writer.mode.publisher.wait_for_hint_raises().await;
 
     *store.view.lock().expect("view lock") = Some((earlier_hint, earlier));
     let step = maintenance

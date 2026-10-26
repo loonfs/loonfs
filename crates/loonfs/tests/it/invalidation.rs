@@ -325,6 +325,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
         .await
         .expect("commit file");
     writer.drain().await.expect("finish hints");
+    writer.wait_for_hint_raises().await;
     namespace
         .stat("/file.txt")
         .await
@@ -418,6 +419,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .await
         .expect("commit file");
     writer.drain().await.expect("finish hints");
+    writer.wait_for_hint_raises().await;
     namespace.stat("/file.txt").await.expect("cache a view");
     let manifest_no = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
         .await
@@ -500,6 +502,7 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
     let put = |path: &'static str| namespace_writer.put_file(path, b"file", &actor);
     put("/cached.txt").await.expect("first put");
     writer.drain().await.expect("finish hints");
+    writer.wait_for_hint_raises().await;
     namespace.stat("/cached.txt").await.expect("cache a view");
     let tip = head_state(&store, &namespace_id).await.wal_no.0;
 
@@ -515,6 +518,7 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
         .expect("fold the WAL");
     put("/four.txt").await.expect("put after the fold");
     writer.drain().await.expect("finish hints");
+    writer.wait_for_hint_raises().await;
     let state = head_state(&store, &namespace_id).await;
     assert_eq!(
         (state.folded_wal_no, state.wal_no),
@@ -580,12 +584,14 @@ async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
         .await
         .expect("first put");
     writer.drain().await.expect("finish hints");
+    writer.wait_for_hint_raises().await;
     namespace.stat("/cached.txt").await.expect("cache a view");
     namespace_writer
         .put_file("/next.txt", b"file", &actor)
         .await
         .expect("put after the cached view");
     writer.drain().await.expect("finish hints");
+    writer.wait_for_hint_raises().await;
 
     // Park the probe's first GET until the view is past the bound, and then
     // fail it.
@@ -619,6 +625,7 @@ async fn fill_other(store: &SharedObjectStore, other_id: &NamespaceId) {
         .await
         .expect("put large file");
     setup.drain().await.expect("finish hints");
+    setup.wait_for_hint_raises().await;
 }
 
 /// What a cold read of the root of `other_id` caches as its WAL tail once
@@ -696,6 +703,7 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
         .await
         .expect("steady-state put");
     writer.drain().await.expect("finish background hints");
+    writer.wait_for_hint_raises().await;
     let _view = namespace
         .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
@@ -762,6 +770,7 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     assert_eq!(file.bytes, b"file");
 
     writer.drain().await.expect("finish hints");
+    writer.wait_for_hint_raises().await;
     recording.reset();
     let before_read = reader.metadata_cache().stats();
     namespace.stat("/file.txt").await.expect("next read");

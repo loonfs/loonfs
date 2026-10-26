@@ -121,8 +121,8 @@ async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
     let namespace_id = NamespaceId::parse("slow-claim").expect("namespace");
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace_id)),
-        OperationSelector::CompareAndSwap,
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
+        OperationSelector::Read,
     ));
     let runtime = test_runtime(store.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -130,8 +130,9 @@ async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
     let mut publisher = standalone_publisher(&namespace_id, &runtime);
     publisher.timer = clock.clone();
     publisher.min_publish_interval = Duration::ZERO;
-    // The first publish observes its tip before the claim, whose hint raise
-    // is held past the publish budget.
+    // The first publish observes its tip before the claim, and the claim's
+    // first WAL read, which follows its manifest put, is held past the
+    // publish budget.
     store.block_next();
     let (published, ()) = futures::join!(
         publisher.submit(CommitCandidate::new(create_directory_request(

@@ -217,6 +217,14 @@ async fn a_commit_at_the_write_stop_waits_for_the_fold_and_commits() {
     settle_commit(commit)
         .await
         .expect("the commit is committed after the fold");
+    // The runtime raises the hint to the manifest of the fold at the write stop.
+    fixture.writer.drain().await.expect("the fold settles");
+    assert_hint_at_current_manifest(
+        &fixture.writer,
+        fixture.store.inner(),
+        &fixture.namespace_id,
+    )
+    .await;
     let recorder = &fixture.recorder;
     assert_eq!(counter(recorder, "loonfs.publisher.write_stop_waits"), 1);
     assert_eq!(counter(recorder, "loonfs.publisher.write_stop_refusals"), 0);

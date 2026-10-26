@@ -2932,6 +2932,8 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     .expect("advance floor")
     .response;
     assert!(floor.retention_floor_seq > pin.captured_seq);
+    // The runtime that published the advance raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
     let aged = mutation_context("gc", u64::MAX / 2);
     crate::gc::gc_namespace(
         &store,

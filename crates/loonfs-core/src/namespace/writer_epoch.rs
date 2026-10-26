@@ -13,7 +13,7 @@ use crate::time::{Deadline, MonotonicTimer};
 use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
-use loonfs_types::{NamespaceId, WriterEpoch, WriterId};
+use loonfs_types::{ManifestNo, NamespaceId, WriterEpoch, WriterId};
 use std::sync::Arc;
 
 /// Captures the writer identity and fencing epoch a session must retain while publishing.
@@ -25,6 +25,15 @@ pub struct AcquiredWriter {
     pub writer_epoch: WriterEpoch,
 }
 
+/// A writer epoch that a session acquired: the epoch, the number of its
+/// claim manifest, and the read anchor whose tip is the session's fence.
+#[derive(Debug)]
+pub(crate) struct WriterAcquisition {
+    pub(crate) writer: AcquiredWriter,
+    pub(crate) claim_manifest_no: ManifestNo,
+    pub(crate) anchor: NamespaceReadAnchor,
+}
+
 #[cfg(test)]
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
@@ -32,7 +41,9 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<AcquiredWriter> {
     let timer = Arc::new(crate::time::StdMonotonicTimer::default());
-    Ok(acquire_writer(store, namespace_id, context, timer).await?.0)
+    Ok(acquire_writer(store, namespace_id, context, timer)
+        .await?
+        .writer)
 }
 
 pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
@@ -40,7 +51,7 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     timer: Arc<dyn MonotonicTimer>,
-) -> Result<(AcquiredWriter, NamespaceReadAnchor)> {
+) -> Result<WriterAcquisition> {
     let deadline = Deadline::start(timer);
     let (acquired, manifest, hint) = update_manifest(
         store,
@@ -69,6 +80,7 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
         },
     )
     .await?;
+    let claim_manifest_no = manifest.state.manifest().manifest_no;
     let mut tip = deadline.observe();
     let mut anchor =
         load_read_anchor_from_manifest(store, namespace_id, manifest, hint, deadline.origin())
@@ -85,7 +97,11 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
             Ok(()) => {
                 anchor.read_state = head.after_wal_object(fence.envelope().payload());
                 anchor.tail.push_published(fence.envelope().clone());
-                return Ok((acquired, anchor));
+                return Ok(WriterAcquisition {
+                    writer: acquired,
+                    claim_manifest_no,
+                    anchor,
+                });
             }
             Err(CoreError::WalPublish(
                 crate::wal::WalPublishError::NumberTaken

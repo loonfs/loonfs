@@ -1,7 +1,7 @@
 //! Manifest discovery while a lagging hint advances and old manifests are swept.
 
 use super::*;
-use crate::namespace::control::load_current_manifest_with_hint;
+use crate::namespace::control::{load_current_manifest_with_hint, raise_namespace_hint};
 use loonfs_test_support::stores::MetadataMapStore;
 use std::assert_matches;
 
@@ -19,32 +19,33 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
     if start == ManifestNo(2) {
         acquire_writer_epoch(&store, &namespace_id, &context)
             .await
-            .expect("advance initial hint");
+            .expect("publish manifest 2");
+        raise_namespace_hint(
+            &store,
+            &namespace_id,
+            start,
+            None,
+            Arc::new(StdMonotonicTimer::default()),
+        )
+        .await
+        .expect("advance initial hint");
     }
-    // Failed hint updates are allowed after durable manifest publication.
-    // Keep that real lagging hint until the reader has consumed it.
-    let failed_hint = FailStore::new(
-        store,
-        KeyPredicate::hint(&namespace_id),
-        OperationSelector::CompareAndSwap,
-        InjectedError::Transport("hint unavailable".into()),
-    );
-    failed_hint.fail_all();
+    // A publication doesn't raise the hint, so the hint lags at `start` until
+    // the reader below has read it.
     for _ in start.0..4 {
-        acquire_writer_epoch(&failed_hint, &namespace_id, &context)
+        acquire_writer_epoch(&store, &namespace_id, &context)
             .await
-            .expect("publish despite failed hint update");
+            .expect("publish without a hint raise");
     }
-    let (expected, initial_hint) = load_current_manifest_with_hint(&failed_hint, &namespace_id)
+    let (expected, initial_hint) = load_current_manifest_with_hint(&store, &namespace_id)
         .await
         .expect("current manifest");
     assert_eq!(expected.state.manifest().manifest_no, ManifestNo(4));
     assert_eq!(initial_hint.state.manifest_no, start);
-    failed_hint.clear();
     let blocked_number = ManifestNo(start.0 + u64::from(block_next_manifest));
     let blocked_key = metadata_manifest_object(&namespace_id, &blocked_number);
     let blocked = BlockingStore::new(
-        failed_hint,
+        store,
         KeyPredicate::exact(&blocked_key),
         OperationSelector::Get,
     );
@@ -53,15 +54,12 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
         load_current_manifest_with_hint(&blocked, &namespace_id),
         async {
             blocked.wait_until_blocked().await;
-            let known = crate::namespace::control::load_hint(blocked.inner(), &namespace_id)
-                .await
-                .expect("hint");
-            crate::namespace::control::raise_hint(
+            raise_namespace_hint(
                 blocked.inner(),
                 &namespace_id,
                 expected.state.manifest().manifest_no,
-                known,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                None,
+                Arc::new(StdMonotonicTimer::default()),
             )
             .await
             .expect("raise discovery hint");
@@ -117,6 +115,8 @@ async fn discovery_still_rejects_a_missing_manifest_when_the_hint_has_not_advanc
     bootstrap_namespace(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
+    // The runtime that published the bootstrap's manifests raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
     let selected = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current manifest");
@@ -181,6 +181,8 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             publish_once(&store, encode_manifest(payload))
                 .await
                 .expect("publish manifest three");
+            // The runtime that published the manifests raises the hint.
+            crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
             let options = crate::gc::GcOptions::default();
             timer.advance_ms(options.grace_window_ms + 1);
             let report = crate::gc::gc_namespace(

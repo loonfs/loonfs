@@ -468,13 +468,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates a new namespace at this namespace's current head or an unexpired snapshot.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
-    /// Returns the target's status at the fork point.
+    /// Returns the target's status at the fork point. The report includes the
+    /// manifest of this namespace that the fork's fold published, if it
+    /// published one.
     pub async fn fork_namespace(
         &self,
         target: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
         snapshot_id: Option<&PinId>,
-    ) -> Result<NamespaceMetadata> {
+    ) -> Result<PublicationReport<NamespaceMetadata>> {
         fork::fork_namespace(
             &self.store,
             &self.namespace_id,

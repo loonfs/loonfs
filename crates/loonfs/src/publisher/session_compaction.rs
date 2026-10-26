@@ -155,6 +155,8 @@ async fn a_session_compacts_after_its_own_fold_without_any_hint() {
         "found {} delta runs",
         delta_runs(&manifest)
     );
+    // The session's compaction unit published the current manifest.
+    assert_hint_at_current_manifest(&writer, store.as_ref(), &namespace_id).await;
     writer.shutdown().await.expect("shut down writer");
 }
 

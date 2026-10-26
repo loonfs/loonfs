@@ -931,7 +931,7 @@ pub(crate) fn control_requests(
 }
 
 /// Publishes `manifest` with one attempt of the publication loop, over the
-/// current manifest and hint that it loads first.
+/// current manifest that it loads first.
 async fn publish_once<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
@@ -947,15 +947,10 @@ async fn publish_once_within<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
-    let (current, hint) =
-        crate::namespace::control::load_current_manifest_with_hint(store, &namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
-    Ok(
-        super::publish::publish_manifest_from(store, manifest, deadline, Some(current), Some(hint))
-            .await?
-            .0,
-    )
+    let current = crate::namespace::control::load_current_manifest(store, &namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    super::publish::publish_manifest_from(store, manifest, deadline, Some(current)).await
 }
 
 pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(

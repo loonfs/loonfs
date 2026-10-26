@@ -156,6 +156,8 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
         .await
         .expect("write");
     fold_wal(&base, &namespace_id).await.expect("fold");
+    // The runtime that published the fold raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(&base, &namespace_id).await;
     let old_manifest = metadata_manifest_object(&namespace_id, &pin.manifest_no);
     let store = BlockingStore::new(
         base,
@@ -252,6 +254,8 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         .await
         .expect("write");
     fold_wal(&store, &namespace_id).await.expect("fold");
+    // The runtime that published the fold raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
     // Deliberate corruption checks must stay fail-closed, even when the first
     // listed pin for this same manifest is independently eligible for deletion.
     store

@@ -280,14 +280,18 @@ impl LoonFs<Writable> {
         self.mode.publisher.is_admission_closed()
     }
 
-    /// Waits for the publication work this runtime has admitted, the folds
-    /// that work started, and the metadata compactions those folds started,
-    /// to finish.
+    /// Waits until the publication work this runtime has admitted, the folds
+    /// that work started, and the metadata compactions those folds started
+    /// have finished.
     ///
     /// Admission stays open. Work admitted during the wait may still be
-    /// running when this returns. [`Self::shutdown`] closes admission and
-    /// then drains. Fails if a publication, deletion, fold, or compaction on
-    /// this runtime has ever panicked. The runtime contains those panics and
+    /// running when this returns. The drain doesn't wait for the hint raises
+    /// that this runtime's manifest publications left pending, because a
+    /// raise can wait for the store's compare-and-swap write interval
+    /// (about a second), and readers tolerate a hint that lags.
+    /// [`Self::shutdown`] closes admission, drains, and then waits for those
+    /// raises. Fails if a publication, deletion, fold, or compaction on this
+    /// runtime has ever panicked. The runtime contains those panics and
     /// keeps publishing.
     #[tracing::instrument(
         level = "debug",
@@ -305,8 +309,23 @@ impl LoonFs<Writable> {
         self.mode.publisher.drain().await
     }
 
-    /// Stops publication, cancels session compactions, and drains accepted
-    /// work.
+    /// Waits until every hint raise that this runtime's manifest publications
+    /// left pending has finished.
+    ///
+    /// This is a hook for tests that check a namespace's hint after a
+    /// publication, or that count store requests without the raise's.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_for_hint_raises(&self) {
+        self.mode.publisher.wait_for_hint_raises().await;
+    }
+
+    /// Stops publication, cancels session compactions, drains accepted work,
+    /// and then waits for the hint raises that this runtime's manifest
+    /// publications left pending.
+    ///
+    /// Each raise waits for at most the store's compare-and-swap write
+    /// interval before it starts, so a shutdown with a raise pending takes up
+    /// to about that much longer.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.shutdown",
@@ -321,7 +340,9 @@ impl LoonFs<Writable> {
     pub async fn shutdown(&self) -> Result<()> {
         self.core.record_trace_context(&tracing::Span::current());
         self.close_admission();
-        self.mode.publisher.drain().await
+        let drained = self.mode.publisher.drain().await;
+        self.mode.publisher.wait_for_hint_raises().await;
+        drained
     }
 }
 

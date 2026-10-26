@@ -66,6 +66,7 @@ fn matter(user_granted: bool) -> AccessState {
 }
 
 struct Fixture {
+    writer: LoonFs<Writable>,
     /// Records every request, and can park the namespace's WAL puts.
     recording: Arc<RecordingStore<BlockingStore<MemoryStore>>>,
     recorder: Arc<DefaultMetricsRecorder>,
@@ -140,6 +141,7 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
             .with_subject(subject("prn_user"))
             .namespace(&namespace_id),
         maintenance: writer.maintenance(writer_id(name)),
+        writer,
         namespace_id,
         actor,
     };
@@ -249,6 +251,10 @@ impl Fixture {
     /// its manifest for a successor. A publisher left on a manifest that
     /// this runtime replaced finds the successor and replays its tail.
     async fn assert_write_reloads_nothing(&self, round: usize, after: &str) {
+        // The hint raises of the publications before the write run after
+        // those publications return, so the check waits for the raises
+        // before it counts the write's requests.
+        self.writer.wait_for_hint_raises().await;
         self.clock.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
         let replays = self.tail_replays();
         self.recording.reset();

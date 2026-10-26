@@ -121,6 +121,50 @@ fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     assert_eq!(json_error(&metadata)["code"], "namespace_deleted");
 }
 
+/// Checks that one-shot commands leave the namespace's hint at the newest
+/// manifest they published, because each process shuts its runtime down
+/// before it exits.
+#[tokio::test]
+async fn one_shot_commands_leave_the_hint_at_the_newest_manifest() {
+    use loonfs_types::format::control::{decode_control_object, ControlObjectKind, HintPayload};
+
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    for index in 0..4 {
+        let remote_path = format!("/file-{index}.txt");
+        assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), &remote_path]));
+        assert_success(&harness.run(&["maintenance", "fold"]));
+    }
+    let store =
+        loonfs_objectstore::local_fs_store::LocalFsStore::new(harness.store_root("default"))
+            .expect("store");
+    let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
+    let current = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest")
+        .state
+        .manifest()
+        .manifest_no;
+    let hint = loonfs_objectstore::ObjectStore::get(
+        &store,
+        &loonfs_objectstore::keys::hint(&namespace_id),
+        None,
+    )
+    .await
+    .expect("read the hint")
+    .expect("the hint exists");
+    let hint = decode_control_object::<HintPayload>(&hint, ControlObjectKind::Hint)
+        .expect("decode the hint")
+        .payload()
+        .manifest_no;
+    assert!(current.0 > 8, "each command published: {current}");
+    assert_eq!(hint, current);
+}
+
 #[test]
 fn retention_window_sets_and_clears_the_window_that_namespace_show_reports() {
     let harness = Harness::new();

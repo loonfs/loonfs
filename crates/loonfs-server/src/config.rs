@@ -198,10 +198,10 @@ pub struct ServerConfig {
     /// arrives less than the interval after the last publication started
     /// waits until the interval has passed, and the next WAL object includes
     /// the commits queued in that time. A longer interval writes fewer,
-    /// larger WAL objects and keeps the namespace's fold rate low. (A low
-    /// fold rate matters because every manifest publication raises the
-    /// namespace's hint with a compare-and-swap, and some providers limit
-    /// writes to one object to about one per second.) A shorter interval
+    /// larger WAL objects and keeps the namespace's fold rate low. (The
+    /// interval bounds how many WAL objects the namespace writes each second,
+    /// and so how many folds it needs, and each fold costs segment and
+    /// manifest puts and reads.) A shorter interval
     /// lowers commit latency and raises throughput. Measured on S3 with 256
     /// clients that each wait for their commits, one namespace published 244
     /// commits per second with a median commit latency of 1,049 ms at an

@@ -21,18 +21,6 @@ async fn published_namespace(
     (writer, namespace)
 }
 
-async fn current_manifest_no(
-    store: &SharedStore,
-    namespace_id: &NamespaceId,
-) -> loonfs_types::ManifestNo {
-    loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
-        .await
-        .expect("current manifest")
-        .state
-        .manifest()
-        .manifest_no
-}
-
 /// Creates a writer that reports to `recorder`.
 async fn test_writer_with_recorder(
     store: SharedStore,
@@ -47,16 +35,6 @@ async fn test_writer_with_recorder(
         .build()
         .await
         .expect("build writer")
-}
-
-/// Returns a store that parks the next raise of the namespace's manifest
-/// hint, which a manifest publication sends once its manifest put landed.
-fn blocking_hint_store(root: &Path, namespace_id: &NamespaceId) -> BlockingStore<LocalFsStore> {
-    BlockingStore::new(
-        LocalFsStore::new(root).expect("store"),
-        KeyPredicate::hint(namespace_id),
-        OperationSelector::CompareAndSwap,
-    )
 }
 
 /// Returns how many reads started from `source`: `position`, `anchor`, or
@@ -299,16 +277,16 @@ async fn a_read_only_runtime_has_no_read_positions() {
 /// Checks that a read during an explicit fold keeps the position, and that
 /// the fold then moves the position to its manifest.
 ///
-/// The fold's manifest is durable before the fold raises the namespace's
-/// hint, and the publisher learns of the manifest only once the fold
-/// returns. A strong read between the two waits for the session's check,
-/// which finds a successor of the position's manifest that this runtime
-/// hasn't recorded as its own yet.
+/// The fold's manifest is durable before the answer to its put arrives, and
+/// the publisher learns of the manifest only once the fold returns. A strong
+/// read between the two waits for the session's check, which finds a
+/// successor of the position's manifest that this runtime hasn't recorded as
+/// its own yet.
 #[tokio::test]
 async fn a_read_during_an_explicit_fold_keeps_the_read_position() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_hint_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(HeldFoldAnswer::new(temp_dir.path(), &namespace_id));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer =
         test_writer_with_recorder(store.clone() as SharedStore, Arc::clone(&recorder)).await;
@@ -321,9 +299,9 @@ async fn a_read_during_an_explicit_fold_keeps_the_read_position() {
         .writer_position(&namespace_id)
         .expect("a position after a commit");
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
-    store.block_next();
+    store.hold_next();
     let (folded, ()) = futures::join!(maintenance.fold_wal(&namespace_id), async {
-        store.wait_until_blocked().await;
+        store.wait_until_held().await;
         let from_position = reads_from(&recorder, "position");
         namespace.stat("/docs").await.expect("stat during the fold");
         assert_eq!(
@@ -354,7 +332,7 @@ async fn a_read_during_an_explicit_fold_keeps_the_read_position() {
 async fn a_read_during_a_session_fold_keeps_the_read_position() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_hint_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(HeldFoldAnswer::new(temp_dir.path(), &namespace_id));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer =
         test_writer_with_recorder(store.clone() as SharedStore, Arc::clone(&recorder)).await;
@@ -376,8 +354,8 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    // The fold waits for a permit until the hint gate is armed, so the gate
-    // parks the fold's hint raise and nothing else.
+    // The fold waits for a permit until the gate is armed, so the gate holds
+    // the answer to the fold's manifest put and nothing else.
     let permits = hold_every_fold_permit(&writer).await;
     let committed = namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
@@ -387,9 +365,9 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
         .await
         .expect("publish across the fold threshold");
     wait_for_fold_waiters(&writer, 1).await;
-    store.block_next();
+    store.hold_next();
     drop(permits);
-    store.wait_until_blocked().await;
+    store.wait_until_held().await;
     let from_position = reads_from(&recorder, "position");
     namespace.stat("/docs").await.expect("stat during the fold");
     assert_eq!(

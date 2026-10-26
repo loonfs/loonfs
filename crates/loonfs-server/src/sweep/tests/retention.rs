@@ -361,9 +361,12 @@ async fn ticks_never_advance_the_floor_and_the_next_full_pass_does() {
 async fn a_pass_that_finds_a_tick_visiting_leaves_its_advance_to_that_visit() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("busy");
+    // The runtime raises the hint in the background after each publication,
+    // so the gate doesn't select the hint.
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("local store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id))
+            .except_hints(),
         OperationSelector::Any,
     ));
     let config = retention_config(Some(WINDOW_MS));
@@ -534,12 +537,18 @@ async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
         )
         .await;
         // The first pass moves the floor to the head when a window applies,
-        // and collects what the seed left behind.
-        server
-            .sweep
-            .run_pass(GarbageCollection::Collect)
-            .await
-            .expect("list namespaces");
+        // and collects what the seed left behind. The advance's hint raise
+        // runs after the advance returns, so the test waits for the raise,
+        // and the second pass collects the manifest that the advance
+        // replaced.
+        for _ in 0..2 {
+            server
+                .sweep
+                .run_pass(GarbageCollection::Collect)
+                .await
+                .expect("list namespaces");
+            server.runtime.wait_for_hint_raises().await;
+        }
         let windows = format!("server {server_window_ms:?}, namespace {namespace_window_ms:?}");
 
         for garbage in [GarbageCollection::Skip, GarbageCollection::Collect] {
