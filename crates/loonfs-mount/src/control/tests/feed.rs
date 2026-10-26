@@ -232,3 +232,40 @@ fn a_refresh_past_the_head_that_a_later_poll_reads_fails_at_once() {
         "{refused:?}"
     );
 }
+
+/// Checks that a failed rebuild starts again after a wait that doubles
+/// after each failure, and not at every tick in between.
+#[test]
+fn a_failed_rebuild_waits_longer_before_each_attempt() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let (mut task, _shared, workers) = task(directory.path(), &[]);
+    let clock = Arc::new(ManualClock::new(0));
+    task.environment.timer = clock.clone();
+    task.start();
+    workers.take();
+    let rebuilds = |work: Vec<Work>| {
+        work.iter()
+            .filter(|work| matches!(work, Work::Rebuild { .. }))
+            .count()
+    };
+    let fail = |task: &mut ControlTask| {
+        task.handle(done(WorkOutcome::RebuildDone(Err(MountError::Stopped))));
+    };
+
+    task.start_rebuild();
+    assert_eq!(rebuilds(workers.take()), 1);
+    fail(&mut task);
+    task.handle(ControlMessage::Tick);
+    assert_eq!(rebuilds(workers.take()), 0, "the first retry waits 250 ms");
+    clock.advance_ms(250);
+    task.handle(ControlMessage::Tick);
+    assert_eq!(rebuilds(workers.take()), 1);
+
+    fail(&mut task);
+    clock.advance_ms(250);
+    task.handle(ControlMessage::Tick);
+    assert_eq!(rebuilds(workers.take()), 0, "the second retry waits 500 ms");
+    clock.advance_ms(250);
+    task.handle(ControlMessage::Tick);
+    assert_eq!(rebuilds(workers.take()), 1);
+}

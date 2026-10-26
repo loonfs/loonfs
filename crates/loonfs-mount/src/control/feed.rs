@@ -22,13 +22,19 @@ pub(super) enum FeedState {
     /// A commit of the current page needs a read before it can be applied.
     WaitingForRead(PageProgress),
     Rebuilding(RebuildState),
-    /// A rebuild failed, and the next tick starts it again.
-    RebuildNeeded,
+    /// A rebuild failed, and the first tick at or after `retry_at_ms` starts
+    /// it again.
+    RebuildNeeded {
+        /// The monotonic time before which no rebuild starts.
+        retry_at_ms: u64,
+        /// How long the next attempt waits if it fails too.
+        backoff_ms: u64,
+    },
 }
 
 impl FeedState {
     pub(super) fn is_rebuilding(&self) -> bool {
-        matches!(self, Self::Rebuilding(_) | Self::RebuildNeeded)
+        matches!(self, Self::Rebuilding(_) | Self::RebuildNeeded { .. })
     }
 }
 
@@ -57,7 +63,14 @@ impl ControlTask {
     pub(super) fn request_poll(&mut self) {
         match self.feed {
             FeedState::Idle => self.start_poll(),
-            FeedState::RebuildNeeded => self.start_rebuild(),
+            FeedState::RebuildNeeded {
+                retry_at_ms,
+                backoff_ms,
+            } => {
+                if self.environment.timer.monotonic_now_ms() >= retry_at_ms {
+                    self.start_rebuild_after_failure(backoff_ms);
+                }
+            }
             FeedState::Polling | FeedState::WaitingForRead(_) | FeedState::Rebuilding(_) => {
                 self.poll_requested = true;
             }

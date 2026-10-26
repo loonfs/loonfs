@@ -408,9 +408,27 @@ impl WorkerContext {
         Ok(RootAncestry { root, ancestors })
     }
 
+    /// Lists the root's subtree at a new snapshot. The control task deletes
+    /// the snapshot once the rebuild is done, and the rebuild deletes it
+    /// itself when it fails, so a failing rebuild that starts again doesn't
+    /// leave a snapshot for each attempt.
     async fn rebuild(&self, root_inode_id: InodeId) -> Result<RebuildBasis> {
         let mut lease =
             SnapshotLease::create(&self.client, &self.namespace_id, self.timer.as_ref()).await?;
+        let listed = self.list_for_rebuild(&mut lease, root_inode_id).await;
+        if listed.is_err() {
+            if let Err(error) = lease.delete(&self.client).await {
+                tracing::warn!(%error, "deleting a failed rebuild's snapshot failed");
+            }
+        }
+        listed
+    }
+
+    async fn list_for_rebuild(
+        &self,
+        lease: &mut SnapshotLease,
+        root_inode_id: InodeId,
+    ) -> Result<RebuildBasis> {
         let snapshot = SnapshotRef {
             snapshot_id: lease.snapshot_id().clone(),
             captured_seq: lease.captured_seq(),

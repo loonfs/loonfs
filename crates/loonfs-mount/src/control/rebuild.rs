@@ -5,7 +5,7 @@ use super::changes::{Changes, Source};
 use super::feed::FeedState;
 use super::ControlTask;
 use crate::database;
-use crate::error::Result;
+use crate::error::{MountError, Result};
 use crate::item::ItemId;
 use crate::item_table::{find_item, for_each_item};
 use crate::records::RemoteState;
@@ -15,15 +15,30 @@ use loonfs_types::api::v0::PathEntry;
 use loonfs_types::{ChangeSeq, InodeId};
 use std::collections::HashSet;
 
-/// The inodes that a rebuild's listing returned so far.
+/// The wait before a failed rebuild starts again, which doubles after each
+/// failure up to [`MAX_REBUILD_BACKOFF_MS`].
+const FIRST_REBUILD_BACKOFF_MS: u64 = 250;
+/// The longest wait before a failed rebuild starts again.
+const MAX_REBUILD_BACKOFF_MS: u64 = 30_000;
+
+/// A rebuild in progress.
 pub(super) struct RebuildState {
+    /// The inodes that the listing returned so far.
     listed: HashSet<InodeId>,
+    /// How long the next attempt waits if this one fails.
+    backoff_ms: u64,
 }
 
 impl ControlTask {
     /// Starts listing the tree again at a new snapshot. For a mount without
     /// local changes, a rebuild is a new scan.
     pub(super) fn start_rebuild(&mut self) {
+        self.start_rebuild_after_failure(FIRST_REBUILD_BACKOFF_MS);
+    }
+
+    /// Starts a rebuild that waits `backoff_ms` before it starts again if it
+    /// fails.
+    pub(super) fn start_rebuild_after_failure(&mut self, backoff_ms: u64) {
         // A rebuild reads no feed page, so a refresh that waits past its end
         // isn't failed by the head of an earlier poll.
         self.polled_head_seq = None;
@@ -32,6 +47,7 @@ impl ControlTask {
         }
         self.feed = FeedState::Rebuilding(RebuildState {
             listed: HashSet::from([self.root.inode_id]),
+            backoff_ms,
         });
         self.workers.start(Work::Rebuild {
             root_inode_id: self.root.inode_id,
@@ -72,16 +88,12 @@ impl ControlTask {
         let basis = match result {
             Ok(basis) => basis,
             Err(error) => {
-                tracing::error!(%error, "a rebuild failed, and the next tick starts it again");
-                self.feed_error = Some(error.to_string());
-                self.feed = FeedState::RebuildNeeded;
+                self.rebuild_failed(&error, rebuild.backoff_ms);
                 return;
             }
         };
         if let Err(error) = self.finish_rebuild(&rebuild.listed, &basis) {
-            tracing::error!(%error, "finishing a rebuild failed");
-            self.feed_error = Some(error.to_string());
-            self.feed = FeedState::RebuildNeeded;
+            self.rebuild_failed(&error, rebuild.backoff_ms);
         }
         self.workers.start(Work::DeleteSnapshot {
             snapshot_id: basis.snapshot.snapshot_id.clone(),
@@ -100,6 +112,20 @@ impl ControlTask {
         }
         self.end_poll(None);
         self.request_poll();
+    }
+
+    /// Records a failed rebuild, which starts again after `backoff_ms`.
+    fn rebuild_failed(&mut self, error: &MountError, backoff_ms: u64) {
+        tracing::error!(%error, backoff_ms, "a rebuild failed, and it starts again after a wait");
+        self.feed_error = Some(error.to_string());
+        self.feed = FeedState::RebuildNeeded {
+            retry_at_ms: self
+                .environment
+                .timer
+                .monotonic_now_ms()
+                .saturating_add(backoff_ms),
+            backoff_ms: backoff_ms.saturating_mul(2).min(MAX_REBUILD_BACKOFF_MS),
+        };
     }
 
     fn finish_rebuild(&mut self, listed: &HashSet<InodeId>, basis: &RebuildBasis) -> Result<()> {
