@@ -128,6 +128,9 @@ impl Mounts {
         let released_directory = directory.clone();
         let release = move || {
             kernel_mount.wait();
+            // A request that's still running can keep a reference to the
+            // engine, so the engine is stopped before its state is removed.
+            engine.stop();
             drop(engine);
             if state != StateDisposal::Kept {
                 remove_state(&state_directory);

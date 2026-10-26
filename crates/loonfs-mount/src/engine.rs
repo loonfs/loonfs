@@ -40,7 +40,7 @@ pub struct Engine {
     shared: SharedState,
     control: ControlSender,
     mount_method: Mutex<Option<MountMethod>>,
-    control_thread: Option<std::thread::JoinHandle<()>>,
+    control_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -111,7 +111,7 @@ impl Engine {
             shared,
             control: sender,
             mount_method: Mutex::new(None),
-            control_thread: Some(control_thread),
+            control_thread: Mutex::new(Some(control_thread)),
         })
     }
 
@@ -289,14 +289,33 @@ fn read_only(operation: &'static str) -> MountError {
     MountError::ReadOnly { operation }
 }
 
-impl Drop for Engine {
-    fn drop(&mut self) {
+impl Engine {
+    /// Stops the control task and waits until its thread has exited, so the
+    /// engine changes no file in the state directory after it returns.
+    /// Every later call fails with [`MountError::Stopped`], and a second
+    /// `stop` does nothing.
+    ///
+    /// The daemon calls it before it removes a mount's state, because a
+    /// request that's still running can keep a reference to the engine.
+    /// Dropping the engine stops it too.
+    pub fn stop(&self) {
         let _ = self.control.send(ControlMessage::Shutdown);
-        if let Some(thread) = self.control_thread.take() {
+        let thread = self
+            .control_thread
+            .lock()
+            .expect("the control thread lock should not be poisoned")
+            .take();
+        if let Some(thread) = thread {
             if thread.join().is_err() {
                 tracing::error!("the mount's control thread panicked");
             }
         }
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

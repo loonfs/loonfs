@@ -3,12 +3,15 @@
 //! second mount that resumes the state, and what the status reports about
 //! the host.
 
-use crate::support::{engine_tree, fixture, mkdir, operations, path, put, Fixture, MOUNT_PATH};
+use crate::support::{
+    engine_tree, fixture, mkdir, operations, path, put, Fixture, MOUNT_PATH, WAIT,
+};
 use loonfs_mount::{ItemId, MountAccess, MountError, MountProgress, Readiness};
 use loonfs_mount_sim::{Operation, SimulatedServerConfig};
-use loonfs_types::NamespaceNaming;
+use loonfs_types::{ChangeSeq, NamespaceNaming};
 use std::assert_matches;
 use std::ffi::OsStr;
+use std::sync::Arc;
 
 /// Commits 10 directories below the mount's root, with 10 subdirectories in
 /// each and 10 files in each subdirectory, and returns the number of
@@ -155,6 +158,29 @@ async fn a_second_mount_resumes_the_state_without_a_scan() {
         "{:?}",
         operations(&trace)
     );
+}
+
+/// Checks that stopping an engine stops its control task while another
+/// reference to the engine remains, as a request that's still running keeps
+/// one while the daemon removes a mount's state: every later call through
+/// any reference fails with `Stopped`, and a second stop does nothing.
+#[tokio::test]
+async fn a_stopped_engine_refuses_calls_through_every_reference() {
+    let fixture = fixture();
+    fixture.commit(vec![put("a.txt", b"a")]);
+    let engine = Arc::new(fixture.mount().await);
+    let request = engine.clone();
+    engine.stop();
+    let refused = request
+        .refresh_at_least(ChangeSeq(0), WAIT)
+        .await
+        .expect_err("the engine is stopped");
+    assert_matches!(refused, MountError::Stopped);
+    let a = request
+        .lookup(ItemId::ROOT, OsStr::new("a.txt"))
+        .expect("the tree stays readable");
+    assert_matches!(request.open_read(a.item).await, Err(MountError::Stopped));
+    engine.stop();
 }
 
 /// Checks that status reports the owner that the mount's settings set, the
