@@ -22,7 +22,8 @@ pub(crate) struct FetchId(pub(crate) u64);
 /// How a fetch reads its bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FetchTransport {
-    /// A proxied read of the whole revision, which the server verifies.
+    /// A proxied read of the whole revision. The engine verifies its bytes
+    /// like every other fetch's.
     WholeFile,
     /// A ranged read of the revision through the server.
     Ranged,

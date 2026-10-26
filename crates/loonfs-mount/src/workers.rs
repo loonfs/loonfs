@@ -103,9 +103,6 @@ pub(crate) struct RebuildBasis {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Fetched {
     pub(crate) written: Range<u64>,
-    /// Whether the server verified the bytes, as it does for a read of the
-    /// whole revision.
-    pub(crate) server_verified: bool,
 }
 
 /// The result of one piece of work.

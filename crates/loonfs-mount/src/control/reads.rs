@@ -371,12 +371,7 @@ impl ControlTask {
                 partial.requested.remove(running.range.clone());
             }
             match result {
-                Ok(fetched) => {
-                    self.cache.record_present(&content_id, fetched.written);
-                    if fetched.server_verified {
-                        self.complete_without_verification(&content_id);
-                    }
-                }
+                Ok(fetched) => self.cache.record_present(&content_id, fetched.written),
                 Err(error) => {
                     tracing::warn!(%error, %content_id, "a fetch failed");
                     self.fail_waiters(&content_id, &running.range, &error);
@@ -387,19 +382,6 @@ impl ControlTask {
         }
         self.start_fetches();
         self.evict(0);
-    }
-
-    /// Completes a file that the server verified as it read the whole
-    /// revision.
-    fn complete_without_verification(&mut self, content_id: &ContentId) {
-        let covered = self
-            .cache
-            .entry_mut(content_id)
-            .and_then(|entry| entry.state.partial_mut())
-            .is_some_and(|partial| partial.present.contains(&(0..partial.target.size_bytes)));
-        if covered {
-            self.complete_cache_file(content_id);
-        }
     }
 
     pub(super) fn complete_cache_file(&mut self, content_id: &ContentId) {

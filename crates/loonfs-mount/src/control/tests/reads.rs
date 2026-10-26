@@ -74,14 +74,7 @@ fn read_and_mismatch() -> (
     RecordedWork,
 ) {
     let directory = tempfile::tempdir().expect("a state directory");
-    // Every fetch is a ranged read, which the server doesn't verify.
-    let (mut task, shared, workers) = task_with(
-        directory.path(),
-        &[file(11, 10, "/project/a.txt")],
-        |mount| {
-            mount.config.max_whole_file_bytes = 1;
-        },
-    );
+    let (mut task, shared, workers) = task(directory.path(), &[file(11, 10, "/project/a.txt")]);
     task.start();
     workers.take();
     let opened = open_a_txt(&mut task, &shared);
@@ -90,13 +83,10 @@ fn read_and_mismatch() -> (
 
     let first = read(&mut task);
     let fetch = only_fetch(workers.take());
-    assert_eq!(fetch.transport, FetchTransport::Ranged);
+    assert_eq!(fetch.transport, FetchTransport::WholeFile);
     task.handle(done(WorkOutcome::Fetched {
         fetch_id: fetch.fetch_id,
-        result: Ok(Fetched {
-            written: 0..size,
-            server_verified: false,
-        }),
+        result: Ok(Fetched { written: 0..size }),
     }));
     let first = first.blocking_recv().expect("a reply");
     assert!(
@@ -114,10 +104,7 @@ fn read_and_mismatch() -> (
     );
     task.handle(done(WorkOutcome::Fetched {
         fetch_id: refetch.fetch_id,
-        result: Ok(Fetched {
-            written: 0..size,
-            server_verified: false,
-        }),
+        result: Ok(Fetched { written: 0..size }),
     }));
     assert!(
         matches!(
@@ -207,10 +194,7 @@ fn a_handle_that_closes_during_its_grant_fetch_drops_the_stream() {
     assert_eq!(dropped(&workers.take()), 1, "the close drops the stream");
     task.handle(done(WorkOutcome::Fetched {
         fetch_id: fetch.fetch_id,
-        result: Ok(Fetched {
-            written: 0..size,
-            server_verified: false,
-        }),
+        result: Ok(Fetched { written: 0..size }),
     }));
     assert_eq!(
         dropped(&workers.take()),

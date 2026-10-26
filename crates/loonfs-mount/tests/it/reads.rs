@@ -28,8 +28,9 @@ fn range_units(start: u64, end: u64) -> ByteRange {
     }
 }
 
-/// Checks that a small file is fetched whole with one read that the server
-/// verifies, and that a second handle reads it from the cache.
+/// Checks that a small file is fetched whole with one read, that a second
+/// handle reads it from the cache, and that the cache file is complete once
+/// the engine verifies it.
 #[tokio::test]
 async fn a_small_file_is_fetched_whole_once_and_then_read_from_the_cache() {
     let fixture = fixture();
@@ -51,8 +52,26 @@ async fn a_small_file_is_fetched_whole_once_and_then_read_from_the_cache() {
     assert_eq!(reads[0].operation, Operation::GetFileRevisionContentByInode);
     assert_eq!(reads[0].status, 200, "a whole read, not a range");
     assert_eq!(fetched_bytes(&trace), bytes.len() as u64);
+    eventually(|| fixture.cache_file(&content_ref).exists()).await;
     let cached = std::fs::read(fixture.cache_file(&content_ref)).expect("the cache file");
     assert_eq!(cached, bytes);
+}
+
+/// Checks that a whole read of a small file is verified like every other
+/// fetch: a corrupted body is found, and the file is fetched again.
+#[tokio::test]
+async fn a_corrupted_whole_read_is_found_and_fetched_again() {
+    let fixture = fixture();
+    let bytes = pattern(5 * 1024);
+    fixture.commit(vec![put("small.bin", &bytes)]);
+    let engine = fixture.mount().await;
+    fixture
+        .server
+        .fail_next_content_read(ContentReadFault::CorruptedByte);
+    let handle = open(&engine, "small.bin").await;
+    assert_ne!(read(&handle, 0, 10 * 1024).await, bytes);
+    eventually(|| engine.status().cache.mismatched_files == 1).await;
+    assert_eq!(read(&handle, 0, 10 * 1024).await, bytes);
 }
 
 /// The size of each signed range of a grant in the sequential read, which is

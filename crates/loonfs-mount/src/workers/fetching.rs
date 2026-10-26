@@ -74,10 +74,7 @@ impl WorkerContext {
                         job.revision_no, job.inode_id, job.range.end
                     ))));
                 }
-                Ok(Fetched {
-                    written: job.range,
-                    server_verified: true,
-                })
+                Ok(Fetched { written: job.range })
             }
             FetchTransport::Ranged => {
                 let length = NonZeroU64::new(job.range.end - job.range.start)
@@ -103,7 +100,6 @@ impl WorkerContext {
                 }
                 Ok(Fetched {
                     written: range.start_offset..offset,
-                    server_verified: false,
                 })
             }
             FetchTransport::Grant => self.fetch_granted(job).await,
@@ -168,7 +164,6 @@ impl WorkerContext {
         }
         Ok(Fetched {
             written: job.range.start..offset,
-            server_verified: false,
         })
     }
 
