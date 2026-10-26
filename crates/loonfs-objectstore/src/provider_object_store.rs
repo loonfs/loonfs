@@ -854,6 +854,7 @@ impl ObjectStore for ProviderObjectStore {
                             last_modified_at_ms: last_modified_at_ms(
                                 meta.last_modified.timestamp_millis(),
                             ),
+                            size_bytes: meta.size,
                         }))
                     }
                     Err(err) => Some(Err(map_provider_error(
@@ -1564,6 +1565,7 @@ mod tests {
         for entry in entries {
             let head = store.head(&entry.key).await.expect("head").expect("exists");
             assert_eq!(entry.last_modified_at_ms, head.last_modified_at_ms);
+            assert_eq!(entry.size_bytes, head.size_bytes);
         }
         let remaining: Vec<_> = store
             .list_prefix_from_stream(prefix, Some(&keys[999]))

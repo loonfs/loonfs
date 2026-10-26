@@ -46,6 +46,8 @@ pub struct ListedObject {
     pub key: String,
     /// Provider modification time, when the listing reports one.
     pub last_modified_at_ms: Option<u64>,
+    /// The object's length in bytes, as the listing reported it.
+    pub size_bytes: u64,
 }
 
 /// Metadata returned by a successful `head`, full-object `get`, or `put` call.
@@ -996,6 +998,7 @@ mod tests {
             Box::pin(stream::iter([Ok(ListedObject {
                 key: "resumed".to_owned(),
                 last_modified_at_ms: None,
+                size_bytes: 0,
             })]))
         }
 

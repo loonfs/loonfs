@@ -19,9 +19,16 @@ use loonfs_types::format::control::{UploadOutcome, UploadSessionPayload};
 use loonfs_types::{ContentId, NamespaceId, UploadId};
 use std::pin::pin;
 
-/// One upload session's records, as a listing of the uploads prefix
-/// returned them.
-pub(super) enum ListedUpload {
+/// One upload session's records, or one other key, as a listing of the
+/// uploads prefix returned them.
+pub(super) struct ListedUpload {
+    pub(super) kind: ListedUploadKind,
+    /// The bytes of the listed records, as the listing reported them.
+    pub(super) size_bytes: u64,
+}
+
+/// The records in one [`ListedUpload`].
+pub(super) enum ListedUploadKind {
     /// A session record, followed in the listing by its outcome record when
     /// `outcome_listed` is true.
     Session {
@@ -58,24 +65,26 @@ pub(super) fn list_uploads<S: ObjectStore + ?Sized>(
         let Some(entry) = entries.next().await.transpose()? else {
             return Ok(None);
         };
-        let listed = if let Some(upload_id) = upload_id_of(&entry.key) {
-            let outcome_listed = entries
+        let mut size_bytes = entry.size_bytes;
+        let kind = if let Some(upload_id) = upload_id_of(&entry.key) {
+            let outcome = entries
                 .as_mut()
                 .next_if(|next| {
                     matches!(next, Ok(next) if upload_outcome_id_of(&next.key).as_ref() == Some(&upload_id))
                 })
                 .await
-                .is_some();
-            ListedUpload::Session {
+                .transpose()?;
+            size_bytes += outcome.as_ref().map_or(0, |outcome| outcome.size_bytes);
+            ListedUploadKind::Session {
                 upload_id,
-                outcome_listed,
+                outcome_listed: outcome.is_some(),
             }
         } else if upload_outcome_id_of(&entry.key).is_some() {
-            ListedUpload::OrphanOutcome { entry }
+            ListedUploadKind::OrphanOutcome { entry }
         } else {
-            ListedUpload::Unrecognized
+            ListedUploadKind::Unrecognized
         };
-        Ok(Some((listed, entries)))
+        Ok(Some((ListedUpload { kind, size_bytes }, entries)))
     })
 }
 
@@ -114,12 +123,12 @@ pub(super) async fn load_upload_sessions<S: ObjectStore + ?Sized>(
     mut visit: impl FnMut(ListedUploadSession) -> Result<()>,
 ) -> Result<()> {
     let mut sessions = pin!(list_uploads(store, namespace_id)
-        .try_filter_map(|listed| future::ok(match listed {
-            ListedUpload::Session {
+        .try_filter_map(|listed| future::ok(match listed.kind {
+            ListedUploadKind::Session {
                 upload_id,
                 outcome_listed,
             } => Some((upload_id, outcome_listed)),
-            ListedUpload::OrphanOutcome { .. } | ListedUpload::Unrecognized => None,
+            ListedUploadKind::OrphanOutcome { .. } | ListedUploadKind::Unrecognized => None,
         }))
         .map_ok(|(upload_id, outcome_listed)| async move {
             if let Some(session) = session_cache.and_then(|cache| cache.get(&upload_id)) {

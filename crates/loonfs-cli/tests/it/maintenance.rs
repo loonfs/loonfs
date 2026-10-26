@@ -670,6 +670,7 @@ fn gc_reports_grep_collection_counts_in_both_modes() {
         let data = json_data(&collected);
         assert_eq!(data["kind"], "gc");
         assert_eq!(data["namespace_id"], "demo");
+        assert!(data["listed_bytes"].as_u64().expect("listed bytes") > 0);
         let grep = &data["extensions"]["grep"];
         assert_eq!(grep["deleted_segments"], 0);
         assert_eq!(grep["deleted_other_objects"], 0);
@@ -680,7 +681,8 @@ fn gc_reports_grep_collection_counts_in_both_modes() {
                 .expect("retained count")
                 > 0
         );
-        assert_eq!(grep.as_object().expect("grep collection counts").len(), 4);
+        assert!(grep["listed_bytes"].as_u64().expect("grep listed bytes") > 0);
+        assert_eq!(grep.as_object().expect("grep collection counts").len(), 5);
 
         let human = harness.run(&["maintenance", "gc", "--profile", profile]);
         assert_success(&human);

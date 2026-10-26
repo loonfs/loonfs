@@ -453,6 +453,7 @@ async fn assert_start_after_contract(store: &dyn ObjectStore) {
             }
             (listed, head) => assert_eq!(listed, head, "{}", entry.key),
         }
+        assert_eq!(entry.size_bytes, metadata.size_bytes, "{}", entry.key);
     }
 
     let after_exact = store

@@ -2692,6 +2692,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "listed_bytes": {
+            "description": "The bytes of every grep object that the pass listed under the namespace, before the pass's\ndeletes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "namespace_reaped": {
             "description": "Whether the pass deleted the grep extension state of a namespace that is missing or\ndeleted.",
             "type": "boolean"
@@ -2707,7 +2713,8 @@
           "deleted_segments",
           "deleted_other_objects",
           "namespace_reaped",
-          "retained_candidates"
+          "retained_candidates",
+          "listed_bytes"
         ],
         "type": "object"
       },
@@ -3990,6 +3997,12 @@
             ],
             "type": "string"
           },
+          "listed_bytes": {
+            "description": "The bytes of every object that the pass listed under the namespace, each object once, before\nthe pass's deletes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace that the pass ran against."
@@ -4016,6 +4029,7 @@
           "deleted",
           "deleted_checkpoints_by_owner",
           "retained",
+          "listed_bytes",
           "kind"
         ],
         "type": "object"

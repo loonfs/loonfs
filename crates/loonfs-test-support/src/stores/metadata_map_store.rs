@@ -216,7 +216,7 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
                             last_modified_at_ms: entry.last_modified_at_ms,
                             etag: None,
                             version: None,
-                            size_bytes: 0,
+                            size_bytes: entry.size_bytes,
                             checksum: None,
                         })
                         .last_modified_at_ms;

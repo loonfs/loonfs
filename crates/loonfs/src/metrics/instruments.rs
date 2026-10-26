@@ -1261,6 +1261,7 @@ mod tests {
                 referenced: 2,
                 ..loonfs_types::RetainedCandidates::default()
             },
+            listed_bytes: 0,
             next_reclamation_at_ms: None,
             reclaimable_at_ms: None,
             extensions: loonfs_types::ExtensionGcReports::default(),
