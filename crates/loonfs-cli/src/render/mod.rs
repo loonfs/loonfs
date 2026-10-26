@@ -2,6 +2,8 @@
 
 mod human;
 mod human_maintenance;
+#[cfg(unix)]
+mod human_mount;
 mod json;
 mod output;
 mod summaries;

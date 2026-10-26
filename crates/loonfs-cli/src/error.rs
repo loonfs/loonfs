@@ -51,6 +51,7 @@ cli_error_codes! {
     JsonNotSupportedForStreaming => "json_not_supported_for_streaming",
     Cancelled => "cancelled",
     ClientError => "client_error",
+    DaemonFailed => "daemon_failed",
 }
 
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
@@ -232,6 +233,16 @@ impl CliError {
         Self::new(
             CliErrorCode::IoError.as_str(),
             format!("i/o error: {error}"),
+        )
+    }
+
+    /// The failure of every mount command on a platform without FUSE
+    /// mounts.
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn mounts_unavailable() -> Self {
+        Self::new(
+            ErrorCode::NotSupported.as_str(),
+            "mounts are available on Linux only",
         )
     }
 

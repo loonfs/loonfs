@@ -1,0 +1,40 @@
+[package]
+name = "loonfs-mount"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The engine of a LoonFS namespace mount: local trees, a content cache, and change-feed application."
+repository.workspace = true
+homepage.workspace = true
+keywords = ["filesystem", "fuse", "mount"]
+categories = ["filesystem"]
+
+# The engine and the daemon are built on Unix only, so on every other platform
+# the crate has no dependencies and compiles to nothing.
+[target.'cfg(unix)'.dependencies]
+bytes.workspace = true
+fs4.workspace = true
+futures.workspace = true
+loonfs-client.workspace = true
+loonfs-types.workspace = true
+rusqlite.workspace = true
+rustix = { workspace = true, features = ["process"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+loonfs-mount-sim.workspace = true
+loonfs-test-support.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
+[lints]
+workspace = true

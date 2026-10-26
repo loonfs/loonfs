@@ -6,6 +6,7 @@ mod completions;
 mod filesystem;
 mod inspection;
 mod maintenance;
+mod mount;
 mod output;
 mod profile;
 mod recursive;

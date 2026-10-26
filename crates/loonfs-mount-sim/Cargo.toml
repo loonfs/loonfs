@@ -1,0 +1,31 @@
+[package]
+name = "loonfs-mount-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "A simulated LoonFS server that the mount's tests run against."
+repository.workspace = true
+publish = false
+
+[dependencies]
+bytes.workspace = true
+form_urlencoded.workspace = true
+futures.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+loonfs-client.workspace = true
+loonfs-model.workspace = true
+loonfs-sim.workspace = true
+loonfs-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tower.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

@@ -35,14 +35,15 @@ async fn body_bytes(body: PayloadStream) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Checks that a ranged read by path and by inode sends the `Range` header
-/// beside the read's usual query, and returns the range that the server's
-/// `Content-Range` header describes.
+/// Checks that a ranged read by path, by inode, and of a revision by inode
+/// sends the `Range` header beside the read's usual query, and returns the
+/// range that the server's `Content-Range` header describes.
 #[tokio::test]
 async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
     let transport = scripted_transport::script([
         Outcome::PartialContent("bytes 2-5/10".to_owned(), b"cdef".to_vec()),
         Outcome::PartialContent("bytes 7-9/10".to_owned(), b"hij".to_vec()),
+        Outcome::PartialContent("bytes 4-5/10".to_owned(), b"ef".to_vec()),
     ]);
     let client = client_for(&transport);
     let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
@@ -74,6 +75,24 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
         (7, 3, 10)
     );
     assert_eq!(body_bytes(by_inode.body).await.expect("body"), b"hij");
+    let by_revision = client
+        .read_file_revision_range_stream_by_inode(
+            spec.namespace(),
+            InodeId(42),
+            RevisionNo(3),
+            range(4, Some(2)),
+        )
+        .await
+        .expect("ranged read of a revision by inode");
+    assert_eq!(
+        (
+            by_revision.start_offset,
+            by_revision.length,
+            by_revision.size_bytes
+        ),
+        (4, 2, 10)
+    );
+    assert_eq!(body_bytes(by_revision.body).await.expect("body"), b"ef");
 
     let sent = transport.sent();
     assert_eq!(
@@ -88,6 +107,11 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
         )
     );
     assert_eq!(sent[1].header("range"), Some("bytes=7-"));
+    assert_eq!(
+        sent[2].url,
+        "http://example.invalid/v0/namespaces/demo/inodes/ino_42/revisions/3/content"
+    );
+    assert_eq!(sent[2].header("range"), Some("bytes=4-5"));
 }
 
 /// Checks that a ranged read refuses a response that isn't the requested

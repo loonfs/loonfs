@@ -31,6 +31,7 @@ loonfs-types.workspace = true
 loonfs-client.workspace = true
 loonfs.workspace = true
 loonfs-grep.workspace = true
+loonfs-mount.workspace = true
 loonfs-objectstore.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -39,6 +40,15 @@ tempfile.workspace = true
 # how `loonfs put -` reads a payload of unknown length.
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "time"] }
 toml.workspace = true
+
+# The log of the hidden `loonfs daemon` command, which serves mounts on Unix.
+[target.'cfg(unix)'.dependencies]
+tracing-subscriber.workspace = true
+
+# The FUSE adapter is built on Linux only, and the mount commands fail at once
+# elsewhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+loonfs-fuse.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["sync"] }

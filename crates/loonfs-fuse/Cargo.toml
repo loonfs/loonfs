@@ -1,0 +1,33 @@
+[package]
+name = "loonfs-fuse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The FUSE adapter of a LoonFS namespace mount, which serves the kernel's requests from the mount's engine."
+repository.workspace = true
+homepage.workspace = true
+keywords = ["filesystem", "fuse", "mount"]
+categories = ["filesystem"]
+
+# The adapter is built only on Linux, so on every other platform the crate has
+# no dependencies and compiles to nothing.
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser.workspace = true
+loonfs-mount.workspace = true
+rustix = { workspace = true, features = ["mount"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+loonfs-client.workspace = true
+loonfs-types.workspace = true
+tempfile.workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
+[lints]
+workspace = true

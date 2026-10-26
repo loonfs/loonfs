@@ -842,7 +842,7 @@ impl Client {
         query.build()
     }
 
-    fn inode_revision_content_url(
+    pub(crate) fn inode_revision_content_url(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
