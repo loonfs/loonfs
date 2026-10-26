@@ -10,6 +10,7 @@ use crate::fetch::{plan_transfers, FetchId, FetchJob, FetchPriority, FetchTransp
 use crate::item::{ItemId, ItemKind};
 use crate::item_table::{content_in_use, find_item};
 use crate::read_handle::{HandleId, HandleView, OpenedRead, PinnedRevision};
+use crate::window::FetchSizes;
 use crate::workers::{Fetched, Work};
 use loonfs_types::ContentId;
 use std::ops::Range;
@@ -83,7 +84,12 @@ impl ControlTask {
                 view: view.clone(),
             },
         );
-        Ok(OpenedRead { handle, item, view })
+        Ok(OpenedRead {
+            handle,
+            item,
+            view,
+            sizes: FetchSizes::of(&self.config),
+        })
     }
 
     /// Answers a read once its bytes are in the cache, fetching the window
@@ -232,6 +238,7 @@ impl ControlTask {
                 .pinned_bytes(|content_id| pins.get(content_id).is_some_and(|&pins| pins > 0))
         };
         let direct_get = self.transports.direct_get;
+        let sizes = FetchSizes::of(&self.config);
         let max_pinned_bytes = self.config.max_pinned_bytes;
         let entry = self.cache.prepare(&revision.content_ref)?;
         let file = entry.file.clone();
@@ -248,13 +255,13 @@ impl ControlTask {
             return Ok(());
         };
         let nothing_cached = partial.present.is_empty() && partial.requested.is_empty();
-        let whole_file = nothing_cached && size_bytes <= crate::window::MAX_WHOLE_FILE_BYTES;
+        let whole_file = nothing_cached && size_bytes <= sizes.max_whole_file_bytes;
         let transfers = match shape {
             RequestShape::Rest if direct_get && !whole_file => {
                 vec![(first_missing..size_bytes, FetchTransport::Grant)]
             }
             RequestShape::Rest | RequestShape::Windows => {
-                plan_transfers(&missing, size_bytes, nothing_cached, direct_get)
+                plan_transfers(&missing, size_bytes, nothing_cached, direct_get, &sizes)
             }
         };
         let new_bytes: u64 = transfers

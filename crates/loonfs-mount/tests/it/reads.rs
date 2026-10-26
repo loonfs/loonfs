@@ -4,7 +4,7 @@
 
 use crate::support::{
     content_reads, eventually, fetched_bytes, fixture, fixture_with, open, pattern, put, read,
-    wait_until_handled, Fixture, MIB,
+    wait_until_handled, Fixture, UNIT,
 };
 use loonfs_mount::ContentState;
 use loonfs_mount_sim::{
@@ -14,9 +14,10 @@ use loonfs_mount_sim::{
 use loonfs_types::api::v0::PathEntryKind;
 use loonfs_types::ContentRef;
 
-/// The size of each read call in the sequential reads, as a program that
-/// reads in 128 KiB calls makes them.
-const CHUNK: u64 = 128 * 1024;
+/// The size of each read call in the sequential reads: an eighth of a
+/// window, as a program that reads in 128 KiB calls makes them with the
+/// mount's default 1 MiB first window.
+const CHUNK: u64 = UNIT / 8;
 
 async fn content_ref(fixture: &Fixture, relative: &str) -> ContentRef {
     match fixture.stat(relative).await.kind {
@@ -25,10 +26,11 @@ async fn content_ref(fixture: &Fixture, relative: &str) -> ContentRef {
     }
 }
 
-fn range_mib(start: u64, end: u64) -> ByteRange {
+/// Returns the range from `start` to `end` units.
+fn range_units(start: u64, end: u64) -> ByteRange {
     ByteRange {
-        start_offset: start * MIB,
-        end_offset: end * MIB,
+        start_offset: start * UNIT,
+        end_offset: end * UNIT,
     }
 }
 
@@ -61,21 +63,21 @@ async fn a_small_file_is_fetched_whole_once_and_then_read_from_the_cache() {
 
 /// The size of each signed range of a grant in the sequential read, which is
 /// the most a grant fetches past the window that asked for it.
-const GRANT_RANGE_BYTES: u64 = MIB;
+const GRANT_RANGE_BYTES: u64 = UNIT;
 
-/// Returns the range from `start` to `end` quarter mebibytes.
-fn range_quarter_mib(start: u64, end: u64) -> ByteRange {
+/// Returns the range from `start` to `end` quarter units.
+fn range_quarter_units(start: u64, end: u64) -> ByteRange {
     ByteRange {
-        start_offset: start * MIB / 4,
-        end_offset: end * MIB / 4,
+        start_offset: start * UNIT / 4,
+        end_offset: end * UNIT / 4,
     }
 }
 
-/// Checks that a sequential reader of a 32 MiB file fetches windows that grow
-/// from 1 MiB, each the smallest of twice the last window, 64 MiB, and the
-/// bytes read less the bytes fetched but not read yet, with one window
-/// ahead once that's at least half the current window. Windows of at most
-/// 8 MiB are ranged reads, and the larger one is a grant that fetches at
+/// Checks that a sequential reader of a 32-unit file fetches windows that
+/// grow from 1 unit, each the smallest of twice the last window, 64 units,
+/// and the bytes read less the bytes fetched but not read yet, with one
+/// window ahead once that's at least half the current window. Windows of at
+/// most 8 units are ranged reads, and the larger one is a grant that fetches at
 /// most one signed range past its window. After every read, the engine has
 /// fetched at most twice the bytes read plus the first window (scaling
 /// invariant 2) plus that one range, and no byte is fetched twice.
@@ -85,7 +87,7 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
         max_download_range_bytes: GRANT_RANGE_BYTES,
         ..SimulatedServerConfig::default()
     });
-    let size = 32 * MIB;
+    let size = 32 * UNIT;
     let bytes = pattern(size);
     fixture.upload("data.bin", &bytes).await;
     let engine = fixture.mount().await;
@@ -99,7 +101,7 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
         offset += chunk.len() as u64;
         let fetched = fetched_bytes(&fixture.server.trace());
         assert!(
-            fetched <= 2 * offset + MIB + GRANT_RANGE_BYTES,
+            fetched <= 2 * offset + UNIT + GRANT_RANGE_BYTES,
             "{fetched} bytes fetched after {offset} read"
         );
     }
@@ -123,7 +125,7 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
     ];
     let expected: Vec<_> = windows
         .into_iter()
-        .map(|(start, end)| range_quarter_mib(start, end))
+        .map(|(start, end)| range_quarter_units(start, end))
         .collect();
     assert_eq!(ranged, expected);
     let granted: Vec<_> = trace
@@ -131,12 +133,14 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
         .filter(|record| record.operation == Operation::ReadDownloadRange)
         .map(|record| record.byte_range.expect("a range"))
         .collect();
-    let expected: Vec<_> = (17..28).map(|start| range_mib(start, start + 1)).collect();
+    let expected: Vec<_> = (17..28)
+        .map(|start| range_units(start, start + 1))
+        .collect();
     assert_eq!(
         granted, expected,
-        "one grant for the window from 17 MiB to 27.5 MiB, in 1 MiB ranges"
+        "one grant for the window from 17 to 27.5 units, in 1-unit ranges"
     );
-    let window_end = 27 * MIB + MIB / 2;
+    let window_end = 27 * UNIT + UNIT / 2;
     let past_window = granted.last().expect("a granted range").end_offset - window_end;
     assert!(
         past_window <= GRANT_RANGE_BYTES,
@@ -150,43 +154,43 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
 }
 
 /// Checks that a read far from where a sequential run ended starts again
-/// with a 1 MiB window and no read-ahead, and that the windows that follow
+/// with a 1-unit window and no read-ahead, and that the windows that follow
 /// continue from there, none smaller than half the one before, within twice
 /// the bytes read since the seek.
 #[tokio::test]
 async fn a_read_at_a_far_offset_resets_the_window() {
     let fixture = fixture();
-    let size = 24 * MIB;
+    let size = 24 * UNIT;
     let bytes = pattern(size);
     fixture.upload("data.bin", &bytes).await;
     let engine = fixture.mount().await;
     let handle = open(&engine, "data.bin").await;
-    for offset in (0..=MIB).step_by(128 * 1024) {
+    for offset in (0..=UNIT).step_by(usize::try_from(CHUNK).expect("a chunk")) {
         read(&handle, offset, CHUNK).await;
     }
-    eventually(|| fetched_bytes(&fixture.server.trace()) >= 3 * MIB / 2).await;
+    eventually(|| fetched_bytes(&fixture.server.trace()) >= 3 * UNIT / 2).await;
     fixture.server.take_trace();
-    let far = 20 * MIB + 7;
+    let far = 20 * UNIT + 7;
     let start = usize::try_from(far).expect("an offset");
     assert_eq!(
         read(&handle, far, CHUNK).await,
-        bytes[start..start + 128 * 1024]
+        bytes[start..start + usize::try_from(CHUNK).expect("a chunk")]
     );
     assert_eq!(
         content_reads(&fixture.server.trace())
             .iter()
             .map(|record| record.byte_range.expect("a range"))
             .collect::<Vec<_>>(),
-        [range_mib(20, 21)],
-        "a 1 MiB window and nothing ahead"
+        [range_units(20, 21)],
+        "a 1-unit window and nothing ahead"
     );
     let mut offset = far + CHUNK;
-    while offset < far + 2 * MIB {
+    while offset < far + 2 * UNIT {
         read(&handle, offset, CHUNK).await;
         offset += CHUNK;
         let fetched = fetched_bytes(&fixture.server.trace());
         assert!(
-            fetched <= 2 * (offset - far) + MIB,
+            fetched <= 2 * (offset - far) + UNIT,
             "{fetched} after {offset}"
         );
     }
@@ -206,7 +210,7 @@ async fn a_read_at_a_far_offset_resets_the_window() {
 #[tokio::test]
 async fn a_corrupted_range_is_fetched_again_once_and_then_reads_correctly() {
     let fixture = fixture();
-    let size = 9 * MIB;
+    let size = 9 * UNIT;
     let bytes = pattern(size);
     fixture.upload("data.bin", &bytes).await;
     let engine = fixture.mount().await;
@@ -265,7 +269,7 @@ async fn a_content_read_that_fails_in_transport_is_tried_again() {
 }
 
 /// Checks that a deployment that doesn't advertise grants gets every fetch
-/// as a ranged read of at most 8 MiB.
+/// as a ranged read of at most the ranged-read limit, 8 units.
 #[tokio::test]
 async fn without_direct_get_every_fetch_is_a_ranged_read() {
     let fixture = fixture_with(SimulatedServerConfig {
@@ -275,7 +279,7 @@ async fn without_direct_get_every_fetch_is_a_ranged_read() {
         },
         ..SimulatedServerConfig::default()
     });
-    let size = 9 * MIB;
+    let size = 9 * UNIT;
     let bytes = pattern(size);
     fixture.upload("data.bin", &bytes).await;
     let engine = fixture.mount().await;
@@ -291,7 +295,7 @@ async fn without_direct_get_every_fetch_is_a_ranged_read() {
     let ranged = Operation::GetFileRevisionContentByInode;
     assert_eq!(
         reads,
-        [(ranged, range_mib(0, 8)), (ranged, range_mib(8, 9))]
+        [(ranged, range_units(0, 8)), (ranged, range_units(8, 9))]
     );
 }
 
@@ -301,14 +305,14 @@ async fn without_direct_get_every_fetch_is_a_ranged_read() {
 #[tokio::test]
 async fn an_abandoned_partial_file_is_evicted_and_an_open_one_is_not() {
     let fixture = fixture();
-    let first = pattern(20 * MIB);
-    let second = pattern(21 * MIB);
+    let first = pattern(20 * UNIT);
+    let second = pattern(21 * UNIT);
     fixture.upload("abandoned.bin", &first).await;
     fixture.upload("open.bin", &second).await;
     let abandoned = content_ref(&fixture, "abandoned.bin").await;
     let kept_ref = content_ref(&fixture, "open.bin").await;
     let mut config = fixture.config();
-    config.max_cache_bytes = MIB / 2;
+    config.max_cache_bytes = UNIT / 2;
     let engine = fixture.mount_with(config).await;
     let partial = |content_ref: &ContentRef| {
         let mut path = fixture.cache_file(content_ref).into_os_string();
@@ -320,11 +324,11 @@ async fn an_abandoned_partial_file_is_evicted_and_an_open_one_is_not() {
     assert_eq!(read(&handle, 0, 4096).await, first[..4096]);
     let kept = open(&engine, "open.bin").await;
     assert_eq!(read(&kept, 0, 4096).await, second[..4096]);
-    assert_eq!(engine.status().cache.pinned_bytes, 2 * MIB);
+    assert_eq!(engine.status().cache.pinned_bytes, 2 * UNIT);
     drop(handle);
     wait_until_handled(&engine).await;
     let cache = engine.status().cache;
-    assert_eq!((cache.evictable_bytes, cache.pinned_bytes), (0, MIB));
+    assert_eq!((cache.evictable_bytes, cache.pinned_bytes), (0, UNIT));
     assert!(
         !partial(&abandoned).exists(),
         "the abandoned partial file is evicted"
@@ -339,7 +343,7 @@ async fn an_abandoned_partial_file_is_evicted_and_an_open_one_is_not() {
             .iter()
             .map(|record| record.byte_range.expect("a range"))
             .collect::<Vec<_>>(),
-        [range_mib(0, 1)],
+        [range_units(0, 1)],
         "the evicted window is fetched again"
     );
 }

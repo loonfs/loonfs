@@ -4,7 +4,7 @@
 
 use crate::support::{
     append, content_reads, fetched_bytes, fixture, item, open, pattern, put, put_replacing, read,
-    refresh, MIB,
+    refresh, UNIT,
 };
 use loonfs_mount::{CachedPages, Invalidation};
 use loonfs_mount_sim::{ByteRange, Operation};
@@ -15,7 +15,7 @@ use loonfs_mount_sim::{ByteRange, Operation};
 #[tokio::test]
 async fn a_replacement_makes_a_new_item_and_an_open_handle_keeps_reading_the_old_bytes() {
     let fixture = fixture();
-    let old = pattern(10 * MIB);
+    let old = pattern(10 * UNIT);
     fixture.upload("data.bin", &old).await;
     let engine = fixture.mount().await;
     let handle = open(&engine, "data.bin").await;
@@ -27,7 +27,7 @@ async fn a_replacement_makes_a_new_item_and_an_open_handle_keeps_reading_the_old
     let current = item(&engine, "data.bin").expect("the replacement");
     assert_ne!(current, handle.item(), "a replacement is a new item");
     assert_eq!(engine.getattr(current).expect("the new item").size_bytes, 8);
-    let offset = 9 * MIB;
+    let offset = 9 * UNIT;
     let start = usize::try_from(offset).expect("an offset");
     assert_eq!(read(&handle, offset, 16).await, old[start..start + 16]);
     let trace = fixture.server.take_trace();
@@ -41,13 +41,13 @@ async fn a_replacement_makes_a_new_item_and_an_open_handle_keeps_reading_the_old
         .iter()
         .filter_map(|record| record.byte_range)
         .collect();
-    assert_eq!(ranges.first().map(|range| range.start_offset), Some(MIB));
+    assert_eq!(ranges.first().map(|range| range.start_offset), Some(UNIT));
     assert!(ranges
         .windows(2)
         .all(|pair| pair[0].end_offset == pair[1].start_offset));
     assert_eq!(
         fetched_bytes(&trace),
-        9 * MIB,
+        9 * UNIT,
         "the rest of the revision, once"
     );
 

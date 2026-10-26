@@ -3,6 +3,7 @@
 
 use crate::cache_file::CacheFile;
 use crate::read_handle::HandleId;
+use crate::window::FetchSizes;
 use loonfs_types::{ContentId, InodeId, RevisionNo};
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -13,15 +14,6 @@ const MIB: u64 = 1 << 20;
 pub(crate) const MAX_FETCH_BYTES_IN_FLIGHT: u64 = 256 * MIB;
 /// The most fetch requests that one mount has in flight.
 pub(crate) const MAX_FETCH_REQUESTS_IN_FLIGHT: usize = 32;
-/// The largest fetch that's a ranged read through the server. A larger fetch
-/// uses a download grant.
-pub(crate) const MAX_RANGED_READ_BYTES: u64 = 8 * MIB;
-
-const _: () = assert!(
-    MAX_RANGED_READ_BYTES <= MAX_FETCH_BYTES_IN_FLIGHT
-        && crate::window::MAX_WINDOW_BYTES <= MAX_FETCH_BYTES_IN_FLIGHT,
-    "one fetch should fit the shared limit, so a fetch never waits for room that can't exist"
-);
 
 /// The identity of one fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,27 +57,30 @@ pub(crate) struct FetchJob {
 
 /// Splits the missing ranges of a revision into fetches: one whole read of a
 /// small revision that has nothing cached, a ranged read for each range of
-/// at most 8 MiB, and a grant for a larger range when the deployment
-/// advertises grants, or ranged reads of at most 8 MiB when it doesn't.
+/// at most the ranged-read limit (8 MiB by default), and a grant for a
+/// larger range when the deployment advertises grants, or ranged reads of at
+/// most the limit when it doesn't.
 pub(crate) fn plan_transfers(
     missing: &[Range<u64>],
     size_bytes: u64,
     nothing_cached: bool,
     direct_get: bool,
+    sizes: &FetchSizes,
 ) -> Vec<(Range<u64>, FetchTransport)> {
-    if nothing_cached && size_bytes <= crate::window::MAX_WHOLE_FILE_BYTES && !missing.is_empty() {
+    let max_ranged_read_bytes = sizes.max_ranged_read_bytes;
+    if nothing_cached && size_bytes <= sizes.max_whole_file_bytes && !missing.is_empty() {
         return vec![(0..size_bytes, FetchTransport::WholeFile)];
     }
     let mut transfers = Vec::new();
     for range in missing {
-        if range.end - range.start <= MAX_RANGED_READ_BYTES {
+        if range.end - range.start <= max_ranged_read_bytes {
             transfers.push((range.clone(), FetchTransport::Ranged));
         } else if direct_get {
             transfers.push((range.clone(), FetchTransport::Grant));
         } else {
             let mut start = range.start;
             while start < range.end {
-                let end = (start + MAX_RANGED_READ_BYTES).min(range.end);
+                let end = (start + max_ranged_read_bytes).min(range.end);
                 transfers.push((start..end, FetchTransport::Ranged));
                 start = end;
             }
@@ -199,6 +194,13 @@ mod tests {
     use super::*;
     use crate::cache_file::CacheFile;
 
+    const DEFAULT_SIZES: FetchSizes = FetchSizes {
+        max_whole_file_bytes: 8 * MIB,
+        first_window_bytes: MIB,
+        max_window_bytes: 64 * MIB,
+        max_ranged_read_bytes: 8 * MIB,
+    };
+
     /// Checks that demand fetches start before background ones, and that no
     /// more than 32 requests and 256 MiB are in flight.
     #[test]
@@ -247,18 +249,36 @@ mod tests {
     #[test]
     fn missing_ranges_become_whole_ranged_and_granted_fetches() {
         assert_eq!(
-            plan_transfers(std::slice::from_ref(&(4096..8192)), 5 * MIB, true, true),
+            plan_transfers(
+                std::slice::from_ref(&(4096..8192)),
+                5 * MIB,
+                true,
+                true,
+                &DEFAULT_SIZES
+            ),
             vec![(0..5 * MIB, FetchTransport::WholeFile)]
         );
         assert_eq!(
-            plan_transfers(&[0..MIB, 2 * MIB..34 * MIB], 100 * MIB, false, true),
+            plan_transfers(
+                &[0..MIB, 2 * MIB..34 * MIB],
+                100 * MIB,
+                false,
+                true,
+                &DEFAULT_SIZES
+            ),
             vec![
                 (0..MIB, FetchTransport::Ranged),
                 (2 * MIB..34 * MIB, FetchTransport::Grant)
             ]
         );
         assert_eq!(
-            plan_transfers(std::slice::from_ref(&(0..20 * MIB)), 100 * MIB, true, false),
+            plan_transfers(
+                std::slice::from_ref(&(0..20 * MIB)),
+                100 * MIB,
+                true,
+                false,
+                &DEFAULT_SIZES
+            ),
             vec![
                 (0..8 * MIB, FetchTransport::Ranged),
                 (8 * MIB..16 * MIB, FetchTransport::Ranged),

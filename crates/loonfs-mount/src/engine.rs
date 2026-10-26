@@ -55,6 +55,7 @@ impl Engine {
     /// keeps the settings it was admitted with. It must be called from a
     /// Tokio runtime, which runs the engine's requests.
     pub async fn mount(client: Client, config: MountConfig) -> Result<Self> {
+        config.validate()?;
         let disk: Arc<dyn DiskSpace> = Arc::new(HostDiskSpace);
         let timer: Arc<dyn MonotonicTimer> = Arc::new(StdMonotonicTimer::default());
         let (database, reflinks) = match resume(&config, disk.as_ref())? {

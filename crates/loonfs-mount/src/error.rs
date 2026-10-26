@@ -92,6 +92,14 @@ pub enum MountError {
         /// The server's reason.
         message: String,
     },
+    /// A setting of the mount's configuration is out of range.
+    #[error("mount setting `{setting}` is invalid: {reason}")]
+    InvalidSetting {
+        /// The setting.
+        setting: &'static str,
+        /// Why the value is invalid.
+        reason: String,
+    },
     /// The mount's state directory belongs to another mount.
     #[error(
         "state directory `{path}` belongs to a mount of `{namespace_id}` at `{mount_path}`, not \

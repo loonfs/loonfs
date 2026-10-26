@@ -31,6 +31,11 @@ pub(crate) const MOUNT_PATH: &str = "/work/project";
 const POLL_INTERVAL_MS: u64 = 3_600_000;
 /// One mebibyte.
 pub(crate) const MIB: u64 = 1 << 20;
+/// The first read window of a test's mount, so a test's files are small. The
+/// mount's defaults are 1 MiB, and a test's mount scales its other fetch
+/// sizes with this one the same way: whole files and ranged reads of up to
+/// 8 units, and windows of up to 64 units.
+pub(crate) const UNIT: u64 = 64 * 1024;
 
 /// A simulated server with one case-sensitive namespace, `demo`, that has
 /// `/work/project` (the mount's root, below `/work`) and `/elsewhere`
@@ -229,7 +234,8 @@ impl Fixture {
     }
 
     /// Returns a read-only mount's configuration, with a small free-space
-    /// floor and a poll interval that doesn't pass during a test.
+    /// floor, a poll interval that doesn't pass during a test, and fetch
+    /// sizes in units of [`UNIT`].
     pub(crate) fn config(&self) -> MountConfig {
         let mut config = MountConfig::new(
             self.namespace_id.clone(),
@@ -239,6 +245,10 @@ impl Fixture {
         );
         config.min_free_bytes = MIB;
         config.poll_interval_ms = POLL_INTERVAL_MS;
+        config.max_whole_file_bytes = 8 * UNIT;
+        config.first_window_bytes = UNIT;
+        config.max_window_bytes = 64 * UNIT;
+        config.max_ranged_read_bytes = 8 * UNIT;
         config
     }
 

@@ -1,5 +1,7 @@
 //! The settings of one mount, with the defaults that `loonfs mount` uses.
 
+use crate::error::{MountError, Result};
+use crate::fetch::MAX_FETCH_BYTES_IN_FLIGHT;
 use loonfs_types::{AbsolutePath, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -73,8 +75,18 @@ pub struct MountConfig {
     /// How long a barrier waits for publication before it fails
     /// (`--sync-timeout-ms`).
     pub sync_timeout_ms: u64,
+    /// The largest file that the first read fetches whole.
+    pub max_whole_file_bytes: u64,
+    /// The first read window of a larger file, and the window after a seek.
+    pub first_window_bytes: u64,
+    /// The largest window that sequential reads grow to.
+    pub max_window_bytes: u64,
+    /// The largest fetch that's a ranged read through the server. A larger
+    /// fetch uses a download grant when the deployment advertises grants.
+    pub max_ranged_read_bytes: u64,
 }
 
+const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 
 /// The name of the mount's control directory at its root, which the mount
@@ -106,7 +118,41 @@ impl MountConfig {
             uid: None,
             gid: None,
             sync_timeout_ms: 60_000,
+            max_whole_file_bytes: 8 * MIB,
+            first_window_bytes: MIB,
+            max_window_bytes: 64 * MIB,
+            max_ranged_read_bytes: 8 * MIB,
         }
+    }
+
+    /// Checks the fetch sizes: each one fetch fits the shared limit on
+    /// fetches in flight, so a fetch never waits for room that can't exist,
+    /// and the first window is at most the largest one.
+    pub(crate) fn validate(&self) -> Result<()> {
+        let max_fetch_bytes = MAX_FETCH_BYTES_IN_FLIGHT;
+        for (setting, value) in [
+            ("max_whole_file_bytes", self.max_whole_file_bytes),
+            ("first_window_bytes", self.first_window_bytes),
+            ("max_window_bytes", self.max_window_bytes),
+            ("max_ranged_read_bytes", self.max_ranged_read_bytes),
+        ] {
+            if value == 0 || value > max_fetch_bytes {
+                return Err(MountError::InvalidSetting {
+                    setting,
+                    reason: format!("{value} isn't between 1 and {max_fetch_bytes}"),
+                });
+            }
+        }
+        if self.first_window_bytes > self.max_window_bytes {
+            return Err(MountError::InvalidSetting {
+                setting: "first_window_bytes",
+                reason: format!(
+                    "{} is larger than `max_window_bytes` ({})",
+                    self.first_window_bytes, self.max_window_bytes
+                ),
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn database_path(&self) -> PathBuf {

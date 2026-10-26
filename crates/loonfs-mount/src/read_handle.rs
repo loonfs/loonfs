@@ -5,7 +5,7 @@ use crate::cache_file::CacheFile;
 use crate::control::{ControlMessage, ControlSender};
 use crate::error::{MountError, Result};
 use crate::item::ItemId;
-use crate::window::ReadWindow;
+use crate::window::{FetchSizes, ReadWindow};
 use bytes::Bytes;
 use loonfs_types::{ContentRef, InodeId, RevisionNo};
 use std::ops::Range;
@@ -51,6 +51,7 @@ pub(crate) struct OpenedRead {
     pub(crate) handle: HandleId,
     pub(crate) item: ItemId,
     pub(crate) view: Arc<Mutex<HandleView>>,
+    pub(crate) sizes: FetchSizes,
 }
 
 /// One open descriptor of a file, which reads the revision that was current
@@ -72,7 +73,7 @@ impl ReadHandle {
             handle: opened.handle,
             item: opened.item,
             view: opened.view,
-            window: Mutex::new(ReadWindow::default()),
+            window: Mutex::new(ReadWindow::new(opened.sizes)),
             control,
         }
     }

@@ -4,7 +4,7 @@
 
 use crate::support::{
     append, fixture_with, move_path, open, operations, pattern, put, put_replacing, read, refresh,
-    MIB,
+    UNIT,
 };
 use loonfs_mount_sim::{Operation, RequestRecord, SimulatedServerConfig};
 
@@ -15,29 +15,29 @@ use loonfs_mount_sim::{Operation, RequestRecord, SimulatedServerConfig};
 /// snapshot.
 async fn run() -> Vec<RequestRecord> {
     let fixture = fixture_with(SimulatedServerConfig {
-        max_download_range_bytes: MIB,
+        max_download_range_bytes: UNIT,
         ..SimulatedServerConfig::default()
     });
     fixture.commit(vec![
         put("log.txt", b"line 0\n"),
         put("/elsewhere/incoming/a.txt", b"a"),
     ]);
-    let data = pattern(20 * MIB);
+    let data = pattern(20 * UNIT);
     fixture.upload("data.bin", &data).await;
     let engine = fixture.mount().await;
     let mut trace = fixture.server.take_trace();
     let log = open(&engine, "log.txt").await;
     read(&log, 0, 4096).await;
     let large = open(&engine, "data.bin").await;
-    for offset in (0..4 * MIB).step_by(256 * 1024) {
-        read(&large, offset, 256 * 1024).await;
+    for offset in (0..4 * UNIT).step_by(usize::try_from(UNIT / 4).expect("a quarter unit")) {
+        read(&large, offset, UNIT / 4).await;
     }
     fixture.commit(vec![append("log.txt", b"line 1\n")]);
     fixture.commit(vec![move_path("/elsewhere/incoming", "incoming")]);
     let last = fixture.commit(vec![put_replacing("data.bin", b"replaced")]);
     refresh(&engine, last.committed_seq).await;
     read(&log, 7, 4096).await;
-    read(&large, 19 * MIB, 4096).await;
+    read(&large, 19 * UNIT, 4096).await;
     fixture.wait_for_request(Operation::DeleteSnapshot).await;
     trace.extend(fixture.server.take_trace());
     trace
