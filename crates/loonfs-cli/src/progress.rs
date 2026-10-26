@@ -49,6 +49,8 @@ impl ProgressMode {
 pub(crate) enum ProgressOp {
     Get,
     Put,
+    #[cfg(unix)]
+    Mount,
 }
 
 impl ProgressOp {
@@ -56,8 +58,22 @@ impl ProgressOp {
         match self {
             Self::Get => "get",
             Self::Put => "put",
+            #[cfg(unix)]
+            Self::Mount => "mount",
         }
     }
+}
+
+/// One step of an operation that moves no bytes, such as mounting.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct Step<'a> {
+    /// The step's name in a `step` event, such as `scanning`.
+    pub(crate) name: &'a str,
+    /// What a terminal shows, such as `listing the tree`.
+    pub(crate) description: String,
+    /// The entries that a scan has listed so far, and its budget.
+    pub(crate) entries: Option<(u64, u64)>,
 }
 
 /// Current progress counters.
@@ -276,6 +292,36 @@ impl ProgressReporter {
         }
     }
 
+    /// Reports a step of an operation that moves no bytes: one line redrawn
+    /// in place on a terminal, or one `step` event.
+    #[cfg(unix)]
+    pub(crate) fn step(&self, step: &Step<'_>) {
+        match self.mode {
+            ProgressMode::Events => self.emit_event(&Event::Step {
+                kind: "step",
+                op: self.op.as_str(),
+                path: &self.path,
+                step: step.name,
+                listed_entries: step.entries.map(|(listed, _)| listed),
+                max_entries: step.entries.map(|(_, budget)| budget),
+                elapsed_ms: self.elapsed_ms(),
+            }),
+            ProgressMode::Human => {
+                let line = format!("{} {}  {}", self.op.as_str(), self.path, step.description);
+                self.draw(&mut self.lock(), &line);
+            }
+            ProgressMode::Off => {}
+        }
+    }
+
+    /// Erases the line that [`Self::step`] drew on a terminal.
+    #[cfg(unix)]
+    pub(crate) fn clear(&self) {
+        if self.mode == ProgressMode::Human {
+            self.erase(&mut self.lock());
+        }
+    }
+
     /// Ends the operation: a last report of where it got to, and a terminal
     /// left as clean as it was found.
     pub(crate) fn finish(&self) {
@@ -415,6 +461,18 @@ enum Event<'a> {
         path: &'a str,
         phase: &'a str,
         bytes_done: u64,
+        elapsed_ms: u64,
+    },
+    #[cfg(unix)]
+    Step {
+        kind: &'static str,
+        op: &'static str,
+        path: &'a str,
+        step: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        listed_entries: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_entries: Option<u64>,
         elapsed_ms: u64,
     },
 }

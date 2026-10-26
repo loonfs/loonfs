@@ -12,14 +12,14 @@ use crate::args::{
 };
 use crate::config::{remote_client_config, ProfileConfig};
 use crate::error::{CliError, CliErrorCode};
-use crate::render::write_stderr_progress;
+use crate::progress::{ProgressOp, ProgressReporter, Step};
 use crate::resolve::{load_cli_config, resolve_actor, resolve_subject};
 use loonfs_mount::daemon::protocol::{
     DaemonErrorCode, DaemonFailure, DaemonProfile, DaemonRequest, DaemonResponse, MountOptions,
     MountRequest, MountStep, RefreshRequest, StatusRequest, UnmountRequest, UnmountedReport,
 };
 use loonfs_mount::daemon::{DaemonClient, DaemonError, DaemonPaths, Kernel};
-use loonfs_mount::MountAccess;
+use loonfs_mount::{MountAccess, MountProgress};
 use loonfs_types::{AbsolutePath, ErrorCode, NamespaceId};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::process::CommandExt as _;
@@ -74,19 +74,19 @@ pub(crate) async fn run_mount(
             max_pinned_bytes: args.pinned_max_bytes,
             uid: args.uid,
             gid: args.gid,
+            sync_timeout_ms: args.sync_timeout_ms,
         },
         profile,
     }));
     let client = connect_or_start(&paths).await.map_err(failure)?;
-    let progress = |step| {
-        if runtime.progress.human_lines_enabled() {
-            write_stderr_progress(progress_line(step, &target, &directory));
-        }
-    };
+    let reporter = ProgressReporter::new(runtime, ProgressOp::Mount, target);
     let response = client
-        .request(&request, progress)
-        .await
-        .map_err(|error| failure(daemon_error(&error)))?;
+        .request(&request, |step| {
+            reporter.step(&progress_step(step, &directory))
+        })
+        .await;
+    reporter.clear();
+    let response = response.map_err(|error| failure(daemon_error(&error)))?;
     match response {
         DaemonResponse::Mounted(report) => Ok(CommandOutput {
             kind,
@@ -437,13 +437,52 @@ fn start_daemon_log() {
         .try_init();
 }
 
-fn progress_line(step: MountStep, target: &str, directory: &Path) -> String {
-    match step {
-        MountStep::CheckingHost => "checking that this host can mount".to_owned(),
-        MountStep::Admitting => {
-            format!("admitting {target}: checking the namespace and listing its tree")
-        }
-        MountStep::Mounting => format!("mounting {target} at {}", directory.display()),
+/// Returns how a terminal and a `step` event show a step of mounting.
+fn progress_step(step: MountStep, directory: &Path) -> Step<'static> {
+    let (name, description, entries) = match step {
+        MountStep::CheckingKernel => (
+            "checking_kernel",
+            "checking that the kernel can mount".to_owned(),
+            None,
+        ),
+        MountStep::Engine(MountProgress::CheckingHost) => (
+            "checking_host",
+            "checking the state directory".to_owned(),
+            None,
+        ),
+        MountStep::Engine(MountProgress::ReadingCapabilities) => (
+            "reading_capabilities",
+            "reading the deployment's capabilities and the namespace".to_owned(),
+            None,
+        ),
+        MountStep::Engine(MountProgress::CreatingSnapshot) => (
+            "creating_snapshot",
+            "creating the snapshot that the scan lists".to_owned(),
+            None,
+        ),
+        MountStep::Engine(MountProgress::Scanning {
+            listed_entries,
+            max_entries,
+        }) => (
+            "scanning",
+            format!("listing the tree: {listed_entries} of at most {max_entries} entries"),
+            Some((listed_entries, max_entries)),
+        ),
+        MountStep::Engine(MountProgress::StartingFeed) => (
+            "starting_feed",
+            "starting to follow the change feed".to_owned(),
+            None,
+        ),
+        MountStep::Mounting => (
+            "mounting",
+            format!("mounting at {}", directory.display()),
+            None,
+        ),
+    };
+    Step {
+        name,
+        description,
+        entries,
     }
 }
 

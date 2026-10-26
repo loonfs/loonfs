@@ -106,6 +106,14 @@ fn write_mount_status(text: &mut String, directory: &Path, status: &Status) {
                 cache.max_pinned_bytes
             ),
         ),
+        ("owner", format!("uid {}, gid {}", status.uid, status.gid)),
+        ("state dir", status.state_directory.display().to_string()),
+        (
+            "free space",
+            status
+                .available_bytes
+                .map_or_else(|| "-".to_owned(), |bytes| format!("{bytes} bytes")),
+        ),
         ("reflinks", reflinks.to_owned()),
     ];
     for (label, value) in rows {

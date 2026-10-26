@@ -57,6 +57,10 @@ pub(crate) struct MountArgs {
     /// runs the daemon].
     #[arg(long, value_name = "GID")]
     pub gid: Option<u32>,
+    /// How long a `loonfs refresh` of the mount waits for the sequence it
+    /// asks for, in milliseconds [default: 60000].
+    #[arg(long, value_name = "MS")]
+    pub sync_timeout_ms: Option<u64>,
     #[command(flatten)]
     pub state: StateDirectoryArgs,
 }

@@ -11,13 +11,14 @@ use super::protocol::{
 };
 use crate::config::{MountAccess, MountConfig};
 use crate::engine::Engine;
+use crate::error::MountError;
 use loonfs_client::{Client, ClientConfig};
 use loonfs_types::{AbsolutePath, ChangeSeq, NamespaceId};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 /// What a mount shows, which a repeated `mount` request has to match.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,7 +175,7 @@ impl Mounts {
         progress: &(dyn Fn(MountStep) + Send + Sync),
     ) -> Result<(Arc<Engine>, Box<dyn KernelMount>), DaemonFailure> {
         let directory = request.directory.clone();
-        progress(MountStep::CheckingHost);
+        progress(MountStep::CheckingKernel);
         let kernel = self.kernel.clone();
         let checked_directory = directory.clone();
         blocking(move || {
@@ -184,7 +185,6 @@ impl Mounts {
         .await
         .map_err(|error| mount_failed(format!("host can't serve the mount: {error}")))?;
 
-        progress(MountStep::Admitting);
         let client = client(&request)?;
         let mut config = MountConfig::new(
             request.namespace_id,
@@ -193,15 +193,7 @@ impl Mounts {
             self.paths.mount_state_directory(&directory),
         );
         request.options.apply(&mut config);
-        // Admission keeps the mount's database across its awaits, so its
-        // future can't move between the runtime's threads, and it runs on a
-        // blocking thread of its own instead.
-        let runtime = tokio::runtime::Handle::current();
-        let engine = Arc::new(
-            blocking(move || runtime.block_on(Engine::mount(client, config, None)))
-                .await
-                .map_err(|error| mount_failed(error.to_string()))?,
-        );
+        let engine = Arc::new(admit(client, config, progress).await?);
 
         progress(MountStep::Mounting);
         let kernel = self.kernel.clone();
@@ -222,18 +214,18 @@ impl Mounts {
     }
 
     /// Reads a mount's change feed now, and waits until it has applied
-    /// `at_least`, or one poll when that isn't set.
+    /// `at_least`, or one poll when that isn't set, for at most the mount's
+    /// sync timeout.
     pub(crate) async fn refresh(
         &self,
         request: RefreshRequest,
     ) -> Result<ChangeSeq, DaemonFailure> {
         let engine = self.ready_engine(&request.directory)?;
+        let timeout = Duration::from_millis(engine.config().sync_timeout_ms);
         engine
-            .refresh_at_least(request.at_least.unwrap_or(ChangeSeq(0)), Duration::MAX)
+            .refresh_at_least(request.at_least.unwrap_or(ChangeSeq(0)), timeout)
             .await
-            .map_err(|error| {
-                DaemonFailure::new(DaemonErrorCode::EngineFailed, error.to_string())
-            })?;
+            .map_err(|error| refresh_failed(&request.directory, error))?;
         Ok(engine.status().applied_seq)
     }
 
@@ -309,6 +301,58 @@ fn busy(directory: &Path, slot: &Slot) -> DaemonFailure {
             identity.path
         ),
     )
+}
+
+/// Admits a mount with the engine, in a task of its own, and passes each
+/// step that the engine reports to `progress` as it arrives.
+async fn admit(
+    client: Client,
+    config: MountConfig,
+    progress: &(dyn Fn(MountStep) + Send + Sync),
+) -> Result<Engine, DaemonFailure> {
+    let (sender, mut steps) = mpsc::unbounded_channel();
+    let mut admission = tokio::spawn(Engine::mount(client, config, Some(sender)));
+    let admitted = loop {
+        tokio::select! {
+            biased;
+            Some(step) = steps.recv() => progress(MountStep::Engine(step)),
+            admitted = &mut admission => break admitted,
+        }
+    };
+    while let Ok(step) = steps.try_recv() {
+        progress(MountStep::Engine(step));
+    }
+    admitted
+        .expect("a mount's admission should not panic")
+        .map_err(|error| mount_failed(error.to_string()))
+}
+
+/// Reports why a refresh failed, with a code of its own for a timeout and
+/// for a sequence that the namespace hasn't committed.
+fn refresh_failed(directory: &Path, error: MountError) -> DaemonFailure {
+    let directory = directory.display();
+    match error {
+        MountError::RefreshTimedOut {
+            seq,
+            applied_seq,
+            timeout_ms,
+        } => DaemonFailure::new(
+            DaemonErrorCode::RefreshTimedOut,
+            format!(
+                "`{directory}` didn't apply sequence {} within its sync timeout of {timeout_ms} \
+                 ms, and has applied sequence {}",
+                seq.0, applied_seq.0
+            ),
+        ),
+        MountError::SequenceNotCommitted { seq, head_seq } => DaemonFailure::new(
+            DaemonErrorCode::SequenceNotCommitted,
+            format!(
+                "sequence {} isn't committed: the namespace's head is sequence {}",
+                seq.0, head_seq.0
+            ),
+        ),
+        other => DaemonFailure::new(DaemonErrorCode::EngineFailed, other.to_string()),
+    }
 }
 
 fn mount_failed(message: String) -> DaemonFailure {

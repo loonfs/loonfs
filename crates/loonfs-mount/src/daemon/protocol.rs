@@ -6,6 +6,7 @@
 
 use super::kernel::StaleMountOutcome;
 use crate::config::{MountAccess, MountConfig};
+use crate::progress::MountProgress;
 use crate::status::Status;
 use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, NamespaceId, SecretString, Subject};
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,8 @@ pub struct MountOptions {
     pub uid: Option<u32>,
     /// `--gid`.
     pub gid: Option<u32>,
+    /// `--sync-timeout-ms`, which also bounds how long `refresh` waits.
+    pub sync_timeout_ms: Option<u64>,
 }
 
 impl MountOptions {
@@ -102,6 +105,7 @@ impl MountOptions {
             max_pinned_bytes,
             uid,
             gid,
+            sync_timeout_ms,
         } = self.clone();
         config.max_entries = max_entries.unwrap_or(config.max_entries);
         config.poll_interval_ms = poll_interval_ms.unwrap_or(config.poll_interval_ms);
@@ -110,6 +114,7 @@ impl MountOptions {
         config.max_pinned_bytes = max_pinned_bytes.unwrap_or(config.max_pinned_bytes);
         config.uid = uid.or(config.uid);
         config.gid = gid.or(config.gid);
+        config.sync_timeout_ms = sync_timeout_ms.unwrap_or(config.sync_timeout_ms);
     }
 }
 
@@ -204,14 +209,18 @@ pub enum DaemonResponse {
 }
 
 /// A step of admitting and mounting.
+///
+/// A command skips a progress line that doesn't decode, so a newer daemon
+/// can add steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MountStep {
-    /// Checking that the host can mount.
-    CheckingHost,
-    /// Checking the namespace and listing the mounted tree at a snapshot, or
-    /// loading the state that a stopped daemon left.
-    Admitting,
+    /// Checking that the kernel can mount on this host, and detaching a
+    /// mount that a stopped daemon left at the directory.
+    CheckingKernel,
+    /// A step of the engine's admission, or of resuming the state that an
+    /// earlier mount left, such as the entries that the scan has listed.
+    Engine(MountProgress),
     /// Mounting the directory.
     Mounting,
 }
@@ -361,6 +370,11 @@ pub enum DaemonErrorCode {
     UnmountFailed,
     /// The engine failed the request.
     EngineFailed,
+    /// A refresh didn't see the mount apply the sequence within the mount's
+    /// sync timeout.
+    RefreshTimedOut,
+    /// A refresh waited for a sequence past the namespace's head.
+    SequenceNotCommitted,
     /// The operation isn't available yet.
     NotSupported,
     /// The daemon is stopping.
@@ -382,6 +396,8 @@ impl DaemonErrorCode {
             Self::MountFailed => "mount_failed",
             Self::UnmountFailed => "unmount_failed",
             Self::EngineFailed => "engine_failed",
+            Self::RefreshTimedOut => "refresh_timed_out",
+            Self::SequenceNotCommitted => "sequence_not_committed",
             Self::NotSupported => "not_supported",
             Self::ShuttingDown => "shutting_down",
             Self::Unknown => "unknown",
@@ -421,6 +437,13 @@ pub fn decode_request(line: &[u8]) -> Result<DaemonRequest, DaemonFailure> {
 /// Decodes a response line.
 pub fn decode_response(line: &[u8]) -> serde_json::Result<DaemonResponse> {
     serde_json::from_slice(line)
+}
+
+/// Returns whether a response line is a progress line, whether or not its
+/// step decodes.
+pub(crate) fn is_progress_line(line: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(line)
+        .is_ok_and(|value| value.get("kind").and_then(|kind| kind.as_str()) == Some("progress"))
 }
 
 #[cfg(test)]

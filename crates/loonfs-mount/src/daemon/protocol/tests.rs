@@ -116,7 +116,13 @@ fn every_message_round_trips_through_one_line() {
     };
     let responses = [
         DaemonResponse::Progress {
-            step: MountStep::Admitting,
+            step: MountStep::CheckingKernel,
+        },
+        DaemonResponse::Progress {
+            step: MountStep::Engine(MountProgress::Scanning {
+                listed_entries: 3_000,
+                max_entries: 110_000,
+            }),
         },
         DaemonResponse::Mounted(Box::new(MountedReport {
             outcome: MountOutcome::AlreadyMounted,
@@ -190,6 +196,17 @@ fn an_unknown_operation_is_reported_apart_from_an_invalid_request() {
         let invalid = decode_request(line).expect_err("an invalid request");
         assert_eq!(invalid.code, DaemonErrorCode::InvalidRequest, "{line:?}");
     }
+}
+
+/// Checks that a command can skip a progress line from a newer daemon, and
+/// still fails on any other line that doesn't decode.
+#[test]
+fn a_progress_line_that_doesnt_decode_is_still_a_progress_line() {
+    let newer = br#"{"kind":"progress","step":{"engine":{"step":"verifying"}}}"#;
+    assert!(decode_response(newer).is_err());
+    assert!(is_progress_line(newer));
+    assert!(!is_progress_line(br#"{"kind":"remounted"}"#));
+    assert!(!is_progress_line(b"not json"));
 }
 
 /// Checks that a command reads a failure code from a newer daemon as

@@ -2,7 +2,8 @@
 
 use super::error::DaemonError;
 use super::protocol::{
-    decode_response, encode_line, DaemonRequest, DaemonResponse, MountStep, MAX_RESPONSE_BYTES,
+    decode_response, encode_line, is_progress_line, DaemonRequest, DaemonResponse, MountStep,
+    MAX_RESPONSE_BYTES,
 };
 use crate::clock;
 use std::path::{Path, PathBuf};
@@ -88,6 +89,8 @@ impl DaemonClient {
             match decode_response(&line) {
                 Ok(DaemonResponse::Progress { step }) => progress(step),
                 Ok(response) => return Ok(response),
+                // A newer daemon's step, which this command doesn't know.
+                Err(_) if is_progress_line(&line) => {}
                 Err(error) => {
                     return Err(DaemonError::protocol(format!(
                         "the daemon's response didn't decode: {error}"
