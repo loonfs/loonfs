@@ -12,6 +12,7 @@ members = [
   "crates/loonfs-server",
   "crates/loonfs-client",
   "crates/loonfs-mount",
+  "crates/loonfs-fuse",
   "crates/loonfs-cli",
   "crates/loonfs-conformance",
   "crates/loonfs-sim",
@@ -65,9 +66,12 @@ libc = "0.2"
 # values with `form_urlencoded` too.
 form_urlencoded = "1"
 futures = "0.3"
-# Cross-process file locks for the local store and the CLI's config and upload
-# journal.
+# Cross-process file locks for the local store, the CLI's config and upload
+# journal, and the mount daemon's state directory.
 fs4 = "0.13"
+# The FUSE adapter of `loonfs mount`. Pinned exactly, because the adapter
+# relies on this release's mount fallback, session ACL, and notifier.
+fuser = "=0.18.0"
 getrandom = "0.3"
 object_store = { version = "0.14.2", default-features = false, features = ["aws", "gcp"] }
 # The mount's local state database, `tree.db`. `bundled` compiles the database
@@ -82,7 +86,8 @@ regex = { version = "1.11", default-features = false, features = ["std", "perf"]
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
 regex-syntax = "0.8"
 # Already in the tree beneath fs4 and tempfile. Named directly for the
-# mount's reflink check (`FICLONE`), which the standard library doesn't offer.
+# mount's reflink check (`FICLONE`) and the FUSE adapter's detach (`umount2`)
+# and effective user, which the standard library doesn't offer.
 rustix = { version = "1", features = ["fs"] }
 # Already in the tree beneath rustls and rcgen. Named directly because the GCS
 # presigner signs `GOOG4-RSA-SHA256` with an RSA key, which the hash and MAC
@@ -114,6 +119,7 @@ loonfs-client = { path = "crates/loonfs-client", version = "0.4.0" }
 loonfs-core = { path = "crates/loonfs-core", version = "0.4.0" }
 loonfs-grep = { path = "crates/loonfs-grep", version = "0.4.0" }
 loonfs-http = { path = "crates/loonfs-http", version = "0.4.0" }
+loonfs-fuse = { path = "crates/loonfs-fuse", version = "0.4.0" }
 loonfs-mount = { path = "crates/loonfs-mount", version = "0.4.0" }
 loonfs-objectstore = { path = "crates/loonfs-objectstore", version = "0.4.0" }
 loonfs-types = { path = "crates/loonfs-types", version = "0.4.0" }

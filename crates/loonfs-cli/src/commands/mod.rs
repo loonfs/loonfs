@@ -3,11 +3,12 @@
 mod access;
 mod config;
 mod context;
-pub(crate) use context::shell_quote;
+pub(crate) use context::{render_target, shell_quote};
 pub(crate) mod download;
 mod fs;
 mod inspection;
 mod maintenance;
+mod mount;
 mod namespace;
 mod output;
 mod pagination;
@@ -122,6 +123,11 @@ pub(crate) async fn run(
                 Command::Maintenance { command } => {
                     maintenance::run_maintenance_command(kind, config_path, command).await
                 }
+                Command::Mount(args) => mount::run_mount(kind, config_path, *args, runtime).await,
+                Command::Unmount(args) => mount::run_unmount(kind, args).await,
+                Command::Status(args) => mount::run_status(kind, args).await,
+                Command::Refresh(args) => mount::run_refresh(kind, args).await,
+                Command::Daemon(args) => mount::run_daemon(kind, args).await,
             }
         }
     }

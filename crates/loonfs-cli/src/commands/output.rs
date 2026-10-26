@@ -6,6 +6,7 @@ use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_run_outcome, StoreProbeRunOutcome};
+use loonfs_mount::daemon::protocol::{MountStatusReport, MountedReport, UnmountedReport};
 use loonfs_types::api::v0::{
     DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, Snapshot,
     StoreProbeResponse,
@@ -16,6 +17,7 @@ use loonfs_types::{
     RunMaintenanceResponse,
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct ListingHeadDrift {
@@ -317,6 +319,23 @@ pub(crate) enum CommandData {
     Version {
         version: String,
     },
+    /// A directory that `loonfs mount` mounted, or that already had the
+    /// mount.
+    Mounted(Box<MountedReport>),
+    /// A directory that `loonfs unmount` unmounted.
+    Unmounted(UnmountedReport),
+    /// The state of each mount that `loonfs status` reported.
+    MountStatuses {
+        mounts: Vec<MountStatusReport>,
+    },
+    /// A mount whose change feed `loonfs refresh` read.
+    Refreshed {
+        directory: PathBuf,
+        applied_seq: ChangeSeq,
+    },
+    /// The daemon stopped, because it had no mount for a minute or a
+    /// `shutdown` request stopped it.
+    DaemonStopped,
     /// A generated shell completion script, rendered byte-for-byte.
     CompletionScript(Vec<u8>),
     /// The payload already went to standard output as it arrived, so there is

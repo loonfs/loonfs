@@ -1,5 +1,9 @@
 //! The clap argument grammar for every `loonfs` command.
 
+mod mount;
+
+pub(crate) use mount::{DaemonArgs, MountArgs, RefreshArgs, StatusArgs, UnmountArgs};
+
 use crate::progress::ProgressMode;
 use crate::render::OutputFormat;
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
@@ -66,6 +70,12 @@ Context and configuration:
   use           Set a profile's default namespace
   current       Show the selected profile and namespace
   config        Inspect the CLI config file
+
+Mounts (Linux only):
+  mount         Mount a namespace directory on a local directory
+  unmount       Unmount a mounted directory
+  status        Report the state of mounts
+  refresh       Read a mount's change feed now
 
 Inspection:
   stat          Describe one visible path or inode
@@ -292,6 +302,18 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Mount a namespace, or a directory in it, on a local directory.
+    Mount(Box<MountArgs>),
+    /// Unmount a directory that `loonfs mount` mounted.
+    Unmount(UnmountArgs),
+    /// Report the state of this user's mounts.
+    Status(StatusArgs),
+    /// Read a mount's change feed now, and wait for a sequence.
+    Refresh(RefreshArgs),
+    /// Serve this user's mounts. `loonfs mount` starts it when none is
+    /// running.
+    #[command(hide = true)]
+    Daemon(DaemonArgs),
     /// Print version and build metadata.
     Version,
 }
@@ -300,7 +322,14 @@ impl Command {
     fn accepts_profile_selector(&self) -> bool {
         !matches!(
             self,
-            Self::Init | Self::Profile { .. } | Self::Config { .. } | Self::Version
+            Self::Init
+                | Self::Profile { .. }
+                | Self::Config { .. }
+                | Self::Unmount(_)
+                | Self::Status(_)
+                | Self::Refresh(_)
+                | Self::Daemon(_)
+                | Self::Version
         )
     }
 
@@ -1607,6 +1636,11 @@ command_kinds! {
     MaintenanceIndexStatus => "maintenance_index_status",
     ConfigPath => "config_path",
     ConfigShow => "config_show",
+    Mount => "mount",
+    Unmount => "unmount",
+    Status => "status",
+    Refresh => "refresh",
+    Daemon => "daemon",
     Version => "version",
 }
 
@@ -1704,6 +1738,11 @@ impl Command {
                 ConfigCommand::Path => CommandKind::ConfigPath,
                 ConfigCommand::Show => CommandKind::ConfigShow,
             },
+            Command::Mount(_) => CommandKind::Mount,
+            Command::Unmount(_) => CommandKind::Unmount,
+            Command::Status(_) => CommandKind::Status,
+            Command::Refresh(_) => CommandKind::Refresh,
+            Command::Daemon(_) => CommandKind::Daemon,
             Command::Version => CommandKind::Version,
         }
     }
@@ -1977,6 +2016,57 @@ mod tests {
             assert!(error.to_string().contains(
                 "`--all` cannot be used with `--json`; use `--json --limit <n>` for a bounded document or `--jsonl` to stream all results"
             ));
+        }
+    }
+
+    #[test]
+    fn mount_commands_take_a_target_and_a_directory_and_no_namespace_selector() {
+        let cli = Cli::try_parse_from([
+            "loonfs",
+            "mount",
+            "demo/work",
+            "/mnt/work",
+            "--ro",
+            "--max-entries",
+            "500",
+            "--profile",
+            "remote",
+        ])
+        .expect("a mount command line");
+        validate_cli(&cli).expect("a mount takes a profile");
+        let TopLevelCommand::Configured(Command::Mount(args)) = &cli.command else {
+            panic!("expected a mount command, got {:?}", cli.command);
+        };
+        assert_eq!(args.target, "demo/work");
+        assert_eq!(args.max_entries, Some(500));
+        assert!(args.ro);
+
+        let missing_directory =
+            Cli::try_parse_from(["loonfs", "mount", "demo"]).expect_err("a missing directory");
+        assert_eq!(
+            missing_directory.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        for arguments in [
+            vec![
+                "loonfs",
+                "mount",
+                "demo",
+                "/mnt",
+                "--ro",
+                "--namespace",
+                "demo",
+            ],
+            vec!["loonfs", "unmount", "/mnt", "--profile", "remote"],
+            vec!["loonfs", "status", "--profile", "remote"],
+        ] {
+            let cli = Cli::try_parse_from(&arguments).expect("the arguments parse");
+            let error = validate_cli(&cli).expect_err("a selector the command doesn't use");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{arguments:?}"
+            );
         }
     }
 
