@@ -24,7 +24,9 @@ impl Mounts {
         self: &Arc<Self>,
         request: UnmountRequest,
     ) -> Result<UnmountedReport, DaemonFailure> {
-        let UnmountRequest { directory, force } = request;
+        let UnmountRequest {
+            directory, force, ..
+        } = request;
         let state_directory = self.paths.mount_state_directory(&directory);
         let unmounted = |state| UnmountedReport {
             directory: directory.clone(),
@@ -151,6 +153,7 @@ impl Mounts {
         for directory in directories {
             let request = UnmountRequest {
                 directory: directory.clone(),
+                state_directory: self.paths.state_directory().to_path_buf(),
                 force: true,
             };
             if let Err(failure) = self.unmount(request).await {

@@ -75,22 +75,32 @@ fn mount_request() -> MountRequest {
 #[test]
 fn every_message_round_trips_through_one_line() {
     let directory = PathBuf::from("/mnt/project");
+    let state_directory = PathBuf::from("/home/ada/.local/state/loonfs");
+    let scope = DaemonScope {
+        state_directory: state_directory.clone(),
+    };
     let requests = [
         DaemonRequest::Mount(Box::new(mount_request())),
         DaemonRequest::Unmount(UnmountRequest {
             directory: directory.clone(),
+            state_directory: state_directory.clone(),
             force: true,
         }),
         DaemonRequest::Sync(DirectoryRequest {
             directory: directory.clone(),
+            state_directory: state_directory.clone(),
         }),
         DaemonRequest::Refresh(RefreshRequest {
             directory: directory.clone(),
+            state_directory: state_directory.clone(),
             at_least: Some(ChangeSeq(9)),
         }),
-        DaemonRequest::Status(StatusRequest { directory: None }),
-        DaemonRequest::List,
-        DaemonRequest::Shutdown,
+        DaemonRequest::Status(StatusRequest {
+            directory: None,
+            state_directory: state_directory.clone(),
+        }),
+        DaemonRequest::List(scope.clone()),
+        DaemonRequest::Shutdown(scope),
     ];
     assert_eq!(requests.len(), DaemonRequest::OPERATIONS.len());
     for request in requests {
@@ -107,6 +117,7 @@ fn every_message_round_trips_through_one_line() {
             1,
             "a message is one line"
         );
+        assert_eq!(request.state_directory(), state_directory);
         assert_eq!(decode_request(&line), Ok(request));
     }
 

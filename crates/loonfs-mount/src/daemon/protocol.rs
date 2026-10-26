@@ -10,7 +10,7 @@ use crate::progress::MountProgress;
 use crate::status::Status;
 use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, NamespaceId, SecretString, Subject};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The longest request line that the daemon reads. A `mount` request, the
 /// largest, is a few hundred bytes plus the profile's token.
@@ -21,6 +21,10 @@ pub(crate) const MAX_REQUEST_BYTES: usize = 64 << 10;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 16 << 20;
 
 /// One request to the daemon.
+///
+/// Every request includes the state directory that the command resolved, and
+/// the daemon refuses a request for another state directory than its own, so
+/// a command never acts on the mounts of another daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum DaemonRequest {
@@ -37,9 +41,9 @@ pub enum DaemonRequest {
     /// Reports the state of one mount, or of every mount.
     Status(StatusRequest),
     /// Lists the daemon's mounts.
-    List,
+    List(DaemonScope),
     /// Detaches every mount, keeping their state, and stops the daemon.
-    Shutdown,
+    Shutdown(DaemonScope),
 }
 
 impl DaemonRequest {
@@ -48,6 +52,26 @@ impl DaemonRequest {
     const OPERATIONS: [&'static str; 7] = [
         "mount", "unmount", "sync", "refresh", "status", "list", "shutdown",
     ];
+
+    /// Returns the state directory that the request is for.
+    pub fn state_directory(&self) -> &Path {
+        match self {
+            Self::Mount(request) => &request.state_directory,
+            Self::Unmount(request) => &request.state_directory,
+            Self::Sync(request) => &request.state_directory,
+            Self::Refresh(request) => &request.state_directory,
+            Self::Status(request) => &request.state_directory,
+            Self::List(scope) | Self::Shutdown(scope) => &scope.state_directory,
+        }
+    }
+}
+
+/// A request about the daemon as a whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonScope {
+    /// The state directory that the command resolved.
+    pub state_directory: PathBuf,
 }
 
 /// A request to mount `namespace_id` at `path` on `directory`.
@@ -142,6 +166,8 @@ pub struct DaemonProfile {
 pub struct UnmountRequest {
     /// The mounted directory.
     pub directory: PathBuf,
+    /// The state directory that the command resolved.
+    pub state_directory: PathBuf,
     /// Whether to keep the mount's state on disk for a later `loonfs mount`,
     /// as `--force` does.
     pub force: bool,
@@ -153,6 +179,8 @@ pub struct UnmountRequest {
 pub struct DirectoryRequest {
     /// The mounted directory.
     pub directory: PathBuf,
+    /// The state directory that the command resolved.
+    pub state_directory: PathBuf,
 }
 
 /// A request to read a mount's change feed now.
@@ -161,6 +189,8 @@ pub struct DirectoryRequest {
 pub struct RefreshRequest {
     /// The mounted directory.
     pub directory: PathBuf,
+    /// The state directory that the command resolved.
+    pub state_directory: PathBuf,
     /// The sequence to wait for, or `None` to wait for one poll.
     pub at_least: Option<ChangeSeq>,
 }
@@ -171,6 +201,8 @@ pub struct RefreshRequest {
 pub struct StatusRequest {
     /// The mounted directory, or `None` for every mount.
     pub directory: Option<PathBuf>,
+    /// The state directory that the command resolved.
+    pub state_directory: PathBuf,
 }
 
 /// One line that the daemon sends in response to a request.

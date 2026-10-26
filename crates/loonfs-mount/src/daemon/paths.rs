@@ -6,6 +6,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 const SOCKET_FILE_NAME: &str = "daemon.sock";
+/// The hexadecimal digits of the state directory's hash in a socket's name in
+/// `$XDG_RUNTIME_DIR`.
+const SOCKET_HASH_DIGITS: usize = 16;
 const LOCK_FILE_NAME: &str = "daemon.lock";
 const LOG_FILE_NAME: &str = "daemon.log";
 const MOUNTS_DIRECTORY_NAME: &str = "mounts";
@@ -21,10 +24,14 @@ impl DaemonPaths {
     /// Resolves the daemon's files from the process's environment.
     ///
     /// The state directory is `state_directory` when it's set, and otherwise
-    /// `$XDG_STATE_HOME/loonfs` or `~/.local/state/loonfs`. The socket is
-    /// `$XDG_RUNTIME_DIR/loonfs/daemon.sock`, or `daemon.sock` in the state
-    /// directory when that variable isn't set. A relative state directory is
-    /// taken from the current directory.
+    /// `$XDG_STATE_HOME/loonfs` or `~/.local/state/loonfs`. A relative state
+    /// directory is taken from the current directory.
+    ///
+    /// The socket is `$XDG_RUNTIME_DIR/loonfs/daemon-<hash>.sock`, where
+    /// `<hash>` is the start of the SHA-256 of the state directory's path,
+    /// with its symbolic links resolved once it exists. Without that
+    /// variable, the socket is `daemon.sock` in the state directory. Either
+    /// way, daemons of two state directories listen on two sockets.
     pub fn resolve(state_directory: Option<&Path>) -> Result<Self, DaemonError> {
         Self::resolve_from(state_directory, |name| std::env::var_os(name))
     }
@@ -47,7 +54,14 @@ impl DaemonPaths {
         let state_directory = std::path::absolute(&state_directory)
             .map_err(|error| DaemonError::io(&state_directory, &error))?;
         let socket = match set("XDG_RUNTIME_DIR") {
-            Some(runtime) => PathBuf::from(runtime).join("loonfs").join(SOCKET_FILE_NAME),
+            Some(runtime) => {
+                let resolved = std::fs::canonicalize(&state_directory)
+                    .unwrap_or_else(|_| state_directory.clone());
+                let hash = loonfs_types::sha256_hex(resolved.as_os_str().as_encoded_bytes());
+                PathBuf::from(runtime)
+                    .join("loonfs")
+                    .join(format!("daemon-{}.sock", &hash[..SOCKET_HASH_DIGITS]))
+            }
             None => state_directory.join(SOCKET_FILE_NAME),
         };
         Ok(Self {
@@ -130,9 +144,10 @@ mod tests {
         )
         .expect("paths");
         assert_eq!(paths.state_directory(), Path::new("/state/loonfs"));
+        let hash = loonfs_types::sha256_hex(b"/state/loonfs");
         assert_eq!(
             paths.socket(),
-            Path::new("/run/user/1000/loonfs/daemon.sock")
+            Path::new("/run/user/1000/loonfs").join(format!("daemon-{}.sock", &hash[..16]))
         );
 
         let paths = DaemonPaths::resolve_from(
@@ -151,5 +166,18 @@ mod tests {
             DaemonPaths::resolve_from(None, environment(&[])),
             Err(DaemonError::NoStateDirectory)
         ));
+    }
+
+    /// Checks that the daemons of two state directories listen on two
+    /// sockets when both sockets are in `$XDG_RUNTIME_DIR`.
+    #[test]
+    fn two_state_directories_have_two_sockets() {
+        let runtime = environment(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        let first = DaemonPaths::resolve_from(Some(Path::new("/srv/a")), &runtime).expect("paths");
+        let second = DaemonPaths::resolve_from(Some(Path::new("/srv/b")), &runtime).expect("paths");
+        assert!(first.socket().starts_with("/run/user/1000/loonfs"));
+        assert_ne!(first.socket(), second.socket());
+        let again = DaemonPaths::resolve_from(Some(Path::new("/srv/a")), &runtime).expect("paths");
+        assert_eq!(first.socket(), again.socket());
     }
 }

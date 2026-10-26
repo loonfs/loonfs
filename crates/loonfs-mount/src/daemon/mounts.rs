@@ -85,6 +85,21 @@ impl Mounts {
         }
     }
 
+    /// Refuses a request for another state directory than the daemon's.
+    pub(crate) fn check_state_directory(&self, requested: &Path) -> Result<(), DaemonFailure> {
+        if self.paths.is_state_directory(requested) {
+            return Ok(());
+        }
+        Err(DaemonFailure::new(
+            DaemonErrorCode::StateDirectoryMismatch,
+            format!(
+                "the daemon keeps its state in `{}`, not `{}`, so pass the same `--state-dir`",
+                self.paths.state_directory().display(),
+                requested.display()
+            ),
+        ))
+    }
+
     /// Returns a receiver of the number of directories in the table.
     pub(crate) fn watch_directories(&self) -> watch::Receiver<usize> {
         self.directories.subscribe()
@@ -111,17 +126,6 @@ impl Mounts {
         request: MountRequest,
         progress: &(dyn Fn(MountStep) + Send + Sync),
     ) -> Result<MountedReport, DaemonFailure> {
-        if !self.paths.is_state_directory(&request.state_directory) {
-            return Err(DaemonFailure::new(
-                DaemonErrorCode::StateDirectoryMismatch,
-                format!(
-                    "the running daemon keeps its state in `{}`, not `{}`; pass the same \
-                     `--state-dir`, or unmount the daemon's mounts first",
-                    self.paths.state_directory().display(),
-                    request.state_directory.display()
-                ),
-            ));
-        }
         let identity = Identity {
             namespace_id: request.namespace_id.clone(),
             path: request.path.clone(),

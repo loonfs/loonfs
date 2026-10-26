@@ -211,6 +211,9 @@ async fn respond(
     stop: &watch::Sender<bool>,
     progress: &mpsc::UnboundedSender<DaemonResponse>,
 ) -> DaemonResponse {
+    if let Err(failure) = mounts.check_state_directory(request.state_directory()) {
+        return DaemonResponse::Error(failure);
+    }
     let result = match request {
         DaemonRequest::Mount(request) => {
             let progress = |step| {
@@ -232,17 +235,89 @@ async fn respond(
             .refresh(request)
             .await
             .map(|applied_seq| DaemonResponse::Refreshed { applied_seq }),
-        DaemonRequest::Status(StatusRequest { directory }) => mounts
+        DaemonRequest::Status(StatusRequest { directory, .. }) => mounts
             .status(directory.as_deref())
             .map(|mounts| DaemonResponse::Statuses { mounts }),
-        DaemonRequest::List => Ok(DaemonResponse::Mounts {
+        DaemonRequest::List(_) => Ok(DaemonResponse::Mounts {
             mounts: mounts.list(),
         }),
-        DaemonRequest::Shutdown => {
+        DaemonRequest::Shutdown(_) => {
             mounts.detach_all().await;
             stop.send_replace(true);
             Ok(DaemonResponse::ShuttingDown)
         }
     };
     result.unwrap_or_else(DaemonResponse::Error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::kernel::{KernelMount, StaleMountOutcome};
+    use crate::daemon::protocol::DaemonScope;
+    use crate::engine::Engine;
+
+    /// A kernel that mounts nothing, for requests that need no mount.
+    struct NoKernel;
+
+    impl Kernel for NoKernel {
+        fn check_host(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn detach_stale(&self, _directory: &Path) -> std::io::Result<StaleMountOutcome> {
+            Ok(StaleMountOutcome::NotMounted)
+        }
+
+        fn mount(
+            &self,
+            _engine: Arc<Engine>,
+            _directory: &Path,
+        ) -> std::io::Result<Box<dyn KernelMount>> {
+            Err(std::io::Error::other("this kernel mounts nothing"))
+        }
+    }
+
+    /// Checks that the daemon refuses every request for another state
+    /// directory, so a command that resolved another `--state-dir` never
+    /// lists, stops, or unmounts this daemon's mounts.
+    #[tokio::test]
+    async fn a_request_for_another_state_directory_is_refused() {
+        let state = tempfile::tempdir().expect("a state directory");
+        let other = tempfile::tempdir().expect("another state directory");
+        let paths = DaemonPaths::resolve(Some(state.path())).expect("paths");
+        let mounts = Arc::new(Mounts::new(Arc::new(NoKernel), paths));
+        let (stop, _stopped) = watch::channel(false);
+        let (progress, _progress) = mpsc::unbounded_channel();
+        let scope = |state_directory: &Path| DaemonScope {
+            state_directory: state_directory.to_path_buf(),
+        };
+
+        for request in [
+            DaemonRequest::List(scope(other.path())),
+            DaemonRequest::Shutdown(scope(other.path())),
+        ] {
+            let refused = respond(request, &mounts, &stop, &progress).await;
+            assert!(
+                matches!(
+                    &refused,
+                    DaemonResponse::Error(failure)
+                        if failure.code == DaemonErrorCode::StateDirectoryMismatch
+                ),
+                "{refused:?}"
+            );
+        }
+        assert!(
+            !*stop.borrow(),
+            "the refused shutdown doesn't stop the daemon"
+        );
+        let listed = respond(
+            DaemonRequest::List(scope(state.path())),
+            &mounts,
+            &stop,
+            &progress,
+        )
+        .await;
+        assert_eq!(listed, DaemonResponse::Mounts { mounts: Vec::new() });
+    }
 }

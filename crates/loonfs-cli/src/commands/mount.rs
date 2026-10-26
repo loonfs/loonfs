@@ -15,8 +15,9 @@ use crate::error::{CliError, CliErrorCode};
 use crate::progress::{ProgressOp, ProgressReporter, Step};
 use crate::resolve::{load_cli_config, resolve_actor, resolve_subject};
 use loonfs_mount::daemon::protocol::{
-    DaemonErrorCode, DaemonFailure, DaemonProfile, DaemonRequest, DaemonResponse, MountOptions,
-    MountRequest, MountStep, RefreshRequest, StatusRequest, UnmountRequest, UnmountedReport,
+    DaemonErrorCode, DaemonFailure, DaemonProfile, DaemonRequest, DaemonResponse, DaemonScope,
+    MountOptions, MountRequest, MountStep, RefreshRequest, StatusRequest, UnmountRequest,
+    UnmountedReport,
 };
 use loonfs_mount::daemon::{DaemonClient, DaemonError, DaemonPaths, Kernel};
 use loonfs_mount::{MountAccess, MountProgress};
@@ -108,6 +109,7 @@ pub(crate) async fn run_unmount(
     let paths = daemon_paths(args.state.state_dir.as_deref()).map_err(failure)?;
     let request = DaemonRequest::Unmount(UnmountRequest {
         directory: directory.clone(),
+        state_directory: paths.state_directory().to_path_buf(),
         force: args.force,
     });
     let response = match connect(&paths).await.map_err(failure)? {
@@ -159,7 +161,10 @@ pub(crate) async fn run_status(
             )),
         };
     };
-    let request = DaemonRequest::Status(StatusRequest { directory });
+    let request = DaemonRequest::Status(StatusRequest {
+        directory,
+        state_directory: paths.state_directory().to_path_buf(),
+    });
     match client
         .request(&request, |_| {})
         .await
@@ -185,6 +190,7 @@ pub(crate) async fn run_refresh(
     };
     let request = DaemonRequest::Refresh(RefreshRequest {
         directory: directory.clone(),
+        state_directory: paths.state_directory().to_path_buf(),
         at_least: args.at_least,
     });
     match client
@@ -233,7 +239,12 @@ async fn stop_daemon(paths: &DaemonPaths) -> Result<(), CliError> {
         return Ok(());
     };
     match client
-        .request(&DaemonRequest::Shutdown, |_| {})
+        .request(
+            &DaemonRequest::Shutdown(DaemonScope {
+                state_directory: paths.state_directory().to_path_buf(),
+            }),
+            |_| {},
+        )
         .await
         .map_err(|error| daemon_error(&error))?
     {
@@ -365,6 +376,10 @@ async fn connect_or_start(paths: &DaemonPaths) -> Result<DaemonClient, CliError>
         return Ok(client);
     }
     let mut daemon = start_daemon(paths)?;
+    // The daemon's socket is named after the state directory with its
+    // symbolic links resolved, which only works once the directory exists.
+    let resolved = daemon_paths(Some(paths.state_directory()))?;
+    let paths = &resolved;
     for _ in 0..DAEMON_START_BUDGET_MS / DAEMON_START_CHECK_INTERVAL_MS {
         let connected =
             DaemonClient::connect_within(paths.socket(), DAEMON_START_CHECK_INTERVAL_MS)
