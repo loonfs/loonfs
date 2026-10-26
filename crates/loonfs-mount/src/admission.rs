@@ -19,6 +19,7 @@ use loonfs_types::{
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
+use tokio::sync::mpsc;
 
 /// What admission produced.
 pub(crate) struct Admission {
@@ -157,15 +158,16 @@ async fn scan(
         transaction.commit()?;
     }
     assert_eq!(kind, ItemKind::Directory, "the root should be a directory");
-    let mut listing = SubtreeScan::new(
+    let listing = SubtreeScan::new(
         client,
         &config.namespace_id,
         &snapshot_id,
         &root,
         Some(budget.saturating_add(1)),
     );
+    let mut pages = read_ahead(listing);
     let mut listed_entries: u64 = 0;
-    while let Some(entries) = listing.next_page().await? {
+    while let Some(entries) = pages.recv().await.transpose()? {
         listed_entries += entries.len() as u64;
         if listed_entries > budget {
             return Err(MountError::EntryBudgetExceeded {
@@ -187,6 +189,29 @@ async fn scan(
         lease.keep_alive(client, timer).await?;
     }
     Ok(database)
+}
+
+/// The listing pages that a scan reads ahead of the page it writes.
+const PAGES_READ_AHEAD: usize = 2;
+
+/// Reads the listing's pages in a task of its own, so the next page's
+/// request and decoding run while the scan writes the page before it. The
+/// task stops when the scan drops the receiver.
+fn read_ahead(mut listing: SubtreeScan) -> mpsc::Receiver<Result<Vec<PathEntry>>> {
+    let (pages, received) = mpsc::channel(PAGES_READ_AHEAD);
+    tokio::spawn(async move {
+        loop {
+            let page = listing.next_page().await.transpose();
+            let last = !matches!(page, Some(Ok(_)));
+            let Some(page) = page else {
+                return;
+            };
+            if pages.send(page).await.is_err() || last {
+                return;
+            }
+        }
+    });
+    received
 }
 
 /// Writes one listing page in one transaction. It's a step of its own, so
