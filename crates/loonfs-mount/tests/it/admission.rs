@@ -1,11 +1,13 @@
 //! Admitting a mount: the scan at a snapshot and the requests it makes, the
-//! entry budget, and the checks that refuse a mount.
+//! steps it reports, the entry budget, the checks that refuse a mount, and a
+//! second mount that resumes the state.
 
 use crate::support::{engine_tree, fixture, mkdir, operations, path, put, Fixture, MOUNT_PATH};
-use loonfs_mount::{MountAccess, MountError, Readiness};
+use loonfs_mount::{ItemId, MountAccess, MountError, MountProgress, Readiness};
 use loonfs_mount_sim::{Operation, SimulatedServerConfig};
 use loonfs_types::NamespaceNaming;
 use std::assert_matches;
+use std::ffi::OsStr;
 
 /// Commits 10 directories below the mount's root, with 10 subdirectories in
 /// each and 10 files in each subdirectory, and returns the number of
@@ -43,7 +45,25 @@ async fn a_nested_namespace_admits_at_a_snapshot_with_the_requests_the_note_desc
     fixture.server.take_trace();
     let mut config = fixture.config();
     config.max_entries = entries;
-    let engine = fixture.admit(config).await.expect("the tree fits");
+    let (engine, steps) = fixture.admit_reporting(config).await;
+    let engine = engine.expect("the tree fits");
+    let scanned = |listed_entries| MountProgress::Scanning {
+        listed_entries,
+        max_entries: entries,
+    };
+    assert_eq!(
+        steps,
+        [
+            MountProgress::CheckingHost,
+            MountProgress::ReadingCapabilities,
+            MountProgress::CreatingSnapshot,
+            scanned(0),
+            scanned(1_000),
+            scanned(entries),
+            MountProgress::StartingFeed,
+        ],
+        "each step, and the entries listed after each page"
+    );
     let trace = fixture.server.take_trace();
     let admission: Vec<_> = trace
         .iter()
@@ -107,6 +127,35 @@ async fn a_nested_namespace_admits_at_a_snapshot_with_the_requests_the_note_desc
     assert_eq!(engine_tree(&engine), fixture.listed_tree().await);
 }
 
+/// Checks that a second mount of the same namespace and path resumes the
+/// state that the first one left, without a scan, and reports only the host
+/// check and the start of the feed.
+#[tokio::test]
+async fn a_second_mount_resumes_the_state_without_a_scan() {
+    let fixture = fixture();
+    fixture.commit(vec![put("a.txt", b"a")]);
+    let engine = fixture.mount().await;
+    let applied_seq = engine.status().applied_seq;
+    drop(engine);
+    fixture.server.take_trace();
+    let (engine, steps) = fixture.admit_reporting(fixture.config()).await;
+    let engine = engine.expect("the state resumes");
+    assert_eq!(
+        steps,
+        [MountProgress::CheckingHost, MountProgress::StartingFeed]
+    );
+    assert_eq!(engine.status().applied_seq, applied_seq);
+    assert!(engine.lookup(ItemId::ROOT, OsStr::new("a.txt")).is_some());
+    let trace = fixture.server.take_trace();
+    assert!(
+        trace
+            .iter()
+            .all(|record| record.operation == Operation::ListChanges),
+        "{:?}",
+        operations(&trace)
+    );
+}
+
 /// Checks that a namespace with one entry more than the budget, and one with
 /// many more, are refused after the scan listed the budget plus one entries,
 /// that the snapshot is deleted, and that no tree is left.
@@ -127,7 +176,16 @@ async fn a_namespace_over_the_budget_is_refused_after_listing_the_budget_plus_on
         fixture.server.take_trace();
         let mut config = fixture.config();
         config.max_entries = max_entries;
-        let refused = fixture.admit(config).await.expect_err("over the budget");
+        let (refused, steps) = fixture.admit_reporting(config).await;
+        let refused = refused.expect_err("over the budget");
+        assert_eq!(
+            steps.last(),
+            Some(&MountProgress::Scanning {
+                listed_entries: 0,
+                max_entries
+            }),
+            "no page that passes the budget is reported"
+        );
         assert_matches!(
             refused,
             MountError::EntryBudgetExceeded { listed_entries, max_entries: budget, .. }

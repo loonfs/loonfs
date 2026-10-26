@@ -8,6 +8,7 @@ use crate::error::{MountError, Result};
 use crate::host::{check_host, DiskSpace};
 use crate::item::{ItemId, ItemKind};
 use crate::item_table::write_item;
+use crate::progress::{MountProgress, Progress};
 use crate::records::{ItemRecord, RemoteState, Visibility};
 use crate::scan::{read_ancestors, snapshot_stat, SnapshotLease, SubtreeScan};
 use crate::status::{ReflinkSupport, Transports};
@@ -35,8 +36,11 @@ pub(crate) async fn admit(
     config: &MountConfig,
     disk: &dyn DiskSpace,
     timer: &dyn MonotonicTimer,
+    progress: &Progress,
 ) -> Result<Admission> {
+    progress.report(MountProgress::CheckingHost);
     let host = check_host(config, disk)?;
+    progress.report(MountProgress::ReadingCapabilities);
     let capabilities = client.get_capabilities().await?;
     let metadata = client.get_namespace(&config.namespace_id).await?;
     if config.access == MountAccess::Writable && metadata.naming != NamespaceNaming::CaseSensitive {
@@ -58,6 +62,7 @@ pub(crate) async fn admit(
         direct_multipart: capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
         direct_get: capabilities.supports(FEATURE_DOWNLOADS_DIRECT_GET),
     };
+    progress.report(MountProgress::CreatingSnapshot);
     let mut lease = SnapshotLease::create(client, &config.namespace_id, timer).await?;
     let scanned = scan(
         client,
@@ -66,6 +71,7 @@ pub(crate) async fn admit(
         timer,
         inline_limit_bytes,
         transports,
+        progress,
     )
     .await;
     let deleted = lease.delete(client).await;
@@ -85,7 +91,9 @@ pub(crate) async fn admit(
 }
 
 /// Reads the root and its ancestors at the snapshot, and lists the root's
-/// subtree into a new `tree.db`, stopping one entry past the budget.
+/// subtree into a new `tree.db`, stopping one entry past the budget. Reports
+/// the entries listed when it starts and after each page that fits the
+/// budget.
 async fn scan(
     client: &Client,
     config: &MountConfig,
@@ -93,7 +101,13 @@ async fn scan(
     timer: &dyn MonotonicTimer,
     inline_limit_bytes: u64,
     transports: Transports,
+    progress: &Progress,
 ) -> Result<Database> {
+    let budget = config.max_entries;
+    progress.report(MountProgress::Scanning {
+        listed_entries: 0,
+        max_entries: budget,
+    });
     let snapshot_id = lease.snapshot_id().clone();
     let root = client
         .stat_with_options(
@@ -143,7 +157,6 @@ async fn scan(
         transaction.commit()?;
     }
     assert_eq!(kind, ItemKind::Directory, "the root should be a directory");
-    let budget = config.max_entries;
     let mut listing = SubtreeScan::new(
         client,
         &config.namespace_id,
@@ -167,6 +180,10 @@ async fn scan(
             });
         }
         write_page(&mut database, &entries)?;
+        progress.report(MountProgress::Scanning {
+            listed_entries,
+            max_entries: budget,
+        });
         lease.keep_alive(client, timer).await?;
     }
     Ok(database)

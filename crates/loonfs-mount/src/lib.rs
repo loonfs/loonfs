@@ -28,6 +28,7 @@ mod host;
 mod invalidation;
 mod item;
 mod item_table;
+mod progress;
 mod ranges;
 mod read_handle;
 mod records;
@@ -44,6 +45,7 @@ pub use engine::Engine;
 pub use error::{MountError, Result};
 pub use invalidation::{CachedPages, Invalidation};
 pub use item::{Attr, DirEntry, Entry, ItemId, ItemKind, LocalChanges};
+pub use progress::MountProgress;
 pub use read_handle::{ContentState, ReadHandle};
 pub use status::{
     CacheStatus, ConflictReport, MountMethod, PendingBatchStatus, PublicationStop, Readiness,

@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use loonfs_client::{Client, ListOptions, NamespacePath, ReadAt};
-use loonfs_mount::{Engine, ItemId, ItemKind, MountAccess, MountConfig, ReadHandle};
+use loonfs_mount::{Engine, ItemId, ItemKind, MountAccess, MountConfig, MountProgress, ReadHandle};
 use loonfs_mount_sim::{
     ByteRange, Operation, RequestRecord, SimulatedServer, SimulatedServerConfig,
 };
@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::sync::mpsc;
 
 /// How long a test waits for the engine.
 pub(crate) const WAIT: Duration = Duration::from_secs(30);
@@ -275,11 +276,25 @@ impl Fixture {
 
     /// Admits a mount with `config` through a new client of the server.
     pub(crate) async fn admit(&self, config: MountConfig) -> loonfs_mount::Result<Engine> {
+        self.admit_reporting(config).await.0
+    }
+
+    /// Admits a mount with `config`, and returns the steps that it reported.
+    pub(crate) async fn admit_reporting(
+        &self,
+        config: MountConfig,
+    ) -> (loonfs_mount::Result<Engine>, Vec<MountProgress>) {
         let client = Client::with_transport(self.server.client_config(), self.server.service())
             .expect("a valid client config");
-        bounded(WAIT, Engine::mount(client, config))
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let engine = bounded(WAIT, Engine::mount(client, config, Some(sender)))
             .await
-            .expect("admission ends in time")
+            .expect("admission ends in time");
+        let mut steps = Vec::new();
+        while let Ok(step) = receiver.try_recv() {
+            steps.push(step);
+        }
+        (engine, steps)
     }
 
     /// Admits a mount with the test configuration, and waits for the poll

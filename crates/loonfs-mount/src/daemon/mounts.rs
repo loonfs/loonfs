@@ -197,7 +197,7 @@ impl Mounts {
         // blocking thread of its own instead.
         let runtime = tokio::runtime::Handle::current();
         let engine = Arc::new(
-            blocking(move || runtime.block_on(Engine::mount(client, config)))
+            blocking(move || runtime.block_on(Engine::mount(client, config, None)))
                 .await
                 .map_err(|error| mount_failed(error.to_string()))?,
         );

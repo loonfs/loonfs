@@ -10,6 +10,7 @@ use crate::error::{MountError, Result};
 use crate::host::{check_host, DiskSpace, HostDiskSpace};
 use crate::invalidation::Invalidation;
 use crate::item::{Attr, DirEntry, Entry, ItemId};
+use crate::progress::{MountProgress, Progress};
 use crate::read_handle::ReadHandle;
 use crate::status::{MountMethod, Status};
 use crate::tree::Tree;
@@ -56,17 +57,27 @@ impl Engine {
     /// keeps the settings it was admitted with. It must be called from a
     /// Tokio runtime, which runs the engine's requests. The future is `Send`,
     /// so a daemon can spawn it.
-    pub async fn mount(client: Client, config: MountConfig) -> Result<Self> {
+    ///
+    /// When `progress` is set, the engine sends each step it reaches to it
+    /// (see [`MountProgress`]), and a closed receiver doesn't stop the mount.
+    pub async fn mount(
+        client: Client,
+        config: MountConfig,
+        progress: Option<mpsc::UnboundedSender<MountProgress>>,
+    ) -> Result<Self> {
         config.validate()?;
+        let progress = Progress::new(progress);
         let disk: Arc<dyn DiskSpace> = Arc::new(HostDiskSpace);
         let timer: Arc<dyn MonotonicTimer> = Arc::new(StdMonotonicTimer::default());
-        let (database, reflinks) = match resume(&config, disk.as_ref())? {
+        let (database, reflinks) = match resume(&config, disk.as_ref(), &progress)? {
             Some(resumed) => resumed,
             None => {
-                let admission = admit(&client, &config, disk.as_ref(), timer.as_ref()).await?;
+                let admission =
+                    admit(&client, &config, disk.as_ref(), timer.as_ref(), &progress).await?;
                 (admission.database, admission.reflinks)
             }
         };
+        progress.report(MountProgress::StartingFeed);
         let config = database.mount()?.config;
         let environment = Environment {
             timer: timer.clone(),
@@ -278,6 +289,7 @@ impl Drop for Engine {
 fn resume(
     config: &MountConfig,
     disk: &dyn DiskSpace,
+    progress: &Progress,
 ) -> Result<Option<(Database, crate::status::ReflinkSupport)>> {
     let path = config.database_path();
     let Some(database) = Database::open(&path)? else {
@@ -301,6 +313,7 @@ fn resume(
         database::remove_files(&path)?;
         return Ok(None);
     }
+    progress.report(MountProgress::CheckingHost);
     let host = check_host(&stored.config, disk)?;
     Ok(Some((database, host.reflinks)))
 }
@@ -360,7 +373,7 @@ mod tests {
     fn the_mount_future_is_send() {
         fn assert_send<T: Send>(_: &T) {}
         let _never_called = |client: Client, config: MountConfig| {
-            let future = Engine::mount(client, config);
+            let future = Engine::mount(client, config, None);
             assert_send(&future);
         };
     }
