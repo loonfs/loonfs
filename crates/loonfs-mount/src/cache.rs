@@ -3,123 +3,35 @@
 //! they do and its checksum matches. A file that no descriptor has open,
 //! partial or complete, can be evicted.
 
+mod entry;
+
+pub(crate) use entry::{
+    CacheEntry, CacheEntryState, FillAttempt, PartialFile, Verification, VerifiedPrefix,
+};
+
 use crate::cache_file::{create_sparse, CacheFile};
 use crate::database::CacheFileRow;
 use crate::error::{MountError, Result};
 use crate::ranges::RangeSet;
-use loonfs_types::{Checksum, ContentId, ContentRef};
-use std::collections::HashMap;
+use loonfs_types::{ContentId, ContentRef};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-/// A prefix of a cache file whose checksum the engine knows, so verifying
-/// the file after an append reads only the appended bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VerifiedPrefix {
-    pub(crate) size_bytes: u64,
-    pub(crate) checksum: Checksum,
-}
-
-/// Whether a partial file's verification is running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verification {
-    Idle,
-    Running,
-}
-
-/// Whether a partial file is being filled for the first time, or again after
-/// its checksum didn't match.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FillAttempt {
-    First,
-    Refetch,
-}
-
-/// A cache file that's being filled.
-#[derive(Debug)]
-pub(crate) struct PartialFile {
-    /// The revision that the file fills.
-    pub(crate) target: ContentRef,
-    pub(crate) present: RangeSet,
-    /// The ranges that a queued or running fetch writes.
-    pub(crate) requested: RangeSet,
-    pub(crate) verified_prefix: Option<VerifiedPrefix>,
-    pub(crate) attempt: FillAttempt,
-    pub(crate) verification: Verification,
-}
-
-/// The state of one cache file.
-#[derive(Debug)]
-pub(crate) enum CacheEntryState {
-    Partial(PartialFile),
-    /// The file is complete up to `size_bytes`, and those bytes match
-    /// `checksum`.
-    Complete {
-        size_bytes: u64,
-        checksum: Checksum,
-    },
-    /// The file didn't match its checksum after a refetch, so reads of it
-    /// fail until the last descriptor that uses it closes.
-    Failed,
-}
-
-impl CacheEntryState {
-    /// Returns the partial file, or `None` for a complete or failed file.
-    pub(crate) fn partial_mut(&mut self) -> Option<&mut PartialFile> {
-        match self {
-            Self::Partial(partial) => Some(partial),
-            Self::Complete { .. } | Self::Failed => None,
-        }
-    }
-}
-
-/// One cache file and its state.
-#[derive(Debug)]
-pub(crate) struct CacheEntry {
-    pub(crate) file: Arc<CacheFile>,
-    pub(crate) state: CacheEntryState,
-    /// When the entry was last used, as a count of uses, for eviction.
-    last_used: u64,
-}
-
-impl CacheEntry {
-    /// Returns whether reads can have the bytes of `range`. A file that's
-    /// fetched again after a mismatch has none until it matches.
-    pub(crate) fn contains(&self, range: &Range<u64>) -> bool {
-        match &self.state {
-            CacheEntryState::Partial(partial) => {
-                partial.attempt == FillAttempt::First && partial.present.contains(range)
-            }
-            CacheEntryState::Complete { size_bytes, .. } => range.end <= *size_bytes,
-            CacheEntryState::Failed => false,
-        }
-    }
-
-    /// Returns whether the file is being fetched again after a mismatch, so
-    /// its reads wait for every byte of it.
-    pub(crate) fn is_refetching(&self) -> bool {
-        matches!(&self.state, CacheEntryState::Partial(partial) if partial.attempt == FillAttempt::Refetch)
-    }
-
-    /// Returns the bytes that the file occupies: a partial file's present
-    /// ranges, or a complete file's size.
-    fn stored_bytes(&self) -> u64 {
-        match &self.state {
-            CacheEntryState::Partial(partial) => partial.present.len_bytes(),
-            CacheEntryState::Complete { size_bytes, .. } => *size_bytes,
-            CacheEntryState::Failed => 0,
-        }
-    }
-}
 
 /// The cache files of one mount.
 #[derive(Debug)]
 pub(crate) struct Cache {
     directory: PathBuf,
     entries: HashMap<ContentId, CacheEntry>,
+    /// The entries by their last use, least recent first, so eviction reads
+    /// them in one pass.
+    by_use: BTreeMap<u64, ContentId>,
     uses: u64,
+    /// The bytes that every entry stores, which status and eviction read
+    /// without walking the entries.
+    stored_bytes: u64,
 }
 
 fn complete_path(directory: &Path, content_id: &ContentId) -> PathBuf {
@@ -142,7 +54,9 @@ impl Cache {
         let mut cache = Self {
             directory: directory.to_path_buf(),
             entries: HashMap::new(),
+            by_use: BTreeMap::new(),
             uses: 0,
+            stored_bytes: 0,
         };
         let mut missing = Vec::new();
         for row in rows {
@@ -154,7 +68,7 @@ impl Cache {
                         .metadata()
                         .is_ok_and(|metadata| metadata.len() == row.size_bytes) =>
                 {
-                    cache.entries.insert(
+                    cache.insert_entry(
                         row.content_id,
                         CacheEntry {
                             file: CacheFile::new(file, row.size_bytes),
@@ -199,8 +113,57 @@ impl Cache {
     pub(crate) fn touch(&mut self, content_id: &ContentId) {
         self.uses += 1;
         if let Some(entry) = self.entries.get_mut(content_id) {
+            self.by_use.remove(&entry.last_used);
             entry.last_used = self.uses;
+            self.by_use.insert(self.uses, content_id.clone());
         }
+    }
+
+    /// Adds an entry as the most recently used one.
+    fn insert_entry(&mut self, content_id: ContentId, mut entry: CacheEntry) {
+        self.uses += 1;
+        entry.last_used = self.uses;
+        self.by_use.insert(self.uses, content_id.clone());
+        self.stored_bytes += entry.stored_bytes();
+        if let Some(replaced) = self.entries.insert(content_id, entry) {
+            self.by_use.remove(&replaced.last_used);
+            self.stored_bytes -= replaced.stored_bytes();
+        }
+    }
+
+    /// Removes an entry, and returns it.
+    fn take_entry(&mut self, content_id: &ContentId) -> Option<CacheEntry> {
+        let entry = self.entries.remove(content_id)?;
+        self.by_use.remove(&entry.last_used);
+        self.stored_bytes -= entry.stored_bytes();
+        Some(entry)
+    }
+
+    /// Changes an entry, and keeps the total of stored bytes.
+    fn update<T>(
+        &mut self,
+        content_id: &ContentId,
+        change: impl FnOnce(&mut CacheEntry) -> T,
+    ) -> Option<T> {
+        let entry = self.entries.get_mut(content_id)?;
+        let before = entry.stored_bytes();
+        let changed = change(entry);
+        self.stored_bytes = self.stored_bytes - before + entry.stored_bytes();
+        Some(changed)
+    }
+
+    /// Returns the bytes that the cache's files store.
+    pub(crate) fn stored_bytes(&self) -> u64 {
+        self.stored_bytes
+    }
+
+    /// Returns each entry and the bytes it stores, least recently used
+    /// first.
+    pub(crate) fn least_recently_used_first(&self) -> impl Iterator<Item = (&ContentId, u64)> {
+        self.by_use.values().map(|content_id| {
+            let entry = &self.entries[content_id];
+            (content_id, entry.stored_bytes())
+        })
     }
 
     /// Returns the entry that serves the revision `target`, creating a
@@ -213,7 +176,7 @@ impl Cache {
             None => {
                 let path = partial_path(&directory, content_id);
                 let file = create_sparse(&path, target.size_bytes)?;
-                self.entries.insert(
+                self.insert_entry(
                     content_id.clone(),
                     CacheEntry {
                         file: CacheFile::new(file, 0),
@@ -304,8 +267,7 @@ impl Cache {
             return Ok(false);
         }
         let entry = self
-            .entries
-            .remove(&previous.content_id)
+            .take_entry(&previous.content_id)
             .expect("the entry was just found");
         entry.file.set_present_prefix(0);
         let from = complete_path(&self.directory, &previous.content_id);
@@ -320,7 +282,7 @@ impl Cache {
             .map_err(|error| MountError::io(&to, &error))?;
         let mut present = RangeSet::default();
         present.insert(0..previous.size_bytes);
-        self.entries.insert(
+        self.insert_entry(
             target.content_id.clone(),
             CacheEntry {
                 file: CacheFile::new(file, previous.size_bytes),
@@ -335,7 +297,7 @@ impl Cache {
                     attempt: FillAttempt::First,
                     verification: Verification::Idle,
                 }),
-                last_used: self.uses,
+                last_used: 0,
             },
         );
         Ok(true)
@@ -345,79 +307,76 @@ impl Cache {
     /// read handles. A file that's fetched again after a mismatch publishes
     /// nothing until it matches.
     pub(crate) fn record_present(&mut self, content_id: &ContentId, range: Range<u64>) {
-        let Some(entry) = self.entries.get_mut(content_id) else {
-            return;
-        };
-        if let CacheEntryState::Partial(partial) = &mut entry.state {
-            partial.present.insert(range);
-            if partial.attempt == FillAttempt::First {
-                entry.file.set_present_prefix(partial.present.prefix_end());
+        self.update(content_id, |entry| {
+            if let CacheEntryState::Partial(partial) = &mut entry.state {
+                partial.present.insert(range);
+                if partial.attempt == FillAttempt::First {
+                    entry.file.set_present_prefix(partial.present.prefix_end());
+                }
             }
-        }
+        });
     }
 
     /// Renames a verified partial file to its complete name, and returns the
     /// row that records it.
     pub(crate) fn complete(&mut self, content_id: &ContentId) -> Result<CacheFileRow> {
-        let entry = self
-            .entries
-            .get_mut(content_id)
-            .expect("a completed cache file should have an entry");
-        let partial = entry
-            .state
-            .partial_mut()
-            .expect("a completed cache file should be partial until it completes");
-        let row = CacheFileRow {
-            content_id: content_id.clone(),
-            size_bytes: partial.target.size_bytes,
-            checksum: partial.target.checksum.clone(),
-        };
         let from = partial_path(&self.directory, content_id);
         let to = complete_path(&self.directory, content_id);
-        fs::rename(&from, &to).map_err(|error| MountError::io(&from, &error))?;
-        entry.file.set_present_prefix(row.size_bytes);
-        entry.state = CacheEntryState::Complete {
-            size_bytes: row.size_bytes,
-            checksum: row.checksum.clone(),
-        };
-        Ok(row)
+        self.update(content_id, |entry| {
+            let partial = entry
+                .state
+                .partial_mut()
+                .expect("a completed cache file should be partial until it completes");
+            let row = CacheFileRow {
+                content_id: content_id.clone(),
+                size_bytes: partial.target.size_bytes,
+                checksum: partial.target.checksum.clone(),
+            };
+            fs::rename(&from, &to).map_err(|error| MountError::io(&from, &error))?;
+            entry.file.set_present_prefix(row.size_bytes);
+            entry.state = CacheEntryState::Complete {
+                size_bytes: row.size_bytes,
+                checksum: row.checksum.clone(),
+            };
+            Ok(row)
+        })
+        .expect("a completed cache file should have an entry")
     }
 
     /// Replaces a partial file whose checksum didn't match with an empty one,
     /// for a refetch, and returns the new file.
     pub(crate) fn restart(&mut self, content_id: &ContentId) -> Result<Arc<CacheFile>> {
         let path = partial_path(&self.directory, content_id);
-        let entry = self
-            .entries
-            .get_mut(content_id)
-            .expect("a restarted cache file should have an entry");
-        entry.file.set_present_prefix(0);
-        let partial = entry
-            .state
-            .partial_mut()
-            .expect("a restarted cache file should be partial");
-        fs::remove_file(&path).map_err(|error| MountError::io(&path, &error))?;
-        let file = create_sparse(&path, partial.target.size_bytes)?;
-        entry.file = CacheFile::new(file, 0);
-        partial.present = RangeSet::default();
-        partial.requested = RangeSet::default();
-        partial.verified_prefix = None;
-        partial.attempt = FillAttempt::Refetch;
-        partial.verification = Verification::Idle;
-        Ok(entry.file.clone())
+        self.update(content_id, |entry| {
+            entry.file.set_present_prefix(0);
+            let partial = entry
+                .state
+                .partial_mut()
+                .expect("a restarted cache file should be partial");
+            fs::remove_file(&path).map_err(|error| MountError::io(&path, &error))?;
+            let file = create_sparse(&path, partial.target.size_bytes)?;
+            entry.file = CacheFile::new(file, 0);
+            partial.present = RangeSet::default();
+            partial.requested = RangeSet::default();
+            partial.verified_prefix = None;
+            partial.attempt = FillAttempt::Refetch;
+            partial.verification = Verification::Idle;
+            Ok(entry.file.clone())
+        })
+        .expect("a restarted cache file should have an entry")
     }
 
     /// Marks a file that didn't match its checksum after a refetch.
     pub(crate) fn fail(&mut self, content_id: &ContentId) {
-        if let Some(entry) = self.entries.get_mut(content_id) {
+        self.update(content_id, |entry| {
             entry.file.set_present_prefix(0);
             entry.state = CacheEntryState::Failed;
-        }
+        });
     }
 
     /// Deletes a cache file.
     pub(crate) fn remove(&mut self, content_id: &ContentId) -> Result<()> {
-        let Some(entry) = self.entries.remove(content_id) else {
+        let Some(entry) = self.take_entry(content_id) else {
             return Ok(());
         };
         entry.file.set_present_prefix(0);
@@ -434,42 +393,11 @@ impl Cache {
         }
     }
 
-    /// Returns the bytes of the files, partial or complete, that no
-    /// descriptor has open.
-    pub(crate) fn evictable_bytes(&self, pinned: impl Fn(&ContentId) -> bool) -> u64 {
-        self.entries
-            .iter()
-            .filter(|(content_id, _)| !pinned(content_id))
-            .map(|(_, entry)| entry.stored_bytes())
-            .sum()
-    }
-
-    /// Returns the bytes of the files that a descriptor has open, which
-    /// eviction can't remove.
-    pub(crate) fn pinned_bytes(&self, pinned: impl Fn(&ContentId) -> bool) -> u64 {
-        self.entries
-            .iter()
-            .filter(|(content_id, _)| pinned(content_id))
-            .map(|(_, entry)| entry.stored_bytes())
-            .sum()
-    }
-
-    /// Returns the least recently used file, partial or complete, that no
-    /// descriptor has open. A partial file goes whole, because its present
-    /// ranges are kept in memory only and a restart drops it anyway.
-    pub(crate) fn least_recently_used(
-        &self,
-        pinned: impl Fn(&ContentId) -> bool,
-    ) -> Option<ContentId> {
-        self.entries
-            .iter()
-            .filter(|(content_id, _)| !pinned(content_id))
-            .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(content_id, _)| content_id.clone())
-    }
-
     /// Returns the cache directory.
     pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }
 }
+
+#[cfg(test)]
+mod tests;

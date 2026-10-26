@@ -4,7 +4,7 @@
 use super::reads::RequestShape;
 use super::ControlTask;
 use crate::cache::Verification as VerificationState;
-use crate::cache::{FillAttempt, VerifiedPrefix};
+use crate::cache::{CacheEntry, FillAttempt, VerifiedPrefix};
 use crate::cache_file::CacheFile;
 use crate::database;
 use crate::error::{MountError, Result};
@@ -291,35 +291,64 @@ impl ControlTask {
         );
     }
 
+    /// Returns the bytes of the cache files that a descriptor has open,
+    /// which eviction can't remove. It reads one entry for each pinned
+    /// content, not every entry.
+    pub(super) fn pinned_bytes(&self) -> u64 {
+        self.pins
+            .keys()
+            .filter_map(|content_id| self.cache.entry(content_id))
+            .map(CacheEntry::stored_bytes)
+            .sum()
+    }
+
     /// Evicts files, partial or complete, that no handle has open, least
     /// recently used first, until evictable bytes are under
     /// `--cache-max-bytes` and the filesystem has `--cache-min-free` free plus
     /// `incoming_bytes`. Returns whether it has that much free.
+    ///
+    /// It measures the free space once, and reads the files in one pass in
+    /// the order of their last use, counting each evicted file's bytes as
+    /// freed.
     pub(super) fn evict(&mut self, incoming_bytes: u64) -> bool {
         let needed_free = self.config.min_free_bytes.saturating_add(incoming_bytes);
-        loop {
-            let available = match self
-                .environment
-                .disk
-                .available_bytes(self.cache.directory())
-            {
-                Ok(available) => available,
-                Err(error) => {
-                    tracing::warn!(%error, "reading the cache's free space failed");
-                    u64::MAX
-                }
-            };
-            let pins = &self.pins;
-            let pinned =
-                |content_id: &ContentId| pins.get(content_id).is_some_and(|&pins| pins > 0);
-            let over_target = self.cache.evictable_bytes(pinned) > self.config.max_cache_bytes;
-            if !over_target && available >= needed_free {
-                return true;
+        let available = match self
+            .environment
+            .disk
+            .available_bytes(self.cache.directory())
+        {
+            Ok(available) => available,
+            Err(error) => {
+                tracing::warn!(%error, "reading the cache's free space failed");
+                u64::MAX
             }
-            let Some(victim) = self.cache.least_recently_used(pinned) else {
-                return available >= needed_free;
-            };
+        };
+        let mut evictable = self
+            .cache
+            .stored_bytes()
+            .saturating_sub(self.pinned_bytes());
+        let mut missing_free = needed_free.saturating_sub(available);
+        let enough = |evictable: u64, missing_free: u64| {
+            evictable <= self.config.max_cache_bytes && missing_free == 0
+        };
+        if enough(evictable, missing_free) {
+            return true;
+        }
+        let mut victims = Vec::new();
+        for (content_id, stored_bytes) in self.cache.least_recently_used_first() {
+            if enough(evictable, missing_free) {
+                break;
+            }
+            if self.is_pinned(content_id) {
+                continue;
+            }
+            victims.push(content_id.clone());
+            evictable = evictable.saturating_sub(stored_bytes);
+            missing_free = missing_free.saturating_sub(stored_bytes);
+        }
+        for victim in victims {
             self.remove_cache_file(&victim);
         }
+        missing_free == 0
     }
 }

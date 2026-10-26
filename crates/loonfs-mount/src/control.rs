@@ -388,8 +388,7 @@ impl ControlTask {
     }
 
     fn publish_status(&mut self) {
-        let pinned =
-            |content_id: &ContentId| self.pins.get(content_id).is_some_and(|&pins| pins > 0);
+        let pinned_bytes = self.pinned_bytes();
         let mut warnings = Vec::new();
         if self.entries > self.config.max_entries.saturating_mul(2) {
             warnings.push(Warning::EntriesOverBudget {
@@ -420,8 +419,8 @@ impl ControlTask {
             pending_batch: None,
             uploads_in_flight: 0,
             cache: CacheStatus {
-                evictable_bytes: self.cache.evictable_bytes(pinned),
-                pinned_bytes: self.cache.pinned_bytes(pinned),
+                evictable_bytes: self.cache.stored_bytes().saturating_sub(pinned_bytes),
+                pinned_bytes,
                 max_cache_bytes: self.config.max_cache_bytes,
                 max_pinned_bytes: self.config.max_pinned_bytes,
                 mismatched_files: self.mismatched_files,

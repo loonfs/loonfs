@@ -232,11 +232,7 @@ impl ControlTask {
     ) -> Result<()> {
         let size_bytes = revision.content_ref.size_bytes;
         let range = range.start..range.end.min(size_bytes);
-        let pinned_bytes = {
-            let pins = &self.pins;
-            self.cache
-                .pinned_bytes(|content_id| pins.get(content_id).is_some_and(|&pins| pins > 0))
-        };
+        let pinned_bytes = self.pinned_bytes();
         let direct_get = self.transports.direct_get;
         let sizes = FetchSizes::of(&self.config);
         let max_pinned_bytes = self.config.max_pinned_bytes;
