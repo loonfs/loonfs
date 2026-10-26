@@ -6,7 +6,7 @@ use crate::cache::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::create_manifest;
-use crate::manifest::{load_namespace_manifest_envelope, MetadataRunPolicy};
+use crate::manifest::{load_namespace_manifest_envelope, MetadataRunPolicy, PublicationReport};
 use crate::pin::record::{delete_failed_pin, load_user_pin, write_pin};
 use crate::pin::{create_pin, ensure_unexpired};
 use crate::time::{Deadline, MonotonicTimer};
@@ -31,22 +31,28 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     fold_policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &crate::PermitPool,
-) -> Result<NamespaceMetadata> {
+) -> Result<PublicationReport<NamespaceMetadata>> {
     let deadline = Deadline::start(Arc::clone(&timer));
     ensure_namespace_absent(store, new_namespace_id).await?;
     let owner = PinOwner::Fork {
         target_namespace_id: new_namespace_id.clone(),
     };
-    let source_record = if let Some(snapshot_id) = snapshot_id {
-        create_snapshot_fork_pin(
-            store,
-            source_namespace_id,
-            snapshot_id,
-            owner,
-            context,
-            &deadline,
-        )
-        .await?
+    let PublicationReport {
+        response: source_record,
+        published,
+    } = if let Some(snapshot_id) = snapshot_id {
+        PublicationReport {
+            response: create_snapshot_fork_pin(
+                store,
+                source_namespace_id,
+                snapshot_id,
+                owner,
+                context,
+                &deadline,
+            )
+            .await?,
+            published: None,
+        }
     } else {
         create_pin(
             store,
@@ -59,7 +65,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             Arc::clone(&timer),
         )
         .await?
-        .response
     };
     let source_manifest = load_namespace_manifest_envelope(
         store,
@@ -115,7 +120,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         }
         return Err(error);
     }
-    Ok(crate::namespace::status::created_namespace(&manifest))
+    Ok(PublicationReport {
+        response: crate::namespace::status::created_namespace(&manifest),
+        published,
+    })
 }
 
 async fn create_snapshot_fork_pin<S: ObjectStore + ?Sized>(

@@ -3,7 +3,7 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::manifest::{compact_unit, fold_wal, CompactionUnitOutcome};
-use crate::namespace::control::{load_current_manifest, raise_hint, LoadedManifest};
+use crate::namespace::control::{load_current_manifest, raise_namespace_hint, LoadedManifest};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_types::MetadataFamilyGroup;
 use std::assert_matches;
@@ -81,18 +81,19 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
         for lagging_hint in [false, true] {
             let directory = tempdir().expect("directory");
             let namespace_id = NamespaceId::parse("superseded").expect("namespace");
-            let store = FailStore::new(
-                MetadataMapStore::aged(
-                    LocalFsStore::new(directory.path()).expect("store"),
-                    KeyPredicate::any(),
-                ),
-                KeyPredicate::hint(&namespace_id),
-                OperationSelector::CompareAndSwap,
-                InjectedError::Transport("hint unavailable".into()),
+            let store = MetadataMapStore::aged(
+                LocalFsStore::new(directory.path()).expect("store"),
+                KeyPredicate::any(),
             );
-            if lagging_hint {
-                store.fail_all();
-            }
+            let raise_hint = |manifest_no| {
+                raise_namespace_hint(
+                    &store,
+                    &namespace_id,
+                    manifest_no,
+                    None,
+                    Arc::new(StdMonotonicTimer::default()),
+                )
+            };
             let previous = seed_segments(&store, &namespace_id).await;
             // Load without shared caches and leave path reads until after GC,
             // so resolving /docs/one needs the bindings compaction drops.
@@ -104,6 +105,14 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 current.state.manifest().manifest_no.0,
                 previous.state.manifest().manifest_no.0 + 1
             );
+            // A publication leaves the hint where it was, and the runtime
+            // that published the manifest raises the hint afterward. The
+            // lagging-hint case models a raise that hasn't happened yet.
+            if !lagging_hint {
+                raise_hint(current.state.manifest().manifest_no)
+                    .await
+                    .expect("raise the hint after the publications");
+            }
             let current_segments = segment_keys(&current);
             let dropped: BTreeSet<_> = segment_keys(&previous)
                 .difference(&current_segments)
@@ -171,19 +180,9 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
             // Once the hint catches up, only the successor's age can protect
             // its predecessor. The exact pass grace applies, even below the
             // longer namespace retirement grace.
-            store.clear();
-            let known = crate::namespace::control::load_hint(&store, &namespace_id)
+            raise_hint(current.state.manifest().manifest_no)
                 .await
-                .expect("hint");
-            raise_hint(
-                &store,
-                &namespace_id,
-                current.state.manifest().manifest_no,
-                known,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            )
-            .await
-            .expect("advance hint");
+                .expect("advance hint");
             let collected = gc_namespace(
                 &recent,
                 None,
@@ -235,6 +234,8 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
     crate::namespace::writer_epoch::acquire_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("supersede the compaction manifest");
+    // The runtime that published the claim raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current manifest");
@@ -317,6 +318,8 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     );
     let previous = seed_segments(&store, &namespace_id).await;
     let current = compact_bindings(&store, &namespace_id).await;
+    // The runtime that published the compaction raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
     let dropped: BTreeSet<_> = segment_keys(&previous)
         .difference(&segment_keys(&current))
         .cloned()

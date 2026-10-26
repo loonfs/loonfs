@@ -149,8 +149,10 @@ pub mod cache {
     pub use crate::namespace::status::{load_namespace_wal_tail_usage, NamespaceWalTailUsage};
 }
 
-/// Typed loaders for namespace control objects and verified catalog state.
-/// Used by `loonfs` read and write paths and by layout tests.
+/// Typed loaders for namespace control objects and verified catalog state,
+/// and the function that raises a namespace's hint.
+///
+/// The `loonfs` read and write paths and the layout tests use this module.
 pub mod control {
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::manifest::{
@@ -160,8 +162,8 @@ pub mod control {
         load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry,
     };
     pub use crate::namespace::control::{
-        load_namespace_current_manifest, load_namespace_read_state, CurrentManifest, LoadedHint,
-        LoadedManifest,
+        load_namespace_current_manifest, load_namespace_read_state, raise_namespace_hint,
+        CurrentManifest, LoadedHint, LoadedManifest,
     };
     pub use crate::namespace::read_anchor::{
         load_live_read_anchor, load_read_anchor, manifest_has_successor, project_anchor_tail,

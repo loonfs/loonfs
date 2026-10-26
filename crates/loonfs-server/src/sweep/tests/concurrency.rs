@@ -16,12 +16,15 @@ use tempfile::tempdir;
 async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("one-visit");
+    // The runtime raises the hint in the background after each publication,
+    // so neither the gate nor the recording selects the hint.
     let store = Arc::new(BlockingStore::new(
         RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any(),
+            KeyPredicate::any().except_hints(),
         ),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id))
+            .except_hints(),
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
@@ -91,12 +94,15 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
 async fn a_publish_during_metadata_maintenance_stays_due() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("concurrent-publish");
+    // The runtime raises the hint in the background after each publication,
+    // so neither the gate nor the recording selects the hint.
     let store = Arc::new(BlockingStore::new(
         RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any(),
+            KeyPredicate::any().except_hints(),
         ),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id))
+            .except_hints(),
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
@@ -270,12 +276,15 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
 async fn a_collection_finishing_after_close_does_not_update_the_replacement_entry() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("replacement-during-collection");
+    // The runtime raises the hint in the background after each publication,
+    // so neither the gate nor the recording selects the hint.
     let store = Arc::new(BlockingStore::new(
         RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any(),
+            KeyPredicate::any().except_hints(),
         ),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id))
+            .except_hints(),
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);

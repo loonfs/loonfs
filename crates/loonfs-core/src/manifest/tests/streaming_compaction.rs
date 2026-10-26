@@ -3348,7 +3348,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
 }
 
 /// Checks that a finalization attempt loads the current manifest and the
-/// hint once, and raises the hint from the hint it loaded.
+/// hint once, and leaves the hint for the runtime to raise.
 #[tokio::test]
 async fn a_finalization_attempt_loads_the_current_manifest_once() {
     use loonfs_test_support::stores::RecordingStore;
@@ -3369,15 +3369,17 @@ async fn a_finalization_attempt_loads_the_current_manifest_once() {
     .await
     .expect("merge");
     let current = current_manifest_number(&store, &namespace).await;
-    assert_eq!(
-        crate::namespace::control::load_hint(&store, &namespace)
-            .await
-            .expect("hint")
-            .state
-            .manifest_no,
+    // The runtime that published the seed raises the hint afterward, so
+    // discovery starts at the current manifest.
+    crate::namespace::control::raise_namespace_hint(
+        &store,
+        &namespace,
         current,
-        "the hint points to the current manifest"
-    );
+        None,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("raise the hint");
     let next = current.successor().expect("next manifest number");
     let store = RecordingStore::new(store, KeyPredicate::any());
     let manifest_no =
@@ -3392,16 +3394,15 @@ async fn a_finalization_attempt_loads_the_current_manifest_once() {
             ("get", hint.clone()),
             ("get", manifest(current)),
             ("get", manifest(next)),
-            ("get", hint.clone()),
+            ("get", hint),
             ("put", manifest(next)),
-            ("cas", hint),
         ]
     );
-    assert_eq!(operations.len(), 6, "{operations:?}");
+    assert_eq!(operations.len(), 5, "{operations:?}");
 }
 
 /// Checks that a compaction unit loads the current manifest once to plan and
-/// once to publish, and raises the hint from the hint it loaded.
+/// once to publish, and leaves the hint for the runtime to raise.
 #[tokio::test]
 async fn a_unit_loads_the_current_manifest_once_to_plan_and_once_to_publish() {
     use loonfs_test_support::stores::RecordingStore;
@@ -3411,15 +3412,17 @@ async fn a_unit_loads_the_current_manifest_once_to_plan_and_once_to_publish() {
     let store = LocalFsStore::new(directory.path()).expect("store");
     seed_bindings_workload(&store, &namespace).await;
     let current = current_manifest_number(&store, &namespace).await;
-    assert_eq!(
-        crate::namespace::control::load_hint(&store, &namespace)
-            .await
-            .expect("hint")
-            .state
-            .manifest_no,
+    // The runtime that published the seed raises the hint afterward, so
+    // discovery starts at the current manifest.
+    crate::namespace::control::raise_namespace_hint(
+        &store,
+        &namespace,
         current,
-        "the hint points to the current manifest"
-    );
+        None,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("raise the hint");
     let next = current.successor().expect("next manifest number");
     let store = RecordingStore::new(store, KeyPredicate::any());
     let outcome = compact_unit_with(
@@ -3443,7 +3446,7 @@ async fn a_unit_loads_the_current_manifest_once_to_plan_and_once_to_publish() {
     ];
     let mut expected = load.to_vec();
     expected.extend(load);
-    expected.extend([("put", manifest(next)), ("cas", hint)]);
+    expected.push(("put", manifest(next)));
     assert_eq!(control_requests(&namespace, &store.take()), expected);
 }
 

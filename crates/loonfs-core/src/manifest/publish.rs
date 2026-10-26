@@ -3,7 +3,7 @@
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{
     load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_no,
-    raise_hint, CurrentManifest, LoadedHint, LoadedManifest,
+    CurrentManifest, LoadedHint, LoadedManifest,
 };
 use crate::time::Deadline;
 use bytes::Bytes;
@@ -49,12 +49,16 @@ pub(crate) enum ManifestChange<T> {
 ///
 /// Each attempt loads the current manifest and the hint, and passes the
 /// manifest to `change`. A `Next` payload is published at the next manifest
-/// number with put-if-absent, and the hint is raised from the hint that the
-/// attempt loaded. After a lost put, the next attempt loads the manifest that
-/// won. The call returns `store_contention` once `attempts` attempts have
-/// each lost their put or returned `Again`. The caller starts `deadline`
-/// before the call, so `METADATA_PUBLICATION_BUDGET_MS` covers every attempt,
-/// from the first load to the last put.
+/// number with put-if-absent. After a lost put, the next attempt loads the
+/// manifest that won. The call returns `store_contention` once `attempts`
+/// attempts have each lost their put or returned `Again`. The caller starts
+/// `deadline` before the call, so `METADATA_PUBLICATION_BUDGET_MS` covers
+/// every attempt, from the first load to the last put.
+///
+/// The call returns the hint that its last attempt loaded, and it doesn't
+/// raise the hint. The runtime that published the manifest raises the hint
+/// afterward with
+/// [`raise_namespace_hint`](crate::namespace::control::raise_namespace_hint).
 pub(crate) async fn update_manifest<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -79,14 +83,8 @@ where
                 payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
                 let manifest = encode_manifest(payload);
                 let manifest_bytes = manifest.as_bytes().len() as u64;
-                let (outcome, raised) = publish_manifest_from(
-                    store,
-                    manifest,
-                    deadline,
-                    Some(current),
-                    Some(hint.clone()),
-                )
-                .await?;
+                let outcome =
+                    publish_manifest_from(store, manifest, deadline, Some(current)).await?;
                 let lost_to = match outcome {
                     ManifestPublicationOutcome::Published(state) => {
                         let loaded = LoadedManifest {
@@ -97,7 +95,7 @@ where
                             manifest_bytes,
                             state,
                         };
-                        return Ok((result, loaded, raised.unwrap_or(hint)));
+                        return Ok((result, loaded, hint));
                     }
                     ManifestPublicationOutcome::CoveredByCurrent(_) => "covered_by_current",
                     ManifestPublicationOutcome::PredecessorChanged(_) => "predecessor_changed",
@@ -143,9 +141,7 @@ pub(crate) async fn create_manifest<S: ObjectStore + ?Sized>(
         Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => {}
         Err(error) => return Err(CoreError::store(&object_key, &error)),
     }
-    let (outcome, _) =
-        publish_manifest_from(store, encode_manifest(payload), deadline, None, None).await?;
-    match outcome {
+    match publish_manifest_from(store, encode_manifest(payload), deadline, None).await? {
         ManifestPublicationOutcome::Published(_) => Ok(()),
         ManifestPublicationOutcome::CoveredByCurrent(current)
         | ManifestPublicationOutcome::PredecessorChanged(current) => {
@@ -170,8 +166,7 @@ pub(super) async fn publish_manifest_from<S: ObjectStore + ?Sized>(
     manifest: EncodedEnvelope<NamespaceManifestPayload>,
     deadline: &Deadline,
     current: Option<LoadedManifest>,
-    hint: Option<LoadedHint>,
-) -> Result<(ManifestPublicationOutcome, Option<LoadedHint>)> {
+) -> Result<ManifestPublicationOutcome> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
     let namespace_id = &namespace_id;
     // A reader refuses a larger document, so publishing one would leave the
@@ -224,14 +219,13 @@ pub(super) async fn publish_manifest_from<S: ObjectStore + ?Sized>(
         if manifest.envelope().payload().writer_epoch
             < current.state.envelope.payload().writer_epoch
         {
-            return Ok((
-                ManifestPublicationOutcome::PredecessorChanged(current.state.clone()),
-                hint,
+            return Ok(ManifestPublicationOutcome::PredecessorChanged(
+                current.state.clone(),
             ));
         }
         match classify_current(&current.state, &candidate, expected_predecessor, false) {
             ManifestKind::Installable => {}
-            ManifestKind::Settled(outcome) => return Ok((outcome, hint)),
+            ManifestKind::Settled(outcome) => return Ok(outcome),
         }
     }
     let payload = manifest.envelope().payload();
@@ -318,30 +312,7 @@ pub(super) async fn publish_manifest_from<S: ObjectStore + ?Sized>(
             return Err(CoreError::store(&object_key, &error));
         }
     };
-    // A successor raises the hint that its attempt loaded. Creation writes the
-    // hint at 1 before manifest 1, so a first manifest needs no raise.
-    let raised = match (&outcome, hint) {
-        (ManifestPublicationOutcome::Published(_), Some(known)) => {
-            // Publication is already durable, so a failed hint update can't undo it.
-            match raise_hint(
-                store,
-                namespace_id,
-                candidate.manifest().manifest_no,
-                known,
-                deadline,
-            )
-            .await
-            {
-                Ok(raised) => Some(raised),
-                Err(error) => {
-                    tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
-                    None
-                }
-            }
-        }
-        _ => None,
-    };
-    Ok((outcome, raised))
+    Ok(outcome)
 }
 
 fn ensure_publication_in_budget(object_key: &str, deadline: &Deadline) -> Result<()> {

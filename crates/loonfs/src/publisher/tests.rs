@@ -3338,8 +3338,115 @@ fn segment_write_watch(root: &Path) -> NamespaceOverlapStore<LocalFsStore> {
     })
 }
 
+/// A store that forwards every call to a local store, and that can hold the
+/// answer to a fold's manifest put.
+///
+/// Once the test arms the store, it holds the answer to the namespace's next
+/// fold manifest put until the test releases the answer. The manifest is
+/// durable while the answer is held, and the fold hasn't returned.
+#[derive(Debug)]
+struct HeldFoldAnswer {
+    inner: LocalFsStore,
+    manifests: String,
+    armed: std::sync::atomic::AtomicBool,
+    held: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl HeldFoldAnswer {
+    fn new(root: &Path, namespace_id: &NamespaceId) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("store"),
+            manifests: metadata_manifest_prefix(namespace_id),
+            armed: std::sync::atomic::AtomicBool::new(false),
+            held: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn hold_next(&self) {
+        self.armed.store(true, AtomicOrdering::SeqCst);
+    }
+
+    async fn wait_until_held(&self) {
+        self.held.notified().await;
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[async_trait]
+impl ObjectStore for HeldFoldAnswer {
+    delegate_object_store!(self => self.inner; except put);
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let fold = key.starts_with(&self.manifests)
+            && matches!(mode, PutMode::CreateIfAbsent)
+            && loonfs_types::format::manifest::decode_namespace_manifest_json(&bytes)
+                .is_ok_and(|manifest| manifest.payload().folded_wal_no.0 > 0);
+        let answer = self.inner.put(key, bytes, mode).await;
+        if fold && self.armed.swap(false, AtomicOrdering::SeqCst) {
+            self.held.notify_one();
+            self.release.notified().await;
+        }
+        answer
+    }
+}
+
+/// Returns the manifest number that the namespace's hint records.
+async fn hint_manifest_no(
+    store: &dyn ObjectStore,
+    namespace_id: &NamespaceId,
+) -> loonfs_types::ManifestNo {
+    use loonfs_types::format::control::{decode_control_object, ControlObjectKind, HintPayload};
+    let bytes = store
+        .get(&loonfs_objectstore::keys::hint(namespace_id), None)
+        .await
+        .expect("read the hint")
+        .expect("the hint exists");
+    decode_control_object::<HintPayload>(&bytes, ControlObjectKind::Hint)
+        .expect("decode the hint")
+        .payload()
+        .manifest_no
+}
+
+async fn current_manifest_no(
+    store: &dyn ObjectStore,
+    namespace_id: &NamespaceId,
+) -> loonfs_types::ManifestNo {
+    loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest")
+        .state
+        .manifest()
+        .manifest_no
+}
+
+/// Waits for the writer's hint raises, and checks that the namespace's hint
+/// records the namespace's current manifest.
+async fn assert_hint_at_current_manifest(
+    writer: &crate::LoonFs<crate::Writable>,
+    store: &dyn ObjectStore,
+    namespace_id: &NamespaceId,
+) {
+    writer.mode.publisher.wait_for_hint_raises().await;
+    assert_eq!(
+        hint_manifest_no(store, namespace_id).await,
+        current_manifest_no(store, namespace_id).await,
+        "the hint of `{namespace_id}` records its current manifest"
+    );
+}
+
 mod fenced_session;
 mod head_positions;
+mod hint_raises;
 mod inline_writer;
 mod pin_folds;
 mod retention_expiry;

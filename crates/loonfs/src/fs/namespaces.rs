@@ -123,13 +123,25 @@ impl LoonFs<Writable> {
                 .await
         }
         .map_err(Error::from);
-        // The fold of the source's tail that a fork of the current head runs
-        // isn't reported, so the source's publisher drops its position.
+        if let Some(published) = result
+            .as_ref()
+            .ok()
+            .and_then(|report| report.published.as_ref())
+        {
+            self.mode
+                .publisher
+                .raise_hint(source_namespace_id, published.manifest.manifest_no);
+        }
+        // The runtime drops its view of the source after a fork, as it does
+        // after a creation or a deletion (see the read freshness design
+        // note), so the source's publisher drops its position instead of
+        // moving onto the fork's fold.
         let result = self
             .mode
             .publisher
             .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unknown)
-            .await;
+            .await
+            .map(|report| report.response);
         if result.is_ok() {
             self.mode
                 .publisher

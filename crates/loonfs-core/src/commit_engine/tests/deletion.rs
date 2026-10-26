@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::test_support::ops::create;
-use loonfs_objectstore::keys::hint;
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
@@ -18,13 +18,18 @@ fn context() -> MutationContext {
 async fn deletion_budget_includes_writer_acquisition() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("deletion-budget").expect("namespace");
+    // The acquisition's check for a successor of its claim (manifest 2) is
+    // held while the clock passes the budget.
     let store = BlockingStore::new(
         RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::any(),
         ),
-        KeyPredicate::exact(hint(&namespace_id)),
-        OperationSelector::CompareAndSwap,
+        KeyPredicate::exact(metadata_manifest_object(
+            &namespace_id,
+            &loonfs_types::ManifestNo(3),
+        )),
+        OperationSelector::Head,
     );
     let context = context();
     create(&store, &namespace_id, &context)

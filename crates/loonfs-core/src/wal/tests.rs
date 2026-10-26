@@ -11,7 +11,7 @@ use crate::namespace::writer_epoch::{acquire_writer, acquire_writer_epoch};
 use crate::path::read::load_current_metadata_view;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_objectstore::keys::{hint, metadata_manifest_object, wal_object, wal_prefix};
+use loonfs_objectstore::keys::{metadata_manifest_object, wal_object, wal_prefix};
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
@@ -242,14 +242,20 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
     assert_eq!(current.state.envelope.payload().folded_wal_no, WalNo(2));
 }
 
+/// Checks that an acquisition whose anchor load is held past the revalidation
+/// bound, while a fold, a compactor claim, and a collection run, stops when
+/// its publication budget runs out and writes no fence over the collected
+/// objects.
 #[tokio::test]
-async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing() {
+async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("late-claim").expect("namespace");
+    // The claim's manifest doesn't fold the first fence, so the acquisition's
+    // first read after the claim is the first fence.
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(hint(&namespace_id)),
-        OperationSelector::CompareAndSwap,
+        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(1))),
+        OperationSelector::Read,
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup).await.expect("create");
@@ -261,8 +267,9 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
     let (acquired, ()) = futures::join!(
         acquire_writer(&store, &namespace_id, &setup, timer.clone()),
         async {
-            // The claim has landed and its hint raise is held. Meanwhile a fold
-            // folds the first fence, a compactor claim supersedes the fold, and
+            // The claim is written and its first WAL read is held. Meanwhile
+            // a fold folds the first fence, a compactor claim supersedes the
+            // fold, the runtime that published them raises the hint, and
             // collection removes the folded manifest and the folded fence.
             store.wait_until_blocked().await;
             let claim = load_current_manifest(store.inner(), &namespace_id)
@@ -274,13 +281,24 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
             crate::manifest::fold_wal(store.inner(), &namespace_id)
                 .await
                 .expect("fold");
-            crate::manifest::claim_compactor(
+            let compactor_claim = crate::manifest::claim_compactor(
                 store.inner(),
                 &namespace_id,
                 crate::test_support::std_timer(),
             )
             .await
-            .expect("compactor claim");
+            .expect("compactor claim")
+            .published
+            .expect("a published claim");
+            crate::namespace::control::raise_namespace_hint(
+                store.inner(),
+                &namespace_id,
+                compactor_claim.manifest.manifest_no,
+                None,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("raise the hint");
             for key in [
                 metadata_manifest_object(&namespace_id, &claim.successor().expect("next")),
                 wal_object(&namespace_id, &WalNo(1)),
@@ -291,17 +309,20 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
             store.release();
         }
     );
-    let (_, anchor) = acquired.expect("acquire");
-    let current = load_current_manifest(&store, &namespace_id)
-        .await
-        .expect("manifest");
-    assert_eq!(anchor.manifest.state.manifest(), current.state.manifest());
-    assert_eq!(anchor.read_state.wal_no, WalNo(2));
-    assert!(store
-        .head(&wal_object(&namespace_id, &WalNo(1)))
-        .await
-        .expect("head")
-        .is_none());
+    // The revalidation bound is longer than the publication budget, so the
+    // acquisition reloads its anchor and then runs out of budget at the fence.
+    let error = acquired.expect_err("the held acquisition runs out of budget");
+    assert_matches!(
+        error,
+        crate::error::CoreError::MetadataPublicationBudgetExceeded { .. }
+    );
+    for number in [1, 2] {
+        assert!(store
+            .head(&wal_object(&namespace_id, &WalNo(number)))
+            .await
+            .expect("head")
+            .is_none());
+    }
 }
 
 #[tokio::test]

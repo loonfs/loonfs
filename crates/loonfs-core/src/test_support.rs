@@ -107,6 +107,33 @@ pub(crate) fn grace_elapsed_after(committed_at_ms: u64) -> u64 {
     committed_at_ms + crate::limits::GC_DEFAULT_GRACE_WINDOW_MS
 }
 
+/// Raises the namespace's hint to its current manifest, as the runtime that
+/// published that manifest does after the publication.
+///
+/// A publication in core leaves the hint where it was, so a test that needs
+/// garbage collection or discovery to see a raised hint calls this.
+#[cfg(test)]
+pub(crate) async fn raise_hint_to_current_manifest<S: loonfs_objectstore::ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &loonfs_types::NamespaceId,
+) {
+    let current = crate::namespace::control::load_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest")
+        .state
+        .manifest()
+        .manifest_no;
+    crate::namespace::control::raise_namespace_hint(
+        store,
+        namespace_id,
+        current,
+        None,
+        std_timer(),
+    )
+    .await
+    .expect("raise the hint");
+}
+
 /// Builds the context a test mutation runs under: `writer_id` at `now_ms`.
 pub fn mutation_context(writer_id: &str, now_ms: u64) -> crate::MutationContext {
     crate::MutationContext {

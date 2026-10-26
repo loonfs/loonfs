@@ -467,11 +467,17 @@ async fn a_fold_whose_tail_is_already_folded_writes_nothing() {
 }
 
 /// Checks that a fold's publication reads the hint only to load the current
-/// manifest, and raises the hint from the hint it loaded.
+/// manifest, and leaves the hint for the runtime to raise.
 #[tokio::test]
 async fn a_fold_publication_reads_the_hint_once_per_load() {
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
+    // The runtime that published the session's claim raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(
+        writer.store.as_ref(),
+        &writer.namespace_id,
+    )
+    .await;
     let basis = writer
         .engine
         .wal_fold_input()
@@ -493,9 +499,8 @@ async fn a_fold_publication_reads_the_hint_once_per_load() {
             ("get", hint.clone()),
             ("get", manifest(basis)),
             ("get", manifest(next)),
-            ("get", hint.clone()),
+            ("get", hint),
             ("put", manifest(next)),
-            ("cas", hint),
         ]
     );
 }
@@ -547,6 +552,13 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
             writer.engine.wal_fold_input().expect("tail").basis.0,
             folded.manifest.manifest
         );
+        // The runtimes that published the manifests raise the hint, so the
+        // next fold's discovery starts at the current manifest in both cases.
+        crate::test_support::raise_hint_to_current_manifest(
+            writer.store.inner(),
+            &writer.namespace_id,
+        )
+        .await;
         writer.commit("second", Vec::new(), &["/b"]).await;
         let publish = request_counts(&writer.store);
         let hint = hint(&writer.namespace_id);

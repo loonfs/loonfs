@@ -338,7 +338,11 @@ The namespace's counters advance at different times:
 
 For example, manifest 5 might cover WAL objects through 8 and sequences through 40. WAL object 9 can be a fence at sequence 40, and WAL object 10 can contain commits 41 to 43. The read view is then at sequence 43. A fold can publish manifest 6, covering WAL object 10, without allocating sequence 44.
 
+A manifest publication returns once its manifest is durable, without raising the hint. The runtime that published the manifest raises the hint to the manifest's number afterward, with compare-and-swap. LoonFS starts compare-and-swap writes to one object at least one write interval apart (1 second, as described in the [provider reference](object-storage-providers.md#1-frequently-used-data-points)), so the hint can lag the newest manifest by about one write interval, or by up to two when a publication arrives while a raise waits. A runtime combines its raises of one namespace's hint into one raise to the newest manifest it published, so each runtime has at most one hint write pending for each namespace. For example, if a runtime publishes manifests 6, 7, and 8 while its raise to 5 waits for the write interval, its next raise writes 8, and the runtime writes neither 6 nor 7. If the process exits before it raises the hint, the hint lags until a runtime raises it after a later publication.
+
 Why does the hint exist, and why can it lag? A reader needs a place to start that doesn't require listing the namespace's manifests, because object-storage listings are slow, and LoonFS keeps them off every hot path. LoonFS updates the hint after it publishes a manifest, as a separate compare-and-swap. Keeping the hint and the manifest in step would need a transaction across two objects, which object storage doesn't support. So readers treat the hint as a starting point and check for newer manifests (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
+
+Why doesn't a publication wait for its hint raise? The raises that follow a namespace's manifest publications all write the same hint object, and some providers accept about one write per second to one object. If a publication waited for its raise, any publication that followed another one within a second would wait for the rest of that second. A hint that lags costs a reader a few more manifest reads, and it doesn't change what the reader finds.
 
 ### 2.5 Manifest references
 
@@ -374,7 +378,7 @@ WAL:        [7]  [8]  [9]  [10]  [11]   <- WAL tip
 
 - A manifest records the namespace's lifecycle status, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that contain its rows through `head_seq`.
 - A WAL object contains the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it. A fence contains no commits.
-- The hint is mutable. It records a manifest number, manifest publications raise it by compare-and-swap, and it never decreases.
+- The hint is mutable. It records a manifest number that never decreases, and the runtime that publishes a manifest raises the hint afterward, with compare-and-swap.
 - Content objects store immutable ranges of file bytes, and a layout lists those ranges in chain order.
 - Pins are retained manifests (see [Pins](#8-pins)).
 
@@ -814,7 +818,7 @@ acknowledge
 
 A confirmed precondition failure creates no object. The writer discovers the winning publication, checks whether it has been fenced, and plans again before it tries another number. It never creates a parallel branch of history.
 
-Commits don't raise the hint. Manifest publications raise it (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)), and readers stay correct while it lags, because discovery probes forward.
+Commits don't raise the hint. The runtime that publishes a manifest raises the hint afterward (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)), and readers stay correct while the hint lags, because discovery probes forward.
 
 Every put is planned against an observed state, and that observation has to be recent. A writer tracks two kinds of observation:
 
@@ -973,7 +977,6 @@ A fold works in these steps:
 3. Write each chain's new extent to a content object (see below).
 4. Write new metadata segments for the WAL objects after `folded_wal_no`, including the new layout rows. A fence is folded even when the sequence doesn't change, and an ordinary fold writes a run at the head when it materializes new state.
 5. Publish the next manifest, with `folded_wal_no` set to the tip it captured, using put-if-absent at the predecessor's `manifest_no + 1`.
-6. Raise the hint.
 
 A fold is a publication by the namespace's "maintainer", the role that folds, compacts, advances the retention floor, and collects garbage, while the writer session commits and deletes the namespace. A fold publishes under the current compactor epoch without claiming it, and it copies the predecessor's writer and compactor epochs forward, so it doesn't need a writer epoch, and any process can run one. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
@@ -1010,7 +1013,7 @@ A successor can set, change, or clear the [retention window](glossary.md#retenti
 
 The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until the manifest put starts. An attempt whose budget expired publishes nothing more, and its unreferenced output is deleted under the segment-age rules in [Candidate and age rules](#113-candidate-and-age-rules). Compaction has a longer bound (see [Streaming compaction](#104-streaming-compaction)).
 
-After the publication, the fold raises the hint within the publication budget. If raising the hint fails, the manifest is still published. Garbage collection keeps every manifest number at or above the hint value it observed for its pass, so discovery can probe forward from a hint that lags. The intermediate manifests kept for discovery don't keep their own runs. A manifest whose successor is younger than the grace does keep its runs, as a root (see [Reference roots](#112-reference-roots)).
+The fold doesn't raise the hint. The runtime that published the fold's manifest raises the hint afterward (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)), and a failed raise doesn't undo the publication. Garbage collection keeps every manifest number at or above the hint value it observed for its pass, so discovery can probe forward from a hint that lags. The intermediate manifests kept for discovery don't keep their own runs. A manifest whose successor is younger than the grace does keep its runs, as a root (see [Reference roots](#112-reference-roots)).
 
 Forks follow the same path from manifest 1. A manifest owned by the fork doesn't mean the inherited segments were copied into the fork's prefix, and each segment keeps its owner.
 

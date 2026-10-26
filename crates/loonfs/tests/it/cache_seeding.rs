@@ -41,12 +41,14 @@ fn runtime_reads_reuse_the_writer_tail_for_repeated_reads() {
     .expect("put file");
 
     block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.wait_for_hint_raises());
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read is served from the position's tail");
     assert_eq!(recording.take(), []);
 
     block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.wait_for_hint_raises());
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read reuses the position's tail");
@@ -60,6 +62,7 @@ fn runtime_reads_reuse_the_writer_tail_for_repeated_reads() {
     )
     .expect("put other");
     block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.wait_for_hint_raises());
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("read after local mutation takes the tail the mutation extended");
@@ -300,6 +303,7 @@ fn a_cache_with_zero_limits_keeps_nothing() {
     .expect("put file");
 
     block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.wait_for_hint_raises());
     raw_store.reset_wal_get_count();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read takes the position's tail");
@@ -332,6 +336,7 @@ fn two_namespaces_with_one_file(store: SharedObjectStore) -> (NamespaceId, Names
             .expect("put file");
     }
     block_on(setup.writer.drain()).expect("finish hints");
+    block_on(setup.writer.wait_for_hint_raises());
     (first, other)
 }
 
@@ -482,6 +487,7 @@ fn runtime_wal_tail_cache_skips_oversized_projection() {
     )
     .expect("put file");
     block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.wait_for_hint_raises());
     let reader = block_on(
         loonfs::LoonFs::builder_with_store(object_store)
             .read_only()
@@ -564,6 +570,7 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     .expect("write succeeds after the WAL publication conflict");
 
     block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.wait_for_hint_raises());
     recording.reset();
     let before_read = fs.metadata_cache_stats();
     fs.stat_path_blocking(&namespace_id, "/after-stale")
@@ -686,6 +693,7 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
     fs.create_snapshot_blocking(&namespace_id)
         .expect("checkpoint");
     block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.wait_for_hint_raises());
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let fs = open_runtime_with(store(temp_dir.path()), "materialized-reader", |builder| {
         builder.metrics_recorder(recorder.clone())

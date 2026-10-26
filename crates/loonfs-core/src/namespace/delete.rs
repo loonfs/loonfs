@@ -3,7 +3,7 @@
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::publish::{update_manifest, ManifestChange};
-use crate::manifest::MetadataRunPolicy;
+use crate::manifest::{MetadataRunPolicy, PublicationReport, PublishedManifest};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -28,7 +28,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     fold_policy: MetadataRunPolicy,
     segment_cache: Option<&crate::cache::MetadataSegmentCache>,
     content_writes: &crate::PermitPool,
-) -> Result<DeleteNamespaceResponse> {
+) -> Result<PublicationReport<DeleteNamespaceResponse>> {
     update_manifest(
         store,
         namespace_id,
@@ -77,5 +77,11 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         },
     )
     .await
-    .map(|(result, _, _)| result)
+    .map(|(response, tombstone, _)| PublicationReport {
+        response,
+        published: Some(PublishedManifest::new(
+            &tombstone.state.envelope,
+            Some(deadline.origin()),
+        )),
+    })
 }

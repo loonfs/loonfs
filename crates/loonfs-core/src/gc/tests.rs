@@ -345,6 +345,8 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     )
     .await
     .expect("delete namespace");
+    // The runtime that deleted the namespace raises its hint to the tombstone.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
 
     let final_activity = crate::control::load_namespace_statistics(&store, &namespace_id)
         .await
@@ -514,6 +516,8 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     )
     .await
     .expect("delete source");
+    // The runtime that deleted the source raises its hint to the tombstone.
+    crate::test_support::raise_hint_to_current_manifest(&store, &source).await;
 
     // The deleted source keeps exactly what the living clone needs.
     let fork_record = read_fork_record(&store, &source).await;
@@ -2123,6 +2127,8 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
             .await
             .expect("fold wal");
     }
+    // The runtime that published the folds raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
 
     // Record-less maintenance: nothing accumulates under `pins/`.
     assert!(
@@ -2340,6 +2346,8 @@ async fn gc_retains_active_checkpoint_bases() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("second checkpoint");
+    // The runtime that published the checkpoints' folds raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(
@@ -2433,6 +2441,8 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     create_checkpoint(&store, &source, &setup)
         .await
         .expect("advance manifest past the fork basis");
+    // The runtime that published the checkpoint's fold raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(&store, &source).await;
 
     let before = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = gc_namespace(
@@ -3325,7 +3335,9 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
     write_test_file(&store, &namespace_id, "/four", "four", &setup).await;
     crate::manifest::fold_wal(&store, &namespace_id)
         .await
-        .expect("refresh hint by publishing");
+        .expect("fold");
+    // The runtime that published the fold raises the hint past the rewind.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
     let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
         .await
         .expect("current");
@@ -3793,6 +3805,9 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
     crate::manifest::fold_wal(&store, &namespace_id)
         .await
         .expect("fold");
+    // The runtime that published the fold raises the hint, so discovery
+    // starts above the deleted manifest.
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
     store
         .delete(&metadata_manifest_object(
             &namespace_id,

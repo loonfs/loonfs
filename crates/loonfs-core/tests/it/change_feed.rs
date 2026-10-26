@@ -341,7 +341,7 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
                 .await
                 .expect("fold the fork's WAL tail into commit rows");
         }
-        let changes = list_changes_after(&store, &fork, forked.head_seq)
+        let changes = list_changes_after(&store, &fork, forked.response.head_seq)
             .await
             .expect("read the fork's change feed");
         let [FilesystemChange::ContentChanged {

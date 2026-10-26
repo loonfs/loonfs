@@ -242,9 +242,11 @@ async fn manifest_receipts_answer_retries_with_a_warm_publisher_without_content_
 #[tokio::test]
 async fn inline_publication_without_fallback_keeps_its_store_requests() {
     let directory = tempfile::tempdir().expect("directory");
+    // The runtime raises the hint in the background after the seed commit,
+    // so the recording leaves the hint out.
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
+        KeyPredicate::any().except_hints(),
     ));
     let writer = open(recording.clone(), 1024).await;
     let namespace_writer = seed(&writer).await;
@@ -278,6 +280,10 @@ async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissio
         .commit_candidate(inline("retained", "alice", b"recorded"))
         .await
         .expect("original commit");
+    // The original writer's hint raise runs after its commits return, so the
+    // test waits for the raise before the gate parks the cold writer's first
+    // read.
+    original_writer.wait_for_hint_raises().await;
     let cold_writer = open(recording.clone(), 1).await;
     recording.reset();
     blocking.block_next();

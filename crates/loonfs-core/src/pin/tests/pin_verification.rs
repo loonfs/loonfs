@@ -109,6 +109,8 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     .await
     .expect("compact");
     assert_matches!(report, CompactionUnitOutcome::Published { .. });
+    // The runtime that published the compaction raises the hint.
+    crate::test_support::raise_hint_to_current_manifest(store, namespace_id).await;
     let current = load_current_manifest(store, namespace_id)
         .await
         .expect("current manifest");

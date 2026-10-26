@@ -4,5 +4,5 @@ mod host;
 mod operations;
 mod step_budget;
 
-pub(crate) use host::{client, MaintenanceHost};
+pub(crate) use host::{client, shut_down_embedded_runtimes, MaintenanceHost};
 pub(crate) use step_budget::StepBudget;

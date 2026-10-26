@@ -71,6 +71,9 @@ async fn fixture(fold: Fold) -> Fixture {
         assert_eq!(folded.outcome, FoldWalOutcome::Published);
     }
     writer.drain().await.expect("the fold settles");
+    // The folds' hint raise runs after the folds return, so the fixture waits
+    // for the raise before the tests count requests.
+    writer.wait_for_hint_raises().await;
     Fixture {
         recording,
         writer,
