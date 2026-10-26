@@ -700,6 +700,7 @@ mod tests {
             deleted_other_objects: 1,
             namespace_reaped: true,
             retained_candidates: 4,
+            listed_bytes: 0,
         });
         let summary = gc_summary(&pass);
         assert!(

@@ -1409,6 +1409,9 @@ pub struct GcResponse {
     pub deleted_checkpoints_by_owner: DeletedCheckpointsByOwner,
     /// The candidates that the pass kept at deletion time, counted by reason.
     pub retained: RetainedCandidates,
+    /// The bytes of every object that the pass listed under the namespace, each object once, before
+    /// the pass's deletes.
+    pub listed_bytes: u64,
     /// The earliest future retirement deadline, pin deletion time, or upload cleanup time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -1466,6 +1469,9 @@ pub struct GrepGcReport {
     /// The candidates that the pass kept because they were referenced, too young, or
     /// unrecognized.
     pub retained_candidates: u64,
+    /// The bytes of every grep object that the pass listed under the namespace, before the pass's
+    /// deletes.
+    pub listed_bytes: u64,
 }
 
 impl GcResponse {
@@ -1477,6 +1483,7 @@ impl GcResponse {
             deleted: DeletedObjectCounts::default(),
             deleted_checkpoints_by_owner: DeletedCheckpointsByOwner::default(),
             retained: RetainedCandidates::default(),
+            listed_bytes: 0,
             next_reclamation_at_ms: None,
             reclaimable_at_ms: None,
             extensions: ExtensionGcReports::default(),
@@ -2771,12 +2778,14 @@ mod tests {
             gc_json["deleted_checkpoints_by_owner"],
             serde_json::json!({"user": 0, "fork": 0})
         );
+        assert_eq!(gc_json["listed_bytes"], 0);
         let gc: GcResponse =
             serde_json::from_value(gc_json).expect("decode gc response without optional fields");
         assert_eq!(gc.next_reclamation_at_ms, None);
         assert_eq!(gc.reclaimable_at_ms, None);
         assert!(gc.extensions.is_empty());
         let retired = GcResponse {
+            listed_bytes: 4_096,
             reclaimable_at_ms: Some(2_000_000),
             extensions: ExtensionGcReports {
                 grep: Some(GrepGcReport {
@@ -2784,11 +2793,13 @@ mod tests {
                     deleted_other_objects: 1,
                     namespace_reaped: true,
                     retained_candidates: 5,
+                    listed_bytes: 512,
                 }),
             },
             ..gc
         };
         let mut json = serde_json::to_value(&retired).expect("encode retirement");
+        assert_eq!(json["listed_bytes"], 4_096);
         assert_eq!(json["reclaimable_at_ms"], 2_000_000);
         assert_eq!(
             json["extensions"],
@@ -2797,7 +2808,8 @@ mod tests {
                     "deleted_segments": 2,
                     "deleted_other_objects": 1,
                     "namespace_reaped": true,
-                    "retained_candidates": 5
+                    "retained_candidates": 5,
+                    "listed_bytes": 512
                 }
             })
         );

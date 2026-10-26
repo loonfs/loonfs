@@ -48,6 +48,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             let mut keys = self.store().list_entries_from_stream(&prefix, None);
             while let Some(entry) = keys.next().await {
                 let entry = entry.map_err(|error| GrepError::store(&prefix, &error))?;
+                report.listed_bytes += entry.size_bytes;
                 collect_candidate(
                     self.store(),
                     &entry,
@@ -96,6 +97,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let mut keys = self.store().list_entries_from_stream(&prefix, None);
         while let Some(entry) = keys.next().await {
             let entry = entry.map_err(|error| GrepError::store(&prefix, &error))?;
+            report.listed_bytes += entry.size_bytes;
             let key = &entry.key;
             let Some(parsed) = parse_key(key) else {
                 report.retained_candidates += 1;
@@ -121,6 +123,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let mut keys = self.store().list_entries_from_stream(&prefix, None);
         while let Some(entry) = keys.next().await {
             let entry = entry.map_err(|error| GrepError::store(&prefix, &error))?;
+            report.listed_bytes += entry.size_bytes;
             let key = &entry.key;
             if live_segments.contains(key) || parse_key(key).is_none() {
                 report.retained_candidates += 1;

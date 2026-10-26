@@ -13,9 +13,11 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::manifest::MetadataSegmentCache;
-use futures::{StreamExt, TryStreamExt};
+use futures::{future, StreamExt, TryStreamExt};
+use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{GcResponse, NamespaceId};
+use std::sync::atomic::AtomicU64;
 
 /// Collects one namespace.
 ///
@@ -71,6 +73,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         mutation: context,
         live: &live,
         session_cache,
+        listed_bytes: AtomicU64::new(0),
     };
     for family in CandidateFamily::ALL {
         if family == CandidateFamily::Content {
@@ -93,6 +96,26 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         .and_then(|listed| sweep.upload(listed))
         .boxed();
     apply_decisions(store, decisions, &mut report).await?;
-    reclaim_namespace(store, &live, &mut report).await?;
+    let content_listed = reclaim_namespace(store, &live, &mut report).await? || content.is_some();
+    // A skipped content sweep or a retained tombstone leaves the content
+    // unlisted, but the content still occupies storage.
+    if !content_listed {
+        report.listed_bytes += list_content_bytes(store, namespace_id).await?;
+    }
+    report.listed_bytes += sweep.listed_bytes.into_inner();
     Ok(report)
+}
+
+/// Lists the namespace's content prefix and returns the sum of the listed
+/// object sizes.
+async fn list_content_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<u64> {
+    let prefix = content_prefix(namespace_id);
+    store
+        .list_entries_from_stream(&prefix, None)
+        .map_err(|error| CoreError::store(&prefix, &error))
+        .try_fold(0, |total, entry| future::ok(total + entry.size_bytes))
+        .await
 }

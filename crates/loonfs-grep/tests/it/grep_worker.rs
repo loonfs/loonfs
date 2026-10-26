@@ -54,6 +54,20 @@ async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
     GrepHost::new(store, "grep-worker-tests").await.worker
 }
 
+/// Sums the listed sizes of the objects under each prefix.
+async fn listed_bytes(store: &SharedObjectStore, prefixes: &[String]) -> u64 {
+    use futures::TryStreamExt;
+    let mut total = 0;
+    for prefix in prefixes {
+        total += store
+            .list_entries_from_stream(prefix, None)
+            .try_fold(0, |sum, entry| futures::future::ok(sum + entry.size_bytes))
+            .await
+            .expect("list grep objects");
+    }
+    total
+}
+
 async fn drive_worker_to_current(
     worker: &GrepWorker<SharedObjectStore>,
     namespace_id: &NamespaceId,
@@ -2540,6 +2554,16 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     }
     write_hint(&*store, &namespace_id, ManifestNo(2)).await;
     let collector = worker(&store).await;
+    // A pass over a live namespace lists the manifests and the segments, but
+    // not the hint.
+    let swept_bytes = listed_bytes(
+        &store,
+        &[
+            manifests_prefix(&namespace_id),
+            segments_prefix(&namespace_id),
+        ],
+    )
+    .await;
     recording.reset();
     let young = collector
         .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS)
@@ -2549,6 +2573,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         (young.deleted_segments, young.deleted_other_objects),
         (0, 1)
     );
+    assert_eq!(young.listed_bytes, swept_bytes);
     assert_eq!(recording.counts().deletes, 1);
     assert!(store
         .head(&manifest_key(&namespace_id, &ManifestNo(1)))
@@ -2615,11 +2640,13 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .into_iter()
         .filter(|key| !key.starts_with(&grep_prefix(&namespace_id)))
         .collect();
+    let reaped_bytes = listed_bytes(&store, &[grep_prefix(&namespace_id)]).await;
     let reaped = collector
         .gc_namespace(&namespace_id, u64::MAX)
         .await
         .expect("reap tombstone");
     assert!(reaped.namespace_reaped);
+    assert_eq!(reaped.listed_bytes, reaped_bytes);
     assert!(store
         .list_prefix(&grep_prefix(&namespace_id))
         .await

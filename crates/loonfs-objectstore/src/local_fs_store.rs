@@ -865,6 +865,7 @@ async fn collect_keys(
                     keys.push(ListedObject {
                         key,
                         last_modified_at_ms: last_modified_at_ms(&metadata),
+                        size_bytes: metadata.len(),
                     });
                 }
             }

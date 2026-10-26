@@ -296,6 +296,7 @@ async fn a_shared_filter_over_its_cap_skips_content_and_still_sweeps_other_famil
             .await
             .expect("orphan");
     }
+    let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
     store.reset();
     let report = gc_namespace(
         &store,
@@ -310,10 +311,20 @@ async fn a_shared_filter_over_its_cap_skips_content_and_still_sweeps_other_famil
     .expect("pass");
     assert_eq!(report.deleted.content_objects, 0);
     assert_eq!(report.deleted.temporary_objects, 1);
+    assert_eq!(report.listed_bytes, listed_bytes);
     let prefix = content_prefix(&namespace_id);
     let segments = metadata_segment_prefix(&namespace_id);
-    for operation in store.snapshot() {
-        assert!(!operation.key().starts_with(&prefix), "{operation:?}");
+    let operations = store.snapshot();
+    // The pass lists the content prefix only to measure the content.
+    let content: Vec<_> = operations
+        .iter()
+        .filter(|operation| operation.key().starts_with(&prefix))
+        .collect();
+    assert_matches!(
+        content.as_slice(),
+        [RecordedOperation::List { prefix: listed }] if *listed == prefix
+    );
+    for operation in operations {
         assert!(
             !matches!(
                 &operation,

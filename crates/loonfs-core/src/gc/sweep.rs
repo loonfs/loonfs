@@ -6,13 +6,14 @@ use super::reap::{sweep_pin, GraceAge, PinSweep};
 use super::session_cache::CompletedUploadSessionCache;
 use super::uploads::{
     load_swept_session, sweep_completed_session, sweep_upload_session, ListedUpload,
-    UploadSessionSweep,
+    ListedUploadKind, UploadSessionSweep,
 };
 use crate::context::MutationContext;
 use crate::error::Result;
 use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::{NamespaceId, RetainedReason, UploadId};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) enum Decision {
     Retain {
@@ -39,6 +40,9 @@ pub(super) struct Sweep<'a, S: ObjectStore + ?Sized> {
     pub(super) mutation: &'a MutationContext,
     pub(super) live: &'a LiveSet,
     pub(super) session_cache: Option<&'a CompletedUploadSessionCache>,
+    /// The bytes of the listed objects that reached this sweep, as the
+    /// listings reported them.
+    pub(super) listed_bytes: AtomicU64,
 }
 
 impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
@@ -47,6 +51,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         family: CandidateFamily,
         entry: ListedObject,
     ) -> Result<Decision> {
+        self.add_listed_bytes(entry.size_bytes);
         if !family.recognizes(&entry.key) {
             return Ok(self.retain(RetainedReason::UnrecognizedKey, None));
         }
@@ -119,8 +124,9 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
 
     /// Decides what to do with one upload session's records.
     pub(super) async fn upload(&self, listed: ListedUpload) -> Result<Decision> {
-        match listed {
-            ListedUpload::Session {
+        self.add_listed_bytes(listed.size_bytes);
+        match listed.kind {
+            ListedUploadKind::Session {
                 upload_id,
                 outcome_listed,
             } => self.process_upload_session(upload_id, outcome_listed).await,
@@ -133,12 +139,14 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
             // the session read as open, and a later pass would abort it and
             // delete content that a commit might reference. That outcome was
             // created after the pass started, so it's younger than the window.
-            ListedUpload::OrphanOutcome { entry } => {
+            ListedUploadKind::OrphanOutcome { entry } => {
                 Ok(self.sweep_aged(entry, self.grace_window_ms, |report| {
                     &mut report.deleted.upload_sessions
                 }))
             }
-            ListedUpload::Unrecognized => Ok(self.retain(RetainedReason::UnrecognizedKey, None)),
+            ListedUploadKind::Unrecognized => {
+                Ok(self.retain(RetainedReason::UnrecognizedKey, None))
+            }
         }
     }
 
@@ -204,6 +212,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
     }
 
     pub(super) fn content_candidate(&self, entry: ListedObject, protected: bool) -> Decision {
+        self.add_listed_bytes(entry.size_bytes);
         if !CandidateFamily::Content.recognizes(&entry.key) {
             self.retain(RetainedReason::UnrecognizedKey, None)
         } else if protected {
@@ -240,5 +249,9 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
             reason,
             reclaimable_at_ms: reclaimable_at_ms.filter(|at_ms| *at_ms > self.mutation.now_ms),
         }
+    }
+
+    fn add_listed_bytes(&self, size_bytes: u64) {
+        self.listed_bytes.fetch_add(size_bytes, Ordering::Relaxed);
     }
 }

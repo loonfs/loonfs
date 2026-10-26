@@ -153,6 +153,7 @@ impl ObjectStore for MemoryStore {
                 Ok(ListedObject {
                     key: key.clone(),
                     last_modified_at_ms: object.metadata.last_modified_at_ms,
+                    size_bytes: object.metadata.size_bytes,
                 })
             })
             .collect();

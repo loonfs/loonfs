@@ -283,7 +283,9 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     .await
     .expect("before deadline");
     assert_eq!(before.next_reclamation_at_ms, Some(deadline));
-    assert_eq!(store.counts().lists, 0);
+    // Each pass inside the grace lists the content prefix once to measure the
+    // content, and deletes nothing.
+    assert_eq!(store.counts().lists, 2);
     assert_eq!(store.counts().deletes, 0);
     clock.advance_ms(1);
     gc_namespace(
@@ -297,7 +299,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     )
     .await
     .expect("owner sweep");
-    assert_eq!(store.counts().lists, 1);
+    assert_eq!(store.counts().lists, 3);
     assert_eq!(store.inner().open_uploads(), 1);
     assert_eq!(store.inner().aborts(), 0);
     let open_session = read_upload_session(&store, &namespace_id, &upload.session.upload_id)

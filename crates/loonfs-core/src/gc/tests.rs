@@ -115,6 +115,21 @@ async fn now_after_newest_object<S: ObjectStore>(
     newest + offset_ms
 }
 
+/// Sums the listed sizes of the objects under the namespace prefix that a
+/// pass lists: every object except the discovery hint and extension objects.
+async fn core_listed_bytes<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> u64 {
+    use futures::{future, TryStreamExt};
+    let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
+    let extensions = format!("{prefix}extensions/");
+    let hint = hint(namespace_id);
+    store
+        .list_entries_from_stream(&prefix, None)
+        .try_filter(|entry| future::ready(entry.key != hint && !entry.key.starts_with(&extensions)))
+        .try_fold(0, |total, entry| future::ok(total + entry.size_bytes))
+        .await
+        .expect("list namespace")
+}
+
 async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
     load_current_metadata_view(store, namespace_id)
         .await
@@ -1781,6 +1796,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
         .await
         .expect("young orphan");
     let young = context(now_after_newest_object(&store, &namespace_id, 0).await);
+    let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
     let report = gc_namespace(
         &store,
         None,
@@ -1796,6 +1812,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
     assert_eq!(report.deleted.wal_objects, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
+    assert_eq!(report.listed_bytes, listed_bytes);
     assert!(report.retained.total() > 0);
     // Everything unreachable here is simply young, and the pass says so
     // rather than leaving the operator to guess between age and reachability.
@@ -3224,6 +3241,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         )
         .await
         .expect("delete");
+        let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
         let report = gc_namespace(
             &store,
             None,
@@ -3235,6 +3253,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         )
         .await
         .expect("unretired run");
+        assert_eq!(report.listed_bytes, listed_bytes);
         assert_eq!(report.deleted.upload_sessions, 0);
         assert_eq!(
             report.retained.upload_session_undecided + report.retained.upload_session_window,
@@ -3242,6 +3261,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         );
         let key = loonfs_objectstore::keys::content_blob(&namespace_id, &content.content_id);
         assert!(store.head(&key).await.expect("object").is_some());
+        let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
         let report = gc_namespace(
             &store,
             None,
@@ -3253,6 +3273,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         )
         .await
         .expect("retired run");
+        assert_eq!(report.listed_bytes, listed_bytes);
         assert_eq!(report.deleted.upload_sessions, 1);
         assert_eq!(report.deleted.retired_content_objects, 1);
         assert!(store.head(&key).await.expect("object").is_none());
