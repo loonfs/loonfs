@@ -570,7 +570,6 @@ async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
         // The visit's share is the advance's one load of the current manifest.
         store.reset();
         let target = RetentionTarget::Window {
-            now_ms: server.maintenance.now_ms(),
             default_window_ms: server_window_ms.and_then(NonZeroU64::new),
         };
         server

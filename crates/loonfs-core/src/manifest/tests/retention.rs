@@ -654,7 +654,6 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
         );
         assert_eq!(current_manifest_no(&store, &namespace_id).await, before);
         let target = RetentionTarget::Window {
-            now_ms,
             default_window_ms: default_window_ms.and_then(window),
         };
         let floor = advance_retention_floor(

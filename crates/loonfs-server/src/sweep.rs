@@ -575,7 +575,6 @@ impl Sweep {
         }
         let options = AdvanceRetentionFloorOptions {
             target: RetentionTarget::Window {
-                now_ms: inner.maintenance.now_ms(),
                 default_window_ms: inner.retention_window_ms,
             },
         };
