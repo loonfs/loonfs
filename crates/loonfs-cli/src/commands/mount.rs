@@ -50,7 +50,7 @@ pub(crate) async fn run_mount(
         return Err(failure(
             CliError::new(
                 ErrorCode::NotSupported.as_str(),
-                "writable mounts aren't available yet; pass `--ro` to mount read-only",
+                "writable mounts aren't supported, so pass `--ro` to mount read-only",
             )
             .with_param("--ro"),
         ));
@@ -119,7 +119,7 @@ pub(crate) async fn run_unmount(
             .map_err(|error| failure(daemon_error(&error)))?,
         None => {
             // No daemon runs, so a mount at the directory is one that a
-            // daemon which stopped left, and nothing serves it.
+            // stopped daemon left, and nothing serves the mount.
             let outcome = kernel.detach_stale(&directory).map_err(|error| {
                 failure(CliError::io_error(format!(
                     "detaching `{}` failed: {error}",
@@ -389,18 +389,20 @@ async fn connect_or_start(paths: &DaemonPaths) -> Result<DaemonClient, CliError>
             return Ok(client);
         }
         if let Some(status) = daemon.try_wait().map_err(CliError::io)? {
-            // Another `loonfs mount` may have started a daemon first, and
-            // this one stopped because that one has the lock.
+            // If another `loonfs mount` started a daemon first, the daemon
+            // that this command started exits because the other daemon has
+            // the lock.
             return connect(paths).await?.ok_or_else(|| {
                 CliError::io_error(format!(
-                    "the mount daemon stopped ({status}) before it listened; its log is `{}`",
+                    "the mount daemon stopped ({status}) before it listened, so check its log at \
+                     `{}`",
                     paths.log_file().display()
                 ))
             });
         }
     }
     Err(CliError::io_error(format!(
-        "the mount daemon didn't listen on `{}` within {} seconds; its log is `{}`",
+        "the mount daemon didn't listen on `{}` within {} seconds, so check its log at `{}`",
         paths.socket().display(),
         DAEMON_START_BUDGET_MS / 1_000,
         paths.log_file().display()
@@ -505,13 +507,14 @@ fn not_mounted(directory: &Path) -> CliError {
     )
 }
 
-/// Reports a failure to reach the daemon, or a response that doesn't decode.
+/// Returns the error for a failure to reach the daemon, or for a response
+/// that doesn't decode.
 fn daemon_error(error: &DaemonError) -> CliError {
     CliError::new(CliErrorCode::DaemonFailed.as_str(), error.to_string())
 }
 
-/// Reports a response other than the request's result: the daemon's
-/// refusal, or a response that belongs to another request.
+/// Returns the error for a response other than the request's result: the
+/// daemon's refusal, or a response that belongs to another request.
 fn refused(response: DaemonResponse) -> CliError {
     match response {
         DaemonResponse::Error(DaemonFailure { code, message }) => {
@@ -530,7 +533,7 @@ mod tests {
     /// Checks that a target identifies a namespace and, after its first slash, a
     /// directory in it.
     #[test]
-    fn mount_targets_name_a_namespace_and_an_optional_path() {
+    fn a_mount_target_identifies_a_namespace_and_an_optional_path() {
         let parsed = |target| {
             parse_target(target).map(|(namespace, path)| (namespace.to_string(), path.to_string()))
         };

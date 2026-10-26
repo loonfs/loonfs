@@ -30,14 +30,13 @@ pub(crate) struct MountArgs {
     /// `demo` or `demo/work/project`.
     #[arg(value_name = "NAMESPACE[/PATH]", value_hint = ValueHint::Other)]
     pub target: String,
-    /// The local directory to mount it on.
+    /// The local directory to mount the namespace on.
     #[arg(value_hint = ValueHint::DirPath)]
     pub directory: PathBuf,
-    /// Mount read-only. Writable mounts aren't available yet, so this is
-    /// required.
+    /// Mount read-only. Required, because this version mounts read-only.
     #[arg(long)]
     pub ro: bool,
-    /// The most entries that the mounted tree can have when it's mounted
+    /// The most entries that admission accepts in the mounted tree
     /// [default: 100000].
     #[arg(long, value_name = "N")]
     pub max_entries: Option<u64>,
@@ -45,8 +44,8 @@ pub(crate) struct MountArgs {
     /// milliseconds [default: 500].
     #[arg(long, value_name = "MS")]
     pub poll_interval_ms: Option<u64>,
-    /// The bytes of cached content that nothing uses that the mount keeps
-    /// before it evicts the least recently used [default: 8 GiB].
+    /// The most bytes of cached content that no open file uses. Above this,
+    /// the mount evicts the least recently used content [default: 8 GiB].
     #[arg(long, value_name = "BYTES")]
     pub cache_max_bytes: Option<u64>,
     /// The free bytes that the mount keeps on the state directory's
@@ -79,7 +78,7 @@ pub(crate) struct UnmountArgs {
     #[arg(value_hint = ValueHint::DirPath)]
     pub directory: PathBuf,
     /// Keep the mount's state on disk, so a later `loonfs mount` of the
-    /// directory resumes it.
+    /// directory resumes the mount's state.
     #[arg(long)]
     pub force: bool,
     #[command(flatten)]
@@ -88,8 +87,8 @@ pub(crate) struct UnmountArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct StatusArgs {
-    /// The mounted directory to report. Every mount is reported when it's
-    /// left out.
+    /// The mounted directory to show. Every mount is shown when this is left
+    /// out.
     #[arg(value_hint = ValueHint::DirPath)]
     pub directory: Option<PathBuf>,
     #[command(flatten)]
@@ -122,8 +121,8 @@ pub(crate) struct DaemonArgs {
 #[derive(Debug, Clone, Args)]
 pub(crate) struct StateDirectoryArgs {
     /// Where the daemon keeps each mount's state and cache. The daemon's
-    /// socket is in it too when `XDG_RUNTIME_DIR` isn't set [default:
-    /// `$XDG_STATE_HOME/loonfs`, or `~/.local/state/loonfs`].
+    /// socket is in this directory too when `XDG_RUNTIME_DIR` isn't set
+    /// [default: `$XDG_STATE_HOME/loonfs`, or `~/.local/state/loonfs`].
     #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
     pub state_dir: Option<PathBuf>,
 }

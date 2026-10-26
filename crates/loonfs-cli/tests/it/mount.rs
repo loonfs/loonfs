@@ -48,7 +48,7 @@ fn mount_commands_without_a_daemon_report_no_mounts_and_refuse_writable_mounts()
         error["message"]
             .as_str()
             .expect("message")
-            .contains("writable mounts aren't available yet"),
+            .contains("writable mounts aren't supported"),
         "{error}"
     );
     assert!(

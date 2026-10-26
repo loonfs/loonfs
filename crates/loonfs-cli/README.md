@@ -399,7 +399,7 @@ Mounts
     checks that the kernel can mount and lists the whole tree at a
     snapshot. If the tree has more entries than --max-entries (100,000 by
     default), the daemon refuses the mount and reports both numbers.
-    Writable mounts aren't available yet, so --ro is required.
+    --ro is required, because this version mounts read-only.
     Running the command again for the same namespace and path succeeds and
     changes nothing, and a different mount at a mounted directory is
     refused. If the daemon stopped, the next mount of the directory
@@ -424,11 +424,11 @@ Mounts
     left there
 
   loonfs status [<dir>]
-    Report every mount, or the mount at <dir>: whether it's ready, whether
+    Show every mount, or the mount at <dir>: whether it's ready, whether
     it was mounted through mount(2) or fusermount3, its applied sequence,
-    its entries against the budget, and its cache. --json reports the
-    whole status, which `.loonfs/status.json` in the mounted directory
-    contains too
+    its entries against the budget, and its cache. --json shows the whole
+    status, which `.loonfs/status.json` in the mounted directory contains
+    too
 
   loonfs refresh <dir> [--at-least <seq>]
     Read the mount's change feed now. --at-least waits until the mount has
@@ -440,9 +440,11 @@ Mounts
   Every mount command takes --state-dir <path>, the directory where the
   daemon keeps each mount's state and cache and its own log
   (`$XDG_STATE_HOME/loonfs`, or `~/.local/state/loonfs`). The daemon
-  listens on `$XDG_RUNTIME_DIR/loonfs/daemon.sock`, or on `daemon.sock` in
-  the state directory when XDG_RUNTIME_DIR isn't set, so the commands need
-  the same --state-dir to reach it. The daemon stops a minute after its
+  listens on a socket in `$XDG_RUNTIME_DIR/loonfs` whose name includes a
+  hash of the state directory, or on `daemon.sock` in the state directory
+  when XDG_RUNTIME_DIR isn't set. So the daemons of two state directories
+  never share a socket, and the commands need the same --state-dir to
+  reach a daemon. The daemon stops a minute after its
   last mount is removed. `loonfs daemon`, which `loonfs mount` starts, is
   the daemon itself, and `loonfs daemon --stop` detaches every mount,
   keeps its state, and stops the daemon. Neither is listed in --help.
@@ -455,6 +457,10 @@ Mounts
 
   The mounted directory contains a read-only directory, `.loonfs`, with
   `status.json` (the mount's status) and `seq` (its applied sequence).
+
+  Following a log on a mount needs a follower that polls, because a change
+  that arrives through the feed raises no inotify event. GNU tail polls on
+  such filesystems, and uutils tail needs `--use-polling`.
 
   On a terminal, `loonfs mount` redraws one line on stderr with the step it
   has reached and, while it lists the tree, the entries listed so far

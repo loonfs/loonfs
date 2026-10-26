@@ -74,7 +74,7 @@ Context and configuration:
 Mounts (Linux only):
   mount         Mount a namespace directory on a local directory
   unmount       Unmount a mounted directory
-  status        Report the state of mounts
+  status        Show the state of mounts
   refresh       Read a mount's change feed now
 
 Inspection:
@@ -306,7 +306,7 @@ pub(crate) enum Command {
     Mount(Box<MountArgs>),
     /// Unmount a directory that `loonfs mount` mounted.
     Unmount(UnmountArgs),
-    /// Report the state of this user's mounts.
+    /// Show the state of this user's mounts.
     Status(StatusArgs),
     /// Read a mount's change feed now, and wait for a sequence.
     Refresh(RefreshArgs),

@@ -32,17 +32,19 @@ pub(super) fn human_unmounted(report: &UnmountedReport) -> String {
         UnmountOutcome::Unmounted {
             state: StateDisposal::Kept,
         } => {
-            format!("unmounted {directory}; its state stays in {state} for a later `loonfs mount`")
+            format!(
+                "unmounted {directory} and kept its state in {state} for the next `loonfs mount`"
+            )
         }
         UnmountOutcome::Unmounted {
             state: StateDisposal::RemovedAfterRelease,
         } => format!(
-            "detached {directory}; programs still have files open in it, and its state is \
-             removed once they close them"
+            "detached {directory}, but programs still have files open in it, so its state is \
+             removed when those files are closed"
         ),
         UnmountOutcome::DetachedStale => format!(
-            "detached {directory}, whose mount's daemon had stopped; its state stays in {state} \
-             for a later `loonfs mount`"
+            "detached {directory}, whose daemon had stopped, and kept its state in {state} for \
+             the next `loonfs mount`"
         ),
         UnmountOutcome::NotMounted => format!("{directory} has no mount"),
     }
