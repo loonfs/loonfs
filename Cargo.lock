@@ -1827,8 +1827,10 @@ dependencies = [
  "loonfs",
  "loonfs-client",
  "loonfs-core",
+ "loonfs-fuse",
  "loonfs-grep",
  "loonfs-http",
+ "loonfs-mount",
  "loonfs-objectstore",
  "loonfs-test-support",
  "loonfs-types",
@@ -1838,6 +1840,7 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
+ "tracing-subscriber",
  "walkdir",
 ]
 

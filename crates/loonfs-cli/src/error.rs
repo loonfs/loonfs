@@ -51,6 +51,7 @@ cli_error_codes! {
     JsonNotSupportedForStreaming => "json_not_supported_for_streaming",
     Cancelled => "cancelled",
     ClientError => "client_error",
+    DaemonFailed => "daemon_failed",
 }
 
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
