@@ -351,7 +351,7 @@ async fn a_deleted_root_or_ancestor_stops_publication() {
 
 /// Checks that `refresh_at_least` fails at once for a sequence past the
 /// namespace's head, and fails with a timeout when the mount doesn't apply
-/// the sequence in time, here because the server holds the feed's pages.
+/// the sequence in time, here because the server delays the feed's pages.
 #[tokio::test]
 async fn a_refresh_fails_past_the_head_and_after_its_timeout() {
     let fixture = project();
@@ -373,7 +373,7 @@ async fn a_refresh_fails_past_the_head_and_after_its_timeout() {
     let timed_out = engine
         .refresh_at_least(commit.committed_seq, Duration::from_millis(100))
         .await
-        .expect_err("the server holds the feed's pages");
+        .expect_err("the server delays the feed's pages");
     assert_matches!(
         timed_out,
         MountError::RefreshTimedOut { seq, applied_seq, timeout_ms: 100 }

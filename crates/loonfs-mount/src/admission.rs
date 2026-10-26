@@ -190,7 +190,7 @@ async fn scan(
 }
 
 /// Writes one listing page in one transaction. It's a step of its own, so
-/// the scan's future holds no transaction across an await and stays `Send`.
+/// the scan's future keeps no transaction across an await and stays `Send`.
 fn write_page(database: &mut Database, entries: &[PathEntry]) -> Result<()> {
     let transaction = database.transaction()?;
     write_listing(&transaction, entries)?;
