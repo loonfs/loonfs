@@ -443,20 +443,35 @@ impl ControlTask {
 
     /// Records the root's location that a worker read: for the commit that
     /// waits for it, or directly after a rebuild.
+    ///
+    /// A commit that waits for the read isn't applied when the read fails,
+    /// because the mount would keep the old ancestors and miss a later
+    /// deletion of a new one. The page fails instead, and the next poll
+    /// reads the commit again.
     pub(super) fn on_ancestors_read(&mut self, result: Result<RootAncestry>) {
+        let waiting = matches!(
+            &self.feed,
+            super::feed::FeedState::WaitingForRead(progress)
+                if progress.awaiting == Some(ReadKey::Ancestors)
+        );
         let location = match result {
-            Ok(location) => Some(Box::new(location)),
-            Err(error) => {
-                tracing::warn!(%error, "reading the root's ancestors failed, so the mount keeps the ancestors it had");
-                None
+            Ok(location) if waiting => {
+                self.resume_page(
+                    ReadKey::Ancestors,
+                    ReadResult::Ancestors(Box::new(location)),
+                );
+                return;
             }
-        };
-        if matches!(self.feed, super::feed::FeedState::WaitingForRead(_)) {
-            self.resume_page(ReadKey::Ancestors, ReadResult::Ancestors(location));
-            return;
-        }
-        let Some(location) = location else {
-            return;
+            Ok(location) => location,
+            Err(error) if waiting => {
+                tracing::warn!(%error, "reading the root's ancestors failed, so the next poll reads the commit again");
+                self.fail_page(error);
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "reading the root's ancestors after a rebuild failed, so the mount keeps the ancestors it had");
+                return;
+            }
         };
         let written = database::write_root_path(self.database.connection(), &location.root.path)
             .and_then(|()| {

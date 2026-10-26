@@ -29,9 +29,8 @@ pub(super) enum ReadKey {
 #[derive(Debug)]
 pub(super) enum ReadResult {
     Item(EnteringItem),
-    /// The root's new location, or `None` when the read failed and the
-    /// engine keeps the ancestors it had.
-    Ancestors(Option<Box<RootAncestry>>),
+    /// The root's new location.
+    Ancestors(Box<RootAncestry>),
 }
 
 /// The reads that one commit needed.
@@ -312,11 +311,11 @@ fn bound(
 fn root_moved(root: &mut RootLocation, reads: &ReadResults) -> Option<ReadKey> {
     match reads.get(&ReadKey::Ancestors) {
         None => Some(ReadKey::Ancestors),
-        Some(ReadResult::Ancestors(Some(location))) => {
+        Some(ReadResult::Ancestors(location)) => {
             root.path = location.root.path.clone();
             root.ancestors = location.ancestors.clone();
             None
         }
-        Some(ReadResult::Ancestors(None) | ReadResult::Item(_)) => None,
+        Some(ReadResult::Item(_)) => None,
     }
 }

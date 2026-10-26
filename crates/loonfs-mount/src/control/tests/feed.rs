@@ -269,3 +269,43 @@ fn a_failed_rebuild_waits_longer_before_each_attempt() {
     task.handle(ControlMessage::Tick);
     assert_eq!(rebuilds(workers.take()), 1);
 }
+
+/// Checks that a commit that moves the mount's root isn't applied when the
+/// read of the root's new ancestors fails: the page fails, and the next poll
+/// reads the commit again, so the mount never keeps ancestors that a later
+/// deletion of a new ancestor can't be checked against.
+#[test]
+fn a_failed_read_of_the_roots_ancestors_fails_the_page() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let (mut task, _shared, workers) = task(directory.path(), &[]);
+    task.start();
+    workers.take();
+    let root_moved = FilesystemChange::Moved {
+        inode_id: InodeId(10),
+        source_parent_inode_id: InodeId(1),
+        source_display_name: DisplayName::parse("project").expect("a name"),
+        destination_parent_inode_id: InodeId(1),
+        destination_display_name: DisplayName::parse("renamed").expect("a name"),
+        binding_version: BindingVersion::parse("moved").expect("a version"),
+    };
+    task.handle(page(5, vec![commit(6, vec![root_moved])]));
+    let read = workers.take();
+    assert!(
+        matches!(
+            read[..],
+            [Work::ReadAncestors {
+                root_inode_id: InodeId(10)
+            }]
+        ),
+        "{read:?}"
+    );
+    task.handle(done(WorkOutcome::AncestorsRead(Err(MountError::Stopped))));
+    assert_eq!(task.applied_seq, ChangeSeq(5), "the commit isn't applied");
+    task.handle(ControlMessage::Tick);
+    assert!(matches!(
+        workers.take()[..],
+        [Work::PollFeed {
+            after_seq: ChangeSeq(5)
+        }]
+    ));
+}
