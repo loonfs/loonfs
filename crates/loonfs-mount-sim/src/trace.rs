@@ -1,7 +1,7 @@
 //! The trace of every request that the simulated server receives.
 
 use crate::faults::ContentReadFault;
-use loonfs_types::ErrorCode;
+use loonfs_types::{ContentId, ErrorCode};
 
 /// The operation that a request asked for, named after its operation ID in the API specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -118,8 +118,12 @@ pub struct RequestRecord {
     pub path: String,
     /// The decoded query parameters, in request order.
     pub query: Vec<(String, String)>,
+    /// The request's `Range` header, as the client sent it.
+    pub range_header: Option<String>,
     /// The file bytes that a successful content read returned.
     pub byte_range: Option<ByteRange>,
+    /// The content whose bytes a successful content read returned.
+    pub content_id: Option<ContentId>,
     /// The status of the response that the server built.
     pub status: u16,
     /// The error code, when the response was an error.

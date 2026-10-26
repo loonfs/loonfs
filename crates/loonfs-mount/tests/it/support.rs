@@ -5,7 +5,9 @@
 use bytes::Bytes;
 use loonfs_client::{Client, ListOptions, NamespacePath, ReadAt};
 use loonfs_mount::{Engine, ItemId, ItemKind, MountAccess, MountConfig, ReadHandle};
-use loonfs_mount_sim::{Operation, RequestRecord, SimulatedServer, SimulatedServerConfig};
+use loonfs_mount_sim::{
+    ByteRange, Operation, RequestRecord, SimulatedServer, SimulatedServerConfig,
+};
 use loonfs_test_support::clock::bounded;
 use loonfs_types::api::v0::{
     Commit, CommitRequest, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation,
@@ -229,6 +231,14 @@ impl Fixture {
         self.stat(relative).await.inode_id
     }
 
+    /// Returns the content reference of a file's current revision.
+    pub(crate) async fn content_ref(&self, relative: &str) -> ContentRef {
+        match self.stat(relative).await.kind {
+            PathEntryKind::File { content_ref, .. } => content_ref,
+            kind => panic!("`{relative}` is not a file: {kind:?}"),
+        }
+    }
+
     pub(crate) fn head_seq(&self) -> ChangeSeq {
         self.server.head_seq(&self.namespace_id)
     }
@@ -449,6 +459,11 @@ pub(crate) fn content_reads(trace: &[RequestRecord]) -> Vec<&RequestRecord> {
         .iter()
         .filter(|record| record.operation.is_content_read())
         .collect()
+}
+
+/// Returns the `Range` header that asks for `range`.
+pub(crate) fn range_header(range: ByteRange) -> String {
+    format!("bytes={}-{}", range.start_offset, range.end_offset - 1)
 }
 
 /// Returns the bytes that the content reads among the requests returned.

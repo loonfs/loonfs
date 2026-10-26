@@ -158,10 +158,13 @@ fn serve(state: &ServerState, content_ref: &ContentRef, range: Option<ReadRange>
             start_offset: 0,
             end_offset: size_bytes,
         };
-        return Ok(
-            Reply::content(StatusCode::OK, Bytes::copy_from_slice(bytes), whole)
-                .with_header(ACCEPT_RANGES, "bytes"),
-        );
+        return Ok(Reply::content(
+            StatusCode::OK,
+            Bytes::copy_from_slice(bytes),
+            content_ref,
+            whole,
+        )
+        .with_header(ACCEPT_RANGES, "bytes"));
     };
     let Some(end_offset) = range.end_offset(size_bytes) else {
         return Err(MountSimError::new(
@@ -184,6 +187,7 @@ fn serve(state: &ServerState, content_ref: &ContentRef, range: Option<ReadRange>
     Ok(Reply::content(
         StatusCode::PARTIAL_CONTENT,
         Bytes::copy_from_slice(slice),
+        content_ref,
         returned,
     )
     .with_header(

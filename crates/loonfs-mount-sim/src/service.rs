@@ -14,6 +14,7 @@ use crate::trace::RequestRecord;
 use crate::{downloads, entries, feed, listing, snapshots, uploads};
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use http::header::RANGE;
 use http::request::Parts;
 use http::{HeaderMap, Request, Response};
 use http_body_util::BodyExt as _;
@@ -102,7 +103,12 @@ impl ServerState {
             operation,
             path: parts.uri.path().to_owned(),
             query: query.pairs().to_vec(),
+            range_header: parts
+                .headers
+                .get(RANGE)
+                .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned()),
             byte_range: reply.byte_range,
+            content_id: reply.content_id.clone(),
             status: reply.status.as_u16(),
             error_code: reply.error_code,
             fault,

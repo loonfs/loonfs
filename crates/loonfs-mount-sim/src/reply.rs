@@ -6,7 +6,7 @@ use bytes::Bytes;
 use http::header::{HeaderName, HeaderValue, CONTENT_RANGE, CONTENT_TYPE};
 use http::{Response, StatusCode};
 use loonfs_client::Body;
-use loonfs_types::{ChangeSeq, ErrorCode, NamespaceId};
+use loonfs_types::{ChangeSeq, ContentId, ContentRef, ErrorCode, NamespaceId};
 use serde::Serialize;
 
 /// A response that the server built for one request.
@@ -17,6 +17,8 @@ pub(crate) struct Reply {
     pub(crate) body: ReplyBody,
     /// The file bytes that a content read returns, for the trace and the content read faults.
     pub(crate) byte_range: Option<ByteRange>,
+    /// The content whose bytes a content read returns, for the trace.
+    pub(crate) content_id: Option<ContentId>,
     pub(crate) error_code: Option<ErrorCode>,
     /// The commit that the request made, when it made one, for the commit faults.
     pub(crate) fresh_commit: Option<FreshCommit>,
@@ -43,6 +45,7 @@ impl Reply {
             headers: Vec::new(),
             body: ReplyBody::Full(body),
             byte_range: None,
+            content_id: None,
             error_code: None,
             fresh_commit: None,
         }
@@ -70,11 +73,18 @@ impl Reply {
         }
     }
 
-    /// Builds a response that returns `bytes`, the file bytes in `range`.
-    pub(crate) fn content(status: StatusCode, bytes: Bytes, range: ByteRange) -> Self {
+    /// Builds a response that returns `bytes`, the bytes in `range` of the content that
+    /// `content_ref` refers to.
+    pub(crate) fn content(
+        status: StatusCode,
+        bytes: Bytes,
+        content_ref: &ContentRef,
+        range: ByteRange,
+    ) -> Self {
         let mut reply =
             Self::new(status, bytes).with_header(CONTENT_TYPE, "application/octet-stream");
         reply.byte_range = Some(range);
+        reply.content_id = Some(content_ref.content_id.clone());
         reply
     }
 

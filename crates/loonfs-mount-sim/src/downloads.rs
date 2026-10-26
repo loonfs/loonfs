@@ -302,6 +302,7 @@ pub(crate) fn read_download_range(
     Reply::content(
         StatusCode::PARTIAL_CONTENT,
         Bytes::copy_from_slice(slice),
+        &grant.content_ref,
         grant.range,
     )
     .with_header(

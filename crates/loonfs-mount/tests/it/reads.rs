@@ -3,8 +3,8 @@
 //! eviction.
 
 use crate::support::{
-    content_reads, eventually, fetched_bytes, fixture, fixture_with, open, pattern, put, read,
-    wait_until_handled, Fixture, UNIT,
+    content_reads, eventually, fetched_bytes, fixture, fixture_with, open, pattern, put,
+    range_header, read, wait_until_handled, UNIT,
 };
 use loonfs_mount::ContentState;
 use loonfs_mount_sim::{
@@ -12,7 +12,6 @@ use loonfs_mount_sim::{
     SimulatedServerConfig,
 };
 use loonfs_test_support::clock::bounded;
-use loonfs_types::api::v0::PathEntryKind;
 use loonfs_types::ContentRef;
 use std::time::Duration;
 
@@ -20,13 +19,6 @@ use std::time::Duration;
 /// window, as a program that reads in 128 KiB calls makes them with the
 /// mount's default 1 MiB first window.
 const CHUNK: u64 = UNIT / 8;
-
-async fn content_ref(fixture: &Fixture, relative: &str) -> ContentRef {
-    match fixture.stat(relative).await.kind {
-        PathEntryKind::File { content_ref, .. } => content_ref,
-        kind => panic!("`{relative}` is not a file: {kind:?}"),
-    }
-}
 
 /// Returns the range from `start` to `end` units.
 fn range_units(start: u64, end: u64) -> ByteRange {
@@ -43,7 +35,7 @@ async fn a_small_file_is_fetched_whole_once_and_then_read_from_the_cache() {
     let fixture = fixture();
     let bytes = pattern(5 * 1024);
     fixture.commit(vec![put("small.bin", &bytes)]);
-    let content_ref = content_ref(&fixture, "small.bin").await;
+    let content_ref = fixture.content_ref("small.bin").await;
     let engine = fixture.mount().await;
     fixture.server.take_trace();
     let first = open(&engine, "small.bin").await;
@@ -110,6 +102,16 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
 
     let trace = fixture.server.take_trace();
     assert_eq!(fetched_bytes(&trace), size, "every byte once");
+    let content_id = fixture.content_ref("data.bin").await.content_id;
+    for record in content_reads(&trace) {
+        let range = record.byte_range.expect("a range");
+        assert_eq!(
+            record.range_header,
+            Some(range_header(range)),
+            "a read asks for the bytes it returns"
+        );
+        assert_eq!(record.content_id.as_ref(), Some(&content_id));
+    }
     let ranged: Vec<_> = trace
         .iter()
         .filter(|record| record.operation == Operation::GetFileRevisionContentByInode)
@@ -331,8 +333,8 @@ async fn an_abandoned_partial_file_is_evicted_and_an_open_one_is_not() {
     let second = pattern(21 * UNIT);
     fixture.upload("abandoned.bin", &first).await;
     fixture.upload("open.bin", &second).await;
-    let abandoned = content_ref(&fixture, "abandoned.bin").await;
-    let kept_ref = content_ref(&fixture, "open.bin").await;
+    let abandoned = fixture.content_ref("abandoned.bin").await;
+    let kept_ref = fixture.content_ref("open.bin").await;
     let mut config = fixture.config();
     config.max_cache_bytes = UNIT / 2;
     let engine = fixture.mount_with(config).await;
@@ -382,9 +384,9 @@ async fn eviction_removes_an_unused_complete_file_and_keeps_an_open_one() {
         put("second.txt", b"second one"),
     ]);
     let refs = [
-        content_ref(&fixture, "open.txt").await,
-        content_ref(&fixture, "first.txt").await,
-        content_ref(&fixture, "second.txt").await,
+        fixture.content_ref("open.txt").await,
+        fixture.content_ref("first.txt").await,
+        fixture.content_ref("second.txt").await,
     ];
     let mut config = fixture.config();
     config.max_cache_bytes = 12;

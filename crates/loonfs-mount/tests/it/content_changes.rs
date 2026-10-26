@@ -3,8 +3,8 @@
 //! that open handles read.
 
 use crate::support::{
-    append, content_reads, fetched_bytes, fixture, item, open, pattern, put, put_replacing, read,
-    refresh, UNIT,
+    append, content_reads, fetched_bytes, fixture, item, open, pattern, put, put_replacing,
+    range_header, read, refresh, UNIT,
 };
 use loonfs_mount::{CachedPages, Invalidation};
 use loonfs_mount_sim::{ByteRange, Operation};
@@ -20,6 +20,7 @@ async fn a_replacement_makes_a_new_item_and_an_open_handle_keeps_reading_the_old
     let engine = fixture.mount().await;
     let handle = open(&engine, "data.bin").await;
     assert_eq!(read(&handle, 0, 4096).await, old[..4096]);
+    let old_content = fixture.content_ref("data.bin").await.content_id;
     fixture.server.take_trace();
     let replaced = fixture.commit(vec![put_replacing("data.bin", b"replaced")]);
     refresh(&engine, replaced.committed_seq).await;
@@ -37,6 +38,12 @@ async fn a_replacement_makes_a_new_item_and_an_open_handle_keeps_reading_the_old
         .collect();
     assert_eq!(grants.len(), 1, "one grant for the rest of the revision");
     assert!(grants[0].path.ends_with("/revisions/1/downloads"));
+    assert!(
+        content_reads(&trace)
+            .iter()
+            .all(|record| record.content_id.as_ref() == Some(&old_content)),
+        "every read is of the old revision's content"
+    );
     let ranges: Vec<_> = trace
         .iter()
         .filter_map(|record| record.byte_range)
@@ -98,12 +105,15 @@ async fn each_append_extends_an_open_file_and_fetches_only_the_appended_range() 
         let revision = format!("/revisions/{}/content", line + 1);
         assert!(reads[0].path.ends_with(&revision), "{}", reads[0].path);
         assert_eq!(reads[0].status, 206);
+        let appended_range = ByteRange {
+            start_offset: end,
+            end_offset: size,
+        };
+        assert_eq!(reads[0].byte_range, Some(appended_range));
         assert_eq!(
-            reads[0].byte_range,
-            Some(ByteRange {
-                start_offset: end,
-                end_offset: size,
-            })
+            reads[0].range_header,
+            Some(range_header(appended_range)),
+            "the engine asks for the appended range only"
         );
         let mut received = Vec::new();
         while let Ok(invalidation) = invalidations.try_recv() {
