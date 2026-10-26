@@ -4,6 +4,8 @@ use super::*;
 use crate::time::Deadline;
 use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
+use loonfs_test_support::stores::MemoryStore;
+use loonfs_types::ChecksumAlgorithm;
 use std::assert_matches;
 
 async fn current_manifest_no<S: ObjectStore + ?Sized>(
@@ -415,33 +417,24 @@ async fn an_advance_stops_at_the_newest_commit_at_least_one_grace_window_old() {
     }
 }
 
-/// Publishes 64 commits stamped `committed_at_ms`, each creating the
-/// directory `/{prefix}-{index}`. Each commit's message is
-/// `MAX_COMMIT_MESSAGE_BYTES` of pseudorandom printable characters generated
-/// from `state`, so the messages compress poorly.
-async fn commit_directories_with_long_messages<S: ObjectStore + ?Sized>(
+/// Publishes one commit for each of `messages`, all stamped
+/// `committed_at_ms`, where the commit at `index` creates the directory
+/// `/{prefix}-{index}` with `messages[index]` as its message.
+async fn commit_directories<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     prefix: &str,
     committed_at_ms: u64,
-    state: &mut u64,
+    messages: Vec<Option<String>>,
 ) {
-    let candidates: Vec<_> = (0..64)
-        .map(|index| {
-            let message = (0..crate::limits::MAX_COMMIT_MESSAGE_BYTES)
-                .map(|_| {
-                    *state ^= *state << 13;
-                    *state ^= *state >> 7;
-                    *state ^= *state << 17;
-                    char::from(
-                        b'!' + u8::try_from(*state % 94).expect("a remainder below 94 fits a byte"),
-                    )
-                })
-                .collect();
+    let candidates: Vec<_> = messages
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
             CommitCandidate::new(CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
-                Some(message),
+                message,
                 FilesystemOperation::CreateDirectory {
                     path: AbsolutePath::parse(format!("/{prefix}-{index:02}")).expect("path"),
                     parents: false,
@@ -468,6 +461,37 @@ async fn commit_directories_with_long_messages<S: ObjectStore + ?Sized>(
     {
         result.expect("commit a directory");
     }
+}
+
+/// Publishes 64 commits stamped `committed_at_ms` with
+/// [`commit_directories`]. Each commit's message is `MAX_COMMIT_MESSAGE_BYTES`
+/// of pseudorandom printable characters generated from `state`, so the
+/// messages compress poorly.
+async fn commit_directories_with_long_messages<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    prefix: &str,
+    committed_at_ms: u64,
+    state: &mut u64,
+) {
+    let messages = (0..64)
+        .map(|_| {
+            Some(
+                (0..crate::limits::MAX_COMMIT_MESSAGE_BYTES)
+                    .map(|_| {
+                        *state ^= *state << 13;
+                        *state ^= *state >> 7;
+                        *state ^= *state << 17;
+                        char::from(
+                            b'!' + u8::try_from(*state % 94)
+                                .expect("a remainder below 94 fits a byte"),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    commit_directories(store, namespace_id, prefix, committed_at_ms, messages).await;
 }
 
 /// Returns the current manifest's one segment of commit rows, with its index.
@@ -499,13 +523,12 @@ async fn commit_segment_with_index<S: ObjectStore + ?Sized>(
     (segment, index)
 }
 
-/// Checks that the walk to the newest commit past the grace window sends one
-/// ranged GET for each block of commit rows that it visits, and that each GET
-/// covers only that block's stored bytes. The walk moves toward older
-/// commits, so a read-ahead window from a missed block would fetch the newer
-/// blocks that the walk has already read.
+/// Checks that the search for the newest commit past the grace window sends
+/// one ranged GET for each block of commit rows that its lookups visit, in
+/// the order of the lookups, and that each GET covers only that block's
+/// stored bytes.
 #[tokio::test]
-async fn the_grace_window_walk_sends_one_get_for_each_commit_block_that_it_visits() {
+async fn the_grace_window_search_sends_one_get_for_each_commit_block_that_it_visits() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -536,22 +559,27 @@ async fn the_grace_window_walk_sends_one_get_for_each_commit_block_that_it_visit
         .await
         .expect("fold the commits");
     let (segment, index) = commit_segment_with_index(&store, &namespace_id).await;
-    // The walk reads commits 128 down to 64, so it visits the blocks from the
-    // last one down to the block of commit 64.
+    // The search looks up the target, commit 128, and then halves the
+    // sequences between the floor and the target until it stops at commit
+    // 64.
     let stop_seq = ChangeSeq(64);
-    let stop_key = lookup_keys::commit_row_key(stop_seq);
-    let stop_block = index.partition_point(|entry| entry.last_row_key < stop_key);
-    let visited: Vec<(u64, u64)> = index[stop_block..]
-        .iter()
-        .rev()
-        .map(|entry| {
-            let start = entry.block.offset;
-            (start, start + u64::from(entry.block.stored_bytes))
-        })
-        .collect();
+    let lookups = [128, 64, 96, 80, 72, 68, 66, 65];
+    let mut visited: Vec<(u64, u64)> = Vec::new();
+    for seq in lookups {
+        let key = lookup_keys::commit_row_key(ChangeSeq(seq));
+        let entry = &index[index.partition_point(|entry| entry.last_row_key < key)];
+        let block = (
+            entry.block.offset,
+            entry.block.offset + u64::from(entry.block.stored_bytes),
+        );
+        if !visited.contains(&block) {
+            visited.push(block);
+        }
+    }
     assert!(
-        stop_block > 0 && visited.len() >= 3,
-        "the walk should pass through a whole block and stop above the first block, but commit 64 is in block {stop_block} of {}",
+        visited.len() >= 3 && visited.len() < lookups.len(),
+        "the lookups should visit at least three blocks and visit some blocks more than once, but they visit {} blocks of {}",
+        visited.len(),
         index.len()
     );
     store.reset();
@@ -575,7 +603,7 @@ async fn the_grace_window_walk_sends_one_get_for_each_commit_block_that_it_visit
     assert!(
         gets.iter()
             .all(|(key, range)| *key == object_key && range.is_some()),
-        "the walk reads ranges of the segment of commit rows: {gets:?}"
+        "the search reads ranges of the segment of commit rows: {gets:?}"
     );
     let data_gets: Vec<(u64, u64)> = gets
         .into_iter()
@@ -584,8 +612,176 @@ async fn the_grace_window_walk_sends_one_get_for_each_commit_block_that_it_visit
         .collect();
     assert_eq!(
         data_gets, visited,
-        "one GET for each block that the walk visits, newest first, and each GET covers only its block"
+        "one GET for each block that the lookups visit, in the order of the lookups, and each GET covers only its block"
     );
+}
+
+/// Checks that an advance toward a commit younger than the grace window looks
+/// up a number of commit rows that grows with the logarithm of the commits
+/// between the floor and the target, and that it stops at the newest commit
+/// that's at least one window old.
+#[tokio::test]
+async fn an_advance_toward_a_young_commit_looks_up_a_logarithmic_number_of_commit_rows() {
+    let store = RecordingStore::metadata_segments(MemoryStore::new(ChecksumAlgorithm::Crc64nvme));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    bootstrap_namespace(&store, &namespace_id, &test_context())
+        .await
+        .expect("bootstrap");
+    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    // Five batches of 64 commits, each stamped a tenth of a window after the
+    // batch before it.
+    let batch_at_ms = |batch: u64| 10 * grace_ms + batch * grace_ms / 10;
+    for batch in 0..5 {
+        commit_directories(
+            &store,
+            &namespace_id,
+            &format!("batch-{batch}"),
+            batch_at_ms(batch),
+            vec![None; 64],
+        )
+        .await;
+    }
+    // One row per segment, so each segment of commit rows that an advance
+    // reads is one lookup.
+    crate::manifest::fold_wal_tail(
+        &store,
+        None,
+        &namespace_id,
+        None,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        MetadataRunPolicy {
+            max_rows_per_segment: NonZeroUsize::MIN,
+            ..MetadataRunPolicy::default()
+        },
+        &crate::test_support::content_writes(),
+    )
+    .await
+    .expect("fold the commits");
+    let manifest = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("load the manifest")
+        .state;
+    let head_seq = manifest.envelope.payload().head_seq;
+    assert_eq!(head_seq, ChangeSeq(320));
+    let commit_segments = manifest
+        .envelope
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|segment| segment.family == ApiMetadataRowFamily::Commits)
+        .map(metadata_segment_object_key)
+        .collect::<BTreeSet<_>>();
+
+    for (advance_at_ms, expected_floor) in [
+        // Every commit is younger than a window, so the floor stays at 0.
+        (batch_at_ms(0) + grace_ms - 1, ChangeSeq(0)),
+        // The first two batches are at least a window old, and commit 128
+        // is the last commit of the second batch.
+        (batch_at_ms(1) + grace_ms, ChangeSeq(128)),
+        // From floor 128, the search stops at the last commit of the fourth
+        // batch.
+        (batch_at_ms(3) + grace_ms, ChangeSeq(256)),
+    ] {
+        let floor_before = read_floor_seq(&store, &namespace_id).await;
+        store.reset();
+        let report = advance_retention_floor(
+            &store,
+            None,
+            &namespace_id,
+            RetentionTarget::Head,
+            advance_at_ms,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("advance the floor");
+        assert_eq!(report.response.retention_floor_seq, expected_floor);
+        assert_eq!(
+            report.published.is_some(),
+            expected_floor > floor_before,
+            "an advance publishes a manifest only when the floor moves"
+        );
+        let looked_up = store.take_get_keys().into_iter().collect::<BTreeSet<_>>();
+        assert!(
+            looked_up.is_subset(&commit_segments),
+            "an advance reads only segments of commit rows"
+        );
+        let commits = head_seq.0 - floor_before.0;
+        let max_lookups = 2 * commits.ilog2() + 2;
+        assert!(
+            looked_up.len() <= usize::try_from(max_lookups).expect("a u32 fits a usize"),
+            "{} lookups for {commits} commits above floor {floor_before}, more than {max_lookups}",
+            looked_up.len()
+        );
+    }
+}
+
+/// Checks that a commit dated out of order can stop the floor below the newest
+/// commit that's at least one grace window old, and that the floor never
+/// passes a commit younger than the window unless a commit at or above it is
+/// at least a window old.
+#[tokio::test]
+async fn a_commit_dated_out_of_order_can_stop_the_floor_below_the_newest_old_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let now_ms = 10 * grace_ms;
+    // Commit times increase with sequence, except that commit 4 is dated
+    // three windows after `now_ms`.
+    for (index, committed_at_ms) in [
+        now_ms - 3 * grace_ms,
+        now_ms - 3 * grace_ms,
+        now_ms - 3 * grace_ms,
+        now_ms + 3 * grace_ms,
+        now_ms - 2 * grace_ms,
+        now_ms - 2 * grace_ms,
+        now_ms - 2 * grace_ms,
+        now_ms - grace_ms / 2,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let context = MutationContext {
+            now_ms: committed_at_ms,
+            ..context.clone()
+        };
+        let path = format!("/{index}.txt");
+        write_file_bytes(&store, &namespace_id, &path, b"body\n", &context, None)
+            .await
+            .expect("commit");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the commits");
+
+    for (advance_at_ms, expected_floor) in [
+        // Commit 8 is half a window old, so the search looks below it. It
+        // finds commit 4 too young, so it stops at commit 3, below commit 7,
+        // which is the newest commit that's at least a window old.
+        (now_ms, ChangeSeq(3)),
+        // Commit 8 is one and a half windows old, so the floor reaches it and
+        // passes commit 4, which is still dated after the advance's clock.
+        (now_ms + grace_ms, ChangeSeq(8)),
+    ] {
+        let floor = advance_retention_floor(
+            &store,
+            None,
+            &namespace_id,
+            RetentionTarget::Head,
+            advance_at_ms,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("advance the floor")
+        .response
+        .retention_floor_seq;
+        assert_eq!(floor, expected_floor, "at {advance_at_ms}");
+    }
 }
 
 #[tokio::test]

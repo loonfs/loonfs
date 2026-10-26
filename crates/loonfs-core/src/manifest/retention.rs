@@ -27,10 +27,11 @@ use std::sync::Arc;
 ///
 /// The floor never moves down and never passes the folded manifest head.
 /// Whatever the target, the floor stops at the newest commit at or below the
-/// target that's at least [`GC_DEFAULT_GRACE_WINDOW_MS`] old, and it passes
-/// every commit below that commit, whatever their timestamps (format spec,
-/// "Advancing the retention floor"). A target at or below the current floor
-/// leaves the floor where it is.
+/// target that's at least [`GC_DEFAULT_GRACE_WINDOW_MS`] old, or below it if a
+/// writer dated a commit out of order, and it passes every commit below the
+/// commit where it stops, whatever their timestamps (format spec, "Advancing
+/// the retention floor"). A target at or below the current floor leaves the
+/// floor where it is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RetentionTarget {
     /// The folded manifest head.
@@ -240,17 +241,28 @@ async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
 /// If no commit above `current`'s floor is that old, returns that floor. A
 /// commit's age is `now_ms` minus its `committed_at_ms`, and a commit dated
 /// after `now_ms` has an age of zero, as an object dated in the future does in
-/// garbage collection. Every sequence above the floor has a commit row, so the
-/// walk reads one commit row per sequence, downward from `target`. It reads
-/// the commits younger than the window at the top of the history, which is
-/// about an hour of commits, and at worst every commit above the floor, if
-/// writers dated every commit above the floor in the future.
+/// garbage collection.
 ///
-/// The walk doesn't read ahead, so it fetches each block of commit rows that
-/// it misses and no others. Commit rows are sorted by sequence, and a
-/// read-ahead window covers the missed block and the blocks after it, which
-/// contain newer commits. The walk moves toward older commits, so it has already
-/// read every block that a window would add.
+/// Every sequence above the floor has a commit row, so the search looks up
+/// commit rows by sequence. It reads the commit at `target` first, so an
+/// advance toward an old target, such as a scheduled advance with a retention
+/// window, reads one commit row. Otherwise, it runs a binary search over the
+/// sequences between the floor and `target`, so it reads about log2 of the
+/// number of commits between them, plus one.
+///
+/// The binary search assumes that commit times don't decrease with sequence.
+/// If a writer dated a commit out of order, the search can stop at an old
+/// commit below the newest one, so the floor stops earlier than it needs to.
+/// The search returns the floor or a commit that it read and found old
+/// enough, and every commit below that commit was committed before it, so the
+/// floor still never passes a commit younger than the window unless a commit
+/// at or above it is old enough.
+///
+/// The lookups don't read ahead, so each one fetches only the block of commit
+/// rows that it needs, if an earlier lookup didn't fetch it. A read-ahead
+/// window would add the blocks after that block, but the search reads few of
+/// them, because each lookup halves the sequences left to search, and the
+/// next lookup can be in either half.
 async fn newest_commit_past_the_grace_window<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -263,7 +275,13 @@ async fn newest_commit_past_the_grace_window<S: ObjectStore + ?Sized>(
         return Ok(floor);
     }
     let basis = metadata_basis_from_manifest(store, segment_cache, current);
-    for seq in (floor.0 + 1..=target.0).rev().map(ChangeSeq) {
+    // The answer is between `old` and `high`, inclusive. `old` is the floor
+    // or a commit that the search found old enough, and `high` is `target` or
+    // the sequence below a commit that the search found too young.
+    let mut old = floor;
+    let mut high = target;
+    let mut seq = target;
+    while old < high {
         let commit = commit_at_seq(&basis.segments, seq, Readahead::Disabled)
             .await?
             .ok_or_else(|| {
@@ -272,8 +290,11 @@ async fn newest_commit_past_the_grace_window<S: ObjectStore + ?Sized>(
                 ))
             })?;
         if now_ms.saturating_sub(commit.committed_at_ms) >= GC_DEFAULT_GRACE_WINDOW_MS {
-            return Ok(seq);
+            old = seq;
+        } else {
+            high = ChangeSeq(seq.0 - 1);
         }
+        seq = ChangeSeq(old.0 + (high.0 - old.0).div_ceil(2));
     }
-    Ok(floor)
+    Ok(old)
 }
