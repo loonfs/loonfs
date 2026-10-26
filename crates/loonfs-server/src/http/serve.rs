@@ -260,6 +260,7 @@ pub async fn app(
         direct_transfers,
         grep,
         metrics,
+        usage_recorder: None,
     };
     let state = AppState {
         binding,

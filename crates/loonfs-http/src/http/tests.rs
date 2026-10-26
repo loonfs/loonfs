@@ -13,6 +13,7 @@ mod ranged_reads;
 mod read_consistency;
 mod request_limit;
 mod surface;
+mod usage;
 
 use super::error::{status_for_core_error_code, ServedErrorCode};
 use super::{request_log_severity, RequestLogSeverity};
@@ -47,6 +48,7 @@ fn options_with_store(store: SharedObjectStore) -> TestAppOptions {
         max_staleness_ms: None,
         consistency: None,
         execution_budget: None,
+        usage_recorder: None,
         store: Some(store),
         direct_transfers: None,
         monotonic_timer: None,
@@ -2933,6 +2935,7 @@ mod direct_download {
                 consistency: None,
                 monotonic_timer: None,
                 execution_budget: None,
+                usage_recorder: None,
                 store: Some(store),
                 direct_transfers: Some(transfers),
             },
@@ -3217,6 +3220,7 @@ mod direct_download {
                 consistency: None,
                 monotonic_timer: None,
                 execution_budget: None,
+                usage_recorder: None,
                 store: None,
                 direct_transfers: Some(DirectTransferIssuers {
                     get: LoopbackIssuer::at("http://objects"),
@@ -3487,6 +3491,7 @@ mod direct_download {
                 consistency: None,
                 monotonic_timer: None,
                 execution_budget: None,
+                usage_recorder: None,
                 store: Some(store),
                 direct_transfers,
             },
@@ -3732,6 +3737,7 @@ mod direct_download {
                 consistency: None,
                 monotonic_timer: None,
                 execution_budget: None,
+                usage_recorder: None,
                 store: Some(store),
                 direct_transfers: Some(DirectTransferIssuers {
                     get: LoopbackIssuer::at("http://objects"),

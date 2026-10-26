@@ -6,9 +6,10 @@ use super::handlers_filesystem::{read_target, reject_snapshot_with_revision};
 use super::handlers_inodes::{parse_inode_id, InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::query_params::{live_consistency, parse_revision_no, read_at};
+use super::usage::GrantedBytes;
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
-use axum::Json;
+use axum::{Extension, Json};
 use loonfs::{DownloadOptions, ReadAt};
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use loonfs_objectstore::ByteRange;
@@ -60,7 +61,7 @@ pub(super) async fn create_download(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateDownloadRequest>,
-) -> Result<Json<CreateDownloadResponse>, ApiResponseError> {
+) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadResponse>), ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     reject_snapshot_with_revision(
@@ -90,13 +91,16 @@ pub(super) async fn create_download(
         })?;
     let ranges = presigned_ranges(issuer, &download.ranges, download.start_offset).await?;
 
-    Ok(Json(CreateDownloadResponse {
-        namespace_id,
-        path: download.absolute_path,
-        revision_no: download.revision_no,
-        content_ref: download.content_ref,
-        ranges,
-    }))
+    Ok((
+        granted_bytes(&ranges),
+        Json(CreateDownloadResponse {
+            namespace_id,
+            path: download.absolute_path,
+            revision_no: download.revision_no,
+            content_ref: download.content_ref,
+            ranges,
+        }),
+    ))
 }
 
 /// Authorizes a direct read of the current revision of a file inode.
@@ -135,7 +139,7 @@ pub(super) async fn create_download_by_inode(
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<CreateDownloadByInodeRequest>,
-) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
+) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadByInodeResponse>), ApiResponseError> {
     let request = request.unwrap_or_default();
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
@@ -199,7 +203,7 @@ pub(super) async fn create_revision_download_by_inode(
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<CreateRevisionDownloadByInodeRequest>,
-) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
+) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadByInodeResponse>), ApiResponseError> {
     let request = request.unwrap_or_default();
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
@@ -235,15 +239,23 @@ async fn inode_download_response(
     issuer: &dyn DirectGetIssuer,
     namespace_id: loonfs_types::NamespaceId,
     target: loonfs::downloads::DirectDownloadByInodeTarget,
-) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
+) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadByInodeResponse>), ApiResponseError> {
     let ranges = presigned_ranges(issuer, &target.ranges, target.start_offset).await?;
-    Ok(Json(CreateDownloadByInodeResponse {
-        namespace_id,
-        inode_id: target.inode_id,
-        revision_no: target.revision_no,
-        content_ref: target.content_ref,
-        ranges,
-    }))
+    Ok((
+        granted_bytes(&ranges),
+        Json(CreateDownloadByInodeResponse {
+            namespace_id,
+            inode_id: target.inode_id,
+            revision_no: target.revision_no,
+            content_ref: target.content_ref,
+            ranges,
+        }),
+    ))
+}
+
+/// Sums the lengths of a grant's ranges, for the request's usage report.
+fn granted_bytes(ranges: &[DownloadRange]) -> Extension<GrantedBytes> {
+    Extension(GrantedBytes(ranges.iter().map(|range| range.length).sum()))
 }
 
 fn direct_get_issuer(state: &BindingState) -> Result<&dyn DirectGetIssuer, ApiResponseError> {
