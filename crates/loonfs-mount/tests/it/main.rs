@@ -1,12 +1,15 @@
-//! One binary for the crate's integration tests, which mount a scripted
-//! namespace through the client and check what the engine shows and asks
-//! for.
+//! One binary for the crate's integration tests, which mount a namespace of
+//! the simulated server through the real client and check what the engine
+//! shows and what it asks the server for.
 
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 mod admission;
+mod content_changes;
 mod dependencies;
+mod determinism;
 mod feed;
-mod namespace;
+mod feed_pages;
 mod reads;
-mod service;
+mod rebuild;
+mod support;

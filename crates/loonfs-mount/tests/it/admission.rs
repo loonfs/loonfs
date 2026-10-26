@@ -1,156 +1,192 @@
-//! Admitting a mount: the scan at a snapshot, the entry budget, the checks
-//! that refuse a mount, and where the feed starts.
+//! Admitting a mount: the scan at a snapshot and the requests it makes, the
+//! entry budget, and the checks that refuse a mount.
 
-use crate::namespace::{
-    commit, content, directory, file, file_created, refresh, ScriptedNamespace, ROOT,
-};
-use bytes::Bytes;
-use loonfs_mount::{ItemId, ItemKind, MountAccess, MountError, Readiness};
-use loonfs_types::{ChangeSeq, ContentId};
+use crate::support::{engine_tree, fixture, mkdir, operations, path, put, Fixture, MOUNT_PATH};
+use loonfs_mount::{MountAccess, MountError, Readiness};
+use loonfs_mount_sim::{Operation, SimulatedServerConfig};
+use loonfs_types::{ErrorCode, NamespaceNaming, PinId};
 use std::assert_matches;
-use std::ffi::OsStr;
 
-fn three_entries() -> ScriptedNamespace {
-    let notes = content(&ContentId::generate(), b"notes");
-    let readme = content(&ContentId::generate(), b"read me");
-    ScriptedNamespace::new(
-        vec![
-            directory(11, ROOT, "/work/project/docs"),
-            file(12, 11, "/work/project/docs/notes.txt", &notes),
-            file(13, ROOT, "/work/project/readme.md", &readme),
-        ],
-        vec![
-            (12, Bytes::from_static(b"notes")),
-            (13, Bytes::from_static(b"read me")),
-        ],
-    )
+/// Commits 10 directories below the mount's root, with 10 subdirectories in
+/// each and 10 files in each subdirectory, and returns the number of
+/// entries: 1,110, which admission lists in two pages.
+///
+/// The simulated server checks every binding after each operation, so a
+/// commit costs time in proportion to its operations times the square of the
+/// namespace's rows, and a larger tree makes this test slow.
+fn commit_nested_tree(fixture: &Fixture) -> u64 {
+    for directory in 0..10 {
+        let top = format!("d{directory}");
+        let mut operations = vec![mkdir(&top, false)];
+        for subdirectory in 0..10 {
+            let sub = format!("{top}/s{subdirectory}");
+            operations.push(mkdir(&sub, false));
+            for file in 0..10 {
+                let name = format!("{sub}/f{file}.txt");
+                operations.push(put(&name, name.as_bytes()));
+            }
+        }
+        fixture.commit(operations);
+    }
+    10 * (1 + 10 * (1 + 10))
 }
 
-/// Checks that a mount whose tree fits the budget lists it at a snapshot
-/// with attributes, deletes the snapshot, and shows the tree, and that a
-/// budget one entry smaller refuses the mount after listing one entry past
-/// it.
+/// Checks that admission reads the capabilities and the namespace, creates
+/// a snapshot, reads the root and its two ancestors and lists the subtree at
+/// it, and deletes it, with no other request, and that the tree it builds
+/// equals a listing of the namespace at the sequence it applied.
 #[tokio::test]
-async fn admission_lists_at_a_snapshot_and_refuses_one_entry_past_the_budget() {
-    let namespace = three_entries();
-    let mut config = namespace.config();
-    config.max_entries = 3;
-    let engine = namespace
-        .mount_with(config)
-        .await
-        .expect("three entries fit");
-
-    let docs = engine
-        .lookup(ItemId::ROOT, OsStr::new("docs"))
-        .expect("the listed directory");
-    assert_eq!(docs.attr.kind, ItemKind::Directory);
-    let notes = engine
-        .lookup(docs.item, OsStr::new("notes.txt"))
-        .expect("the listed file");
-    assert_eq!(
-        (notes.attr.kind, notes.attr.size_bytes),
-        (ItemKind::File, 5)
-    );
-    let names: Vec<_> = engine
-        .readdir(ItemId::ROOT, 0)
-        .map(|entry| entry.name)
+async fn a_nested_namespace_admits_at_a_snapshot_with_the_requests_the_note_describes() {
+    let fixture = fixture();
+    let entries = commit_nested_tree(&fixture);
+    let head = fixture.head_seq();
+    fixture.server.take_trace();
+    let mut config = fixture.config();
+    config.max_entries = entries;
+    let engine = fixture.admit(config).await.expect("the tree fits");
+    let trace = fixture.server.take_trace();
+    let admission: Vec<_> = trace
+        .iter()
+        .take_while(|record| record.operation != Operation::ListChanges)
+        .cloned()
         .collect();
-    assert_eq!(names, ["docs", "readme.md"]);
-    let status = engine.status();
-    assert_eq!(status.applied_seq, ChangeSeq(5));
-    assert_eq!((status.entries, status.readiness), (4, Readiness::Ready));
-    assert!(status.transports.direct_get);
-    assert_eq!(status.inline_limit_bytes, 65_536);
-
-    let listings = namespace.requests_to("/inodes/ino_10/children");
-    assert_eq!(listings.len(), 1);
-    let listing = &listings[0];
-    assert_eq!(listing.query("recursive"), Some("true"));
-    assert_eq!(listing.query("include_attributes"), Some("true"));
-    let snapshot_id = listing.query("snapshot_id").expect("a snapshot");
-    let deletes = namespace.requests_to(&format!("/snapshots/{snapshot_id}"));
-    assert_eq!(deletes.len(), 1, "admission deletes its snapshot");
-
-    let over_budget = three_entries();
-    let mut config = over_budget.config();
-    config.max_entries = 2;
-    let refused = over_budget
-        .mount_with(config)
-        .await
-        .expect_err("three entries don't fit");
-    assert_matches!(
-        refused,
-        MountError::EntryBudgetExceeded {
-            listed_entries: 3,
-            max_entries: 2,
-            ..
-        }
-    );
-    let listing = &over_budget.requests_to("/inodes/ino_10/children")[0];
-    assert_eq!(listing.query("limit"), Some("3"));
+    use Operation::*;
     assert_eq!(
-        over_budget
-            .requests_to("/snapshots/pin_00000000000000000001-0000000000000001")
-            .len(),
-        1
+        operations(&admission),
+        [
+            GetCapabilities,
+            GetNamespace,
+            CreateSnapshot,
+            GetPathEntry,
+            GetInode,
+            GetInode,
+            ListInodeChildren,
+            ListInodeChildren,
+            DeleteSnapshot,
+        ]
     );
     assert!(
-        !over_budget.state_directory.path().join("tree.db").exists(),
-        "a refused mount leaves no tree"
+        trace[admission.len()..]
+            .iter()
+            .all(|record| record.operation == ListChanges),
+        "the engine only polls the feed after admission"
     );
+    let snapshot_id = admission[3]
+        .query_param("snapshot_id")
+        .expect("the root is read at the snapshot");
+    assert_eq!(admission[3].query_param("path"), Some(MOUNT_PATH));
+    for read in &admission[3..8] {
+        assert_eq!(read.query_param("snapshot_id"), Some(snapshot_id));
+        assert_eq!(read.query_param("include_attributes"), Some("true"));
+    }
+    let limits: Vec<_> = admission[6..8]
+        .iter()
+        .map(|page| {
+            assert_eq!(page.query_param("recursive"), Some("true"));
+            page.query_param("limit")
+        })
+        .collect();
+    assert_eq!(
+        limits,
+        [Some("1000"), Some("111")],
+        "pages of 1,000 entries, and no more than the budget plus one in all"
+    );
+    assert!(admission[8].path.ends_with(snapshot_id));
+    let snapshot_id = PinId::parse(snapshot_id).expect("a snapshot ID");
+    let deleted = fixture
+        .client
+        .get_snapshot(&fixture.namespace_id, &snapshot_id)
+        .await
+        .expect_err("admission deletes its snapshot");
+    assert_eq!(deleted.code(), Some(ErrorCode::SnapshotNotFound));
+
+    let status = engine.status();
+    assert_eq!(
+        (status.applied_seq, status.readiness, status.entries),
+        (head, Readiness::Ready, entries + 1),
+        "the applied sequence is the head that the snapshot captured"
+    );
+    assert_eq!(engine_tree(&engine), fixture.listed_tree().await);
 }
 
-/// Checks the refusals that don't depend on the tree's size.
+/// Checks that a namespace with one entry more than the budget, and one with
+/// many more, are refused after the scan listed the budget plus one entries,
+/// that the snapshot is deleted, and that no tree is left.
+#[tokio::test]
+async fn a_namespace_over_the_budget_is_refused_after_listing_the_budget_plus_one() {
+    let fixture = fixture();
+    let operations: Vec<_> = (0..5)
+        .flat_map(|directory| {
+            let top = format!("d{directory}");
+            let files: Vec<_> = (0..4)
+                .map(|file| put(&format!("{top}/f{file}"), b"x"))
+                .collect();
+            std::iter::once(mkdir(&top, false)).chain(files)
+        })
+        .collect();
+    fixture.commit(operations);
+    for max_entries in [24, 10] {
+        fixture.server.take_trace();
+        let mut config = fixture.config();
+        config.max_entries = max_entries;
+        let refused = fixture.admit(config).await.expect_err("over the budget");
+        assert_matches!(
+            refused,
+            MountError::EntryBudgetExceeded { listed_entries, max_entries: budget, .. }
+                if listed_entries == max_entries + 1 && budget == max_entries
+        );
+        let trace = fixture.server.take_trace();
+        let pages: Vec<_> = trace
+            .iter()
+            .filter(|record| record.operation == Operation::ListInodeChildren)
+            .collect();
+        let limit = (max_entries + 1).to_string();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].query_param("limit"), Some(limit.as_str()));
+        assert_eq!(
+            trace.last().map(|record| record.operation),
+            Some(Operation::DeleteSnapshot)
+        );
+        assert!(
+            !fixture.has_tree_database(),
+            "a refused mount leaves no tree"
+        );
+    }
+}
+
+/// Checks the refusals that don't depend on the tree's size: a `.loonfs`
+/// child at the root, a root that's a file, and a writable mount of a
+/// case-insensitive namespace, which a read-only mount accepts.
 #[tokio::test]
 async fn admission_refuses_a_reserved_child_a_file_and_a_writable_case_insensitive_namespace() {
-    let reserved =
-        ScriptedNamespace::new(vec![directory(11, ROOT, "/work/project/.loonfs")], vec![]);
+    let reserved = fixture();
+    reserved.commit(vec![mkdir(".loonfs", false)]);
     assert_matches!(
-        reserved.mount_with(reserved.config()).await,
+        reserved.admit(reserved.config()).await,
         Err(MountError::ReservedName { .. })
     );
 
-    let not_a_directory = three_entries();
-    let mut config = not_a_directory.config();
-    config.path = loonfs_types::AbsolutePath::parse("/work/project/readme.md").expect("a path");
+    let file_root = fixture();
+    file_root.commit(vec![put("readme.md", b"read me")]);
+    let mut config = file_root.config();
+    config.path = path("readme.md");
     assert_matches!(
-        not_a_directory.mount_with(config).await,
+        file_root.admit(config).await,
         Err(MountError::NotADirectory { .. })
     );
 
-    let case_insensitive = three_entries();
-    case_insensitive.edit(|script| script.case_sensitive = false);
+    let case_insensitive = Fixture::new(
+        SimulatedServerConfig::default(),
+        NamespaceNaming::CaseInsensitive,
+    );
     let mut config = case_insensitive.config();
     config.access = MountAccess::Writable;
     assert_matches!(
-        case_insensitive.mount_with(config).await,
+        case_insensitive.admit(config).await,
         Err(MountError::CaseInsensitiveNaming { .. })
     );
-    let read_only = case_insensitive.config();
     case_insensitive
-        .mount_with(read_only)
+        .admit(case_insensitive.config())
         .await
         .expect("a read-only mount of a case-insensitive namespace");
-}
-
-/// Checks that the feed starts after the snapshot's captured sequence, with
-/// strong polls, and that `refresh_at_least` waits for the commit it names.
-#[tokio::test]
-async fn the_feed_starts_after_the_applied_sequence_with_strong_polls() {
-    let namespace = three_entries();
-    let engine = namespace.mount().await;
-    let added = content(&ContentId::generate(), b"added");
-    namespace.push_commit(commit(6, vec![file_created(14, ROOT, "added.txt", &added)]));
-    namespace.push_commit(commit(7, vec![]));
-    refresh(&engine, 7).await;
-
-    assert_eq!(engine.status().applied_seq, ChangeSeq(7));
-    assert!(engine
-        .lookup(ItemId::ROOT, OsStr::new("added.txt"))
-        .is_some());
-    let polls = namespace.requests_to("/changes");
-    assert_eq!(polls[0].query("after_seq"), Some("5"));
-    assert!(polls
-        .iter()
-        .all(|poll| poll.query("consistency") == Some("strong")));
 }

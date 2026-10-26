@@ -261,3 +261,25 @@ fn a_commit_that_brings_in_a_directory_waits_for_its_listing() {
         "{deleted:?}"
     );
 }
+
+/// Checks that an `access_changed` event changes nothing but the applied
+/// sequence. (The simulated server's namespaces are unrestricted, so the
+/// integration tests can't produce this event.)
+#[test]
+fn an_access_change_changes_nothing_but_the_applied_sequence() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let (mut task, shared, workers) = task(directory.path(), &[file(11, 10, "/project/a.txt")]);
+    task.start();
+    workers.take();
+    let mut invalidations = shared.subscribers.subscribe();
+    let access_changed = serde_json::from_value(serde_json::json!({
+        "kind": "access_changed", "inode_id": "ino_11", "access_revision_no": 1,
+        "boundary": false, "grants": {},
+    }))
+    .expect("an access event");
+    task.handle(page(5, vec![commit(6, vec![access_changed])]));
+    assert_eq!(task.applied_seq, ChangeSeq(6));
+    assert!(shown(&shared, "a.txt"));
+    assert!(invalidations.try_recv().is_err());
+    assert!(workers.take().is_empty());
+}

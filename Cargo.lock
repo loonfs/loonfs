@@ -1959,12 +1959,10 @@ name = "loonfs-mount"
 version = "0.4.0"
 dependencies = [
  "bytes",
- "form_urlencoded",
  "fs4",
  "futures",
- "http",
- "http-body-util",
  "loonfs-client",
+ "loonfs-mount-sim",
  "loonfs-test-support",
  "loonfs-types",
  "rusqlite",
@@ -1974,8 +1972,27 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tower",
  "tracing",
+]
+
+[[package]]
+name = "loonfs-mount-sim"
+version = "0.4.0"
+dependencies = [
+ "bytes",
+ "form_urlencoded",
+ "futures",
+ "http",
+ "http-body-util",
+ "loonfs-client",
+ "loonfs-model",
+ "loonfs-sim",
+ "loonfs-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

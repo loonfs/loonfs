@@ -1,326 +1,327 @@
-//! Following the change feed: each event kind's rule on clean rows, moves
-//! into and out of the mount, recursive deletes, the root's ancestors, and a
-//! rebuild after `rebootstrap_required`.
+//! Following the change feed: each kind of event that the simulated server
+//! produces, applied to a mount without local changes.
 
-use crate::namespace::{
-    commit, content, deleted, directory, eventually, file, file_created, moved, name, refresh,
-    ScriptedNamespace, OUTSIDE, ROOT, WORK,
+use crate::support::{
+    delete, engine_tree, eventually, fixture, item, mkdir, move_path, open, operations, put, read,
+    refresh, request, undelete, update_attributes, Fixture, MOUNT_PATH,
 };
-use bytes::Bytes;
-use loonfs_mount::{
-    CachedPages, Engine, Invalidation, ItemId, ItemKind, PublicationStop, Readiness,
-};
+use loonfs_mount::{ItemKind, PublicationStop};
+use loonfs_mount_sim::{EchoOrder, Operation, RequestRecord};
 use loonfs_types::api::v0::FilesystemChange;
-use loonfs_types::{
-    AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, BindingVersion, ChangeSeq,
-    ContentId, InodeId,
-};
-use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 
-fn project() -> ScriptedNamespace {
-    let notes = content(&ContentId::generate(), b"notes");
-    let deep = content(&ContentId::generate(), b"deep");
-    let readme = content(&ContentId::generate(), b"read me");
-    ScriptedNamespace::new(
-        vec![
-            directory(11, ROOT, "/work/project/docs"),
-            file(12, 11, "/work/project/docs/notes.txt", &notes),
-            directory(15, 11, "/work/project/docs/sub"),
-            file(16, 15, "/work/project/docs/sub/deep.txt", &deep),
-            file(13, ROOT, "/work/project/readme.md", &readme),
-        ],
-        vec![
-            (12, Bytes::from_static(b"notes")),
-            (16, Bytes::from_static(b"deep")),
-            (13, Bytes::from_static(b"read me")),
-        ],
-    )
+/// A namespace whose mounted directory has `docs/notes.txt`,
+/// `docs/sub/deep.txt`, and `readme.md`, and whose `/elsewhere` has a
+/// directory and a file to move into the mount.
+fn project() -> Fixture {
+    let fixture = fixture();
+    fixture.commit(vec![
+        put("docs/notes.txt", b"notes"),
+        put("docs/sub/deep.txt", b"deep"),
+        put("readme.md", b"read me"),
+        put("/elsewhere/incoming/a.txt", b"a"),
+        put("/elsewhere/loose.txt", b"loose"),
+    ]);
+    fixture
 }
 
-fn attributes(entries: &[(&str, &str)]) -> Attributes {
-    Attributes::new(
-        entries
-            .iter()
-            .map(|(key, value)| {
-                (
-                    AttributeKey::parse(key).expect("a key"),
-                    AttributeValue::parse(value).expect("a value"),
-                )
-            })
-            .collect::<BTreeMap<_, _>>(),
-    )
-    .expect("attributes")
+/// Returns the requests other than feed polls.
+fn other_than_polls(trace: &[RequestRecord]) -> Vec<Operation> {
+    operations(trace)
+        .into_iter()
+        .filter(|operation| *operation != Operation::ListChanges)
+        .collect()
 }
 
-fn item(engine: &Engine, parent: ItemId, entry_name: &str) -> Option<ItemId> {
-    engine
-        .lookup(parent, OsStr::new(entry_name))
-        .map(|entry| entry.item)
-}
-
-/// Checks the creation, move, and attribute rules on clean rows, that the
-/// events with no effect on a mount change nothing, and that the kernel
-/// gets the invalidations of a page.
+/// Checks that created directories and files appear, including the parents
+/// that a put creates, and that the feed is read with strong polls from the
+/// applied sequence.
 #[tokio::test]
-async fn creations_moves_and_attribute_changes_apply_to_clean_rows() {
-    let namespace = project();
-    let engine = namespace.mount().await;
-    let mut invalidations = engine.subscribe_invalidations();
-    let readme = item(&engine, ItemId::ROOT, "readme.md").expect("the readme");
-    let docs = item(&engine, ItemId::ROOT, "docs").expect("the docs");
-    let notes = item(&engine, docs, "notes.txt").expect("the notes");
-    let log = content(&ContentId::generate(), b"log");
-    namespace.push_commit(commit(
-        6,
-        vec![
-            FilesystemChange::DirectoryCreated {
-                inode_id: InodeId(20),
-                parent_inode_id: InodeId(ROOT),
-                display_name: name("build"),
-                binding_version: BindingVersion::parse("build").expect("a binding version"),
-            },
-            file_created(21, 20, "out.log", &log),
-        ],
-    ));
-    namespace.push_commit(commit(
-        7,
-        vec![
-            moved(13, ROOT, 20, "README"),
-            FilesystemChange::AttributesChanged {
-                inode_id: InodeId(12),
-                attributes_revision_no: AttributesRevisionNo(1),
-                attributes: attributes(&[("fs.mode", "600"), ("owner", "docs-team")]),
-            },
-        ],
-    ));
-    let access_changed = serde_json::from_value(serde_json::json!({
-        "kind": "access_changed", "inode_id": "ino_11", "access_revision_no": 1,
-        "boundary": false, "grants": {},
-    }))
-    .expect("an access event");
-    namespace.push_commit(commit(
-        8,
-        vec![
-            FilesystemChange::AttributesChanged {
-                inode_id: InodeId(21),
-                attributes_revision_no: AttributesRevisionNo(1),
-                attributes: attributes(&[("fs.type", "symlink"), ("fs.target", "../docs")]),
-            },
-            access_changed,
-            FilesystemChange::DeletionExpired {
-                inode_id: InodeId(99),
-                deletion_seq: ChangeSeq(3),
-            },
-        ],
-    ));
-    refresh(&engine, 8).await;
+async fn created_directories_and_files_appear_through_strong_polls_from_the_applied_sequence() {
+    let fixture = project();
+    let engine = fixture.mount().await;
+    let admitted = engine.status().applied_seq;
+    fixture.server.take_trace();
+    let commit = fixture.commit(vec![
+        mkdir("build", false),
+        put("build/gen/out.log", b"log"),
+    ]);
+    let created: Vec<_> = commit
+        .events
+        .iter()
+        .map(|event| matches!(event, FilesystemChange::FileCreated { .. }))
+        .collect();
+    assert_eq!(created, [false, false, true], "the put creates `build/gen`");
+    refresh(&engine, commit.committed_seq).await;
 
-    let build = engine
-        .lookup(ItemId::ROOT, OsStr::new("build"))
-        .expect("the new directory");
-    assert_eq!(build.attr.kind, ItemKind::Directory);
+    let out = item(&engine, "build/gen/out.log").expect("the created file");
+    let attr = engine.getattr(out).expect("the file's attributes");
+    assert_eq!((attr.kind, attr.size_bytes), (ItemKind::File, 3));
     assert_eq!(
-        item(&engine, build.item, "README"),
+        read(&open(&engine, "build/gen/out.log").await, 0, 10).await,
+        "log"
+    );
+    assert_eq!(engine.status().applied_seq, commit.committed_seq);
+    let trace = fixture.server.take_trace();
+    let polls: Vec<_> = trace
+        .iter()
+        .filter(|record| record.operation == Operation::ListChanges)
+        .collect();
+    let admitted = admitted.0.to_string();
+    assert_eq!(polls.len(), 1, "one poll for one refresh");
+    assert_eq!(polls[0].query_param("after_seq"), Some(admitted.as_str()));
+    assert_eq!(polls[0].query_param("consistency"), Some("strong"));
+    assert_eq!(engine_tree(&engine), fixture.listed_tree().await);
+}
+
+/// Checks that a move within the mount keeps the item, that a move out of
+/// the mount removes the subtree, and that a file moved into the mount is
+/// read by inode, with no listing.
+#[tokio::test]
+async fn moves_within_out_of_and_into_the_mount_rebind_remove_and_read_items() {
+    let fixture = project();
+    let engine = fixture.mount().await;
+    let readme = item(&engine, "readme.md").expect("the readme");
+    let deep = item(&engine, "docs/sub/deep.txt").expect("the deep file");
+    let entries = engine.status().entries;
+    fixture.server.take_trace();
+    fixture.commit(vec![move_path("readme.md", "docs/README")]);
+    fixture.commit(vec![move_path("docs/sub", "/elsewhere/sub")]);
+    let last = fixture.commit(vec![move_path("/elsewhere/loose.txt", "loose.txt")]);
+    refresh(&engine, last.committed_seq).await;
+
+    assert_eq!(
+        item(&engine, "docs/README"),
         Some(readme),
         "a move keeps the item"
     );
-    assert_eq!(item(&engine, ItemId::ROOT, "readme.md"), None);
-    assert_eq!(engine.getattr(notes).expect("the notes").mode, 0o600);
-    let link = engine
-        .lookup(build.item, OsStr::new("out.log"))
-        .expect("the symlink");
-    assert_eq!(link.attr.kind, ItemKind::Symlink);
-    assert_eq!(engine.readlink(link.item), Some(OsString::from("../docs")));
-    assert_eq!(engine.status().applied_seq, ChangeSeq(8));
-
-    let mut received = Vec::new();
-    while let Ok(invalidation) = invalidations.try_recv() {
-        received.push(invalidation);
-    }
-    for expected in [
-        Invalidation::Entry {
-            parent: ItemId::ROOT,
-            name: OsString::from("build"),
-        },
-        Invalidation::Delete {
-            parent: ItemId::ROOT,
-            child: readme,
-            name: OsString::from("readme.md"),
-        },
-        Invalidation::Entry {
-            parent: build.item,
-            name: OsString::from("README"),
-        },
-        Invalidation::Inode {
-            item: notes,
-            pages: CachedPages::None,
-        },
-    ] {
-        assert!(received.contains(&expected), "{expected:?} in {received:?}");
-    }
-}
-
-/// Checks that a recursive delete removes the subtree below the deleted
-/// directory, that a move out of the mount removes the item, that a removed
-/// item stays readable by attributes until the kernel forgets it, and that
-/// an undelete reads the item again by inode.
-#[tokio::test]
-async fn a_recursive_delete_and_a_move_out_remove_items() {
-    let namespace = project();
-    let engine = namespace.mount().await;
-    let docs = item(&engine, ItemId::ROOT, "docs").expect("the docs");
-    let sub = item(&engine, docs, "sub").expect("the subdirectory");
-    let deep = item(&engine, sub, "deep.txt").expect("the deep file");
-    let readme = item(&engine, ItemId::ROOT, "readme.md").expect("the readme");
-    namespace.push_commit(commit(6, vec![deleted(11, ROOT, "docs")]));
-    namespace.push_commit(commit(7, vec![moved(13, ROOT, OUTSIDE, "elsewhere.md")]));
-    refresh(&engine, 7).await;
-
-    assert_eq!(item(&engine, ItemId::ROOT, "docs"), None);
-    assert_eq!(item(&engine, ItemId::ROOT, "readme.md"), None);
-    assert_eq!(engine.readdir(ItemId::ROOT, 0).count(), 0);
+    assert_eq!(item(&engine, "readme.md"), None);
+    assert_eq!(item(&engine, "docs/sub"), None);
     assert!(
         engine.getattr(deep).is_some(),
-        "the kernel still has a lookup of the deep file"
+        "an item that left the tree stays while the kernel has a lookup of it"
     );
-    assert_eq!(engine.status().entries, 1);
     engine.forget(deep, 1);
-    refresh(&engine, 7).await;
-    assert_eq!(engine.getattr(deep), None);
-    assert_eq!(engine.getattr(readme).map(|attr| attr.size_bytes), Some(7));
-    engine.forget(readme, 1);
-
-    namespace.push_commit(commit(
-        8,
-        vec![FilesystemChange::Undeleted {
-            inode_id: InodeId(13),
-            parent_inode_id: InodeId(ROOT),
-            display_name: name("restored.md"),
-            binding_version: BindingVersion::parse("restored").expect("a binding version"),
-        }],
-    ));
-    refresh(&engine, 8).await;
-    let restored = engine
-        .lookup(ItemId::ROOT, OsStr::new("restored.md"))
-        .expect("the undeleted file");
-    assert_eq!(restored.attr.size_bytes, 7);
+    eventually(|| engine.getattr(deep).is_none()).await;
+    assert_eq!(engine.status().entries, entries - 2 + 1);
     assert_eq!(
-        namespace.requests_to("/inodes/ino_13").len(),
-        1,
-        "read by inode"
+        read(&open(&engine, "loose.txt").await, 0, 10).await,
+        "loose"
     );
+    let trace = fixture.server.take_trace();
+    assert_eq!(
+        other_than_polls(&trace),
+        [
+            Operation::GetInode,
+            Operation::GetFileRevisionContentByInode
+        ]
+    );
+    let read_by_inode = trace
+        .iter()
+        .find(|record| record.operation == Operation::GetInode)
+        .expect("the moved-in file's read");
+    assert_eq!(read_by_inode.query_param("consistency"), Some("strong"));
+    assert_eq!(engine_tree(&engine), fixture.listed_tree().await);
 }
 
 /// Checks that a directory moved into the mount is listed at a snapshot and
-/// stays out of the tree until the feed reaches the snapshot, and that the
-/// commits in between apply to its rows.
+/// stays hidden while the feed is behind that snapshot, that the commits in
+/// between apply to its rows, and that this listing is the one listing after
+/// admission (scaling invariant 1).
 #[tokio::test]
-async fn a_moved_in_directory_is_hidden_until_the_feed_reaches_its_snapshot() {
-    let namespace = project();
-    let engine = namespace.mount().await;
-    let a = content(&ContentId::generate(), b"a");
-    let b = content(&ContentId::generate(), b"b");
-    namespace.edit(|script| {
-        script
-            .entries
-            .insert(30, directory(30, OUTSIDE, "/elsewhere/incoming"));
-        script.listings.insert(
-            30,
-            vec![
-                file(31, 30, "/elsewhere/incoming/a.txt", &a),
-                file(32, 30, "/elsewhere/incoming/b.txt", &b),
-            ],
-        );
-        script.feed_through_seq = 6;
-    });
-    namespace.push_commit(commit(6, vec![moved(30, OUTSIDE, ROOT, "incoming")]));
-    namespace.push_commit(commit(7, vec![file_created(32, 30, "b.txt", &b)]));
-    refresh(&engine, 6).await;
-    assert_eq!(engine.status().applied_seq, ChangeSeq(6));
+async fn a_directory_moved_in_is_hidden_until_the_feed_reaches_its_snapshot() {
+    let fixture = project();
+    let engine = fixture.mount().await;
+    fixture.server.take_trace();
+    let moved = fixture.commit(vec![move_path("/elsewhere/incoming", "incoming")]);
+    let hold = fixture
+        .server
+        .order_next_commit_echo(EchoOrder::ResponseFirst);
+    let later = fixture
+        .client
+        .commit(
+            &fixture.namespace_id,
+            &fixture.actor,
+            &request(vec![put("incoming/b.txt", b"b")]),
+        )
+        .await
+        .expect("the commit's response comes before its echo");
+    refresh(&engine, moved.committed_seq).await;
+    assert_eq!(engine.status().applied_seq, moved.committed_seq);
     assert_eq!(
-        item(&engine, ItemId::ROOT, "incoming"),
+        item(&engine, "incoming"),
         None,
-        "the feed hasn't reached the listing's snapshot at 7"
+        "the listing's snapshot is at {}, past the applied sequence",
+        later.committed_seq
     );
 
-    namespace.edit(|script| script.feed_through_seq = u64::MAX);
-    refresh(&engine, 7).await;
-    let incoming = item(&engine, ItemId::ROOT, "incoming").expect("the shown directory");
-    let names: Vec<_> = engine
+    hold.release();
+    refresh(&engine, later.committed_seq).await;
+    let incoming = item(&engine, "incoming").expect("the shown directory");
+    let names: Vec<OsString> = engine
         .readdir(incoming, 0)
         .map(|entry| entry.name)
         .collect();
     assert_eq!(names, ["a.txt", "b.txt"]);
-    let snapshots = namespace.requests_to("/snapshots");
-    assert_eq!(snapshots.len(), 2, "admission's snapshot and the listing's");
-    eventually(|| {
-        namespace
-            .requests_to("/snapshots/pin_00000000000000000002-0000000000000002")
-            .len()
-            == 1
-    })
-    .await;
+    fixture.wait_for_request(Operation::DeleteSnapshot).await;
+    let trace = fixture.server.take_trace();
+    use Operation::*;
+    assert_eq!(
+        other_than_polls(&trace),
+        [
+            CreateCommit,
+            GetInode,
+            CreateSnapshot,
+            GetInode,
+            ListInodeChildren,
+            DeleteSnapshot
+        ]
+    );
+    let listing = trace
+        .iter()
+        .find(|record| record.operation == ListInodeChildren)
+        .expect("the listing");
+    let snapshot_id = listing.query_param("snapshot_id").expect("at a snapshot");
+    assert_eq!(listing.query_param("recursive"), Some("true"));
+    assert!(trace
+        .iter()
+        .any(|record| record.operation == DeleteSnapshot && record.path.ends_with(snapshot_id)));
+    assert_eq!(engine_tree(&engine), fixture.listed_tree().await);
 }
 
-/// Checks that a deletion of a directory above the root stops publication
-/// and that status reports it.
+/// Checks that a recursive delete has one event for the deleted directory
+/// and removes everything below it, and that an undelete reads and lists the
+/// directory again.
 #[tokio::test]
-async fn a_deleted_root_ancestor_is_recorded_in_status() {
-    let namespace = project();
-    let engine = namespace.mount().await;
-    namespace.push_commit(commit(6, vec![deleted(WORK, 1, "work")]));
-    refresh(&engine, 6).await;
+async fn a_recursive_delete_removes_a_subtree_and_an_undelete_brings_it_back() {
+    let fixture = project();
+    let engine = fixture.mount().await;
+    let tree = engine_tree(&engine);
+    let entries = engine.status().entries;
+    let docs = fixture.inode("docs").await;
+    let deleted = fixture.commit(vec![delete("docs")]);
     assert_eq!(
-        engine.status().publication_stop,
-        Some(PublicationStop::RootDeleted {
-            inode_id: InodeId(WORK),
-            deleted_seq: ChangeSeq(6),
-        })
+        deleted.events.len(),
+        1,
+        "one event for the deleted directory"
+    );
+    refresh(&engine, deleted.committed_seq).await;
+    assert_eq!(item(&engine, "docs"), None);
+    assert_eq!(engine.status().entries, entries - 4);
+
+    fixture.server.take_trace();
+    let undeleted = fixture.commit(vec![undelete(docs, deleted.committed_seq)]);
+    refresh(&engine, undeleted.committed_seq).await;
+    assert_eq!(engine_tree(&engine), tree);
+    assert_eq!(engine.status().entries, entries);
+    fixture.wait_for_request(Operation::DeleteSnapshot).await;
+    use Operation::*;
+    assert_eq!(
+        other_than_polls(&fixture.server.take_trace()),
+        [
+            GetInode,
+            CreateSnapshot,
+            GetInode,
+            ListInodeChildren,
+            DeleteSnapshot
+        ]
     );
 }
 
-/// Checks that a feed that passed the retention floor makes the engine list
-/// the tree again at a new snapshot, remove what the listing doesn't have,
-/// and follow the feed from the new snapshot.
+/// Checks that the expiry of a deletion that the retention floor passed
+/// changes nothing in the mount.
 #[tokio::test]
-async fn rebootstrap_required_lists_the_tree_again() {
-    let namespace = project();
-    let engine = namespace.mount().await;
-    let notes = item(
-        &engine,
-        item(&engine, ItemId::ROOT, "docs").expect("docs"),
-        "notes.txt",
+async fn an_expired_deletion_changes_nothing() {
+    let fixture = project();
+    let engine = fixture.mount().await;
+    let deleted = fixture.commit(vec![delete("readme.md")]);
+    refresh(&engine, deleted.committed_seq).await;
+    let tree = engine_tree(&engine);
+    let entries = engine.status().entries;
+    fixture.server.take_trace();
+    fixture
+        .server
+        .advance_retention_floor(&fixture.namespace_id, deleted.committed_seq);
+    let head = fixture.head_seq();
+    assert_eq!(
+        head.0,
+        deleted.committed_seq.0 + 1,
+        "the floor advance expires the deletion"
     );
-    let added = content(&ContentId::generate(), b"added");
-    namespace.edit(|script| {
-        script.head_seq = 9;
-        script.retention_floor_seq = 9;
-        let listing = script.listings.get_mut(&ROOT).expect("the root's listing");
-        listing.retain(|entry| entry.inode_id != InodeId(13));
-        listing.push(file(14, ROOT, "/work/project/added.txt", &added));
-    });
-    refresh(&engine, 9).await;
+    refresh(&engine, head).await;
+    assert_eq!(engine.status().applied_seq, head);
+    assert_eq!(
+        (engine_tree(&engine), engine.status().entries),
+        (tree, entries)
+    );
+    assert!(other_than_polls(&fixture.server.take_trace()).is_empty());
+}
 
-    assert_eq!(item(&engine, ItemId::ROOT, "readme.md"), None);
-    assert!(item(&engine, ItemId::ROOT, "added.txt").is_some());
-    let docs = item(&engine, ItemId::ROOT, "docs").expect("docs");
+/// Checks that `fs.mode`, `fs.mtime_ms`, and `fs.type` with `fs.target`
+/// change the mode, the modification time, and the kind of an item, and that
+/// other keys change nothing that the mount shows.
+#[tokio::test]
+async fn attribute_changes_to_fs_keys_set_the_mode_the_time_and_a_symlink_target() {
+    let fixture = project();
+    fixture.commit(vec![put("link", b"")]);
+    let engine = fixture.mount().await;
+    let notes = item(&engine, "docs/notes.txt").expect("the notes");
+    let readme = item(&engine, "readme.md").expect("the readme");
+    let link = item(&engine, "link").expect("the future symlink");
+    let commit = fixture.commit(vec![
+        update_attributes("docs/notes.txt", &[("fs.mode", "600")], &[]),
+        update_attributes(
+            "readme.md",
+            &[("fs.mtime_ms", "1234567"), ("fs.mtime_revision_no", "1")],
+            &[],
+        ),
+        update_attributes(
+            "link",
+            &[("fs.type", "symlink"), ("fs.target", "../docs")],
+            &[],
+        ),
+    ]);
+    refresh(&engine, commit.committed_seq).await;
+    assert_eq!(item(&engine, "docs/notes.txt"), Some(notes));
+    assert_eq!(engine.getattr(notes).expect("the notes").mode, 0o600);
     assert_eq!(
-        item(&engine, docs, "notes.txt"),
-        notes,
-        "an unchanged item stays"
+        engine.getattr(readme).expect("the readme").mtime_ms,
+        1_234_567
     );
-    let status = engine.status();
-    assert_eq!(
-        (status.applied_seq, status.readiness),
-        (ChangeSeq(9), Readiness::Ready)
-    );
-    assert_eq!(namespace.requests_to("/snapshots").len(), 2);
-    eventually(|| {
-        namespace
-            .requests_to("/changes")
-            .last()
-            .is_some_and(|poll| poll.query("after_seq") == Some("9"))
-    })
-    .await;
+    let symlink = item(&engine, "link").expect("the symlink");
+    assert_ne!(symlink, link, "a file that becomes a symlink is a new item");
+    let attr = engine.getattr(symlink).expect("the symlink");
+    assert_eq!((attr.kind, attr.size_bytes), (ItemKind::Symlink, 7));
+    assert_eq!(engine.readlink(symlink), Some(OsString::from("../docs")));
+
+    let shown = engine.getattr(readme);
+    let commit = fixture.commit(vec![
+        update_attributes("docs/notes.txt", &[], &["fs.mode"]),
+        update_attributes("readme.md", &[("owner", "docs")], &[]),
+    ]);
+    refresh(&engine, commit.committed_seq).await;
+    assert_eq!(engine.getattr(notes).expect("the notes").mode, 0o644);
+    assert_eq!(engine.getattr(readme), shown, "a key outside `fs.`");
+    assert_eq!(engine_tree(&engine), fixture.listed_tree().await);
+}
+
+/// Checks that a deletion of the mount's root, or of a directory above it,
+/// stops publication and that status reports it.
+#[tokio::test]
+async fn a_deleted_root_or_ancestor_stops_publication() {
+    for deleted in [MOUNT_PATH, "/work"] {
+        let fixture = project();
+        let engine = fixture.mount().await;
+        let inode_id = fixture.inode(deleted).await;
+        let commit = fixture.commit(vec![delete(deleted)]);
+        refresh(&engine, commit.committed_seq).await;
+        assert_eq!(
+            engine.status().publication_stop,
+            Some(PublicationStop::RootDeleted {
+                inode_id,
+                deleted_seq: commit.committed_seq,
+            }),
+            "{deleted}"
+        );
+    }
 }

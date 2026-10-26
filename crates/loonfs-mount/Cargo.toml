@@ -27,13 +27,10 @@ tracing.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
-form_urlencoded.workspace = true
-http.workspace = true
-http-body-util.workspace = true
+loonfs-mount-sim.workspace = true
 loonfs-test-support.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
-tower.workspace = true
 
 [[test]]
 name = "it"
