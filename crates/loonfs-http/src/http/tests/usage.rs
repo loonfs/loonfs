@@ -6,6 +6,7 @@ use super::fixtures::{test_app, test_options, TestAppOptions};
 use crate::{BindingState, JobMode, UsageRecorder, UsageReport};
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
+use futures::StreamExt as _;
 use http_body_util::BodyExt as _;
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_test_support::ids::namespace_id;
@@ -133,7 +134,7 @@ impl Fixture {
         UsageReport {
             operation,
             namespace_id: self.namespace_id.clone(),
-            status,
+            status: Some(status),
             request_bytes: request.len() as u64,
             response_bytes: response.len() as u64,
             grant_bytes,
@@ -330,6 +331,62 @@ async fn a_client_that_goes_away_still_produces_a_report() {
     assert_eq!(
         fixture.usage.take(),
         [fixture.report("get_file_content", status, "", &first, 0)]
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_request_canceled_before_its_response_still_produces_a_report() {
+    let fixture = fixture("usage-canceled").await;
+    let (status, response) = fixture
+        .send(request(
+            "POST",
+            "/v0/namespaces/demo/uploads",
+            r#"{"mode":"service_proxied"}"#,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response:?}");
+    let upload: Value = serde_json::from_slice(&response).expect("upload session");
+    assert_eq!(fixture.usage.take().len(), 1);
+    let chunk = Bytes::from_static(b"the first chunk of a longer upload");
+    let (wants_more, handler_wants_more) = tokio::sync::oneshot::channel();
+    // The handler polls for the second item only after the counting body
+    // returned the first chunk, so the signal means the chunk is counted.
+    // The second item never arrives, so the request stays in the handler.
+    let body = futures::stream::once(std::future::ready(Ok::<_, std::io::Error>(chunk.clone())))
+        .chain(futures::stream::once(async move {
+            wants_more.send(()).expect("the test waits for the signal");
+            std::future::pending::<Result<Bytes, std::io::Error>>().await
+        }));
+    let upload_request = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/v0/namespaces/demo/uploads/{}/content",
+            upload["upload_id"].as_str().expect("upload id")
+        ))
+        .header("authorization", "Bearer test-token")
+        .body(Body::from_stream(body))
+        .expect("upload request");
+    let task = tokio::spawn(fixture.router.clone().oneshot(upload_request));
+    handler_wants_more
+        .await
+        .expect("the handler reads past the first chunk");
+    assert_eq!(fixture.usage.take(), []);
+    task.abort();
+    assert!(task
+        .await
+        .expect_err("the request is canceled")
+        .is_cancelled());
+    assert_eq!(
+        fixture.usage.take(),
+        [UsageReport {
+            operation: "put_upload_content",
+            namespace_id: fixture.namespace_id.clone(),
+            status: None,
+            request_bytes: chunk.len() as u64,
+            response_bytes: 0,
+            grant_bytes: 0,
+        }]
     );
     fixture.shutdown().await;
 }

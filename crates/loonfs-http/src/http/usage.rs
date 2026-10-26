@@ -22,8 +22,9 @@ pub struct UsageReport {
     pub operation: &'static str,
     /// The namespace that the request ran against.
     pub namespace_id: NamespaceId,
-    /// The status of the response.
-    pub status: StatusCode,
+    /// The status of the response, or `None` when the request ended before the
+    /// handler produced a response.
+    pub status: Option<StatusCode>,
     /// The request body bytes that the handler read.
     pub request_bytes: u64,
     /// The response body bytes that the server wrote before the body ended or
@@ -37,10 +38,11 @@ pub struct UsageReport {
 /// Embedders adapt this trait to their own usage accounting.
 ///
 /// The binding calls it once for each request to a route with a `{namespace_id}`
-/// parameter whose namespace ID parses, after the response body ended or the
-/// client went away, from the task that drove the body. An implementation
-/// returns quickly and never blocks; a host that aggregates or ships reports
-/// does that on its own task.
+/// parameter whose namespace ID parses: after the response body ended or the
+/// client went away, from the task that drove the body, or when the request
+/// ended before the handler produced a response, from the task that dropped
+/// the request. An implementation returns quickly and never blocks; a host
+/// that aggregates or ships reports does that on its own task.
 pub trait UsageRecorder: Send + Sync + 'static {
     /// Records what one request used.
     fn record(&self, report: UsageReport);
@@ -237,7 +239,8 @@ pub(super) const NAMESPACE_OPERATIONS: &[(Method, &str, &str)] = &[
 ];
 
 /// Records one usage report for each request to a namespace route, once the
-/// response body ends or the client goes away.
+/// response body ends, the client goes away, or the request ends before its
+/// response.
 pub(super) async fn report_usage(
     State(state): State<BindingState>,
     mut request: Request,
@@ -249,29 +252,30 @@ pub(super) async fn report_usage(
     let Some((operation, namespace_id)) = find_namespace_operation(&mut request).await else {
         return next.run(request).await;
     };
-    let request_bytes = Arc::new(AtomicU64::new(0));
-    let request = request.map(|body| {
-        Body::new(CountedRequestBody {
-            body,
-            bytes: Arc::clone(&request_bytes),
-        })
-    });
-    let response = next.run(request).await;
-    let pending = PendingUsage {
+    let mut pending = PendingUsage {
         recorder,
         operation,
         namespace_id,
-        status: response.status(),
-        request_bytes,
-        grant_bytes: response
-            .extensions()
-            .get::<GrantedBytes>()
-            .map_or(0, |GrantedBytes(bytes)| *bytes),
+        status: None,
+        request_bytes: Arc::new(AtomicU64::new(0)),
+        response_bytes: 0,
+        grant_bytes: 0,
     };
+    let request = request.map(|body| {
+        Body::new(CountedRequestBody {
+            body,
+            bytes: Arc::clone(&pending.request_bytes),
+        })
+    });
+    let response = next.run(request).await;
+    pending.status = Some(response.status());
+    pending.grant_bytes = response
+        .extensions()
+        .get::<GrantedBytes>()
+        .map_or(0, |GrantedBytes(bytes)| *bytes);
     response.map(|body| {
         Body::new(ReportedResponseBody {
             body,
-            response_bytes: 0,
             pending: Some(pending),
         })
     })
@@ -333,42 +337,43 @@ impl http_body::Body for CountedRequestBody {
     }
 }
 
-/// The parts of a usage report that the binding knows once the handler
-/// returns its response.
+/// A guard over one request's usage report that records the report when the
+/// guard drops.
+///
+/// The guard exists from before the handler runs, so a request that ends
+/// before its response, such as a stream reset during a proxied upload, still
+/// records the bytes the handler read.
 struct PendingUsage {
     recorder: Arc<dyn UsageRecorder>,
     operation: &'static str,
     namespace_id: NamespaceId,
-    status: StatusCode,
+    /// The status of the response, or `None` until the handler returns one.
+    status: Option<StatusCode>,
     request_bytes: Arc<AtomicU64>,
+    response_bytes: u64,
     grant_bytes: u64,
+}
+
+impl Drop for PendingUsage {
+    fn drop(&mut self) {
+        self.recorder.record(UsageReport {
+            operation: self.operation,
+            namespace_id: self.namespace_id.clone(),
+            status: self.status,
+            request_bytes: self.request_bytes.load(Ordering::Relaxed),
+            response_bytes: self.response_bytes,
+            grant_bytes: self.grant_bytes,
+        });
+    }
 }
 
 /// A response body that counts the data bytes it yields, and records the
 /// request's usage report when the body ends, fails, or drops.
 struct ReportedResponseBody {
     body: Body,
-    response_bytes: u64,
-    /// The parts of the report, or `None` once the body recorded the report.
+    /// The request's usage report, or `None` once the body ended and recorded
+    /// the report.
     pending: Option<PendingUsage>,
-}
-
-impl ReportedResponseBody {
-    /// Records the report with the response bytes counted so far, the first
-    /// time the body ends, fails, or drops.
-    fn record(&mut self) {
-        let Some(pending) = self.pending.take() else {
-            return;
-        };
-        pending.recorder.record(UsageReport {
-            operation: pending.operation,
-            namespace_id: pending.namespace_id,
-            status: pending.status,
-            request_bytes: pending.request_bytes.load(Ordering::Relaxed),
-            response_bytes: self.response_bytes,
-            grant_bytes: pending.grant_bytes,
-        });
-    }
 }
 
 impl http_body::Body for ReportedResponseBody {
@@ -383,11 +388,12 @@ impl http_body::Body for ReportedResponseBody {
         let frame = ready!(Pin::new(&mut this.body).poll_frame(cx));
         match &frame {
             Some(Ok(frame)) => {
-                if let Some(data) = frame.data_ref() {
-                    this.response_bytes += data.len() as u64;
+                if let (Some(data), Some(pending)) = (frame.data_ref(), &mut this.pending) {
+                    pending.response_bytes += data.len() as u64;
                 }
             }
-            Some(Err(_)) | None => this.record(),
+            // Dropping the guard records the report.
+            Some(Err(_)) | None => this.pending = None,
         }
         Poll::Ready(frame)
     }
@@ -398,11 +404,5 @@ impl http_body::Body for ReportedResponseBody {
 
     fn size_hint(&self) -> SizeHint {
         self.body.size_hint()
-    }
-}
-
-impl Drop for ReportedResponseBody {
-    fn drop(&mut self) {
-        self.record();
     }
 }
