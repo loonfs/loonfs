@@ -435,11 +435,14 @@ async fn eviction_removes_an_unused_complete_file_and_keeps_an_open_one() {
     wait_until_handled(&engine).await;
     assert_eq!(engine.status().cache.evictable_bytes, 10);
     assert_eq!(engine.status().cache.pinned_bytes, 9, "the open file");
-    let present: Vec<bool> = refs
-        .iter()
-        .map(|content_ref| fixture.cache_file(content_ref).exists())
-        .collect();
-    assert_eq!(present, [true, false, true]);
+    // A file is renamed to its complete name once its verification, which
+    // runs outside the control task, matches.
+    let present = || -> Vec<bool> {
+        refs.iter()
+            .map(|content_ref| fixture.cache_file(content_ref).exists())
+            .collect()
+    };
+    eventually(|| present() == [true, false, true]).await;
 
     fixture.server.take_trace();
     assert_eq!(read(&kept, 0, 100).await, "kept open");
