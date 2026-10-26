@@ -6,7 +6,7 @@ use crate::support::{
     content_reads, eventually, fetched_bytes, fixture, fixture_with, open, pattern, put,
     range_header, read, wait_until_handled, UNIT,
 };
-use loonfs_mount::ContentState;
+use loonfs_mount::{CachedPages, ContentState, Invalidation};
 use loonfs_mount_sim::{
     ByteRange, CapabilitySwitches, ContentReadFault, InjectedFault, Operation,
     SimulatedServerConfig,
@@ -219,6 +219,7 @@ async fn a_read_after_a_mismatch_waits_for_the_second_fetch_and_then_reads_corre
     let bytes = pattern(size);
     fixture.upload("data.bin", &bytes).await;
     let engine = fixture.mount().await;
+    let mut invalidations = engine.subscribe_invalidations();
     fixture.server.take_trace();
     fixture
         .server
@@ -232,6 +233,21 @@ async fn a_read_after_a_mismatch_waits_for_the_second_fetch_and_then_reads_corre
     hold.wait_for_held_responses(1).await;
     wait_until_handled(&engine).await;
     assert_eq!(engine.status().cache.mismatched_files, 1);
+    let mut dropped = Vec::new();
+    while let Ok(invalidation) = invalidations.try_recv() {
+        dropped.push(invalidation);
+    }
+    assert_eq!(
+        dropped,
+        [Invalidation::Inode {
+            item: handle.item(),
+            pages: CachedPages::Range {
+                offset: 0,
+                length: size
+            },
+        }],
+        "the kernel drops the pages that the first read cached"
+    );
 
     let waiting = read(&handle, 0, size);
     tokio::pin!(waiting);

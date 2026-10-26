@@ -356,6 +356,24 @@ pub(crate) fn for_each_item(
 }
 
 /// Returns whether any item's current revision refers to `content_id`.
+/// Returns the items whose server or committed state has `content_id`.
+pub(crate) fn items_with_content(
+    connection: &Connection,
+    content_id: &ContentId,
+) -> rusqlite::Result<Vec<ItemId>> {
+    let mut statement = connection.prepare(
+        "SELECT item_id FROM items \
+         WHERE json_extract(s_content_ref, '$.content_id') = ?1 \
+         OR json_extract(c_content_ref, '$.content_id') = ?1",
+    )?;
+    let items = statement
+        .query_map(params![content_id.as_str()], |row| {
+            Ok(ItemId(from_sql_u64(row.get(0)?)))
+        })?
+        .collect();
+    items
+}
+
 pub(crate) fn content_in_use(
     connection: &Connection,
     content_id: &ContentId,

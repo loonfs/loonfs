@@ -9,8 +9,9 @@ use crate::cache_file::CacheFile;
 use crate::database;
 use crate::error::{MountError, Result};
 use crate::fetch::FetchPriority;
+use crate::invalidation::{CachedPages, Invalidation};
 use crate::item::ItemId;
-use crate::item_table::content_in_use;
+use crate::item_table::{content_in_use, items_with_content};
 use crate::read_handle::PinnedRevision;
 use crate::verify::{Verification, VerifyJob};
 use crate::workers::Work;
@@ -82,8 +83,10 @@ impl ControlTask {
             }
             Ok(Verification::Mismatch) | Err(_) => {
                 let attempt = partial.attempt;
+                let size_bytes = partial.target.size_bytes;
                 self.mismatched_files += 1;
                 tracing::warn!(%content_id, ?attempt, "a cache file didn't match its checksum");
+                self.invalidate_content(content_id, size_bytes);
                 match attempt {
                     FillAttempt::First => self.refetch(content_id),
                     FillAttempt::Refetch => {
@@ -94,6 +97,36 @@ impl ControlTask {
                 }
             }
         }
+    }
+
+    /// Drops the kernel's cached pages of every item that shows or reads
+    /// `content_id`, because reads returned the content's bytes before they
+    /// were verified, and the next open would keep those pages.
+    fn invalidate_content(&mut self, content_id: &ContentId, size_bytes: u64) {
+        let mut items: Vec<ItemId> = self
+            .handles
+            .values()
+            .filter(|open| &open.view().revision.content_ref.content_id == content_id)
+            .map(|open| open.item)
+            .collect();
+        match items_with_content(self.database.connection(), content_id) {
+            Ok(shown) => items.extend(shown),
+            Err(error) => {
+                tracing::error!(%error, %content_id, "finding the items of a content failed")
+            }
+        }
+        items.sort_unstable();
+        items.dedup();
+        for item in items {
+            self.invalidations.push(Invalidation::Inode {
+                item,
+                pages: CachedPages::Range {
+                    offset: 0,
+                    length: size_bytes,
+                },
+            });
+        }
+        self.flush_invalidations();
     }
 
     /// Deletes a file that didn't match its checksum, and fetches its
