@@ -125,6 +125,10 @@ impl WorkerContext {
             }
             _ => (self.open_grant(&job).await?, false),
         };
+        // The grant covers the rest of the revision, and the stream asks for
+        // no range past the window, so a fetch reads at most one range past
+        // it.
+        stream.set_end_offset(job.range.end);
         let mut offset = job.range.start;
         let mut ended = false;
         while offset < job.range.end {
@@ -136,6 +140,7 @@ impl WorkerContext {
                 Err(_) if kept => {
                     kept = false;
                     stream = self.open_grant(&job).await?;
+                    stream.set_end_offset(job.range.end);
                     continue;
                 }
                 Err(error) => return Err(error.into()),

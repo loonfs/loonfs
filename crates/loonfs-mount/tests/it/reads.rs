@@ -59,9 +59,9 @@ async fn a_small_file_is_fetched_whole_once_and_then_read_from_the_cache() {
     assert_eq!(cached, bytes);
 }
 
-/// The most signed ranges that the client's download stream keeps open at
-/// once, which a grant can fetch past the window that asked for it.
-const GRANT_RANGES_IN_FLIGHT: u64 = 4;
+/// The size of each signed range of a grant in the sequential read, which is
+/// the most a grant fetches past the window that asked for it.
+const GRANT_RANGE_BYTES: u64 = MIB;
 
 /// Returns the range from `start` to `end` quarter mebibytes.
 fn range_quarter_mib(start: u64, end: u64) -> ByteRange {
@@ -74,14 +74,15 @@ fn range_quarter_mib(start: u64, end: u64) -> ByteRange {
 /// Checks that a sequential reader of a 32 MiB file fetches windows that grow
 /// from 1 MiB, each the smallest of twice the last window, 64 MiB, and the
 /// bytes read less the bytes fetched but not read yet, with one window
-/// ahead once that's at least half the current window; that windows of at most 8 MiB are ranged reads and the larger one
-/// is a grant; and that after every read the engine has fetched at most
-/// twice the bytes read plus the first window (scaling invariant 2), plus the
-/// signed ranges that a grant's stream keeps in flight.
+/// ahead once that's at least half the current window. Windows of at most
+/// 8 MiB are ranged reads, and the larger one is a grant that fetches at
+/// most one signed range past its window. After every read, the engine has
+/// fetched at most twice the bytes read plus the first window (scaling
+/// invariant 2) plus that one range, and no byte is fetched twice.
 #[tokio::test]
 async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read() {
     let fixture = fixture_with(SimulatedServerConfig {
-        max_download_range_bytes: MIB,
+        max_download_range_bytes: GRANT_RANGE_BYTES,
         ..SimulatedServerConfig::default()
     });
     let size = 32 * MIB;
@@ -98,17 +99,13 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
         offset += chunk.len() as u64;
         let fetched = fetched_bytes(&fixture.server.trace());
         assert!(
-            fetched <= 2 * offset + MIB + GRANT_RANGES_IN_FLIGHT * MIB,
+            fetched <= 2 * offset + MIB + GRANT_RANGE_BYTES,
             "{fetched} bytes fetched after {offset} read"
         );
     }
 
     let trace = fixture.server.take_trace();
-    let fetched = fetched_bytes(&trace);
-    assert!(
-        (size..=size + GRANT_RANGES_IN_FLIGHT * MIB).contains(&fetched),
-        "{fetched} bytes fetched"
-    );
+    assert_eq!(fetched_bytes(&trace), size, "every byte once");
     let ranged: Vec<_> = trace
         .iter()
         .filter(|record| record.operation == Operation::GetFileRevisionContentByInode)
@@ -122,12 +119,13 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
         (16, 26),
         (26, 42),
         (42, 68),
+        (112, 128),
     ];
     let expected: Vec<_> = windows
         .into_iter()
         .map(|(start, end)| range_quarter_mib(start, end))
         .collect();
-    assert_eq!(ranged[..expected.len()], expected);
+    assert_eq!(ranged, expected);
     let granted: Vec<_> = trace
         .iter()
         .filter(|record| record.operation == Operation::ReadDownloadRange)
@@ -135,9 +133,14 @@ async fn a_sequential_read_fetches_growing_windows_within_twice_the_bytes_read()
         .collect();
     let expected: Vec<_> = (17..28).map(|start| range_mib(start, start + 1)).collect();
     assert_eq!(
-        granted[..expected.len()],
-        expected,
-        "one grant from 17 MiB, in 1 MiB ranges"
+        granted, expected,
+        "one grant for the window from 17 MiB to 27.5 MiB, in 1 MiB ranges"
+    );
+    let window_end = 27 * MIB + MIB / 2;
+    let past_window = granted.last().expect("a granted range").end_offset - window_end;
+    assert!(
+        past_window <= GRANT_RANGE_BYTES,
+        "{past_window} bytes past the window"
     );
     let grants = trace
         .iter()

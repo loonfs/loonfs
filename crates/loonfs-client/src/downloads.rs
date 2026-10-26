@@ -53,12 +53,16 @@ impl From<&ReadAt> for ReadAtFields {
 /// length of each range.
 ///
 /// The ranges after the current one are requested while it is read, up to a
-/// fixed window of open responses.
+/// fixed window of open responses, and up to the end offset that
+/// [`Self::set_end_offset`] sets.
 pub struct DirectDownloadStream {
     body: Fuse<payload::PayloadStream>,
     next: VecDeque<NextRange>,
     client: Client,
     ranges: VecDeque<DownloadRange>,
+    /// The stream requests no range ahead that starts at or past this
+    /// offset in the revision.
+    end_offset: u64,
     range_remaining: u64,
     expected: ContentRef,
     target: String,
@@ -115,6 +119,18 @@ impl DirectDownloadStream {
         })
     }
 
+    /// Stops the stream from requesting a signed range ahead that starts at or
+    /// past `end_offset`, for a caller that reads the revision up to there.
+    ///
+    /// The stream still finishes the range that contains `end_offset`, and a
+    /// later [`Self::next_chunk`] opens the next range when the caller reads
+    /// on. Raising the end lets the stream request ranges ahead again, and a
+    /// range that the stream already requested stays requested. By default,
+    /// the end is the end of the revision.
+    pub fn set_end_offset(&mut self, end_offset: u64) {
+        self.end_offset = end_offset;
+    }
+
     /// Returns the next response-body chunk, or `None` once the complete
     /// revision has passed its length and checksum checks.
     ///
@@ -131,6 +147,7 @@ impl DirectDownloadStream {
         if let Some(error) = &self.failed {
             return Err(error.clone());
         }
+        self.request_next_range();
         let read = self.read_next_chunk().await;
         if let Err(error) = &read {
             self.failed = Some(error.clone());
@@ -189,6 +206,14 @@ impl DirectDownloadStream {
                         self.request_next_range();
                         continue;
                     }
+                    if let Some(range) = self.ranges.pop_front() {
+                        // The caller reads past the end offset, so the range
+                        // after it opens now.
+                        self.body = self.client.open_download_range(&range).await?.fuse();
+                        self.range_remaining = range.length;
+                        self.request_next_range();
+                        continue;
+                    }
                     let DownloadCheck::Verify(verifier) = &mut self.check else {
                         return Ok(None);
                     };
@@ -205,9 +230,17 @@ impl DirectDownloadStream {
 
     fn request_next_range(&mut self) {
         while self.next.len() < RANGE_RESPONSES_IN_FLIGHT - 1 {
-            let Some(range) = self.ranges.pop_front() else {
+            if self
+                .ranges
+                .front()
+                .is_none_or(|range| range.start_offset >= self.end_offset)
+            {
                 return;
-            };
+            }
+            let range = self
+                .ranges
+                .pop_front()
+                .expect("the front range was just read");
             let client = self.client.clone();
             self.next.push_back(NextRange::Opening {
                 length: range.length,
@@ -485,18 +518,20 @@ impl Client {
             .split_first()
             .expect("validated grant should contain a range");
         let body = self.open_download_range(first).await?;
-        let mut stream = DirectDownloadStream {
+        let stream = DirectDownloadStream {
             body: body.fuse(),
             next: VecDeque::new(),
             client: self.clone(),
             ranges: remaining.iter().cloned().collect(),
+            end_offset: content_ref.size_bytes,
             range_remaining: first.length,
             expected: content_ref.clone(),
             target,
             check: DownloadCheck::Verify(ContentVerifier::new(content_ref, start_offset)),
             failed: None,
         };
-        stream.request_next_range();
+        // The first `next_chunk` requests the ranges ahead, after the caller
+        // had a chance to set an end offset.
         Ok(stream)
     }
 

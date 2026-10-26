@@ -397,6 +397,65 @@ async fn ranges_up_to_the_window_are_requested_while_the_current_one_is_read() {
     assert_eq!(urls, expected);
 }
 
+/// Checks that a stream with an end offset requests no range ahead that
+/// starts at or past it, still finishes the range that contains it, opens
+/// the next range when the caller reads past the end, and requests ranges
+/// ahead again once the end is raised, so the whole revision still verifies.
+#[tokio::test]
+async fn an_end_offset_stops_the_ranges_requested_ahead() {
+    let payload: Vec<u8> = (0u8..80).collect();
+    let content_ref = ContentRef::blob_v1(
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
+    );
+    let grant = grant_of_ranges(content_ref, "http://example.invalid/object", &[10; 8]);
+    let transport = scripted_transport::script(grant.ranges.iter().map(|range| {
+        let start = loonfs_types::usize_from_u64(range.start_offset);
+        Outcome::Success(
+            payload[start..start + loonfs_types::usize_from_u64(range.length)].to_vec(),
+        )
+    }));
+    let client = client_for(&transport);
+    let mut download = client
+        .open_direct_download(&grant)
+        .await
+        .expect("open the grant");
+    download.set_end_offset(25);
+
+    let mut received = Vec::new();
+    while received.len() < 25 {
+        let chunk = download
+            .next_chunk()
+            .await
+            .expect("a chunk")
+            .expect("bytes");
+        received.extend_from_slice(&chunk);
+    }
+    assert_eq!(received, payload[..30], "the range with the end finishes");
+    assert_eq!(transport.attempts(), 3, "nothing past the end is requested");
+    let chunk = download
+        .next_chunk()
+        .await
+        .expect("a chunk")
+        .expect("bytes");
+    assert_eq!(chunk.as_ref(), &payload[30..40]);
+    assert_eq!(
+        transport.attempts(),
+        4,
+        "a read past the end opens one range"
+    );
+
+    download.set_end_offset(80);
+    let mut rest = Vec::new();
+    while let Some(chunk) = download.next_chunk().await.expect("verified download") {
+        rest.extend_from_slice(&chunk);
+    }
+    assert_eq!(rest, payload[40..]);
+    assert_eq!(transport.attempts(), 8);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_held_next_range_does_not_time_out_while_the_current_one_is_read() {
     let payload = b"abcde".to_vec();
