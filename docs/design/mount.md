@@ -110,9 +110,11 @@ The receiver that `subscribe_invalidations` returns is bounded (4,096 items). If
 
 Each mount has one control task. Only the control task changes the trees, the dirty set, the generations, and the pending batch. Network requests, uploads, captures, and feed polls run in worker tasks that send their results to the control task as messages, and the adapter sends every change through the control task's channel. Metadata reads (`lookup`, `getattr`, `readdir`, and `readlink`) read the in-memory tree under a read lock, so they don't wait for the channel. With the workers replaced by fakes, the control task is a deterministic state machine over its messages, which is what the simulation relies on.
 
-The daemon is one process for each host user, and it serves all of that user's mounts. The CLI talks to it over a Unix socket at `$XDG_RUNTIME_DIR/loonfs/daemon.sock` (or in the state directory when that variable isn't set), with one JSON message per line. The socket accepts the operations `mount`, `unmount`, `sync`, `refresh`, `status`, `list`, and `shutdown`. `loonfs mount` starts the daemon (as the hidden `loonfs daemon` command) when no daemon is running, and the daemon exits 60 seconds after its last mount is removed. The daemon takes a lock on its state directory, so a second daemon for the same directory refuses to start. The daemon starts and stops kernel mounts through an interface that the adapter implements, and the hidden command connects the two. The simulation implements the same interface with a fake kernel.
+The daemon is one process for each host user, and it serves all of that user's mounts. The CLI talks to it over a Unix socket, with one JSON message per line. The socket is in `$XDG_RUNTIME_DIR/loonfs/`, with a name that contains a hash of the state directory's resolved path (or in the state directory itself when that variable isn't set), so two daemons with different state directories have different sockets. Every request from the CLI includes its state directory, and the daemon checks it against its own and refuses a request whose state directory doesn't match. The socket accepts the operations `mount`, `unmount`, `sync`, `refresh`, `status`, `list`, and `shutdown`. `loonfs mount` starts the daemon (as the hidden `loonfs daemon` command) when no daemon is running, and the daemon exits 60 seconds after its last mount is removed. The daemon takes a lock on its state directory, so a second daemon for the same directory refuses to start. The daemon starts and stops kernel mounts through an interface that the adapter implements, and the hidden command connects the two. The simulation implements the same interface with a fake kernel.
 
 The daemon keeps credentials in memory. Each `loonfs mount` sends the resolved profile (the server's address, the token, and the actor and subject settings) over the socket, so a daemon that restarts resumes a mount the next time `loonfs mount` runs for it.
+
+Why does each state directory have its own socket? With one socket for every daemon, a second daemon started with another state directory would take the socket, and an unmount or a stop sent to that socket would detach the first daemon's live mount or stop the wrong daemon.
 
 Why is there a daemon, and not a process per mount? One process can share the HTTP connection pool, the upload and download limits, and the disk budget across a host's mounts, and `loonfs sync` and `loonfs status` need a process that keeps running after `loonfs mount` returns.
 
@@ -124,10 +126,10 @@ The commands take these arguments:
 
 ```text
 loonfs mount <namespace>[/<path>] <dir> [--ro] [options]
-loonfs unmount <dir> [--force] [--sync-timeout-ms <ms>]
-loonfs sync <dir>
-loonfs refresh <dir> [--at-least <seq>]
-loonfs status [<dir>] [--json]
+loonfs unmount <dir> [--force] [--sync-timeout-ms <ms>] [--state-dir <path>]
+loonfs sync <dir> [--state-dir <path>]
+loonfs refresh <dir> [--at-least <seq>] [--state-dir <path>]
+loonfs status [<dir>] [--json] [--state-dir <path>]
 loonfs run --mount <namespace>[/<path>]=<dir>[:ro]... [options] -- <command> [<arg>...]
 ```
 
@@ -158,7 +160,7 @@ A mount of a different namespace or path at a directory whose state has unpublis
 | `--cache-max-bytes <n>` | 8 GiB | The eviction target for cached content that nothing uses. |
 | `--cache-min-free <n>` | 2 GiB | The free space that the mount keeps on the state directory's filesystem. |
 | `--pinned-max-bytes <n>` | 16 GiB | The hard limit on local bytes that the mount can't evict. |
-| `--state-dir <path>` | `$XDG_STATE_HOME/loonfs`, or `~/.local/state/loonfs` | Where the daemon keeps each mount's state, working files, captures, and cache. |
+| `--state-dir <path>` | `$XDG_STATE_HOME/loonfs`, or `~/.local/state/loonfs` | Where the daemon keeps each mount's state, working files, captures, and cache. `unmount`, `sync`, `status`, `refresh`, and the hidden `daemon` command also take `--state-dir`, to find the daemon's socket when `XDG_RUNTIME_DIR` isn't set. |
 | `--uid <uid>`, `--gid <gid>` | The user running the command | The owner that every item shows. |
 | `--sync-timeout-ms <ms>` | 60,000 | How long a barrier waits for publication before it fails. |
 
