@@ -11,6 +11,7 @@ pub use http::metrics::HttpMetrics;
 #[cfg(feature = "openapi")]
 pub use http::openapi_document;
 pub use http::request_limit::RequestLimit;
+pub use http::usage::{UsageRecorder, UsageReport};
 pub use http::{authenticate_routes, error_response, observe_routes, router};
 pub use state::{
     transfer_permits, AuthPolicy, BindingConfig, BindingState, GrepBinding, HeldNamespace, JobMode,

@@ -20,6 +20,7 @@ pub(crate) mod request_limit;
 mod response_frames;
 #[cfg(test)]
 mod tests;
+pub(crate) mod usage;
 
 pub use self::error::error_response;
 
@@ -498,13 +499,18 @@ pub fn authenticate_routes(router: Router, state: &BindingState) -> Router {
         ))
 }
 
-/// Applies request admission, error envelopes, correlation IDs, and metrics to host routes.
+/// Applies request admission, usage reports, error envelopes, correlation IDs, and metrics
+/// to host routes.
 pub fn observe_routes(router: Router, state: &BindingState) -> Router {
     router
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn(catch_handler_panic))
         .layer(tower::util::MapResponseLayer::new(
             response_frames::split_response,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            usage::report_usage,
         ))
         .layer(middleware::from_fn_with_state(
             state.clone(),

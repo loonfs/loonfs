@@ -1,6 +1,6 @@
 //! Host-supplied options and handles for HTTP requests.
 
-use crate::{HttpMetrics, RequestLimit};
+use crate::{HttpMetrics, RequestLimit, UsageRecorder};
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt as _;
 use loonfs::{
@@ -145,6 +145,8 @@ pub struct BindingState {
     pub upload_permits: Arc<Semaphore>,
     pub download_permits: Arc<Semaphore>,
     pub metrics: Arc<HttpMetrics>,
+    /// The recorder of one usage report for each namespace request, or `None` to record none.
+    pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
 }
 
 /// The writable handle this host holds for each namespace.

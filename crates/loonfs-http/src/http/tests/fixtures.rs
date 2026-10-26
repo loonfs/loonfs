@@ -2,6 +2,7 @@
 
 use crate::{
     AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, JobMode, Namespaces,
+    UsageRecorder,
 };
 use loonfs::{InlineContentPolicy, LoonFs, SharedObjectStore, TraceMode};
 use loonfs_grep::{
@@ -38,6 +39,8 @@ pub(super) struct TestAppOptions {
     pub(super) monotonic_timer: Option<Arc<dyn MonotonicTimer>>,
     /// The runtime's execution budget, or the default when `None`.
     pub(super) execution_budget: Option<loonfs::ExecutionBudget>,
+    /// The binding's usage recorder, or no recorder when `None`.
+    pub(super) usage_recorder: Option<Arc<dyn UsageRecorder>>,
 }
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
@@ -140,6 +143,7 @@ pub(super) async fn test_app(
         direct_transfers: inputs.direct_transfers,
         grep,
         metrics,
+        usage_recorder: inputs.usage_recorder,
     };
     Ok((crate::router(state.clone()), state))
 }

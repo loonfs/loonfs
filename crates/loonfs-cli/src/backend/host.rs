@@ -88,6 +88,7 @@ pub(crate) fn client(
             worker: host.grep_worker.clone(),
         },
         metrics: HttpMetrics::new(),
+        usage_recorder: None,
     };
     let router = loonfs_http::router(state);
     EMBEDDED_RUNTIMES
