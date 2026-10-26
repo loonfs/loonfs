@@ -22,6 +22,7 @@ use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// The entries that one `readdir` batch reads under the tree's read lock.
@@ -225,11 +226,23 @@ impl Engine {
     }
 
     /// Reads the change feed now, and waits until the mount has applied the
-    /// commit at `seq` or a later one.
-    pub async fn refresh_at_least(&self, seq: ChangeSeq) -> Result<()> {
+    /// commit at `seq` or a later one, across polls, for at most `timeout`.
+    ///
+    /// It fails with [`MountError::RefreshTimedOut`] when the timeout passes
+    /// first, and at once with [`MountError::SequenceNotCommitted`] when a
+    /// poll that started after the call shows the namespace's head below
+    /// `seq`. A poll that fails fails the call with the poll's error.
+    pub async fn refresh_at_least(&self, seq: ChangeSeq, timeout: Duration) -> Result<()> {
         let (reply, replied) = oneshot::channel();
         self.send(ControlMessage::RefreshAtLeast { seq, reply })?;
-        replied.await.map_err(|_| MountError::Stopped)?
+        match clock::within(timeout, replied).await {
+            Some(replied) => replied.map_err(|_| MountError::Stopped)?,
+            None => Err(MountError::RefreshTimedOut {
+                seq,
+                applied_seq: self.status().applied_seq,
+                timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            }),
+        }
     }
 
     /// Returns the changes that the kernel's caches have to drop, sent once

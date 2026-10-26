@@ -2,7 +2,7 @@
 
 use crate::item::ItemId;
 use loonfs_client::ClientError;
-use loonfs_types::{ContentId, NamespaceId};
+use loonfs_types::{ChangeSeq, ContentId, NamespaceId};
 use thiserror::Error;
 
 /// Error returned by a mount's engine.
@@ -142,6 +142,30 @@ pub enum MountError {
     NoSpace {
         /// Which limit was reached.
         reason: String,
+    },
+    /// `refresh_at_least` didn't see the mount apply the sequence before its
+    /// timeout passed.
+    #[error(
+        "the mount applied sequence {}, not {}, within {timeout_ms} ms",
+        .applied_seq.0,
+        .seq.0
+    )]
+    RefreshTimedOut {
+        /// The sequence that the call waited for.
+        seq: ChangeSeq,
+        /// The mount's applied sequence when the timeout passed.
+        applied_seq: ChangeSeq,
+        /// The call's timeout, in milliseconds.
+        timeout_ms: u64,
+    },
+    /// `refresh_at_least` waited for a sequence past the namespace's head.
+    #[error("the namespace's head is sequence {}, below sequence {}", .head_seq.0, .seq.0)]
+    SequenceNotCommitted {
+        /// The sequence that the call waited for.
+        seq: ChangeSeq,
+        /// The namespace's head, which a poll that started after the call
+        /// read.
+        head_seq: ChangeSeq,
     },
     /// The engine's control task stopped, so the mount serves nothing more.
     #[error("the mount's control task stopped")]

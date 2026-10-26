@@ -296,6 +296,60 @@ fn an_access_change_changes_nothing_but_the_applied_sequence() {
     assert!(workers.take().is_empty());
 }
 
+/// Checks that a refresh is judged by a poll that starts after it: a page of
+/// the poll in flight when it arrives doesn't fail it, the next poll replies
+/// to a refresh that it reached, and fails one whose sequence is past the
+/// head that it read.
+#[test]
+fn a_refresh_past_the_head_that_a_later_poll_reads_fails_at_once() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let (mut task, _shared, workers) = task(directory.path(), &[]);
+    task.start();
+    workers.take();
+    let refresh = |task: &mut ControlTask, seq| {
+        let (reply, replied) = oneshot::channel();
+        task.handle(ControlMessage::RefreshAtLeast {
+            seq: ChangeSeq(seq),
+            reply,
+        });
+        replied
+    };
+    let mut reached = refresh(&mut task, 8);
+    let mut past_head = refresh(&mut task, 9);
+    task.handle(page(5, vec![commit(6, vec![]), commit(7, vec![])]));
+    assert!(
+        matches!(
+            past_head.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "the poll in flight started before the call"
+    );
+    let polls = workers.take();
+    assert!(
+        matches!(
+            polls[..],
+            [Work::PollFeed {
+                after_seq: ChangeSeq(7)
+            }]
+        ),
+        "{polls:?}"
+    );
+
+    task.handle(page(7, vec![commit(8, vec![])]));
+    assert!(matches!(reached.try_recv(), Ok(Ok(()))));
+    let refused = past_head.try_recv().expect("a reply");
+    assert!(
+        matches!(
+            refused,
+            Err(MountError::SequenceNotCommitted {
+                seq: ChangeSeq(9),
+                head_seq: ChangeSeq(8)
+            })
+        ),
+        "{refused:?}"
+    );
+}
+
 fn only_fetch(work: Vec<Work>) -> FetchJob {
     let [Work::Fetch(job)] = &work[..] else {
         panic!("one fetch should start: {work:?}");

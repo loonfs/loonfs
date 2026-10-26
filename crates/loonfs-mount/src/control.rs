@@ -148,6 +148,8 @@ pub(crate) struct ControlTask {
     poll_requested: bool,
     started_polls: u64,
     completed_polls: u64,
+    /// The namespace's head that the current poll's last page read.
+    polled_head_seq: Option<ChangeSeq>,
     refresh_waiters: Vec<RefreshWaiter>,
     invalidations: Vec<Invalidation>,
     entering: Vec<EnteringState>,
@@ -211,6 +213,7 @@ impl ControlTask {
             poll_requested: true,
             started_polls: 0,
             completed_polls: 0,
+            polled_head_seq: None,
             refresh_waiters: Vec::new(),
             invalidations: Vec::new(),
             entering,

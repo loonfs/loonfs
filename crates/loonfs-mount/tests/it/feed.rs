@@ -3,12 +3,15 @@
 
 use crate::support::{
     delete, engine_tree, fixture, item, mkdir, move_path, open, operations, put, read, refresh,
-    request, undelete, update_attributes, wait_until_handled, Fixture, MOUNT_PATH,
+    request, undelete, update_attributes, wait_until_handled, Fixture, MOUNT_PATH, WAIT,
 };
-use loonfs_mount::{ItemId, ItemKind, PublicationStop};
+use loonfs_mount::{ItemId, ItemKind, MountError, PublicationStop};
 use loonfs_mount_sim::{EchoOrder, Operation, RequestRecord};
 use loonfs_types::api::v0::FilesystemChange;
+use loonfs_types::ChangeSeq;
+use std::assert_matches;
 use std::ffi::OsString;
+use std::time::Duration;
 
 /// A namespace whose mounted directory has `docs/notes.txt`,
 /// `docs/sub/deep.txt`, and `readme.md`, and whose `/elsewhere` has a
@@ -344,4 +347,39 @@ async fn a_deleted_root_or_ancestor_stops_publication() {
             "{deleted}"
         );
     }
+}
+
+/// Checks that `refresh_at_least` fails at once for a sequence past the
+/// namespace's head, and fails with a timeout when the mount doesn't apply
+/// the sequence in time, here because the server holds the feed's pages.
+#[tokio::test]
+async fn a_refresh_fails_past_the_head_and_after_its_timeout() {
+    let fixture = project();
+    let engine = fixture.mount().await;
+    let head_seq = fixture.head_seq();
+    let past_head = ChangeSeq(head_seq.0 + 5);
+    let refused = engine
+        .refresh_at_least(past_head, WAIT)
+        .await
+        .expect_err("the sequence is past the head");
+    assert_matches!(
+        refused,
+        MountError::SequenceNotCommitted { seq, head_seq: head }
+            if seq == past_head && head == head_seq
+    );
+
+    let hold = fixture.server.hold_feed_pages();
+    let commit = fixture.commit(vec![put("new.txt", b"new")]);
+    let timed_out = engine
+        .refresh_at_least(commit.committed_seq, Duration::from_millis(100))
+        .await
+        .expect_err("the server holds the feed's pages");
+    assert_matches!(
+        timed_out,
+        MountError::RefreshTimedOut { seq, applied_seq, timeout_ms: 100 }
+            if seq == commit.committed_seq && applied_seq == head_seq
+    );
+    hold.release();
+    refresh(&engine, commit.committed_seq).await;
+    assert!(item(&engine, "new.txt").is_some());
 }

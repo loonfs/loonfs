@@ -4,7 +4,6 @@
 
 use crate::support::{delete, fixture, item, move_path, put, refresh, update_attributes, WAIT};
 use loonfs_mount::{CachedPages, Invalidation, ItemId};
-use loonfs_test_support::clock::bounded;
 use std::ffi::OsString;
 use tokio::sync::mpsc;
 
@@ -49,7 +48,7 @@ async fn a_held_feed_page_delays_the_change_and_refresh_waits_for_it() {
     let mut invalidations = engine.subscribe_invalidations();
     let hold = fixture.server.hold_feed_pages();
     let commit = fixture.commit(vec![put("new.txt", b"new")]);
-    let refresh = engine.refresh_at_least(commit.committed_seq);
+    let refresh = engine.refresh_at_least(commit.committed_seq, WAIT);
     tokio::pin!(refresh);
     tokio::select! {
         result = &mut refresh => panic!("the refresh ended while its page was held: {result:?}"),
@@ -60,10 +59,7 @@ async fn a_held_feed_page_delays_the_change_and_refresh_waits_for_it() {
     assert!(drain(&mut invalidations).is_empty());
 
     hold.release();
-    bounded(WAIT, refresh)
-        .await
-        .expect("the refresh ends in time")
-        .expect("the refresh");
+    refresh.await.expect("the refresh");
     assert!(item(&engine, "new.txt").is_some());
     assert_eq!(
         drain(&mut invalidations),

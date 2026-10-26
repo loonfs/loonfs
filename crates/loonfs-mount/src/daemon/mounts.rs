@@ -16,6 +16,7 @@ use loonfs_types::{AbsolutePath, ChangeSeq, NamespaceId};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::watch;
 
 /// What a mount shows, which a repeated `mount` request has to match.
@@ -228,7 +229,7 @@ impl Mounts {
     ) -> Result<ChangeSeq, DaemonFailure> {
         let engine = self.ready_engine(&request.directory)?;
         engine
-            .refresh_at_least(request.at_least.unwrap_or(ChangeSeq(0)))
+            .refresh_at_least(request.at_least.unwrap_or(ChangeSeq(0)), Duration::MAX)
             .await
             .map_err(|error| {
                 DaemonFailure::new(DaemonErrorCode::EngineFailed, error.to_string())

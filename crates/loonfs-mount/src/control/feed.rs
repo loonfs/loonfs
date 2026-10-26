@@ -67,6 +67,7 @@ impl ControlTask {
     fn start_poll(&mut self) {
         self.poll_requested = false;
         self.started_polls += 1;
+        self.polled_head_seq = None;
         self.feed = FeedState::Polling;
         self.workers.start(Work::PollFeed {
             after_seq: self.applied_seq,
@@ -84,6 +85,7 @@ impl ControlTask {
         match page {
             Ok(page) => {
                 self.feed_error = None;
+                self.polled_head_seq = Some(page.head_seq);
                 self.continue_page(PageProgress {
                     more: page.next_after_seq.is_some(),
                     changes: page.changes.into(),
@@ -179,20 +181,34 @@ impl ControlTask {
     }
 
     /// Ends the current poll, and replies to the `refresh_at_least` calls that
-    /// it satisfies, or fails the ones it was for.
+    /// it satisfies, or fails the ones it was for: with the poll's error, or
+    /// because the head that the poll read is below the call's sequence.
     pub(super) fn end_poll(&mut self, error: Option<MountError>) {
         self.feed = FeedState::Idle;
         self.completed_polls = self.started_polls;
         let completed = self.completed_polls;
         let applied_seq = self.applied_seq;
+        let head_seq = self.polled_head_seq;
         let waiters = std::mem::take(&mut self.refresh_waiters);
         for waiter in waiters {
+            if waiter.reply.is_closed() {
+                // The call's timeout passed.
+                continue;
+            }
             if waiter.poll > completed {
                 self.refresh_waiters.push(waiter);
             } else if let Some(error) = &error {
                 self.outbox.reply(waiter.reply, Err(error.clone()));
             } else if waiter.seq <= applied_seq {
                 self.outbox.reply(waiter.reply, Ok(()));
+            } else if let Some(head_seq) = head_seq.filter(|head_seq| *head_seq < waiter.seq) {
+                self.outbox.reply(
+                    waiter.reply,
+                    Err(MountError::SequenceNotCommitted {
+                        seq: waiter.seq,
+                        head_seq,
+                    }),
+                );
             } else {
                 self.refresh_waiters.push(RefreshWaiter {
                     poll: completed + 1,

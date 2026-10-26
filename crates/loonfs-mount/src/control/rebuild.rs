@@ -24,6 +24,9 @@ impl ControlTask {
     /// Starts listing the tree again at a new snapshot. For a mount without
     /// local changes, a rebuild is a new scan.
     pub(super) fn start_rebuild(&mut self) {
+        // A rebuild reads no feed page, so a refresh that waits past its end
+        // isn't failed by the head of an earlier poll.
+        self.polled_head_seq = None;
         if let Err(error) = self.discard_entering() {
             tracing::error!(%error, "discarding unshown directories before a rebuild failed");
         }

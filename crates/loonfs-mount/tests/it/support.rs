@@ -422,9 +422,9 @@ pub(crate) fn item(engine: &Engine, relative: &str) -> Option<ItemId> {
 
 /// Waits until the engine has applied the commit at `seq`.
 pub(crate) async fn refresh(engine: &Engine, seq: ChangeSeq) {
-    bounded(WAIT, engine.refresh_at_least(seq))
+    engine
+        .refresh_at_least(seq, WAIT)
         .await
-        .expect("the refresh ends in time")
         .expect("the refresh");
 }
 
