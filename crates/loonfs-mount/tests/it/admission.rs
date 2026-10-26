@@ -4,7 +4,7 @@
 use crate::support::{engine_tree, fixture, mkdir, operations, path, put, Fixture, MOUNT_PATH};
 use loonfs_mount::{MountAccess, MountError, Readiness};
 use loonfs_mount_sim::{Operation, SimulatedServerConfig};
-use loonfs_types::{ErrorCode, NamespaceNaming, PinId};
+use loonfs_types::NamespaceNaming;
 use std::assert_matches;
 
 /// Commits 10 directories below the mount's root, with 10 subdirectories in
@@ -92,13 +92,11 @@ async fn a_nested_namespace_admits_at_a_snapshot_with_the_requests_the_note_desc
         "pages of 1,000 entries, and no more than the budget plus one in all"
     );
     assert!(admission[8].path.ends_with(snapshot_id));
-    let snapshot_id = PinId::parse(snapshot_id).expect("a snapshot ID");
-    let deleted = fixture
-        .client
-        .get_snapshot(&fixture.namespace_id, &snapshot_id)
-        .await
-        .expect_err("admission deletes its snapshot");
-    assert_eq!(deleted.code(), Some(ErrorCode::SnapshotNotFound));
+    let snapshots = fixture.server.snapshots(&fixture.namespace_id);
+    assert!(
+        snapshots.is_empty(),
+        "admission deletes its snapshot: {snapshots:?}"
+    );
 
     let status = engine.status();
     assert_eq!(
@@ -147,6 +145,8 @@ async fn a_namespace_over_the_budget_is_refused_after_listing_the_budget_plus_on
             trace.last().map(|record| record.operation),
             Some(Operation::DeleteSnapshot)
         );
+        let snapshots = fixture.server.snapshots(&fixture.namespace_id);
+        assert!(snapshots.is_empty(), "{snapshots:?}");
         assert!(
             !fixture.has_tree_database(),
             "a refused mount leaves no tree"

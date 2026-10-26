@@ -11,7 +11,7 @@ use crate::state::ServerState;
 use crate::trace::RequestRecord;
 use loonfs_client::ClientConfig;
 use loonfs_sim::{DeterministicClock, SimInstant};
-use loonfs_types::api::v0::{Commit, CommitRequest};
+use loonfs_types::api::v0::{Commit, CommitRequest, Snapshot};
 use loonfs_types::{ActorId, ChangeSeq, NamespaceId, NamespaceNaming};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -159,6 +159,21 @@ impl SimulatedServer {
     ) -> ChangeSeq {
         advance_retention_floor(&mut self.state(), namespace_id, to_seq)
             .expect("the test should name a namespace it created")
+    }
+
+    /// Returns a namespace's snapshots, including expired ones, which nothing collects.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the namespace doesn't exist.
+    pub fn snapshots(&self, namespace_id: &NamespaceId) -> Vec<Snapshot> {
+        self.state()
+            .namespace(namespace_id)
+            .expect("the test should name a namespace it created")
+            .snapshots
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Returns every request recorded since the server started or the trace was last taken.
