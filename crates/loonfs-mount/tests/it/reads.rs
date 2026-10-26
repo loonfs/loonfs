@@ -79,9 +79,10 @@ async fn a_small_file_is_fetched_whole_and_then_read_from_the_cache() {
     );
 }
 
-/// Checks that sequential reads of a large file fetch windows that double
-/// from 1 MiB, read 8 MiB windows as ranged reads, read larger ones through
-/// one grant whose stream continues across windows, and return every byte.
+/// Checks that sequential reads of a large file fetch growing windows from
+/// 1 MiB, each the smallest of twice the last window and the bytes consumed
+/// less the bytes fetched but not read, that windows of at most 8 MiB are
+/// ranged reads and a larger one is a grant, and that every byte is right.
 #[tokio::test]
 async fn sequential_reads_fetch_growing_windows() {
     let bytes = pattern(40 * MIB);
@@ -106,20 +107,16 @@ async fn sequential_reads_fetch_growing_windows() {
         .iter()
         .map(|request| request.header("range").expect("a ranged read").to_owned())
         .collect();
-    let mib = |value: u64| value * MIB;
-    let expected: Vec<String> = [(0, 1), (1, 3), (3, 7), (7, 15)]
+    let half_mib = |value: u64| value * MIB / 2;
+    let expected: Vec<String> = [(0, 2), (2, 3), (3, 5), (5, 8), (8, 13), (13, 21), (21, 34)]
         .into_iter()
-        .map(|(start, end)| format!("bytes={}-{}", mib(start), mib(end) - 1))
+        .map(|(start, end)| format!("bytes={}-{}", half_mib(start), half_mib(end) - 1))
         .collect();
     assert_eq!(ranged, expected);
     let grants = namespace.requests_to("/inodes/ino_14/revisions/1/downloads");
-    assert_eq!(
-        grants.len(),
-        1,
-        "the grant's stream continues across windows"
-    );
+    assert_eq!(grants.len(), 1);
     let body: serde_json::Value = serde_json::from_slice(&grants[0].body).expect("a grant body");
-    assert_eq!(body["start_offset"], mib(15));
+    assert_eq!(body["start_offset"], half_mib(34));
 }
 
 /// Checks that an append extends the cached file in place: the item and its
