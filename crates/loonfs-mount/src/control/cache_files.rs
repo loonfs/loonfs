@@ -43,8 +43,11 @@ impl ControlTask {
         self.workers.start(Work::Verify(job));
     }
 
-    /// Completes a file that matched its checksum. A file that didn't is
-    /// fetched again once, and fails its reads after a second mismatch.
+    /// Completes a file that matched its checksum, and replies to the reads
+    /// that wait for it. A file that didn't match is fetched again once, its
+    /// reads wait for the second fetch, and they fail after a second
+    /// mismatch. Bytes that reads had before the first mismatch aren't
+    /// checked again.
     pub(super) fn on_verified(
         &mut self,
         content_id: &ContentId,
@@ -65,6 +68,7 @@ impl ControlTask {
         match result {
             Ok(Verification::Matches) if target.size_bytes == partial.target.size_bytes => {
                 self.complete_cache_file(content_id);
+                self.wake_waiters(content_id);
                 self.evict(0);
             }
             Ok(Verification::Matches) => {
@@ -100,6 +104,8 @@ impl ControlTask {
         if let Err(error) = self.cache.restart(content_id) {
             tracing::error!(%error, %content_id, "restarting a cache file failed");
             self.cache.fail(content_id);
+            self.set_view_files(content_id);
+            self.wake_waiters(content_id);
             return;
         }
         self.set_view_files(content_id);

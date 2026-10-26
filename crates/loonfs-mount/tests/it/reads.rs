@@ -11,8 +11,10 @@ use loonfs_mount_sim::{
     ByteRange, CapabilitySwitches, ContentReadFault, InjectedFault, Operation,
     SimulatedServerConfig,
 };
+use loonfs_test_support::clock::bounded;
 use loonfs_types::api::v0::PathEntryKind;
 use loonfs_types::ContentRef;
+use std::time::Duration;
 
 /// The size of each read call in the sequential reads: an eighth of a
 /// window, as a program that reads in 128 KiB calls makes them with the
@@ -204,11 +206,12 @@ async fn a_read_at_a_far_offset_resets_the_window() {
     assert!(grows && fetched.len() > 1, "{fetched:?}");
 }
 
-/// Checks that a cache file whose bytes don't match the revision's checksum
-/// is deleted and fetched again once, after which reads return the right
-/// bytes and the file is complete.
+/// Checks that a file whose ranges don't match its checksum is fetched again
+/// once, that a read that arrives after the mismatch waits for the second
+/// fetch and then returns the right bytes, and that bytes a read had before
+/// the mismatch aren't checked again.
 #[tokio::test]
-async fn a_corrupted_range_is_fetched_again_once_and_then_reads_correctly() {
+async fn a_read_after_a_mismatch_waits_for_the_second_fetch_and_then_reads_correctly() {
     let fixture = fixture();
     let size = 9 * UNIT;
     let bytes = pattern(size);
@@ -218,19 +221,38 @@ async fn a_corrupted_range_is_fetched_again_once_and_then_reads_correctly() {
     fixture
         .server
         .fail_next_content_read(ContentReadFault::CorruptedByte);
+    // Each fetch is a grant of one signed range, so the hold delays the
+    // second fetch's.
+    let hold = fixture.server.hold_content_reads_after(1);
     let handle = open(&engine, "data.bin").await;
     let unverified = read(&handle, 0, size).await;
     assert_ne!(unverified, bytes, "a range isn't verified as it arrives");
-    eventually(|| engine.status().cache.mismatched_files == 1).await;
-    eventually(|| handle.content_state() == ContentState::Complete).await;
-    assert_eq!(read(&handle, 0, size).await, bytes);
+    hold.wait_for_held_responses(1).await;
+    wait_until_handled(&engine).await;
+    assert_eq!(engine.status().cache.mismatched_files, 1);
+
+    let waiting = read(&handle, 0, size);
+    tokio::pin!(waiting);
+    assert!(
+        bounded(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err(),
+        "a read after a mismatch waits for the second fetch"
+    );
+    assert_eq!(handle.content_state(), ContentState::Partial);
+    hold.release();
+    assert_eq!(waiting.await, bytes);
+    assert_eq!(handle.content_state(), ContentState::Complete);
     assert_eq!(engine.status().cache.mismatched_files, 1);
 
     let trace = fixture.server.take_trace();
     let faults: Vec<_> = trace.iter().filter_map(|record| record.fault).collect();
     assert_eq!(
         faults,
-        [InjectedFault::ContentRead(ContentReadFault::CorruptedByte)]
+        [
+            InjectedFault::ContentRead(ContentReadFault::CorruptedByte),
+            InjectedFault::ResponseHeld
+        ]
     );
     let grants = trace
         .iter()

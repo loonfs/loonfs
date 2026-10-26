@@ -2,7 +2,7 @@
 //! wait for.
 
 use super::ControlTask;
-use crate::cache::CacheEntryState;
+use crate::cache::{CacheEntryState, FillAttempt};
 use crate::cache_file::CacheFile;
 use crate::database;
 use crate::error::{MountError, Result};
@@ -245,6 +245,12 @@ impl ControlTask {
         let Some(partial) = entry.state.partial_mut() else {
             return Ok(());
         };
+        // A read of a file that's fetched again waits for all of it, so a
+        // request fetches what's missing of all of it.
+        let range = match partial.attempt {
+            FillAttempt::First => range,
+            FillAttempt::Refetch => 0..size_bytes,
+        };
         let missing: Vec<Range<u64>> = partial
             .present
             .missing(range)
@@ -421,15 +427,22 @@ impl ControlTask {
         }
     }
 
+    /// Fails the reads that wait for the bytes of `range`, or every read of
+    /// a file that's fetched again, since those wait for all of it.
     pub(super) fn fail_waiters(
         &mut self,
         content_id: &ContentId,
         range: &Range<u64>,
         error: &MountError,
     ) {
+        let refetching = self
+            .cache
+            .entry(content_id)
+            .is_some_and(|entry| entry.is_refetching());
         let waiters = std::mem::take(&mut self.read_waiters);
         for waiter in waiters {
-            let overlaps = waiter.needed.start < range.end && range.start < waiter.needed.end;
+            let overlaps =
+                refetching || (waiter.needed.start < range.end && range.start < waiter.needed.end);
             if &waiter.content_id == content_id && overlaps {
                 self.outbox.reply(waiter.reply, Err(error.clone()));
             } else {

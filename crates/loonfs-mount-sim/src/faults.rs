@@ -137,6 +137,14 @@ struct HiddenFeed {
     hold: Arc<HoldState>,
 }
 
+/// A hold on content reads that starts after a number of them pass.
+#[derive(Debug)]
+struct ContentReadHold {
+    /// The content reads that are still delivered at once.
+    passing: usize,
+    hold: Arc<HoldState>,
+}
+
 /// The fault hooks that a test has armed.
 #[derive(Debug, Default)]
 pub(crate) struct Faults {
@@ -146,6 +154,7 @@ pub(crate) struct Faults {
     feed_hold: Option<Arc<HoldState>>,
     hidden_feeds: Vec<HiddenFeed>,
     content_reads: VecDeque<ContentReadFault>,
+    content_read_hold: Option<ContentReadHold>,
 }
 
 impl Faults {
@@ -173,6 +182,21 @@ impl Faults {
 
     pub(crate) fn fail_next_content_read(&mut self, fault: ContentReadFault) {
         self.content_reads.push_back(fault);
+    }
+
+    pub(crate) fn hold_content_reads_after(&mut self, passing: usize) -> Hold {
+        assert!(
+            self.content_read_hold
+                .as_ref()
+                .is_none_or(|held| held.hold.is_released()),
+            "a test should release the content-read hold it has before it holds content reads again"
+        );
+        let (hold, state) = Hold::new();
+        self.content_read_hold = Some(ContentReadHold {
+            passing,
+            hold: state,
+        });
+        hold
     }
 
     /// Returns the last sequence that the change feed of `namespace_id` shows, while a commit's
@@ -207,6 +231,19 @@ impl Faults {
             self.feed_hold = None;
         }
         if reply.byte_range.is_some() && reply.status.is_success() {
+            if let Some(held) = self
+                .content_read_hold
+                .as_mut()
+                .filter(|held| !held.hold.is_released())
+            {
+                if held.passing == 0 {
+                    return (
+                        Delivery::Held(held.hold.clone()),
+                        Some(InjectedFault::ResponseHeld),
+                    );
+                }
+                held.passing -= 1;
+            }
             if let Some(fault) = self.content_reads.pop_front() {
                 return (
                     apply_content_fault(fault, reply),

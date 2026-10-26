@@ -85,13 +85,22 @@ pub(crate) struct CacheEntry {
 }
 
 impl CacheEntry {
-    /// Returns whether the bytes of `range` are present.
+    /// Returns whether reads can have the bytes of `range`. A file that's
+    /// fetched again after a mismatch has none until it matches.
     pub(crate) fn contains(&self, range: &Range<u64>) -> bool {
         match &self.state {
-            CacheEntryState::Partial(partial) => partial.present.contains(range),
+            CacheEntryState::Partial(partial) => {
+                partial.attempt == FillAttempt::First && partial.present.contains(range)
+            }
             CacheEntryState::Complete { size_bytes, .. } => range.end <= *size_bytes,
             CacheEntryState::Failed => false,
         }
+    }
+
+    /// Returns whether the file is being fetched again after a mismatch, so
+    /// its reads wait for every byte of it.
+    pub(crate) fn is_refetching(&self) -> bool {
+        matches!(&self.state, CacheEntryState::Partial(partial) if partial.attempt == FillAttempt::Refetch)
     }
 
     /// Returns the bytes that the file occupies: a partial file's present
@@ -333,14 +342,17 @@ impl Cache {
     }
 
     /// Records bytes that a fetch wrote, and publishes the present prefix to
-    /// read handles.
+    /// read handles. A file that's fetched again after a mismatch publishes
+    /// nothing until it matches.
     pub(crate) fn record_present(&mut self, content_id: &ContentId, range: Range<u64>) {
         let Some(entry) = self.entries.get_mut(content_id) else {
             return;
         };
         if let CacheEntryState::Partial(partial) = &mut entry.state {
             partial.present.insert(range);
-            entry.file.set_present_prefix(partial.present.prefix_end());
+            if partial.attempt == FillAttempt::First {
+                entry.file.set_present_prefix(partial.present.prefix_end());
+            }
         }
     }
 

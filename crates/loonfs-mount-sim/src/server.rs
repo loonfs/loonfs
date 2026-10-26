@@ -202,6 +202,17 @@ impl SimulatedServer {
         self.state().faults.fail_next_content_read(fault);
     }
 
+    /// Delivers the next `passing` successful content reads, and delays every later one until the
+    /// returned hold is released. A content read that the hold delays doesn't use a queued
+    /// content-read fault.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an earlier content-read hold hasn't been released.
+    pub fn hold_content_reads_after(&self, passing: usize) -> Hold {
+        self.state().faults.hold_content_reads_after(passing)
+    }
+
     fn state(&self) -> MutexGuard<'_, ServerState> {
         self.shared
             .lock()
