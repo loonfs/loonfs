@@ -235,11 +235,14 @@ impl Database {
 
     fn connect(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
-        // Write-ahead logging lets one transaction per commit stay cheap, and
-        // `FULL` syncs each transaction, so an acknowledged state is never
-        // lost to a machine crash.
+        // Write-ahead logging lets one transaction per commit stay cheap. With
+        // `NORMAL`, a transaction isn't synced when it commits, only at a
+        // checkpoint, so a machine crash can lose the last transactions but
+        // never corrupts the file. The tree can be listed again from the
+        // server, and the feed applies the lost commits again from the
+        // applied sequence that the database kept.
         connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", true)?;
         Ok(Self { connection })
     }
