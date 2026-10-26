@@ -159,7 +159,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     );
 
     // The test folds three commits with one row per segment, so the segments
-    // that the advance reads show which commits the advance inspected.
+    // that the advance reads show which commit rows the advance read.
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
         write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
             .await
@@ -204,14 +204,11 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .map(metadata_segment_object_key)
         .collect::<BTreeSet<_>>()
         .len();
-    let head_commit_segment = referenced
-        .filter(|segment| {
-            segment.family == ApiMetadataRowFamily::Commits
-                && segment.min_row_key == lookup_keys::commit_row_key(head_seq)
-        })
+    let commit_segments = referenced
+        .filter(|segment| segment.family == ApiMetadataRowFamily::Commits)
         .map(metadata_segment_object_key)
         .collect::<BTreeSet<_>>();
-    assert_eq!(head_commit_segment.len(), 1, "one segment per commit row");
+    assert_eq!(commit_segments.len(), 3, "one segment per commit row");
     let wal_objects_prefix = wal_prefix(&namespace_id);
     let wal_objects = store
         .list_prefix(&wal_objects_prefix)
@@ -237,8 +234,8 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     );
     assert_eq!(
         store.take_get_keys().into_iter().collect::<BTreeSet<_>>(),
-        head_commit_segment,
-        "the head commit is a grace window old, so the advance reads that one commit row"
+        commit_segments,
+        "every commit is a grace window old, so the advance reads the commit rows up to the head and no other rows"
     );
 
     assert_eq!(read_floor_seq(&store, &namespace_id).await, head_seq);
@@ -336,7 +333,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
 }
 
 #[tokio::test]
-async fn an_advance_stops_at_the_newest_commit_at_least_one_grace_window_old() {
+async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -378,11 +375,11 @@ async fn an_advance_stops_at_the_newest_commit_at_least_one_grace_window_old() {
             now_ms,
             ChangeSeq(1),
         ),
-        // Commit 3 is two windows old, so the floor reaches it and passes
-        // commit 2, which is half a window old.
-        (RetentionTarget::Seq(ChangeSeq(3)), now_ms, ChangeSeq(3)),
-        // Commit 6 is dated after the advance's clock and commit 5 is half a
-        // window old, so the floor stops at commit 4.
+        // Commit 3 is two windows old, but commit 2 is half a window old, so
+        // the walk stops before commit 2 and the floor stays at 1. A commit
+        // dated out of order can only stop the floor earlier.
+        (RetentionTarget::Seq(ChangeSeq(3)), now_ms, ChangeSeq(1)),
+        // Commit 5 is half a window old, so the floor stops at commit 4.
         (RetentionTarget::Head, now_ms + grace_ms, ChangeSeq(4)),
         // A sequence above the head targets the head, and commit 6 is still
         // dated after the advance's clock.
@@ -415,7 +412,7 @@ async fn an_advance_stops_at_the_newest_commit_at_least_one_grace_window_old() {
     }
 }
 
-/// Publishes 64 commits stamped `committed_at_ms`, each creating the
+/// Publishes `count` commits stamped `committed_at_ms`, each creating the
 /// directory `/{prefix}-{index}`. Each commit's message is
 /// `MAX_COMMIT_MESSAGE_BYTES` of pseudorandom printable characters generated
 /// from `state`, so the messages compress poorly.
@@ -424,9 +421,10 @@ async fn commit_directories_with_long_messages<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     prefix: &str,
     committed_at_ms: u64,
+    count: usize,
     state: &mut u64,
 ) {
-    let candidates: Vec<_> = (0..64)
+    let candidates: Vec<_> = (0..count)
         .map(|index| {
             let message = (0..crate::limits::MAX_COMMIT_MESSAGE_BYTES)
                 .map(|_| {
@@ -499,93 +497,242 @@ async fn commit_segment_with_index<S: ObjectStore + ?Sized>(
     (segment, index)
 }
 
-/// Checks that the walk to the newest commit past the grace window sends one
-/// ranged GET for each block of commit rows that it visits, and that each GET
-/// covers only that block's stored bytes. The walk moves toward older
-/// commits, so a read-ahead window from a missed block would fetch the newer
-/// blocks that the walk has already read.
+/// A namespace whose 128 commits are folded into one segment of commit rows,
+/// which is too large to be fetched whole. Each commit has a long message, so
+/// each data block of the segment contains 15 commit rows.
+struct LongCommitHistory {
+    _temp_dir: tempfile::TempDir,
+    store: RecordingStore<LocalFsStore>,
+    namespace_id: NamespaceId,
+    segment: MetadataSegmentRef,
+    index: Arc<Vec<SegmentIndexEntry>>,
+}
+
+impl LongCommitHistory {
+    /// Publishes `count` commits stamped `committed_at_ms` for each pair of
+    /// `groups`, in order, and folds them.
+    async fn new(groups: &[(usize, u64)]) -> Self {
+        let temp_dir = tempdir().expect("tempdir");
+        let store =
+            RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        bootstrap_namespace(&store, &namespace_id, &test_context())
+            .await
+            .expect("bootstrap");
+        let mut state = 1_u64;
+        for (group, &(count, committed_at_ms)) in groups.iter().enumerate() {
+            if count > 0 {
+                commit_directories_with_long_messages(
+                    &store,
+                    &namespace_id,
+                    &format!("group-{group}"),
+                    committed_at_ms,
+                    count,
+                    &mut state,
+                )
+                .await;
+            }
+        }
+        fold::fold_wal(&store, &namespace_id)
+            .await
+            .expect("fold the commits");
+        let (segment, index) = commit_segment_with_index(&store, &namespace_id).await;
+        assert_eq!(
+            index[0].last_row_key,
+            lookup_keys::commit_row_key(ChangeSeq(15)),
+            "each data block contains 15 commit rows"
+        );
+        store.reset();
+        Self {
+            _temp_dir: temp_dir,
+            store,
+            namespace_id,
+            segment,
+            index,
+        }
+    }
+
+    /// Takes the recorded GETs, checks that each one reads a range of the
+    /// segment of commit rows, and returns the ranges.
+    fn take_commit_ranges(&self) -> Vec<(u64, u64)> {
+        let object_key = metadata_segment_object_key(&self.segment);
+        self.store
+            .take_gets()
+            .into_iter()
+            .map(|(key, range)| {
+                assert_eq!(key, object_key, "an advance reads only commit rows");
+                range.expect("an advance reads ranges of the segment of commit rows")
+            })
+            .collect()
+    }
+
+    /// Returns the ranges of the segment's index and of each data block from
+    /// the first block through the block that contains commit `seq`, which
+    /// are the GETs of a walk through [`cache_reading_one_block_at_a_time`]
+    /// that reads commit `seq` last.
+    fn ranges_through(&self, seq: ChangeSeq) -> Vec<(u64, u64)> {
+        let range =
+            |block: &BlockHandle| (block.offset, block.offset + u64::from(block.stored_bytes));
+        let key = lookup_keys::commit_row_key(seq);
+        let last = self.index.partition_point(|entry| entry.last_row_key < key);
+        std::iter::once(range(&self.segment.index_block))
+            .chain(self.index[..=last].iter().map(|entry| range(&entry.block)))
+            .collect()
+    }
+}
+
+/// A cache whose reads fetch one data block at a time, so the GETs of a walk
+/// show each block that it reached.
+fn cache_reading_one_block_at_a_time() -> MetadataSegmentCache {
+    MetadataSegmentCache::new(
+        Arc::new(SharedSegmentBlocks::new(64 * 1024 * 1024, 64 * 1024 * 1024)),
+        ObjectStoreScope::new(0),
+        Arc::default(),
+        1,
+    )
+}
+
+/// Checks that an advance reads commits upward from the floor, and stops at
+/// its sequence or at the first commit younger than the grace window, with
+/// one ranged GET for each block of commit rows that it reaches.
 #[tokio::test]
-async fn the_grace_window_walk_sends_one_get_for_each_commit_block_that_it_visits() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store =
-        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    bootstrap_namespace(&store, &namespace_id, &test_context())
-        .await
-        .expect("bootstrap");
+async fn an_advance_sends_one_get_for_each_commit_block_up_to_where_it_stops() {
     let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
     let now_ms = 10 * grace_ms;
-    // Commits 1 to 64 are two windows old, and commits 65 to 128 are half a
-    // window old. About 15 of these commit rows fill a data block, and the
-    // segment of commit rows is too large to be fetched whole.
-    let mut state = 1_u64;
-    for (prefix, committed_at_ms) in [
-        ("old", now_ms - 2 * grace_ms),
-        ("young", now_ms - grace_ms / 2),
+    for (target, expected_floor, last_read) in [
+        // Commit 65 is the first commit younger than the window, so the walk
+        // reads commits 1 to 65, and the floor moves to commit 64.
+        (RetentionTarget::Head, ChangeSeq(64), ChangeSeq(65)),
+        // The sequence ends the walk after commit 15, the last row of the
+        // first block, so the walk fetches no other block.
+        (
+            RetentionTarget::Seq(ChangeSeq(15)),
+            ChangeSeq(15),
+            ChangeSeq(15),
+        ),
+        // Commit 65 ends the walk below the sequence.
+        (
+            RetentionTarget::Seq(ChangeSeq(100)),
+            ChangeSeq(64),
+            ChangeSeq(65),
+        ),
     ] {
-        commit_directories_with_long_messages(
-            &store,
-            &namespace_id,
-            prefix,
-            committed_at_ms,
-            &mut state,
+        // Commits 1 to 64 are two windows old, and commits 65 to 128 are half
+        // a window old.
+        let history =
+            LongCommitHistory::new(&[(64, now_ms - 2 * grace_ms), (64, now_ms - grace_ms / 2)])
+                .await;
+        let floor = advance_retention_floor(
+            &history.store,
+            Some(&cache_reading_one_block_at_a_time()),
+            &history.namespace_id,
+            target,
+            now_ms,
+            crate::test_support::std_timer(),
         )
-        .await;
-    }
-    fold::fold_wal(&store, &namespace_id)
         .await
-        .expect("fold the commits");
-    let (segment, index) = commit_segment_with_index(&store, &namespace_id).await;
-    // The walk reads commits 128 down to 64, so it visits the blocks from the
-    // last one down to the block of commit 64.
-    let stop_seq = ChangeSeq(64);
-    let stop_key = lookup_keys::commit_row_key(stop_seq);
-    let stop_block = index.partition_point(|entry| entry.last_row_key < stop_key);
-    let visited: Vec<(u64, u64)> = index[stop_block..]
-        .iter()
-        .rev()
-        .map(|entry| {
-            let start = entry.block.offset;
-            (start, start + u64::from(entry.block.stored_bytes))
-        })
-        .collect();
-    assert!(
-        stop_block > 0 && visited.len() >= 3,
-        "the walk should pass through a whole block and stop above the first block, but commit 64 is in block {stop_block} of {}",
-        index.len()
-    );
-    store.reset();
+        .expect("advance the floor")
+        .response
+        .retention_floor_seq;
+        assert_eq!(floor, expected_floor, "{target:?}");
+        assert_eq!(
+            history.take_commit_ranges(),
+            history.ranges_through(last_read),
+            "{target:?}: one GET for the index, then one for each block through the block of commit {last_read}"
+        );
+    }
+}
 
-    let floor = advance_retention_floor(
-        &store,
-        None,
-        &namespace_id,
-        RetentionTarget::Head,
-        now_ms,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("advance the floor")
-    .response
-    .retention_floor_seq;
+/// Checks that an advance reads one commit row when the first commit above
+/// the floor is younger than the grace window, as every commit of a fresh
+/// namespace is, and leaves the floor where it is.
+#[tokio::test]
+async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_is_young() {
+    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let now_ms = 10 * grace_ms;
+    // With no old commits, the namespace is fresh, and the walk reads commit
+    // 1. With 14 old commits, a first advance moves the floor to 14, and the
+    // walk reads commit 15, the last row of the first block, so a walk that
+    // read another commit row would fetch the second block.
+    for old_commits in [0, 14] {
+        let history = LongCommitHistory::new(&[
+            (old_commits, now_ms - 2 * grace_ms),
+            (128 - old_commits, now_ms - grace_ms / 2),
+        ])
+        .await;
+        let floor = ChangeSeq(u64::try_from(old_commits).expect("a count fits a u64"));
+        for advance in ["first", "second"] {
+            history.store.reset();
+            let report = advance_retention_floor(
+                &history.store,
+                Some(&cache_reading_one_block_at_a_time()),
+                &history.namespace_id,
+                RetentionTarget::Head,
+                now_ms,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("advance the floor");
+            assert_eq!(
+                report.response.retention_floor_seq, floor,
+                "{advance} advance"
+            );
+            assert_eq!(
+                report.published.is_some(),
+                advance == "first" && old_commits > 0,
+                "{advance} advance: only a floor that moves publishes a manifest"
+            );
+        }
+        assert_eq!(
+            history.take_commit_ranges(),
+            history.ranges_through(ChangeSeq(floor.0 + 1)),
+            "{old_commits} old commits: one GET for the index and one for the first block"
+        );
+    }
+}
 
-    assert_eq!(floor, stop_seq);
-    let object_key = metadata_segment_object_key(&segment);
-    let gets = store.take_gets();
-    assert!(
-        gets.iter()
-            .all(|(key, range)| *key == object_key && range.is_some()),
-        "the walk reads ranges of the segment of commit rows: {gets:?}"
-    );
-    let data_gets: Vec<(u64, u64)> = gets
-        .into_iter()
-        .filter_map(|(_, range)| range)
-        .filter(|(start, _)| *start < segment.filter_block.offset)
-        .collect();
-    assert_eq!(
-        data_gets, visited,
-        "one GET for each block that the walk visits, newest first, and each GET covers only its block"
-    );
+/// Checks that an advance toward a cutoff, or a retention window, that's
+/// older than the grace window reads the commits up to that cutoff once.
+#[tokio::test]
+async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once() {
+    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let now_ms = 10 * grace_ms;
+    for target in [
+        RetentionTarget::Cutoff {
+            cutoff_at_ms: now_ms - 5 * grace_ms / 2,
+        },
+        RetentionTarget::Window {
+            default_window_ms: std::num::NonZeroU64::new(5 * grace_ms / 2),
+        },
+    ] {
+        // Commits 1 to 64 are older than the target's cutoff, and commits 65
+        // to 128 are between that cutoff and the grace window's.
+        let history =
+            LongCommitHistory::new(&[(64, now_ms - 3 * grace_ms), (64, now_ms - 2 * grace_ms)])
+                .await;
+        let floor = advance_retention_floor(
+            &history.store,
+            None,
+            &history.namespace_id,
+            target,
+            now_ms,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("advance the floor")
+        .response
+        .retention_floor_seq;
+        assert_eq!(floor, ChangeSeq(64), "{target:?}");
+        // Without a cache, the read-ahead window from the first block covers
+        // every block, and a second walk would fetch the index and the blocks
+        // again.
+        let ranges = history.ranges_through(ChangeSeq(128));
+        assert_eq!(
+            history.take_commit_ranges(),
+            vec![ranges[0], (ranges[1].0, ranges[ranges.len() - 1].1)],
+            "{target:?}: one GET for the index and one for the blocks"
+        );
+    }
 }
 
 #[tokio::test]

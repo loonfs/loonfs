@@ -34,7 +34,12 @@ async fn list_snapshots(
 #[test]
 fn a_created_snapshot_is_listed_with_its_expiry() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "snapshot-create-test");
+    let now_ms = 1_750_000_000_000;
+    let fs = open_runtime_with(store(temp_dir.path()), "snapshot-create-test", |builder| {
+        builder.wall_clock(Arc::new(loonfs_test_support::clock::ManualClock::new(
+            now_ms,
+        )))
+    });
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -62,7 +67,8 @@ fn a_created_snapshot_is_listed_with_its_expiry() {
     let expires_at_ms = snapshot
         .expires_at_ms
         .expect("a snapshot with a TTL expires");
-    assert!(expires_at_ms >= snapshot.created_at_ms + 60_000);
+    assert_eq!(snapshot.created_at_ms, now_ms);
+    assert_eq!(expires_at_ms, now_ms + 60_000);
 
     let listed = block_on(list_snapshots(&fs.reader, &namespace_id)).expect("list snapshots");
     let listed_snapshot = listed

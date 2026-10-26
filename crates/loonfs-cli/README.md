@@ -401,9 +401,9 @@ Maintenance
     to the folded manifest head unless a target is given. --to-seq moves
     it to that sequence, or to the folded manifest head when that is
     lower. --before moves it to the last commit made at or before that
-    Unix time in milliseconds. Whatever the target, the floor stops at
-    the newest commit at or below the target that's at least one hour
-    old, and the output shows the floor that the advance reached.
+    Unix time in milliseconds. Whatever the target, the floor doesn't
+    pass a commit that's less than one hour old, and the output shows the
+    floor that the advance reached.
 
   loonfs maintenance retention window (--retention-window-ms <ms> | --clear)
     Set or clear the namespace's retention window. The server's

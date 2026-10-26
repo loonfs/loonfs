@@ -6,11 +6,10 @@ use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::{update_manifest, ManifestChange};
 use super::published::{PublicationReport, PublishedManifest};
-use super::scan::Readahead;
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
-use crate::metadata::manifest_index::{commit_at_seq, commits_after_page};
+use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, load_current_manifest, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
@@ -26,11 +25,11 @@ use std::sync::Arc;
 /// Where a retention advance moves the floor.
 ///
 /// The floor never moves down and never passes the folded manifest head.
-/// Whatever the target, the floor stops at the newest commit at or below the
-/// target that's at least [`GC_DEFAULT_GRACE_WINDOW_MS`] old, and it passes
-/// every commit below that commit, whatever their timestamps (format spec,
-/// "Advancing the retention floor"). A target at or below the current floor
-/// leaves the floor where it is.
+/// Whatever the target, the advance also treats [`GC_DEFAULT_GRACE_WINDOW_MS`]
+/// before its clock as a cutoff, so the floor stops at or below the last
+/// commit at or before that time, found by the same walk as a
+/// [`Self::Cutoff`] target (format spec, "Advancing the retention floor"). A
+/// target at or below the current floor leaves the floor where it is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RetentionTarget {
     /// The folded manifest head.
@@ -95,10 +94,13 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
 /// retention floor"). The advance uses `now_ms` as the current time for the
 /// grace-window check and for a [`RetentionTarget::Window`] cutoff.
 ///
-/// The advance loads the current manifest once to find the target, and it
-/// returns that manifest's floor without another request when the target is
-/// at or below the floor. A floor that moves is published through
-/// [`update_manifest`], which loads the manifest again.
+/// The advance loads the current manifest once, and it returns that
+/// manifest's floor without another request when the target is at or below
+/// the floor. Otherwise, it reads commits upward from the floor once, and it
+/// stops at the target or at the first commit after the cutoff, which is the
+/// earlier of the target's own cutoff, if it has one, and `now_ms` minus the
+/// grace. A floor that moves is published through [`update_manifest`], which
+/// loads the manifest again.
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -112,24 +114,31 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?;
     let manifest = current.state.envelope.payload();
     ensure_namespace_live(&NamespaceReadState::from(manifest))?;
-    let target = match target {
-        RetentionTarget::Head => manifest.head_seq,
-        RetentionTarget::Seq(seq) => seq.min(manifest.head_seq),
+    let grace_cutoff_at_ms = now_ms.saturating_sub(GC_DEFAULT_GRACE_WINDOW_MS);
+    let (through, cutoff_at_ms) = match target {
+        RetentionTarget::Head => (manifest.head_seq, grace_cutoff_at_ms),
+        RetentionTarget::Seq(seq) => (seq.min(manifest.head_seq), grace_cutoff_at_ms),
         RetentionTarget::Cutoff { cutoff_at_ms } => {
-            last_commit_at_or_before(store, segment_cache, &current, cutoff_at_ms).await?
+            (manifest.head_seq, cutoff_at_ms.min(grace_cutoff_at_ms))
         }
         RetentionTarget::Window { default_window_ms } => {
             match manifest.retention_window_ms.or(default_window_ms) {
-                Some(window_ms) => {
-                    let cutoff_at_ms = now_ms.saturating_sub(window_ms.get());
-                    last_commit_at_or_before(store, segment_cache, &current, cutoff_at_ms).await?
-                }
-                None => manifest.retention_floor_seq,
+                Some(window_ms) => (
+                    manifest.head_seq,
+                    now_ms
+                        .saturating_sub(window_ms.get())
+                        .min(grace_cutoff_at_ms),
+                ),
+                // With neither window, the floor stays where it is.
+                None => (manifest.retention_floor_seq, grace_cutoff_at_ms),
             }
         }
     };
-    let target =
-        newest_commit_past_the_grace_window(store, segment_cache, &current, target, now_ms).await?;
+    let target = if through <= manifest.retention_floor_seq {
+        manifest.retention_floor_seq
+    } else {
+        last_commit_at_or_before(store, segment_cache, &current, through, cutoff_at_ms).await?
+    };
     if target <= manifest.retention_floor_seq {
         return Ok(PublicationReport {
             response: AdvanceRetentionResponse {
@@ -211,13 +220,18 @@ pub(crate) async fn set_retention_window<S: ObjectStore + ?Sized>(
     })
 }
 
-/// The sequence of the last commit at or before `cutoff_at_ms`, read upward
-/// from `current`'s floor. The floor itself when the first commit above it
-/// is later than the cutoff.
+/// Returns the sequence of the last commit at or before `cutoff_at_ms` and at
+/// or below `through`, read upward from `current`'s floor.
+///
+/// The walk stops at the first commit committed after the cutoff, even if a
+/// later commit is older, because commit times come from writers' clocks and
+/// need not increase with sequence. If the first commit above the floor is
+/// later than the cutoff, the walk returns the floor.
 async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     current: &LoadedManifest,
+    through: ChangeSeq,
     cutoff_at_ms: u64,
 ) -> Result<ChangeSeq> {
     let basis = metadata_basis_from_manifest(store, segment_cache, current);
@@ -225,55 +239,14 @@ async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
     // One commit per scan, as the change feed reads them: a commit row can
     // be large, and the memo keeps the block for the next call within the
     // caller's read budget.
-    while let Some(commit) = commits_after_page(&basis.segments, last, 1).await?.pop() {
+    while last < through {
+        let Some(commit) = commits_after_page(&basis.segments, last, 1).await?.pop() else {
+            break;
+        };
         if commit.committed_at_ms > cutoff_at_ms {
             break;
         }
         last = commit.committed_seq;
     }
     Ok(last)
-}
-
-/// Returns the sequence of the newest commit at or below `target` that's at
-/// least [`GC_DEFAULT_GRACE_WINDOW_MS`] old at `now_ms`.
-///
-/// If no commit above `current`'s floor is that old, returns that floor. A
-/// commit's age is `now_ms` minus its `committed_at_ms`, and a commit dated
-/// after `now_ms` has an age of zero, as an object dated in the future does in
-/// garbage collection. Every sequence above the floor has a commit row, so the
-/// walk reads one commit row per sequence, downward from `target`. It reads
-/// the commits younger than the window at the top of the history, which is
-/// about an hour of commits, and at worst every commit above the floor, if
-/// writers dated every commit above the floor in the future.
-///
-/// The walk doesn't read ahead, so it fetches each block of commit rows that
-/// it misses and no others. Commit rows are sorted by sequence, and a
-/// read-ahead window covers the missed block and the blocks after it, which
-/// contain newer commits. The walk moves toward older commits, so it has already
-/// read every block that a window would add.
-async fn newest_commit_past_the_grace_window<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: Option<&MetadataSegmentCache>,
-    current: &LoadedManifest,
-    target: ChangeSeq,
-    now_ms: u64,
-) -> Result<ChangeSeq> {
-    let floor = current.state.retention_floor_seq();
-    if target <= floor {
-        return Ok(floor);
-    }
-    let basis = metadata_basis_from_manifest(store, segment_cache, current);
-    for seq in (floor.0 + 1..=target.0).rev().map(ChangeSeq) {
-        let commit = commit_at_seq(&basis.segments, seq, Readahead::Disabled)
-            .await?
-            .ok_or_else(|| {
-                CoreError::NamespaceCorrupt(format!(
-                    "the `commits` family has no row at sequence {seq}, which is above the retention floor {floor}"
-                ))
-            })?;
-        if now_ms.saturating_sub(commit.committed_at_ms) >= GC_DEFAULT_GRACE_WINDOW_MS {
-            return Ok(seq);
-        }
-    }
-    Ok(floor)
 }

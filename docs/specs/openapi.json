@@ -3894,7 +3894,7 @@
         "type": "object"
       },
       "RunMaintenanceRequestRetention": {
-        "description": "A job that advances the retention floor toward the folded manifest head, or toward the\ntarget that the request sets.\n\nThe floor stops at the newest commit at or below the target that's at least one hour old.",
+        "description": "A job that advances the retention floor toward the folded manifest head, or toward the\ntarget that the request sets.\n\nThe floor doesn't pass a commit that's less than one hour old.",
         "properties": {
           "cutoff_at_ms": {
             "description": "A Unix time in milliseconds. The floor advances to the last commit made at or before this\ntime. LoonFS reads commits upward from the floor, and the first commit made after this time\nends the advance. This field can't be combined with `to_seq`.",
@@ -4102,7 +4102,7 @@
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The retention floor that the advance reached, which is the minimum sequence for incremental\nreplay. It's below the target when the commit at the target is less than one hour old."
+            "description": "The retention floor that the advance reached, which is the minimum sequence for incremental\nreplay. It's below the target when LoonFS reads a commit that's less than one hour old\nbefore it reaches the target."
           }
         },
         "required": [
