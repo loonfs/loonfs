@@ -2,6 +2,7 @@
 //! columns, and the queries that read and write records.
 
 use crate::attributes::MtimeAttribute;
+use crate::config::CONTROL_DIRECTORY_NAME;
 use crate::item::{ItemId, ItemKind};
 use crate::records::{
     AttributeState, Binding, FileContent, HiddenBy, ItemRecord, LocalState, RemoteState, WriteState,
@@ -356,6 +357,19 @@ pub(crate) fn for_each_item(
 }
 
 /// Returns whether any item's current revision refers to `content_id`.
+/// Returns the inode of the `.loonfs` entry at the root, which the mount
+/// doesn't show, when the server has one.
+pub(crate) fn reserved_inode(connection: &Connection) -> rusqlite::Result<Option<InodeId>> {
+    connection
+        .query_row(
+            "SELECT remote_inode_id FROM items WHERE s_parent = ?1 AND s_name = ?2 LIMIT 1",
+            params![sql_u64(ItemId::ROOT.0), CONTROL_DIRECTORY_NAME],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .map(|inode| inode.flatten().map(|inode| InodeId(from_sql_u64(inode))))
+}
+
 /// Returns the items whose server or committed state has `content_id`.
 pub(crate) fn items_with_content(
     connection: &Connection,

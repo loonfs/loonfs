@@ -7,6 +7,7 @@ use super::rebuild::RebuildState;
 use super::ControlTask;
 use crate::database;
 use crate::error::{MountError, Result};
+use crate::item_table::reserved_inode;
 use crate::status::PublicationStop;
 use crate::workers::{SnapshotRef, Work};
 use loonfs_client::ClientError;
@@ -303,6 +304,12 @@ impl ControlTask {
         self.root = root;
         if applied.reserved.is_some() {
             self.reserved_name = applied.reserved;
+        } else if self.reserved_name.is_some() {
+            // The commit can have moved or deleted the hidden entry.
+            match reserved_inode(self.database.connection()) {
+                Ok(reserved) => self.reserved_name = reserved,
+                Err(error) => tracing::error!(%error, "reading the hidden `.loonfs` entry failed"),
+            }
         }
         self.entries = self.entries.saturating_add_signed(applied.entry_change);
         if let Some(stop) = stop {

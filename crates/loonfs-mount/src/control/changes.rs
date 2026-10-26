@@ -385,9 +385,10 @@ impl<'a> Changes<'a> {
                     length: content.content_ref.size_bytes.saturating_sub(offset),
                 },
             }));
-        } else {
-            record.append_only = false;
         }
+        // An append that starts at the previous size keeps `append_only` as
+        // it was, also for an item with a local content change, whose own
+        // append is re-based on the remote appends.
     }
 
     /// Makes the item's inode a new item in `state`, and keeps the old item

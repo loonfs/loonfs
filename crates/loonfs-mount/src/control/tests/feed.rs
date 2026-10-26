@@ -2,6 +2,9 @@
 //! events that change nothing, and refreshes.
 
 use super::*;
+use crate::item_table::find_item_by_inode;
+use crate::records::CONTENT_DIRTY;
+use crate::status::Warning;
 
 /// Checks that a commit that brings a directory into the mount isn't applied
 /// until the listing it needs arrives, and that the directory stays hidden
@@ -308,4 +311,98 @@ fn a_failed_read_of_the_roots_ancestors_fails_the_page() {
             after_seq: ChangeSeq(5)
         }]
     ));
+}
+
+/// Checks that an append from the feed keeps `append_only` set on a file
+/// whose content has a local change, which the re-base of a local append on
+/// remote appends depends on.
+#[test]
+fn an_append_keeps_append_only_set_on_a_file_with_a_local_change() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let (mut task, _shared, workers) = task(directory.path(), &[file(11, 10, "/project/a.txt")]);
+    task.start();
+    workers.take();
+    let mut record = find_item_by_inode(task.database.connection(), InodeId(11))
+        .expect("a read")
+        .expect("the file's row");
+    record.write.dirty_groups |= CONTENT_DIRTY;
+    write_item(task.database.connection(), &record).expect("the dirty row");
+    let previous = record
+        .server
+        .content
+        .clone()
+        .expect("the file's content")
+        .content_ref;
+    let appended = ContentRef::blob_v1(
+        namespace_id(),
+        previous.content_id.clone(),
+        b"/project/a.txt and more",
+        ChecksumAlgorithm::Crc64nvme,
+    );
+    let append = FilesystemChange::ContentChanged {
+        inode_id: InodeId(11),
+        revision_no: RevisionNo(2),
+        content_ref: appended,
+        append_offset: Some(previous.size_bytes),
+    };
+    task.handle(page(5, vec![commit(6, vec![append])]));
+    assert_eq!(task.applied_seq, ChangeSeq(6));
+    let record = find_item_by_inode(task.database.connection(), InodeId(11))
+        .expect("a read")
+        .expect("the file's row");
+    assert!(record.append_only);
+}
+
+/// Checks that the warning about a hidden `.loonfs` entry at the root
+/// appears when a commit creates the entry, and goes away when a commit
+/// moves the entry out of the mount.
+#[test]
+fn the_reserved_name_warning_follows_the_hidden_entry() {
+    let directory = tempfile::tempdir().expect("a state directory");
+    let (mut task, shared, workers) = task(directory.path(), &[]);
+    task.start();
+    workers.take();
+    let warnings = |shared: &SharedState| {
+        shared
+            .status
+            .lock()
+            .expect("the status lock")
+            .warnings
+            .clone()
+    };
+    let name = DisplayName::parse(".loonfs").expect("a name");
+    let created = FilesystemChange::FileCreated {
+        inode_id: InodeId(40),
+        parent_inode_id: InodeId(10),
+        display_name: name.clone(),
+        binding_version: BindingVersion::parse("b40").expect("a version"),
+        revision_no: RevisionNo(1),
+        content_ref: ContentRef::blob_v1(
+            namespace_id(),
+            ContentId::generate(),
+            b"x",
+            ChecksumAlgorithm::Crc64nvme,
+        ),
+    };
+    task.handle(page(5, vec![commit(6, vec![created])]));
+    assert_eq!(
+        warnings(&shared),
+        [Warning::ReservedName {
+            inode_id: InodeId(40)
+        }]
+    );
+
+    task.handle(ControlMessage::Tick);
+    workers.take();
+    let moved_out = FilesystemChange::Moved {
+        inode_id: InodeId(40),
+        source_parent_inode_id: InodeId(10),
+        source_display_name: name,
+        destination_parent_inode_id: InodeId(2),
+        destination_display_name: DisplayName::parse("kept").expect("a name"),
+        binding_version: BindingVersion::parse("moved").expect("a version"),
+    };
+    task.handle(page(6, vec![commit(7, vec![moved_out])]));
+    assert_eq!(task.applied_seq, ChangeSeq(7));
+    assert_eq!(warnings(&shared), []);
 }

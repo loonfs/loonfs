@@ -28,7 +28,7 @@ use crate::fetch::FetchQueue;
 use crate::host::{DiskSpace, Owner};
 use crate::invalidation::{Invalidation, Subscribers};
 use crate::item::ItemId;
-use crate::item_table::for_each_item;
+use crate::item_table::{for_each_item, reserved_inode};
 use crate::read_handle::{HandleId, OpenedRead};
 use crate::status::{
     CacheStatus, PublicationStop, Readiness, ReflinkSupport, Status, Transports, Warning,
@@ -194,6 +194,7 @@ impl ControlTask {
         };
         let entering = entering::load(&mut database)?;
         let owner = Owner::of(&mount.config);
+        let reserved_name = reserved_inode(database.connection())?;
         let tree = load_tree(&database)?;
         let rows = database::read_cache_files(database.connection())?;
         let (cache, missing) = Cache::load(&mount.config.cache_directory(), rows)?;
@@ -233,7 +234,7 @@ impl ControlTask {
             relisting: HashSet::new(),
             relist_on_tick: HashSet::new(),
             publication_stop: mount.publication_stop,
-            reserved_name: None,
+            reserved_name,
             owner,
             feed_error: None,
             dropped_invalidations: 0,
