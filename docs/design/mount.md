@@ -23,7 +23,7 @@ A mount makes these promises:
 - Writes go to local disk at local speed, and the mount publishes them to the namespace as atomic commits, normally within a second.
 - Reads are lazy and cached. Only the first read of content that isn't cached, and opening such a file for writing, wait for the network.
 - `fsync` and `loonfs sync` return once every write they cover is published.
-- Other hosts see a published change within about a second, and a log that one host appends to can be followed from another host.
+- Other hosts see a published change within about a second, and a log that one host appends to can be followed from another host by a program that reads it again, or by a follower that polls. A follower that waits for inotify never wakes, because the kernel raises inotify events only for changes made through it, and a change from another host arrives as a FUSE invalidation.
 - When hosts write one file concurrently, the mount detects the conflict when it publishes and resolves it with the mount's conflict policy. No published version is lost, because every revision stays in the file's history until the [retention floor](../specs/glossary.md#retention-floor) passes it.
 - If the host can't serve a mount, or the namespace has more entries than the budget, the mount fails before the directory is mounted, and the error says why.
 
@@ -307,7 +307,7 @@ A ranged read and a grant aren't verified by the server, so the engine verifies 
 
 A descriptor follows the file's working file while the file has one, and it's pinned to the revision it opened otherwise. When another host changes a file that has no working file on this host, the change event records which kind of change it is:
 
-- An append (a `content_changed` event with `append_offset`) extends the revision. If the cache has the previous revision and its size equals the event's `append_offset`, the cache file becomes the new revision's file. If a descriptor has the file open, the engine fetches the appended range at once and appends it to the cache file. Otherwise the cache file becomes a partial file, and a read of the appended range fetches that range. Open descriptors follow the file as it grows, and the adapter sends the kernel an attribute invalidation with the new size. A read at the end of the file returns the new bytes once they're fetched, which is how `tail -f` follows a log that another host appends to. The engine verifies the extension by combining the checksum of the cached bytes with the checksum of the appended bytes, as the server does, so it doesn't read the earlier bytes again.
+- An append (a `content_changed` event with `append_offset`) extends the revision. If the cache has the previous revision and its size equals the event's `append_offset`, the cache file becomes the new revision's file. If a descriptor has the file open, the engine fetches the appended range at once and appends it to the cache file. Otherwise the cache file becomes a partial file, and a read of the appended range fetches that range. Open descriptors follow the file as it grows, and the adapter sends the kernel an attribute invalidation with the new size. A read at the end of the file returns the new bytes once they're fetched, so a program follows a log that another host appends to by reading it again, or with a follower that polls. A follower that waits for an inotify event never wakes, because the kernel raises those events only for changes made through it, not for the invalidations that the adapter sends. The engine verifies the extension by combining the checksum of the cached bytes with the checksum of the appended bytes, as the server does, so it doesn't read the earlier bytes again.
 - Any other new revision replaces the file. The name then refers to a new item with a new kernel inode number, whether or not the file is open, and the next open reads the new revision. Open descriptors stay on the old item and the revision they opened. If an open descriptor's revision isn't completely cached, the engine requests one grant for the rest of that revision and fetches it at once, within the grant's 15-minute lifetime. The old revision's cache file is deleted after the last descriptor closes.
 
 A deletion of an open file works like a replacement. Open descriptors keep their revision, and the engine fetches the rest of that revision at once.
@@ -635,7 +635,7 @@ This section lists the measurable properties that the mount has to keep, which t
 4. A plan with D dirty items does work in proportion to D, and constant work when D is zero.
 5. 10,000 writes to one file in one second publish exactly one content operation and no attribute update.
 6. A namespace with more entries than the budget fails admission before the kernel mount, after listing at most the budget plus one entries.
-7. When 32 child sandboxes append to logs and one parent follows them with `tail -f`, each appended line is visible to the parent within the append interval plus the poll interval plus 500 ms, at the 99th percentile.
+7. When 32 child sandboxes append to logs and one parent follows them with a follower that polls, each appended line is visible to the parent within the append interval plus the poll interval plus 500 ms, at the 99th percentile.
 8. A sequential read of a complete cached file through the mount reaches at least half the throughput of reading the cache file directly, and a second open of an unchanged file reads from the kernel's page cache without a read request to the daemon.
 9. With 1,000 materialized files, a `kill -9` of the daemon at any point in capturing, uploading, sending, or acknowledging converges after a restart with no lost and no duplicated commits, and every item's published bytes equal the generation that was published.
 10. 500 concurrent opens that each read 4 KiB of a 100 MiB file transfer less than 1 GiB in total.
@@ -683,7 +683,7 @@ These tests check other orderings and rules:
 - A rebuild after `rebootstrap_required` keeps the bases of dirty items.
 - A populated directory moves into the mount, and a deleted directory is undeleted into it.
 - A partly cached open revision is replaced, and its reader finishes reading it.
-- A `tail -f` reader on one host follows appends from another host.
+- A follower that polls, on one host, follows appends from another host.
 - Duplicated descriptors send several `flush` requests before one `release`.
 - Each conflict policy, for each row of the conflict table, including a re-based append.
 - Two names that differ only in Unicode normalization.
