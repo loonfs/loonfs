@@ -2,6 +2,7 @@
 //! the simulated server through the real client and check what the engine
 //! shows and what it asks the server for.
 
+#![cfg(unix)]
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 mod admission;

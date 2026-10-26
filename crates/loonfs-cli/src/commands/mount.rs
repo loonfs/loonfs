@@ -249,10 +249,7 @@ fn kernel() -> Result<Arc<dyn Kernel>, CliError> {
 
 #[cfg(not(target_os = "linux"))]
 fn kernel() -> Result<Arc<dyn Kernel>, CliError> {
-    Err(CliError::new(
-        ErrorCode::NotSupported.as_str(),
-        "mounts are available on Linux only",
-    ))
+    Err(CliError::mounts_unavailable())
 }
 
 fn output(kind: CommandKind, data: CommandData) -> CommandOutput {

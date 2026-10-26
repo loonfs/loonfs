@@ -6,6 +6,7 @@ use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_run_outcome, StoreProbeRunOutcome};
+#[cfg(unix)]
 use loonfs_mount::daemon::protocol::{MountStatusReport, MountedReport, UnmountedReport};
 use loonfs_types::api::v0::{
     DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, Snapshot,
@@ -17,6 +18,7 @@ use loonfs_types::{
     RunMaintenanceResponse,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -321,20 +323,25 @@ pub(crate) enum CommandData {
     },
     /// A directory that `loonfs mount` mounted, or that already had the
     /// mount.
+    #[cfg(unix)]
     Mounted(Box<MountedReport>),
     /// A directory that `loonfs unmount` unmounted.
+    #[cfg(unix)]
     Unmounted(UnmountedReport),
     /// The state of each mount that `loonfs status` reported.
+    #[cfg(unix)]
     MountStatuses {
         mounts: Vec<MountStatusReport>,
     },
     /// A mount whose change feed `loonfs refresh` read.
+    #[cfg(unix)]
     Refreshed {
         directory: PathBuf,
         applied_seq: ChangeSeq,
     },
     /// The daemon stopped, because it had no mount for a minute or a
     /// `shutdown` request stopped it.
+    #[cfg(unix)]
     DaemonStopped,
     /// A generated shell completion script, rendered byte-for-byte.
     CompletionScript(Vec<u8>),

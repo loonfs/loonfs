@@ -3,11 +3,14 @@
 mod access;
 mod config;
 mod context;
-pub(crate) use context::{render_target, shell_quote};
+#[cfg(unix)]
+pub(crate) use context::render_target;
+pub(crate) use context::shell_quote;
 pub(crate) mod download;
 mod fs;
 mod inspection;
 mod maintenance;
+#[cfg(unix)]
 mod mount;
 mod namespace;
 mod output;
@@ -123,11 +126,27 @@ pub(crate) async fn run(
                 Command::Maintenance { command } => {
                     maintenance::run_maintenance_command(kind, config_path, command).await
                 }
+                #[cfg(unix)]
                 Command::Mount(args) => mount::run_mount(kind, config_path, *args, runtime).await,
+                #[cfg(unix)]
                 Command::Unmount(args) => mount::run_unmount(kind, args).await,
+                #[cfg(unix)]
                 Command::Status(args) => mount::run_status(kind, args).await,
+                #[cfg(unix)]
                 Command::Refresh(args) => mount::run_refresh(kind, args).await,
+                #[cfg(unix)]
                 Command::Daemon(args) => mount::run_daemon(kind, args).await,
+                #[cfg(not(unix))]
+                Command::Mount(_)
+                | Command::Unmount(_)
+                | Command::Status(_)
+                | Command::Refresh(_)
+                | Command::Daemon(_) => Err(context::fail(
+                    kind,
+                    None,
+                    None,
+                    CliError::mounts_unavailable(),
+                )),
             }
         }
     }

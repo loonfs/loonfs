@@ -11,6 +11,7 @@ use loonfs_objectstore::StoreConfig;
 use loonfs_types::{ChangeSeq, CommitId, FileRevision, GrepMatch, PathEntry};
 
 use super::human_maintenance::*;
+#[cfg(unix)]
 use super::human_mount::*;
 
 #[cfg(test)]
@@ -150,13 +151,18 @@ fn human_success_text(output: &CommandOutput) -> String {
         CommandData::ConfigShowDegraded { error, config_toml } => {
             human_config_show_degraded(error, config_toml)
         }
+        #[cfg(unix)]
         CommandData::Mounted(report) => human_mounted(report),
+        #[cfg(unix)]
         CommandData::Unmounted(report) => human_unmounted(report),
+        #[cfg(unix)]
         CommandData::MountStatuses { mounts } => human_mount_statuses(mounts),
+        #[cfg(unix)]
         CommandData::Refreshed {
             directory,
             applied_seq,
         } => human_refreshed(directory, *applied_seq),
+        #[cfg(unix)]
         CommandData::DaemonStopped => "the mount daemon stopped".to_owned(),
         CommandData::Version { version } => version.clone(),
         CommandData::CompletionScript(_) | CommandData::StreamedToStdout => String::new(),

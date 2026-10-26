@@ -1,6 +1,14 @@
 //! The arguments of `loonfs mount`, `unmount`, `status`, `refresh`, and the
 //! hidden `daemon` command.
 
+#![cfg_attr(
+    not(unix),
+    allow(
+        dead_code,
+        reason = "mounts need Unix, so elsewhere the commands fail before reading their arguments"
+    )
+)]
+
 use super::{parse_change_seq, ActorSelectorArgs, ProfileSelectorArgs, SubjectSelectorArgs};
 use clap::{Args, ValueHint};
 use loonfs_types::ChangeSeq;

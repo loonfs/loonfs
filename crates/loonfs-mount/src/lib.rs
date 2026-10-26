@@ -11,6 +11,12 @@
 //!
 //! This version serves read-only mounts. The write path's methods exist, and
 //! they refuse every change.
+//!
+//! The engine and the daemon are built on Unix only, because they use Unix
+//! file and socket interfaces. On every other platform the crate is empty, so
+//! the CLI, which depends on it everywhere, still builds there.
+
+#![cfg(unix)]
 
 mod admission;
 mod attributes;

@@ -236,6 +236,16 @@ impl CliError {
         )
     }
 
+    /// The failure of every mount command on a platform without FUSE
+    /// mounts.
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn mounts_unavailable() -> Self {
+        Self::new(
+            ErrorCode::NotSupported.as_str(),
+            "mounts are available on Linux only",
+        )
+    }
+
     pub(crate) fn cancelled() -> Self {
         Self::new(CliErrorCode::Cancelled.as_str(), "operation cancelled")
     }
