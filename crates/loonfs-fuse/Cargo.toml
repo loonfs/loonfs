@@ -15,7 +15,7 @@ categories = ["filesystem"]
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser.workspace = true
 loonfs-mount.workspace = true
-rustix = { workspace = true, features = ["mount", "process"] }
+rustix = { workspace = true, features = ["mount"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true

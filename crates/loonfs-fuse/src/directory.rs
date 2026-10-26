@@ -9,11 +9,30 @@ use loonfs_mount::{DirEntry, Engine, ItemId, ItemKind};
 /// offset is the engine's offset plus this.
 const ADDED_OFFSETS: u64 = 3;
 
+/// Which of a directory's two dot entries an entry is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dot {
+    /// `.`, the directory itself.
+    Current,
+    /// `..`, the directory that contains it.
+    Parent,
+}
+
+impl Dot {
+    /// Returns the entry's name.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Current => ".",
+            Self::Parent => "..",
+        }
+    }
+}
+
 /// One entry of a listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Listed {
     /// `.` or `..`, which the kernel doesn't count as a lookup.
-    Dot { name: &'static str, offset: u64 },
+    Dot { dot: Dot, offset: u64 },
     /// An item of the control directory.
     Control { control: ControlItem, offset: u64 },
     /// An entry of the engine's tree.
@@ -61,11 +80,11 @@ pub(crate) fn list(
 fn added_entries(directory: ItemId) -> Vec<Listed> {
     let mut entries = vec![
         Listed::Dot {
-            name: ".",
+            dot: Dot::Current,
             offset: 1,
         },
         Listed::Dot {
-            name: "..",
+            dot: Dot::Parent,
             offset: 2,
         },
     ];
@@ -103,7 +122,7 @@ mod tests {
         entries
             .iter()
             .map(|entry| match entry {
-                Listed::Dot { name, .. } => (*name).to_owned(),
+                Listed::Dot { dot, .. } => dot.name().to_owned(),
                 Listed::Control { control, .. } => control.name().to_owned(),
                 Listed::Engine(entry) => entry.name.to_string_lossy().into_owned(),
             })

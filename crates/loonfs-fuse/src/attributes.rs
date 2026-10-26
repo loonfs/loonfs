@@ -2,7 +2,7 @@
 //! them.
 
 use fuser::{FileAttr, FileType, Generation, INodeNo};
-use loonfs_mount::{Attr, ItemId, ItemKind, LocalChanges, MountConfig};
+use loonfs_mount::{Attr, ItemId, ItemKind, LocalChanges, Status};
 use std::time::{Duration, UNIX_EPOCH};
 
 /// How long the kernel caches the entry and attributes of an item without
@@ -35,16 +35,12 @@ pub(crate) struct Owner {
 }
 
 impl Owner {
-    /// Returns the owner that the mount's settings set, or the user and
-    /// group that run the daemon.
-    pub(crate) fn of(config: &MountConfig) -> Self {
+    /// Returns the owner that a mount's status reports: `--uid` and
+    /// `--gid`, or the user and group that run the daemon.
+    pub(crate) fn of(status: &Status) -> Self {
         Self {
-            uid: config
-                .uid
-                .unwrap_or_else(|| rustix::process::geteuid().as_raw()),
-            gid: config
-                .gid
-                .unwrap_or_else(|| rustix::process::getegid().as_raw()),
+            uid: status.uid,
+            gid: status.gid,
         }
     }
 }

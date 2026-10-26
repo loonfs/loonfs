@@ -73,6 +73,14 @@ impl ControlItem {
         }
     }
 
+    /// Returns the directory that contains the item.
+    pub(crate) fn parent(self) -> ItemId {
+        match self {
+            Self::Directory => ItemId::ROOT,
+            Self::StatusFile | Self::SeqFile => Self::Directory.item(),
+        }
+    }
+
     /// Returns the item's kind.
     pub(crate) fn kind(self) -> ItemKind {
         match self {
@@ -104,10 +112,7 @@ impl ControlItem {
         };
         Attr {
             kind: self.kind(),
-            parent: match self {
-                Self::Directory => ItemId::ROOT,
-                Self::StatusFile | Self::SeqFile => Self::Directory.item(),
-            },
+            parent: self.parent(),
             size_bytes,
             mode,
             mtime_ms: root_mtime_ms,

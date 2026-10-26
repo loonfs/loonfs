@@ -10,7 +10,7 @@ mod requests;
 
 use crate::attributes::{cache_lifetime, file_attr, file_type, Owner, BLOCK_BYTES, GENERATION};
 use crate::control_directory::ControlItem;
-use crate::directory::{list, listed_kind, Listed};
+use crate::directory::{list, listed_kind, Dot, Listed};
 use crate::errors::{errno, Refusal};
 use crate::open_files::{control_read, OpenFile, OpenFiles};
 use fuser::{
@@ -36,10 +36,10 @@ pub(crate) struct MountFilesystem {
 
 impl MountFilesystem {
     pub(crate) fn new(engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> Self {
-        let config = engine.config();
+        let status = engine.status();
         Self {
-            owner: Owner::of(config),
-            access: config.access,
+            owner: Owner::of(&status),
+            access: status.access,
             engine,
             runtime,
             open_files: Arc::default(),
@@ -94,7 +94,7 @@ impl MountFilesystem {
     fn read_directory(&self, directory: ItemId, offset: u64, mut reply: ReplyDirectory) {
         for entry in list(&self.engine, directory, offset) {
             let (item, name) = match &entry {
-                Listed::Dot { name, .. } => (directory, OsStr::new(name)),
+                Listed::Dot { dot, .. } => (self.dot_item(directory, *dot), OsStr::new(dot.name())),
                 Listed::Control { control, .. } => (control.item(), OsStr::new(control.name())),
                 Listed::Engine(entry) => (entry.item, entry.name.as_os_str()),
             };
@@ -122,7 +122,10 @@ impl MountFilesystem {
     /// is full. A full reply leaves the entry out, so its lookup is undone.
     fn add_plus(&self, directory: ItemId, entry: &Listed, reply: &mut ReplyDirectoryPlus) -> bool {
         let (name, attributes) = match entry {
-            Listed::Dot { name, .. } => (OsStr::new(name), self.attributes(directory)),
+            Listed::Dot { dot, .. } => (
+                OsStr::new(dot.name()),
+                self.attributes(self.dot_item(directory, *dot)),
+            ),
             Listed::Control { control, .. } => {
                 (OsStr::new(control.name()), self.attributes(control.item()))
             }
@@ -140,6 +143,20 @@ impl MountFilesystem {
             self.forget_item(ItemId(attr.ino.0), 1);
         }
         full
+    }
+
+    /// Returns the item that a dot entry of `directory` refers to. The
+    /// root's `..` is the root, and the kernel shows the directory above the
+    /// mount instead.
+    fn dot_item(&self, directory: ItemId, dot: Dot) -> ItemId {
+        match (dot, ControlItem::of(directory)) {
+            (Dot::Current, _) => directory,
+            (Dot::Parent, Some(control)) => control.parent(),
+            (Dot::Parent, None) => self
+                .engine
+                .getattr(directory)
+                .map_or(directory, |attr| attr.parent),
+        }
     }
 
     fn open_file(&self, item: ItemId, flags: OpenFlags, reply: ReplyOpen) {
@@ -212,15 +229,20 @@ impl MountFilesystem {
         }
     }
 
-    /// Reports the cache's limit as the filesystem's size, its unused part
-    /// as the free space, and the entry budget as the number of inodes.
+    /// Reports the cache's bytes as the used space, the free space of the
+    /// state directory's filesystem as the free space, and the entry budget
+    /// as the number of inodes. When that filesystem doesn't report its free
+    /// space, the room left under the cache's eviction target stands in for
+    /// it.
     fn report_statfs(&self, reply: ReplyStatfs) {
         let status = self.engine.status();
         let block_bytes = u64::from(BLOCK_BYTES);
-        let blocks = status.cache.max_cache_bytes / block_bytes;
-        let used_blocks =
-            (status.cache.evictable_bytes + status.cache.pinned_bytes).div_ceil(block_bytes);
-        let free_blocks = blocks.saturating_sub(used_blocks);
+        let used_bytes = status.cache.evictable_bytes + status.cache.pinned_bytes;
+        let available_bytes = status
+            .available_bytes
+            .unwrap_or_else(|| status.cache.max_cache_bytes.saturating_sub(used_bytes));
+        let free_blocks = available_bytes / block_bytes;
+        let blocks = used_bytes.div_ceil(block_bytes) + free_blocks;
         reply.statfs(
             blocks,
             free_blocks,
