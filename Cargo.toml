@@ -18,7 +18,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.4.0"
+version = "0.5.0"
 license = "Apache-2.0"
 rust-version = "1.99"
 description = "Spec-locked object-store-backed file service"
@@ -99,13 +99,13 @@ loonfs-test-support = { path = "crates/loonfs-test-support" }
 # Cargo requires published dependencies to include a registry version even
 # when they also have a local path. These versions must match
 # `workspace.package.version`.
-loonfs = { path = "crates/loonfs", version = "0.4.0" }
-loonfs-client = { path = "crates/loonfs-client", version = "0.4.0" }
-loonfs-core = { path = "crates/loonfs-core", version = "0.4.0" }
-loonfs-grep = { path = "crates/loonfs-grep", version = "0.4.0" }
-loonfs-http = { path = "crates/loonfs-http", version = "0.4.0" }
-loonfs-objectstore = { path = "crates/loonfs-objectstore", version = "0.4.0" }
-loonfs-types = { path = "crates/loonfs-types", version = "0.4.0" }
+loonfs = { path = "crates/loonfs", version = "0.5.0" }
+loonfs-client = { path = "crates/loonfs-client", version = "0.5.0" }
+loonfs-core = { path = "crates/loonfs-core", version = "0.5.0" }
+loonfs-grep = { path = "crates/loonfs-grep", version = "0.5.0" }
+loonfs-http = { path = "crates/loonfs-http", version = "0.5.0" }
+loonfs-objectstore = { path = "crates/loonfs-objectstore", version = "0.5.0" }
+loonfs-types = { path = "crates/loonfs-types", version = "0.5.0" }
 tempfile = "3"
 thiserror = "2"
 tokio = "1"
