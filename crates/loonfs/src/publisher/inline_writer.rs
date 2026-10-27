@@ -843,7 +843,12 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             OperationSelector::Put,
             InjectedError::PermissionDenied("content writes refused".to_owned()),
         ));
-        let store = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
+        // The hint raise after the first put's publication runs in the
+        // background, so its write would land in the counts below.
+        let store = Arc::new(RecordingStore::new(
+            failing.clone(),
+            KeyPredicate::any().except_hints(),
+        ));
         let writer = crate::LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
             .inline_content(InlineContentPolicy {
