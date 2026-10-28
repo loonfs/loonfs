@@ -1850,26 +1850,6 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
             .expect("test row budget should be nonzero"),
         ..MetadataRunPolicy::default()
     };
-    // A base unit of this group also reads the basis's slot index and trash
-    // to build its kept inode filter.
-    let walked_segments = runs_newest_first(
-        load_current_manifest(&store, &namespace_id)
-            .await
-            .expect("load the current manifest")
-            .state
-            .envelope
-            .payload(),
-    )
-    .iter()
-    .flat_map(|run| &run.segments)
-    .filter(|family| {
-        matches!(
-            family.family,
-            ApiMetadataRowFamily::DirentryBinds | ApiMetadataRowFamily::ActiveDeletions
-        )
-    })
-    .map(|family| family.segments.len())
-    .sum::<usize>();
     store.reset();
     let published = super::compact_unit(
         &store,
@@ -1897,10 +1877,12 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     assert!(input_runs <= policy.max_input_runs_per_step.get());
     assert!(rows_read <= policy.max_decoded_input_rows_per_step.get() as u64);
     let reads = store.count(OperationSelector::Read);
+    // The namespace's floor is still 0, so the base unit builds no kept inode
+    // filter and walks nothing.
     assert!(
-        reads <= input_runs * group.families().len() * 2 + walked_segments,
-        "the unit should read index and data sections only for selected-run family segments, \
-         and each small segment the walk scans once, whole: {reads} reads"
+        reads <= input_runs * group.families().len() * 2,
+        "the unit should read index and data sections only for selected-run family segments: \
+         {reads} reads"
     );
 }
 
