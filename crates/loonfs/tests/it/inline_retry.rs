@@ -280,10 +280,10 @@ async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissio
         .commit_candidate(inline("retained", "alice", b"recorded"))
         .await
         .expect("original commit");
-    // The original writer's hint raise runs after its commits return, so the
-    // test waits for the raise before the gate parks the cold writer's first
-    // read.
-    original_writer.wait_for_hint_raises().await;
+    // The original writer's hint raise runs in its session's worker after
+    // the commit returns, so the test drains the writer before the gate
+    // parks the cold writer's first read.
+    original_writer.drain().await.expect("drain");
     let cold_writer = open(recording.clone(), 1).await;
     recording.reset();
     blocking.block_next();

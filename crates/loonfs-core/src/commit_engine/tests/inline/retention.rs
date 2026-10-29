@@ -46,6 +46,7 @@ async fn compact_and_check_pair(
             store,
             None,
             namespace_id,
+            None,
             loonfs_types::CompactorEpoch(0),
             MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,

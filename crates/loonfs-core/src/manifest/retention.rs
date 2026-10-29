@@ -12,7 +12,8 @@ use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, load_current_manifest, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
-use crate::time::{Deadline, MonotonicTimer};
+use crate::namespace::PublicationBasis;
+use crate::time::{Deadline, MonotonicTimer, Observation};
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -99,8 +100,8 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
 /// the floor. Otherwise, it reads commits upward from the floor once, and it
 /// stops at the target or at the first commit after the cutoff, which is the
 /// earlier of the target's own cutoff, if it has one, and `now_ms` minus the
-/// grace. A floor that moves is published through [`update_manifest`], which
-/// loads the manifest again.
+/// grace. A floor that moves is published through [`update_manifest`],
+/// which builds on that manifest.
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -109,6 +110,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     now_ms: u64,
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<PublicationReport<AdvanceRetentionResponse>> {
+    let checked = Observation::now(Arc::clone(&timer));
     let current = load_current_manifest(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
@@ -149,9 +151,14 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         });
     }
     let deadline = Deadline::start(timer);
+    let basis = PublicationBasis {
+        manifest: current,
+        checked,
+    };
     let ((floor, advanced), current, _) = update_manifest(
         store,
         namespace_id,
+        Some(basis),
         &deadline,
         MAX_CONTENTION_ATTEMPTS,
         |current: LoadedManifest| async move {
@@ -197,6 +204,7 @@ pub(crate) async fn set_retention_window<S: ObjectStore + ?Sized>(
     let (changed, current, _) = update_manifest(
         store,
         namespace_id,
+        None,
         &deadline,
         MAX_CONTENTION_ATTEMPTS,
         |current: LoadedManifest| async move {

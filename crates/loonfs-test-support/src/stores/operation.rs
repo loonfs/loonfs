@@ -233,6 +233,18 @@ pub enum RecordedOperation {
     List { prefix: String },
 }
 
+/// Sorts each run of consecutive HEAD requests in `operations` by key.
+///
+/// A manifest probe sends a window of HEAD requests at once, and a log
+/// records them in the order they finish, so a test that compares a log
+/// with an expected sequence sorts the runs first.
+pub fn sort_head_runs(operations: &mut [RecordedOperation]) {
+    let head = |operation: &RecordedOperation| matches!(operation, RecordedOperation::Head { .. });
+    for run in operations.chunk_by_mut(|left, right| head(left) && head(right)) {
+        run.sort_by(|left, right| left.key().cmp(right.key()));
+    }
+}
+
 impl RecordedOperation {
     /// Returns the addressed key or list prefix.
     pub fn key(&self) -> &str {

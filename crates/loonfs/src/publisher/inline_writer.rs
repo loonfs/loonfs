@@ -242,8 +242,8 @@ async fn the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome()
         .await
         .expect("acquire writer epoch");
     // The gate parks the first read after the lost put, so the claim's hint
-    // raise, which reads the hint, finishes first.
-    writer.mode.publisher.wait_for_hint_raises().await;
+    // raise, which reads the hint in the session's worker, finishes first.
+    writer.drain().await.expect("drain");
     let publisher = namespace_writer.session().publisher.clone();
     let folds = hold_every_fold_permit(&writer).await;
     armed.store(true, Ordering::SeqCst);
@@ -389,9 +389,10 @@ async fn writer_with_policy_and_byte_limit(
         .create_directory("/warmup", &loonfs_test_support::test_actor())
         .await
         .expect("acquire writer epoch");
-    // The claim's hint raise runs after the commit returns, so the setup
-    // waits for the raise before the tests count requests.
-    writer.mode.publisher.wait_for_hint_raises().await;
+    // The claim's hint raise runs in the session's worker after the commit
+    // returns, so the setup drains the writer before the tests count
+    // requests.
+    writer.drain().await.expect("drain");
     store.reset();
     (directory, store, writer, namespace, namespace_writer)
 }
@@ -813,9 +814,6 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
     assert!(written_records(&store).await.is_empty());
     drop(fold_permits);
     namespace_writer.wait_for_fold().await.expect("fold");
-    // The fold's hint raise runs after the fold returns, so the test waits
-    // for the raise before it counts requests.
-    writer.mode.publisher.wait_for_hint_raises().await;
     store.reset();
     assert_eq!(
         namespace_writer
@@ -1098,10 +1096,6 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
             .sum();
         assert_eq!(inline_bytes, if limited_tail { 3 } else { 6 });
         if limited_tail {
-            // The hint raise of the fold that the tail limit started runs
-            // after the fold returns, so the test waits for the raise before
-            // it counts requests.
-            writer.mode.publisher.wait_for_hint_raises().await;
             store.reset();
             namespace
                 .put_file_with_options(

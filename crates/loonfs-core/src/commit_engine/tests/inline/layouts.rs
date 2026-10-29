@@ -841,6 +841,7 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
                 store,
                 None,
                 namespace_id,
+                None,
                 loonfs_types::CompactorEpoch(0),
                 Default::default(),
                 MetadataCompactionPolicy::CompactImmediately,

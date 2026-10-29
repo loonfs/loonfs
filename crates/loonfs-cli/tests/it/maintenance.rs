@@ -121,24 +121,11 @@ fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     assert_eq!(json_error(&metadata)["code"], "namespace_deleted");
 }
 
-/// Checks that one-shot commands leave the namespace's hint at the newest
-/// manifest they published, because each process shuts its runtime down
-/// before it exits.
-#[tokio::test]
-async fn one_shot_commands_leave_the_hint_at_the_newest_manifest() {
+/// Returns the hint's manifest number and the current manifest number of
+/// the namespace `demo` in the harness's default profile.
+async fn hint_and_current(harness: &Harness) -> (u64, u64) {
     use loonfs_types::format::control::{decode_control_object, ControlObjectKind, HintPayload};
 
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
-    let payload = harness.temp_dir.path().join("payload.txt");
-    fs::write(&payload, b"body").expect("write payload");
-    for index in 0..4 {
-        let remote_path = format!("/file-{index}.txt");
-        assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), &remote_path]));
-        assert_success(&harness.run(&["maintenance", "fold"]));
-    }
     let store =
         loonfs_objectstore::local_fs_store::LocalFsStore::new(harness.store_root("default"))
             .expect("store");
@@ -161,8 +148,38 @@ async fn one_shot_commands_leave_the_hint_at_the_newest_manifest() {
         .expect("decode the hint")
         .payload()
         .manifest_no;
-    assert!(current.0 > 8, "each command published: {current}");
-    assert_eq!(hint, current);
+    (hint.0, current.0)
+}
+
+/// Checks that each one-shot command that publishes raises the namespace's
+/// hint past the manifest that was current before the command, so the hint
+/// of a namespace that only one-shot commands write keeps moving, and
+/// garbage collection can delete the manifests below it.
+///
+/// A runtime raises the hint after its first publication in a namespace,
+/// and each request drains the runtime before the command exits.
+#[tokio::test]
+async fn each_one_shot_command_that_publishes_raises_the_hint() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    for index in 0..4 {
+        let remote_path = format!("/file-{index}.txt");
+        let put = ["put", payload.to_str().expect("utf-8 path"), &remote_path];
+        for command in [&put[..], &["maintenance", "fold"][..]] {
+            let (_, before) = hint_and_current(&harness).await;
+            assert_success(&harness.run(command));
+            let (hint, current) = hint_and_current(&harness).await;
+            assert!(
+                before < hint && hint <= current,
+                "{command:?} raises the hint past manifest {before}: the hint is at {hint}, \
+                 and manifest {current} is current"
+            );
+        }
+    }
 }
 
 #[test]

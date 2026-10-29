@@ -187,16 +187,17 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
         );
         assert_eq!(
             gets(DurableObjectFamily::MetadataManifest),
-            2,
-            "the fold's manifest and its absent successor; {operations:?}"
+            1,
+            "the fold's manifest; {operations:?}"
         );
         assert_eq!(
             operations
                 .iter()
                 .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
                 .count(),
-            1,
-            "one successor probe; {operations:?}"
+            2,
+            "discovery's probe after the fold's manifest and the anchor's successor check; \
+             {operations:?}"
         );
         if replay_receipt {
             assert!(!operations

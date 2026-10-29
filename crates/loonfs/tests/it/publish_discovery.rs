@@ -44,7 +44,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .create_directory("/first", &test_actor())
         .await
         .expect("first publish");
-    writer.wait_for_hint_raises().await;
+    writer.drain().await.expect("drain");
     let mut requests = store.take();
     // The runtime raises the hint to the claim after the publish, so the
     // raise's load and swap of the hint follow the commit's WAL put.
@@ -101,7 +101,6 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     }
     namespace.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("the fold's compaction settles");
-    writer.wait_for_hint_raises().await;
     store.reset();
     namespace
         .create_directory("/after-fold", &test_actor())
@@ -203,7 +202,9 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
     store.inner().release();
     namespace_writer.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("the fold's compaction settles");
-    writer.wait_for_hint_raises().await;
+    // The fold's hint raise can come less than a second after the claim's,
+    // which skips it, so the test raises the hint to the fold's manifest.
+    loonfs_core::test_support::raise_hint_to_current_manifest(store.as_ref(), &namespace_id).await;
     store.reset();
 
     namespace_writer
@@ -235,16 +236,16 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
                     .key()
                     .starts_with(&metadata_manifest_prefix(&namespace_id)))
             .count(),
-        2,
-        "the fold's manifest and its absent successor; {requests:?}"
+        1,
+        "the fold's manifest; {requests:?}"
     );
     assert_eq!(
         before_put
             .iter()
             .filter(|request| matches!(request, RecordedOperation::Head { .. }))
             .count(),
-        1,
-        "one successor probe; {requests:?}"
+        2,
+        "discovery's probe after the fold's manifest and one successor check; {requests:?}"
     );
     assert!(
         before_put

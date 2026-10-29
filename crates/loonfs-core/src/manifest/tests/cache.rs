@@ -1545,6 +1545,7 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
         &store,
         Some(&cache),
         &namespace_id,
+        None,
         loonfs_types::CompactorEpoch(0),
         MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,

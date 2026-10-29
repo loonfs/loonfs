@@ -3429,14 +3429,15 @@ async fn current_manifest_no(
         .manifest_no
 }
 
-/// Waits for the writer's hint raises, and checks that the namespace's hint
-/// records the namespace's current manifest.
+/// Drains the writer, so the hint raises of its sessions' publications have
+/// finished, and checks that the namespace's hint records the namespace's
+/// current manifest.
 async fn assert_hint_at_current_manifest(
     writer: &crate::LoonFs<crate::Writable>,
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
 ) {
-    writer.mode.publisher.wait_for_hint_raises().await;
+    writer.drain().await.expect("drain");
     assert_eq!(
         hint_manifest_no(store, namespace_id).await,
         current_manifest_no(store, namespace_id).await,
@@ -3444,6 +3445,7 @@ async fn assert_hint_at_current_manifest(
     );
 }
 
+mod basis_publications;
 mod fenced_session;
 mod head_positions;
 mod hint_raises;

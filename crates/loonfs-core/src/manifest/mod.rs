@@ -70,6 +70,7 @@ pub use self::fold::{
     fold_wal_tail, next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
 };
 pub use self::index_block_load::decode_stored_block;
+pub use self::load::load_position_basis;
 pub(crate) use self::published::same_head;
 pub use self::published::{PublicationReport, PublishedManifest};
 pub use self::retention::RetentionTarget;

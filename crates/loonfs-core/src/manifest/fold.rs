@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::metadata::{MetadataState, MetadataView};
-use crate::namespace::basis::MetadataBasis;
+use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
@@ -171,7 +171,14 @@ impl FoldedWalTail {
 /// The manifest copies both epochs from its predecessor (format spec,
 /// "Publishing a materialized file set"). A writer session passes the tail
 /// it holds as `held`, and every other caller passes `None`, which loads the
-/// tail from the store. Each publication attempt loads the current manifest.
+/// tail from the store. A held tail whose last check is at the revalidation
+/// bound is discarded, and the tail is loaded from the store too: garbage
+/// collection keeps the manifest that the tail was read above for one grace
+/// after a successor, and a check within the bound is younger than that
+/// grace (see `update_manifest`). The publication's first attempt starts
+/// from the manifest that the tail was read above, and each later attempt
+/// starts from the manifest that the attempt before it found (see
+/// `update_manifest`).
 /// A current manifest that folds the tail finishes the fold, and any other
 /// manifest after the fold's own predecessor makes the fold rebuild against
 /// it. The rebuild keeps the tail it read when the manifest is at the same
@@ -187,6 +194,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     content_writes: &crate::PermitPool,
 ) -> Result<FoldedWalTail> {
+    let held = held.filter(|held| held.basis_checked.is_within_revalidation_bound());
     let projection = match held {
         Some(held) => ManifestProjection {
             manifest_segments: load_basis_metadata_segments(store, segment_cache, &held.basis)
@@ -194,6 +202,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
                 .segments,
             head: held.head,
             basis: held.basis,
+            basis_checked: held.basis_checked,
             tail_state: held.tail_state,
         },
         None => {
@@ -211,6 +220,10 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
             FoldWalOutcome::AlreadyCurrent,
         ));
     }
+    let publication_basis = PublicationBasis {
+        manifest: projection.manifest_segments.loaded_manifest(),
+        checked: projection.basis_checked.clone(),
+    };
     // Each attempt's future borrows the fold through this lock, because a
     // future that a closure returns can't borrow the closure's own state.
     let fold = tokio::sync::Mutex::new(FoldAttempts {
@@ -226,6 +239,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     let folded = update_manifest(
         store,
         namespace_id,
+        Some(publication_basis),
         deadline,
         MAX_CONTENTION_ATTEMPTS,
         |current: LoadedManifest| {
@@ -349,6 +363,8 @@ impl<S: ObjectStore + ?Sized> FoldAttempts<'_, S> {
 pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
     pub(super) basis: MetadataBasis,
+    /// When a store observation last confirmed `basis` current.
+    pub(super) basis_checked: Observation,
     pub(super) manifest_segments: VerifiedMetadataSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.
@@ -395,6 +411,7 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     let basis = anchor.basis();
+    let basis_checked = anchor.checked.clone();
     let head = anchor.read_state;
     if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
@@ -412,6 +429,7 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     Ok(ManifestProjection {
         head,
         basis,
+        basis_checked,
         manifest_segments,
         tail_state: Arc::new(replayed.projected_tail),
     })

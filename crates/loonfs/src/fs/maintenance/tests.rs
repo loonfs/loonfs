@@ -1105,16 +1105,18 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .compactor_epoch(&claimed)
         .await
         .expect("claim the namespace");
+    // A runtime skips a hint raise less than a second after its last raise
+    // of the same hint, so the test raises each hint to its current manifest
+    // before the collection below and before it counts requests.
+    for namespace in [&idle, &claimed, &retired] {
+        loonfs_core::test_support::raise_hint_to_current_manifest(store.as_ref(), namespace).await;
+    }
     for namespace in [&idle, &claimed, &retired] {
         maintenance
             .gc(namespace)
             .await
             .expect("collect what the setup left behind");
     }
-    // The hint raises of the setup's folds and claim run after those
-    // publications return, so the test waits for the raises before it counts
-    // requests.
-    maintenance.publisher.wait_for_hint_raises().await;
 
     store.reset();
     let cancelled = crate::MaintenanceCancellation::new();
@@ -1129,9 +1131,13 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     );
     assert_eq!(requests(store.counts()), [0; 4]);
 
+    // A load of a live namespace sends a HEAD request for the missing
+    // manifest after the current one in its discovery, and again in its
+    // check of the manifest's successor.
+    let heads = 2;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
-        (&idle, [5, 1, 0, 0], None, [5, 1, 10, 0], None),
-        (&claimed, [5, 1, 0, 0], None, [5, 1, 10, 0], None),
+        (&idle, [4, heads, 0, 0], None, [4, heads, 10, 0], None),
+        (&claimed, [4, heads, 0, 0], None, [4, heads, 10, 0], None),
         (
             &retired,
             [2, 0, 0, 0],
@@ -1189,9 +1195,6 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .compactor_epoch(&claimed)
         .await
         .expect("another process claims the namespace");
-    // The claim's hint raise runs after the claim returns, so the test waits
-    // for the raise before it counts requests.
-    other.mode.publisher.wait_for_hint_raises().await;
     store.reset();
     let fenced = maintenance
         .maintain_metadata(&claimed)
@@ -1200,7 +1203,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     assert_eq!(fenced.compaction, MetadataCompactionOutcome::Fenced);
     assert_eq!(
         requests(store.counts()),
-        [5, 1, 0, 0],
+        [4, heads, 0, 0],
         "the observed anchor already reports the fence"
     );
 }
@@ -1248,25 +1251,25 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
         (
             ChangeSeq(1),
             [
-                (RetentionTarget::Seq(ChangeSeq(0)), 4),
-                (RetentionTarget::Seq(ChangeSeq(1)), 4),
+                (RetentionTarget::Seq(ChangeSeq(0)), 3),
+                (RetentionTarget::Seq(ChangeSeq(1)), 3),
                 // The scan reads commit 2 from the commits segment, and
                 // commit 2 is later than the cutoff.
-                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 5),
+                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 4),
             ],
         ),
         (
             ChangeSeq(2),
             [
-                (RetentionTarget::Head, 4),
-                (RetentionTarget::Seq(ChangeSeq(u64::MAX)), 4),
+                (RetentionTarget::Head, 3),
+                (RetentionTarget::Seq(ChangeSeq(u64::MAX)), 3),
                 // No folded commit is above the head, so the scan reads no
                 // segment.
                 (
                     RetentionTarget::Cutoff {
                         cutoff_at_ms: u64::MAX,
                     },
-                    4,
+                    3,
                 ),
             ],
         ),
@@ -1281,16 +1284,13 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
             )
             .await
             .expect("advance the floor");
-        // The advance's hint raise runs after the advance returns, so the
-        // test waits for the raise before it counts requests.
-        advancing.publisher.wait_for_hint_raises().await;
         let manifest = metadata_manifest_object(
             &namespace,
             &current_manifest_payload(store.as_ref(), &namespace)
                 .await
                 .manifest_no,
         );
-        for (target, requests) in advances {
+        for (target, gets) in advances {
             let maintenance = maintenance().await;
             store.reset();
             let advanced = maintenance
@@ -1302,12 +1302,18 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                 .expect("an advance that moves nothing");
             assert_eq!(advanced.retention_floor_seq, floor, "{target:?}");
             let operations = store.take();
+            let heads = operations
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
+                .count();
             assert!(
                 operations.iter().all(|operation| matches!(
                     operation,
-                    RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. }
+                    RecordedOperation::Get { .. }
+                        | RecordedOperation::GetWithMetadata { .. }
+                        | RecordedOperation::Head { .. }
                 )),
-                "{target:?} sends only GET requests: {operations:?}"
+                "{target:?} sends only reads: {operations:?}"
             );
             let loads = operations
                 .iter()
@@ -1316,10 +1322,11 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                 })
                 .count();
             assert_eq!(
-                (loads, operations.len()),
-                (1, requests),
-                "{target:?} loads the current manifest once (the hint, the manifest, the \
-                 missing next manifest, and the hint again): {operations:?}"
+                (loads, operations.len() - heads, heads),
+                (1, gets, 1),
+                "{target:?} loads the current manifest once (the hint, the manifest, a HEAD \
+                 request for the missing manifest after it, and the hint again): \
+                 {operations:?}"
             );
         }
     }
@@ -1695,11 +1702,15 @@ impl ObjectStore for HeldHintAnswer {
 }
 
 /// Checks that a session's compaction step reads the writer position before
-/// the manifest. The step's manifest read ends with a second read of the
-/// hint, and the answer to that read is held while the session's fold
-/// publishes the next manifest and moves the position onto it. The step must
-/// then plan from a manifest at least as new as the position that it read,
-/// so the tail that it saw unfolded leaves metadata due instead of caught up.
+/// the manifest.
+///
+/// The position's last check is past the revalidation bound, so the step
+/// loads the current manifest through the hint. The step's manifest read
+/// ends with a second read of the hint, and the answer to that read is held
+/// while the session's fold publishes the next manifest and moves the
+/// position onto it. The step must then plan from a manifest at least as new
+/// as the position that it read, so the tail that it saw unfolded leaves
+/// metadata due instead of caught up.
 #[tokio::test]
 async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
     let directory = tempdir().expect("tempdir");
@@ -1711,10 +1722,12 @@ async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
         held: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
     });
+    let clock = Arc::new(ManualClock::new(0));
     // Each write leaves inline bytes in the tail, so the session folds each
     // write.
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .monotonic_timer(clock.clone())
         .inline_content(crate::InlineContentPolicy {
             inline_content_fold_at_bytes: 1,
             ..crate::InlineContentPolicy::default()
@@ -1737,7 +1750,6 @@ async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
         .expect("put a file");
     namespace.wait_for_fold().await.expect("the fold settles");
     writer.drain().await.expect("nothing else runs");
-    writer.mode.publisher.wait_for_hint_raises().await;
 
     // With the fold permits held, the next write waits unfolded in the
     // session's position.
@@ -1752,6 +1764,10 @@ async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
     let before = current_manifest_payload(store.as_ref(), &namespace_id)
         .await
         .manifest_no;
+    // A step plans from a position checked within the revalidation bound
+    // without loading the manifest, so the test ages the position past the
+    // bound.
+    clock.advance_ms(loonfs_core::limits::READ_REVALIDATION_BOUND_MS);
 
     store
         .reads_until_held
@@ -1820,7 +1836,6 @@ impl EarlierManifestView {
 #[async_trait::async_trait]
 impl ObjectStore for EarlierManifestView {
     loonfs_test_support::delegate_object_store!(self => self.inner;
-        head,
         checksum_algorithm,
         identity,
         create_multipart_upload,
@@ -1838,6 +1853,17 @@ impl ObjectStore for EarlierManifestView {
         list_prefix,
         list_child_prefixes,
     );
+
+    async fn head(
+        &self,
+        key: &str,
+    ) -> Result<Option<loonfs_objectstore::ObjectMetadata>, loonfs_objectstore::ObjectStoreError>
+    {
+        match self.answer(key) {
+            Some(None) => Ok(None),
+            _ => self.inner.head(key).await,
+        }
+    }
 
     async fn get_with_metadata(
         &self,
@@ -1862,9 +1888,12 @@ impl ObjectStore for EarlierManifestView {
 }
 
 /// Checks that a session's compaction step that finds a current manifest
-/// older than the writer position's manifest reports metadata due. The
-/// publish order rules that out, so the store fakes it: it answers with the
-/// hint from before the session's last fold, and hides the fold's manifest.
+/// older than the writer position's manifest reports metadata due.
+///
+/// The publish order rules that out, so the store fakes it: it answers with
+/// the hint from before the session's last fold, and hides the fold's
+/// manifest. The position's last check is past the revalidation bound, so
+/// the step loads the current manifest through the hint.
 #[tokio::test]
 async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
     let directory = tempdir().expect("tempdir");
@@ -1875,10 +1904,12 @@ async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
         hint_key: hint_key.clone(),
         view: std::sync::Mutex::new(None),
     });
+    let clock = Arc::new(ManualClock::new(0));
     // Each write leaves inline bytes in the tail, so the session folds each
     // write.
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .monotonic_timer(clock.clone())
         .inline_content(crate::InlineContentPolicy {
             inline_content_fold_at_bytes: 1,
             ..crate::InlineContentPolicy::default()
@@ -1901,7 +1932,6 @@ async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
         .expect("put a file");
     namespace.wait_for_fold().await.expect("the fold settles");
     writer.drain().await.expect("nothing else runs");
-    writer.mode.publisher.wait_for_hint_raises().await;
     let earlier_hint = store
         .inner
         .get_with_metadata(&hint_key)
@@ -1917,8 +1947,11 @@ async fn a_session_compaction_step_behind_the_position_reports_metadata_due() {
         .expect("put a file");
     namespace.wait_for_fold().await.expect("the fold settles");
     writer.drain().await.expect("nothing else runs");
-    writer.mode.publisher.wait_for_hint_raises().await;
 
+    // A step plans from a position checked within the revalidation bound
+    // without loading the manifest, so the test ages the position past the
+    // bound.
+    clock.advance_ms(loonfs_core::limits::READ_REVALIDATION_BOUND_MS);
     *store.view.lock().expect("view lock") = Some((earlier_hint, earlier));
     let step = maintenance
         .metadata_step(

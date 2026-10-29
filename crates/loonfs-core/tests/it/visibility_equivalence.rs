@@ -966,6 +966,7 @@ async fn drain_compaction(
         let report = harness
             .engine
             .compact_metadata_unit(
+                None,
                 loonfs_core::MetadataCompactionPolicy::default(),
                 loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),

@@ -461,7 +461,6 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
                 &namespace_id,
                 compactor_claim.manifest.manifest_no,
                 None,
-                crate::test_support::std_timer(),
             )
             .await
             .expect("raise the hint");

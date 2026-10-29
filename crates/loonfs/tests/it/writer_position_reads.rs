@@ -17,6 +17,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::{ChecksumAlgorithm, ManifestNo, NamespaceId};
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,6 +66,11 @@ pub(crate) enum Parked {
     WalPuts,
     /// HEAD requests for the namespace's manifests.
     ManifestChecks,
+    /// The HEAD request that ends a load of the namespace: the check of the
+    /// loaded manifest's successor, which follows the load's WAL reads. The
+    /// probe of the load's discovery comes before those reads, so it isn't
+    /// parked.
+    LoadChecks,
     /// GET requests for the namespace's WAL objects.
     WalReads,
 }
@@ -73,28 +79,37 @@ pub(crate) enum Parked {
 /// with a 1 KiB file, and a reader on the writer's runtime.
 pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
     let namespace_id = namespace_id(name);
-    let (keys, operation) = match parked {
-        Parked::WalPuts => (
-            KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id)),
+    let memory = MemoryStore::new(ChecksumAlgorithm::Crc64nvme);
+    let wal = loonfs_objectstore::keys::wal_prefix(&namespace_id);
+    let blocking = match parked {
+        Parked::WalPuts => BlockingStore::new(
+            memory,
+            KeyPredicate::prefix(wal),
             OperationSelector::PutCreateIfAbsent,
         ),
-        Parked::ManifestChecks => (
+        Parked::ManifestChecks => BlockingStore::new(
+            memory,
             KeyPredicate::manifest(&namespace_id),
             OperationSelector::Head,
         ),
-        Parked::WalReads => (
-            KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id)),
-            OperationSelector::Get,
-        ),
+        Parked::LoadChecks => {
+            let manifests = metadata_manifest_prefix(&namespace_id);
+            // Whether a WAL read came after the last other read.
+            let wal_read = AtomicBool::new(false);
+            BlockingStore::matching(memory, move |operation| {
+                if OperationSelector::Read.matches(operation.kind()) {
+                    wal_read.store(operation.key().starts_with(&wal), Ordering::SeqCst);
+                }
+                operation.key().starts_with(&manifests)
+                    && OperationSelector::Head.matches(operation.kind())
+                    && wal_read.load(Ordering::SeqCst)
+            })
+        }
+        Parked::WalReads => {
+            BlockingStore::new(memory, KeyPredicate::prefix(wal), OperationSelector::Get)
+        }
     };
-    let recording = Arc::new(RecordingStore::new(
-        BlockingStore::new(
-            MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
-            keys,
-            operation,
-        ),
-        KeyPredicate::any(),
-    ));
+    let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
     let clock = Arc::new(ManualClock::new(1_000_000));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -546,11 +561,14 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
     let (during, folded) = futures::join!(fixture.put("/during.txt"), async {
         gate.wait_until_blocked().await;
         let (folded, ()) = futures::join!(maintenance.fold_wal(&fixture.namespace_id), async {
-            // The fold's last request raises the hint, and then its move of
-            // the position waits for the publish's engine.
+            // The fold's manifest put is its last request before its move
+            // of the position, which waits for the publish's engine.
             wait_for_operation(&fixture.recording, |operation| {
-                operation.key() == hint(&fixture.namespace_id)
-                    && matches!(operation, RecordedOperation::Put { .. })
+                matches!(
+                    operation,
+                    RecordedOperation::Put { key, .. }
+                        if *key == metadata_manifest_object(&fixture.namespace_id, &fold_manifest)
+                )
             })
             .await;
             fixture.clock.advance_ms(MAX_STALENESS_MS);

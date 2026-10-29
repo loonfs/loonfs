@@ -24,6 +24,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::MAX_COMPACTION_INPUT_RUNS;
 use crate::namespace::control::{ensure_namespace_live, load_current_manifest, CurrentManifest};
 use crate::namespace::state::NamespaceReadState;
+use crate::namespace::PublicationBasis;
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
@@ -99,13 +100,15 @@ pub enum CompactionUnitOutcome {
 
 /// Runs one compaction unit against the current manifest.
 ///
-/// The unit loads the current manifest once, plans from its descriptors, and
-/// reads its input runs without the cache. The merge checks `cancellation`
-/// between blocks. The unit publishes through [`finalize_metadata_compaction`],
-/// which retries a lost put over the manifest that won while the unit's input
-/// segments are unchanged. The unit's time bound starts before the load (see
-/// `METADATA_COMPACTION_BUDGET_MS`). Each call reloads durable state, so
-/// callers may repeat it safely across process restarts.
+/// The unit plans from `basis`, or from the current manifest that it loads
+/// when `basis` is `None`, and reads its input runs without the cache. The
+/// merge checks `cancellation` between blocks. The unit publishes through
+/// [`finalize_metadata_compaction`], starting from the manifest it planned
+/// from, and finalization retries a lost put over the manifest that won
+/// while the unit's input segments are unchanged. The unit's time bound
+/// starts at the start of the call, before any load (see
+/// `METADATA_COMPACTION_BUDGET_MS`). A call without a basis reloads durable
+/// state, so callers may repeat it safely across process restarts.
 #[allow(
     clippy::too_many_arguments,
     reason = "one unit's inputs, listed instead of grouped into a second struct"
@@ -121,6 +124,7 @@ pub(crate) async fn compact_unit<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
+    basis: Option<PublicationBasis>,
     compactor_epoch: CompactorEpoch,
     policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
@@ -129,9 +133,19 @@ pub(crate) async fn compact_unit<S: ObjectStore + ?Sized>(
     timer: Arc<dyn MonotonicTimer>,
 ) -> Result<CompactionUnitOutcome> {
     let compaction = Deadline::start(Arc::clone(&timer));
-    let current = load_current_manifest(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
+    let basis = match basis {
+        Some(basis) => basis,
+        None => {
+            let checked = compaction.observe();
+            PublicationBasis {
+                manifest: load_current_manifest(store, namespace_id)
+                    .await
+                    .map_err(CoreError::ControlObjectLoad)?,
+                checked,
+            }
+        }
+    };
+    let current = &basis.manifest;
     let payload = current.state.envelope.payload();
     if payload.compactor_epoch != compactor_epoch {
         return Ok(CompactionUnitOutcome::Fenced);
@@ -139,7 +153,7 @@ pub(crate) async fn compact_unit<S: ObjectStore + ?Sized>(
     ensure_namespace_live(&NamespaceReadState::from(payload))?;
     // The unit reads its input runs without the cache, and the merge inserts
     // its output into the cache.
-    let segments = metadata_basis_from_manifest(store, None, &current).segments;
+    let segments = metadata_basis_from_manifest(store, None, current).segments;
     let Some(spec) = plan_compaction(payload, &segments.scan_runs, policy, compaction_policy)
     else {
         return Ok(CompactionUnitOutcome::NotNeeded);
@@ -180,6 +194,7 @@ pub(crate) async fn compact_unit<S: ObjectStore + ?Sized>(
             finalize_metadata_compaction(
                 store,
                 namespace_id,
+                Some(basis),
                 &spec,
                 &input_keys,
                 merged,

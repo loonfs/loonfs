@@ -373,55 +373,127 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
     }
 }
 
+/// Points the namespace's hint at `manifest_no`, discovers the current
+/// manifest, and returns it with the discovery's requests for the hint and
+/// the manifests.
+async fn discover_from_hint(
+    store: &RecordingStore<LocalFsStore>,
+    namespace_id: &NamespaceId,
+    manifest_no: u64,
+) -> (ManifestNo, Vec<(&'static str, String)>) {
+    let bytes = encode_control_state(
+        ControlObjectKind::Hint,
+        &HintPayload {
+            namespace_id: namespace_id.clone(),
+            manifest_no: ManifestNo(manifest_no),
+        },
+    )
+    .expect("hint");
+    replace_object(store, &hint(namespace_id), Bytes::from(bytes))
+        .await
+        .expect("rewind hint");
+    store.reset();
+    let current = load_current_manifest(store, namespace_id)
+        .await
+        .expect("discover");
+    (
+        current.state.manifest().manifest_no,
+        control_requests(namespace_id, &store.take()),
+    )
+}
+
+/// Checks that discovery loads the hinted manifest and sends a HEAD request
+/// for the number after it, which ends discovery when the number is missing.
+/// When it exists, discovery probes the numbers above it a window at a time
+/// with HEAD requests, loads only the newest manifest found, and reads the
+/// hint again. A tombstone that the probe finds ends discovery, and a
+/// missing hint reads as an absent namespace.
 #[tokio::test]
-async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
+async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_absent() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    let context = test_context();
-    create(&store, &namespace_id, &context)
+    create(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
-    write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
-        .await
-        .expect("write");
-    fold::fold_wal(&store, &namespace_id).await.expect("fold");
-    let expected = load_current_manifest(&store, &namespace_id)
-        .await
-        .expect("current");
-    for manifest_no in [ManifestNo(1), ManifestNo(2)] {
-        let bytes = encode_control_state(
-            ControlObjectKind::Hint,
-            &HintPayload {
-                namespace_id: namespace_id.clone(),
-                manifest_no,
-            },
-        )
-        .expect("hint");
-        replace_object(&store, &hint(&namespace_id), Bytes::from(bytes))
+    for _ in 2..=11 {
+        crate::manifest::claim_compactor(&store, &namespace_id, crate::test_support::std_timer())
             .await
-            .expect("rewind hint");
-        store.reset();
-        let actual = load_current_manifest(&store, &namespace_id)
-            .await
-            .expect("discover");
-        assert_eq!(actual.state, expected.state);
-        assert_eq!(
-            store.counts().gets as u64,
-            expected.state.manifest().manifest_no.0 - manifest_no.0
-                + 1
-                + u64::from(manifest_no.0 > 0)
-        );
-        assert_eq!(store.counts().lists, 0);
-        assert_eq!(store.counts().puts, 0);
+            .expect("publish a claim");
     }
-    store
-        .delete(&hint(&namespace_id))
-        .await
-        .expect("delete hint");
+    let window = u64::try_from(crate::limits::MANIFEST_PROBE_WINDOW).expect("a small window");
+    let hint = hint(&namespace_id);
+    let get = |number| {
+        (
+            "get",
+            metadata_manifest_object(&namespace_id, &ManifestNo(number)),
+        )
+    };
+    let heads = |first: u64, last: u64| {
+        (first..=last)
+            .map(|number| {
+                (
+                    "head",
+                    metadata_manifest_object(&namespace_id, &ManifestNo(number)),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    // A current hint costs one HEAD request. A hint 1 or 3 manifests behind
+    // costs that HEAD request and one window above it, and a hint 9
+    // manifests behind costs two windows, because the first one ends at a
+    // manifest that exists.
+    for (hinted, probed_through) in [
+        (11, 12),
+        (10, 11 + window),
+        (8, 9 + window),
+        (2, 3 + 2 * window),
+    ] {
+        let mut expected = vec![("get", hint.clone()), get(hinted)];
+        expected.extend(heads(hinted + 1, probed_through));
+        if hinted != 11 {
+            expected.push(get(11));
+        }
+        expected.push(("get", hint.clone()));
+        assert_eq!(
+            discover_from_hint(&store, &namespace_id, hinted).await,
+            (ManifestNo(11), expected),
+            "a hint at manifest {hinted}"
+        );
+    }
+
+    let ((), tombstone, _) = crate::manifest::publish::update_manifest(
+        &store,
+        &namespace_id,
+        None,
+        &Deadline::start(crate::test_support::std_timer()),
+        crate::limits::MAX_CONTENTION_ATTEMPTS,
+        |current: crate::namespace::control::LoadedManifest| async move {
+            let mut payload = current.state.envelope.payload().clone();
+            payload.status =
+                loonfs_types::format::control::NamespaceStatus::Deleted { deleted_at_ms: 1 };
+            Ok(crate::manifest::publish::ManifestChange::Next(
+                Box::new(payload),
+                (),
+            ))
+        },
+    )
+    .await
+    .expect("publish a tombstone");
+    assert_eq!(tombstone.state.manifest().manifest_no, ManifestNo(12));
+    let mut expected = vec![("get", hint.clone()), get(8)];
+    expected.extend(heads(9, 9 + window));
+    expected.push(get(12));
+    assert_eq!(
+        discover_from_hint(&store, &namespace_id, 8).await,
+        (ManifestNo(12), expected),
+        "the tombstone ends discovery without another read of the hint"
+    );
+
+    store.delete(&hint).await.expect("delete hint");
     store.reset();
     let error = load_current_metadata_view(&store, &namespace_id)
         .await
@@ -554,6 +626,7 @@ async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
     let ((), published, hint) = crate::manifest::publish::update_manifest(
         &store,
         &namespace_id,
+        None,
         &deadline,
         crate::limits::MAX_CONTENTION_ATTEMPTS,
         |current: crate::namespace::control::LoadedManifest| async move {
@@ -566,13 +639,15 @@ async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
     .await
     .expect("publish");
     assert_eq!(published.state.manifest().manifest_no, ManifestNo(2));
-    assert_eq!(hint, before);
+    assert_eq!(hint.as_ref(), Some(&before));
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(
         hint,
-        crate::namespace::control::load_hint(&store, &namespace_id)
-            .await
-            .expect("stored hint")
+        Some(
+            crate::namespace::control::load_hint(&store, &namespace_id)
+                .await
+                .expect("stored hint")
+        )
     );
 }
 
@@ -592,6 +667,7 @@ async fn a_manifest_update_stops_after_the_contention_limit() {
         let result = update_manifest(
             &store,
             &namespace_id,
+            None,
             &deadline,
             crate::limits::MAX_CONTENTION_ATTEMPTS,
             |current: crate::namespace::control::LoadedManifest| {

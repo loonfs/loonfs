@@ -30,6 +30,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::LoadedManifest;
+use crate::namespace::PublicationBasis;
 use crate::time::Deadline;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -259,7 +260,9 @@ impl CompactionPublication {
 
 /// Swaps the rebuilt run in for the input it replaces.
 ///
-/// Each attempt checks the current manifest that `update_manifest` loaded.
+/// The publication starts from `basis`, the manifest that the unit planned
+/// from, or loads the current manifest when `basis` is `None`. Each attempt
+/// checks the current manifest that `update_manifest` found.
 /// That manifest must still contain the segments the unit merged, and the
 /// replacement keeps every run published meanwhile. A lost manifest put is
 /// retried over the manifest that won, while changes to the unit's input
@@ -267,9 +270,14 @@ impl CompactionPublication {
 ///
 /// The publication budget starts during finalization rather than at the start
 /// of the potentially long rebuild.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "finalization takes the unit's basis, plan, inputs, output, and publication clock"
+)]
 pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    basis: Option<PublicationBasis>,
     spec: &MetadataCompactionSpec,
     input_keys: &BTreeSet<String>,
     result: MetadataMergeReport,
@@ -281,6 +289,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     let finalized = update_manifest(
         store,
         namespace_id,
+        basis,
         &publication.publication,
         MAX_FINALIZATION_ATTEMPTS,
         |current: LoadedManifest| async move {

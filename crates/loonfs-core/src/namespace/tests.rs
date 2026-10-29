@@ -378,13 +378,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     publish(&mut engine, &store, "seed").await.expect("seed");
     store.block_next();
     let (hint_result, ()) = futures::join!(
-        super::control::raise_namespace_hint(
-            &store,
-            &namespace_id,
-            ManifestNo(2),
-            Some(known),
-            crate::test_support::std_timer()
-        ),
+        super::control::raise_namespace_hint(&store, &namespace_id, ManifestNo(2), Some(known)),
         async {
             store.wait_until_blocked().await;
             crate::manifest::fold_wal(store.inner(), &namespace_id)
@@ -402,15 +396,9 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
             .expect("advance floor");
             // The runtime that published the fold and the advance raises the
             // hint after them, while the raise to manifest 2 is still pending.
-            super::control::raise_namespace_hint(
-                store.inner(),
-                &namespace_id,
-                ManifestNo(4),
-                None,
-                crate::test_support::std_timer(),
-            )
-            .await
-            .expect("raise the hint past the pending raise");
+            super::control::raise_namespace_hint(store.inner(), &namespace_id, ManifestNo(4), None)
+                .await
+                .expect("raise the hint past the pending raise");
             let aged = MutationContext {
                 now_ms: grace + 1,
                 ..context()
@@ -429,7 +417,12 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
             store.release();
         }
     );
-    hint_result.expect("finish pending hint");
+    // The pending raise's compare-and-swap loses to the newer raise, and the
+    // raise makes no second attempt.
+    std::assert_matches!(
+        hint_result.expect_err("the pending raise loses its write"),
+        crate::CoreError::StoreContention { .. }
+    );
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("discover past lagging hint");
@@ -440,15 +433,9 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     let known = super::control::load_hint(&store, &namespace_id)
         .await
         .expect("hint");
-    super::control::raise_namespace_hint(
-        &store,
-        &namespace_id,
-        ManifestNo(1),
-        Some(known),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("refresh hint");
+    super::control::raise_namespace_hint(&store, &namespace_id, ManifestNo(1), Some(known))
+        .await
+        .expect("refresh hint");
     let aged = MutationContext {
         now_ms: 2 * grace + 2,
         ..context()

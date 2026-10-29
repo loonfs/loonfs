@@ -8,7 +8,7 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::manifest::{FoldWalResponse, PublicationReport};
 use crate::metadata::access::is_administrator;
-use crate::namespace::basis::MetadataBasis;
+use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::{bootstrap, fork};
@@ -126,6 +126,9 @@ pub struct NamespaceEngine<S, M> {
     authorization_head: Option<RuntimeReadContext>,
     run_policy: crate::manifest::MetadataRunPolicy,
     segment_cache: Option<Arc<MetadataSegmentCache>>,
+    /// The writer session's position that [`NamespaceEngine::fold_wal`]
+    /// folds, or `None` to load the tail from the store.
+    writer_position: Option<crate::commit_engine::WalFoldInput>,
     /// A narrowed per-segment row budget, so a test can get many compacted
     /// segments from a few thousand rows. See [`Self::narrow_segment_row_budget`].
     #[cfg(any(test, feature = "test-support"))]
@@ -369,6 +372,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             authorization_head: None,
             run_policy: crate::manifest::MetadataRunPolicy::default(),
             segment_cache: None,
+            writer_position: None,
             #[cfg(any(test, feature = "test-support"))]
             #[cfg(any(test, feature = "test-support"))]
             segment_row_budget: None,
@@ -413,6 +417,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// compactions, pins, and retention floor advances.
     pub fn with_metadata_segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
         self.segment_cache = Some(segment_cache);
+        self
+    }
+
+    /// Sets a writer session's position for [`Self::fold_wal`] to fold, so
+    /// the fold takes the tail from the position instead of loading it from
+    /// the store, and publishes on the position's manifest.
+    pub fn with_writer_position(mut self, position: crate::commit_engine::WalFoldInput) -> Self {
+        self.writer_position = Some(position);
         self
     }
 
@@ -1299,14 +1311,16 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// This is the latest-state maintenance operation: it absorbs the visible
     /// WAL tail into a new manifest, creating no
     /// pin. Superseded manifests become garbage-collection
-    /// candidates once nothing pins them. The report includes the manifest
-    /// this call published.
+    /// candidates once nothing pins them. If [`Self::with_writer_position`]
+    /// set a position, the fold takes the tail from that position while the
+    /// position's last check is within the revalidation bound. The report
+    /// includes the manifest this call published.
     pub async fn fold_wal(&self) -> Result<PublicationReport<FoldWalResponse>> {
         let folded = crate::manifest::fold_wal_tail(
             &self.store,
             self.segment_cache.as_deref(),
             &self.namespace_id,
-            None,
+            self.writer_position.clone(),
             &crate::time::Deadline::start(Arc::clone(&self.timer)),
             self.effective_run_policy(),
             &self.content_writes,
@@ -1350,10 +1364,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
     /// Runs one metadata compaction unit under the claimed compactor epoch.
     ///
+    /// The unit plans from `basis`, a manifest that the caller already has,
+    /// or from the current manifest that it loads when `basis` is `None`.
     /// `admission` decides whether the unit may merge a window over the run
-    /// policy's row budget, and `cancellation` stops the merge between blocks.
+    /// policy's row budget, and `cancellation` stops the merge between
+    /// blocks.
     pub async fn compact_metadata_unit(
         &self,
+        basis: Option<PublicationBasis>,
         compaction_policy: crate::manifest::MetadataCompactionPolicy,
         admission: crate::manifest::CompactionAdmission,
         compactor_epoch: CompactorEpoch,
@@ -1363,6 +1381,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             self.segment_cache.as_deref(),
             &self.namespace_id,
+            basis,
             compactor_epoch,
             self.effective_run_policy(),
             compaction_policy,

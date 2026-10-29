@@ -71,9 +71,11 @@ async fn fixture(fold: Fold) -> Fixture {
         assert_eq!(folded.outcome, FoldWalOutcome::Published);
     }
     writer.drain().await.expect("the fold settles");
-    // The folds' hint raise runs after the folds return, so the fixture waits
-    // for the raise before the tests count requests.
-    writer.wait_for_hint_raises().await;
+    // The writer's timer doesn't move, so the writer skips every hint raise
+    // after the claim's, and the fixture raises the hint to the current
+    // manifest before the tests count requests.
+    loonfs_core::test_support::raise_hint_to_current_manifest(recording.as_ref(), &namespace_id)
+        .await;
     Fixture {
         recording,
         writer,

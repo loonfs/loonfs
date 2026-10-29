@@ -4,10 +4,10 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
 use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache, PublishedManifest};
-use crate::namespace::basis::MetadataBasis;
+use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::control::{
-    load_current_manifest_with_hint, load_manifest_by_no, CurrentManifest, LoadedHint,
-    LoadedManifest,
+    load_current_manifest_with_hint, load_manifest_by_no, manifest_exists, CurrentManifest,
+    LoadedHint, LoadedManifest,
 };
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::{
@@ -24,6 +24,9 @@ pub struct NamespaceReadAnchor {
     pub(crate) manifest: LoadedManifest,
     pub(crate) hint: LoadedHint,
     pub(crate) tail: ValidatedWalTail,
+    /// When the anchor's checks began, read before the anchor loaded
+    /// `manifest` and confirmed it with a successor check.
+    pub(crate) checked: crate::time::Observation,
 }
 
 impl NamespaceReadAnchor {
@@ -39,6 +42,15 @@ impl NamespaceReadAnchor {
     /// the WAL tail above that manifest.
     pub fn current_manifest(&self) -> &CurrentManifest {
         &self.manifest.state
+    }
+
+    /// Returns the anchor's manifest, with the time that the anchor's checks
+    /// began, as a basis that a publication can build on.
+    pub fn publication_basis(&self) -> PublicationBasis {
+        PublicationBasis {
+            manifest: self.manifest.clone(),
+            checked: self.checked.clone(),
+        }
     }
 }
 
@@ -91,6 +103,7 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
                     manifest,
                     hint,
                     tail,
+                    checked: observed,
                 });
             }
             Err(error @ ControlObjectLoadError::Codec { .. }) => {
@@ -134,16 +147,7 @@ pub async fn manifest_has_successor<S: ObjectStore + ?Sized>(
     let Ok(next) = manifest_no.successor() else {
         return Ok(false);
     };
-    let object_key = loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &next);
-    Ok(store
-        .head(&object_key)
-        .await
-        .map_err(|error| ControlObjectLoadError::Store {
-            object_key: object_key.clone(),
-            message: error.public_message().into_owned(),
-            kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
-        })?
-        .is_some())
+    manifest_exists(store, namespace_id, next).await
 }
 
 /// Returns the manifests above `basis`, oldest first, for a position at

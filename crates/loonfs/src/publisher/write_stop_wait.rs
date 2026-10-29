@@ -209,10 +209,13 @@ async fn engine_wal_tail_objects(publisher: &NamespacePublisher) -> u64 {
 /// retry, and that `write_stop_waits` records it.
 #[tokio::test]
 async fn a_commit_at_the_write_stop_waits_for_the_fold_and_commits() {
-    let fixture = fixture(|builder| builder).await;
+    let timer = Arc::new(ManualClock::new(0));
+    let fixture = fixture(|builder| builder.monotonic_timer(timer.clone())).await;
     let commit = start_commit_at_the_write_stop(&fixture).await;
     assert!(!commit.is_finished(), "the commit waits for the fold");
 
+    // The fold's hint raise starts an interval after the claim's.
+    timer.advance_ms(loonfs_core::limits::HINT_RAISE_INTERVAL_MS);
     fixture.store.release();
     settle_commit(commit)
         .await

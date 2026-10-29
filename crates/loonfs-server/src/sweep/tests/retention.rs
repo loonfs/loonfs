@@ -544,16 +544,17 @@ async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
         // The first pass moves the floor to the head when a window applies,
         // and collects what the seed left behind. Nobody writes to the
         // namespace, so the second pass acknowledges that floor with a fence
-        // and a fold. Each hint raise runs after its publication returns, so
-        // the test waits for the raises, and each pass collects the
-        // manifests that the previous pass replaced.
+        // and a fold. The runtime skips a hint raise less than a second after
+        // its last one, so the test raises the hint to the current manifest
+        // after each pass, and each pass collects the manifests that the
+        // previous pass replaced.
         for _ in 0..3 {
             server
                 .sweep
                 .run_pass(GarbageCollection::Collect)
                 .await
                 .expect("list namespaces");
-            server.runtime.wait_for_hint_raises().await;
+            super::raise_hint_to_current_manifest(store.as_ref(), &namespace_id).await;
         }
         let windows = format!("server {server_window_ms:?}, namespace {namespace_window_ms:?}");
 
