@@ -39,13 +39,17 @@ pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Vec<By
         .map(|piece| piece.bytes.clone())
         .collect();
     if content.pieces[0].offset == 0 {
-        let object_key = content_object_key_for_ref(newest)?;
-        let actual = checksum_pieces(&pieces, newest.checksum.algorithm);
+        let object_key = content_object_key_for_ref(newest);
+        let actual = checksum_pieces(&pieces, newest.checksum.algorithm());
         if actual != newest.checksum {
             return Err(DurableContentValidationError::ContentChecksumMismatch {
                 object_key,
-                expected: format!("{}:{}", newest.checksum.algorithm, newest.checksum.value),
-                actual: format!("{}:{}", actual.algorithm, actual.value),
+                expected: format!(
+                    "{}:{}",
+                    newest.checksum.algorithm(),
+                    newest.checksum.value()
+                ),
+                actual: format!("{}:{}", actual.algorithm(), actual.value()),
             }
             .into());
         }
@@ -306,7 +310,7 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
         let checksum = stored
             .checksum
             .clone()
-            .filter(|checksum| checksum.algorithm == store.checksum_algorithm())
+            .filter(|checksum| checksum.algorithm() == store.checksum_algorithm())
             .ok_or_else(corrupt)?;
         expected = expected
             .crc_combine(&checksum, stored.size_bytes)
@@ -320,7 +324,7 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
     }
     let expected = expected
         .crc_combine(
-            &checksum_pieces(tail, expected.algorithm),
+            &checksum_pieces(tail, expected.algorithm()),
             tail.iter().map(|piece| piece.len() as u64).sum(),
         )
         .ok_or_else(|| {

@@ -3,7 +3,6 @@
 use super::*;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::manifest::row::manifest_rows_for_family;
-use crate::manifest::runs::MANIFEST_ROW_FAMILIES;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::test_support::ops::{create, write_file_bytes};
@@ -145,7 +144,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
         .await
         .expect("projection");
         let tail_rows = projection.tail_state.merged_rows();
-        let expected = MANIFEST_ROW_FAMILIES
+        let expected = MetadataRowFamily::ALL
             .into_iter()
             .flat_map(|family| {
                 manifest_rows_for_family(&tail_rows, family)
@@ -156,7 +155,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
             .collect::<Vec<_>>();
         if rows_per_segment == 2 {
             assert!(expected.len() > STORE_WRITES_IN_FLIGHT);
-            for family in MANIFEST_ROW_FAMILIES {
+            for family in MetadataRowFamily::ALL {
                 let count = expected
                     .iter()
                     .filter(|(actual, _)| *actual == family)

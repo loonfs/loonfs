@@ -422,6 +422,7 @@ pub struct Page<T, C> {
 /// A cursor from a read of a snapshot resumes only against the same
 /// snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectoryPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
@@ -445,6 +446,7 @@ impl PageCursor for DirectoryPageCursor {
 /// A cursor from a read of a snapshot resumes only against the same
 /// snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectoryTreePageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
@@ -464,6 +466,7 @@ impl PageCursor for DirectoryTreePageCursor {
 /// One frame of a recursive listing's position: a directory, and the last
 /// name key the walk returned from that directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectoryTreeFrame {
     /// Directory inode of this frame, a child of the previous frame's
     /// directory.
@@ -537,6 +540,7 @@ impl ListPageCursor {
 
 /// A cursor that resumes a newest-first revision listing for one file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileRevisionsPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
@@ -556,6 +560,7 @@ impl PageCursor for FileRevisionsPageCursor {
 
 /// A cursor that resumes an oldest-first trash listing after one deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrashPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
@@ -569,17 +574,35 @@ impl PageCursor for TrashPageCursor {
     const KIND: &'static str = "trash";
 }
 
-/// A cursor that resumes content search after one `(inode_id, byte_offset)` position.
+/// A cursor that resumes content search at one position in candidate order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrepPageCursor {
     /// Sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
-    /// Inode of the last candidate the issuing page finished scanning.
+    /// Inode of the last candidate the issuing page reached.
     pub last_inode_id: InodeId,
-    /// The last match offset, or `u64::MAX` when the file was fully scanned.
-    pub last_byte_offset: u64,
+    /// Where the next page resumes in `last_inode_id`.
+    pub resume: GrepCursorPosition,
     /// The fingerprint of the pattern, flags, and scope that issued the cursor.
     pub fingerprint: u64,
+}
+
+/// Where a grep cursor resumes in its last candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GrepCursorPosition {
+    /// After the match at `byte_offset`, so the next page continues in the
+    /// same file.
+    AfterMatch {
+        /// Byte offset of the last returned match.
+        byte_offset: u64,
+    },
+    /// After the whole file.
+    ///
+    /// The braces make serde reject a stray field; a unit variant would
+    /// silently accept and discard one.
+    AfterFile {},
 }
 
 impl PageCursor for GrepPageCursor {
@@ -593,10 +616,10 @@ pub trait PageCursor: Serialize + serde::de::DeserializeOwned {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OpaqueTokenEnvelope<T> {
     format_version: u8,
     kind: String,
-    #[serde(flatten)]
     token: T,
 }
 
@@ -721,6 +744,7 @@ pub enum OpaqueTokenError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::convert::Infallible;
     use std::task::{Context, Poll, Waker};
 
@@ -936,16 +960,21 @@ mod tests {
             last_deletion_seq: ChangeSeq(10),
             last_root_inode_id: InodeId(7),
         });
-        assert_cursor_round_trips(GrepPageCursor {
-            head_seq: ChangeSeq(11),
-            last_inode_id: InodeId(7),
-            last_byte_offset: 13,
-            fingerprint: 17,
-        });
+        for resume in [
+            GrepCursorPosition::AfterMatch { byte_offset: 13 },
+            GrepCursorPosition::AfterFile {},
+        ] {
+            assert_cursor_round_trips(GrepPageCursor {
+                head_seq: ChangeSeq(11),
+                last_inode_id: InodeId(7),
+                resume,
+                fingerprint: 17,
+            });
+        }
     }
 
     #[test]
-    fn live_directory_cursor_omits_the_pin_field() {
+    fn a_live_directory_cursor_omits_the_pin_field_and_rejects_unknown_fields() {
         let cursor = DirectoryPageCursor {
             head_seq: ChangeSeq(11),
             pin_id: None,
@@ -957,11 +986,23 @@ mod tests {
         let bytes = decode_token_bytes(&encoded).expect("decode base64url");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("decode JSON");
 
-        assert!(json.get("pin_id").is_none());
+        assert!(json["token"].is_object());
+        assert!(json["token"].get("pin_id").is_none());
         assert_eq!(
             decode_cursor::<DirectoryPageCursor>(&encoded).expect("decode cursor"),
             cursor
         );
+        let mut extra_envelope_field = json.clone();
+        extra_envelope_field["extra"] = true.into();
+        let mut extra_token_field = json;
+        extra_token_field["token"]["extra"] = true.into();
+        for edited in [extra_envelope_field, extra_token_field] {
+            let edited = encode_token_bytes(&serde_json::to_vec(&edited).expect("encode JSON"));
+            assert_matches!(
+                decode_cursor::<DirectoryPageCursor>(&edited),
+                Err(OpaqueTokenError::InvalidJson(message)) if message.contains("unknown field")
+            );
+        }
     }
 
     #[test]

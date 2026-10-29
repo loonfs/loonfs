@@ -26,9 +26,9 @@ use loonfs_types::format::segment_blocks::{
     string_prefix_upper_bound,
 };
 use loonfs_types::{
-    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EntryInodeKind, ErrorCode, GrepMatch,
-    GrepPageCursor, GrepRequest, GrepResponse, InodeId, NamespaceId, PageRequest, PathEntry,
-    RevisionNo, MAX_PAGE_LIMIT, ROOT_INODE_ID,
+    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EntryInodeKind, ErrorCode,
+    GrepCursorPosition, GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, GrepScope, InodeId,
+    NamespaceId, PageRequest, PathEntry, RevisionNo, MAX_PAGE_LIMIT, ROOT_INODE_ID,
 };
 use loonfs_types::{MonotonicTimer, StdMonotonicTimer};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -235,13 +235,6 @@ impl GrepService {
             }
             .into());
         }
-        if request.path_prefix.is_some() && request.inode_id.is_some() {
-            return Err(loonfs::Error::InvalidRequest {
-                message: "`path_prefix` cannot be combined with `inode_id`".to_owned(),
-                param: "inode_id",
-            }
-            .into());
-        }
         let mut reads = namespace_reads.read_view().await?;
         let snapshot = self
             .load_index_snapshot(store, reads.namespace_id())
@@ -277,10 +270,10 @@ impl GrepService {
             regex: pattern,
             plan: gram_plan,
         } = compile_pattern(request)?;
-        let scope = match (&request.path_prefix, request.inode_id) {
-            (Some(prefix), _) => Some(reads.resolve_path(prefix).await?),
-            (None, Some(inode_id)) => Some(reads.resolve_inode(inode_id).await?),
-            (None, None) => None,
+        let scope = match &request.scope {
+            GrepScope::Namespace => None,
+            GrepScope::PathPrefix(prefix) => Some(reads.resolve_path(prefix).await?),
+            GrepScope::Inode(inode_id) => Some(reads.resolve_inode(*inode_id).await?),
         };
         let mut candidates = GrepCandidates::default();
         let tail_resume = match gram_plan {
@@ -772,28 +765,32 @@ enum GrepResume {
 }
 
 impl GrepResume {
-    /// The encoded cursor spells a fully scanned file as offset `u64::MAX`.
     fn from_cursor(cursor: &GrepPageCursor) -> Self {
-        match cursor.last_byte_offset {
-            u64::MAX => Self::AfterFile {
+        match cursor.resume {
+            GrepCursorPosition::AfterMatch { byte_offset } => Self::InFile {
                 inode_id: cursor.last_inode_id,
+                after_offset: byte_offset,
             },
-            after_offset => Self::InFile {
+            GrepCursorPosition::AfterFile {} => Self::AfterFile {
                 inode_id: cursor.last_inode_id,
-                after_offset,
             },
         }
     }
 
-    /// The position as the encoded cursor spells it: the inode and the last
-    /// match offset, or `u64::MAX` for a fully scanned file.
-    fn cursor_position(self) -> (InodeId, u64) {
+    /// Returns the position as the encoded cursor spells it: the inode, and
+    /// where the next page resumes in that inode.
+    fn cursor_position(self) -> (InodeId, GrepCursorPosition) {
         match self {
             Self::InFile {
                 inode_id,
                 after_offset,
-            } => (inode_id, after_offset),
-            Self::AfterFile { inode_id } => (inode_id, u64::MAX),
+            } => (
+                inode_id,
+                GrepCursorPosition::AfterMatch {
+                    byte_offset: after_offset,
+                },
+            ),
+            Self::AfterFile { inode_id } => (inode_id, GrepCursorPosition::AfterFile {}),
         }
     }
 }
@@ -1081,12 +1078,12 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
         let PageProgress::Truncated(position) = self.progress else {
             return None;
         };
-        let (last_inode_id, last_byte_offset) = position.cursor_position();
+        let (last_inode_id, resume) = position.cursor_position();
         Some(
             encode_cursor(&GrepPageCursor {
                 head_seq: self.plan.head_seq,
                 last_inode_id,
-                last_byte_offset,
+                resume,
                 fingerprint: self.plan.fingerprint,
             })
             .expect("a grep page cursor should encode"),

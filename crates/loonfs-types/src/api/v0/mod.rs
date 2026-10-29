@@ -52,7 +52,7 @@ pub use reads::{
     ListInodeChildrenResponse, ListPathEntriesResponse, ListTrashResponse, PathEntry,
     PathEntryKind, TrashEntry,
 };
-pub use search::{GrepIndex, GrepIndexStatus, GrepMatch, GrepRequest, GrepResponse};
+pub use search::{GrepIndex, GrepIndexStatus, GrepMatch, GrepRequest, GrepResponse, GrepScope};
 pub use snapshots::{
     Checkpoint, CheckpointOwner, CreateSnapshotRequest, DeleteSnapshotResponse,
     ExtendSnapshotRequest, ListCheckpointsResponse, ListSnapshotsResponse, Snapshot,

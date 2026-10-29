@@ -14,7 +14,7 @@ await client.files.upload({
     namespace_id: "demo",
     path: "/notes.txt",
     content: new TextEncoder().encode("first line\n"),
-    commit_id: "c_0123456789abcdef0123456789abcdef",
+    commit_id: "c_7kn71d9dq885x91hejz3gvf9p0",
 });
 ```
 

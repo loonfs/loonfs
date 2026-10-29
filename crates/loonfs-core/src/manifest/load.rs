@@ -69,11 +69,11 @@ pub(crate) fn ensure_manifest_reference_matches(
             reference.head_seq.to_string(),
             payload.head_seq.to_string(),
         ))
-    } else if reference.payload_checksum != manifest.payload_checksum() {
+    } else if &reference.payload_checksum != manifest.payload_checksum() {
         Some((
             "payload_checksum",
-            reference.payload_checksum.clone(),
-            manifest.payload_checksum().to_owned(),
+            reference.payload_checksum.to_string(),
+            manifest.payload_checksum().to_string(),
         ))
     } else {
         None

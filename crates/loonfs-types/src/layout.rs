@@ -108,7 +108,7 @@ mod tests {
     fn layouts_cover_the_chain_and_validate_empty_and_span_extents() {
         let whole = ContentExtent {
             owner_namespace_id: NamespaceId::parse("owner").expect("namespace"),
-            content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content"),
+            content_id: ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content"),
             object: ExtentObject::Whole,
             offset: 0,
             length: 10,

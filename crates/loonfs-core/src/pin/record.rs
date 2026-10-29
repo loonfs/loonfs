@@ -214,7 +214,7 @@ mod tests {
             pin_id,
             namespace_id: namespace_id.clone(),
             head_seq: ChangeSeq(1),
-            payload_checksum: "sha256:test".to_owned(),
+            payload_checksum: loonfs_types::sha256_digest(b"test"),
             created_at_ms: 1,
             owner: PinOwner::User {
                 name: "test".to_owned(),

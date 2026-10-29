@@ -13,6 +13,13 @@ use std::num::NonZeroU32;
 
 const NAMESPACES_PREFIX: &str = "namespaces/";
 
+/// Length of a content ID: `con_` and a generated ID body.
+const CONTENT_ID_BYTES: usize = "con_".len() + loonfs_types::GENERATED_ID_BODY_BYTES;
+
+/// Length of a span object name: the content ID, then `-` and a twenty-digit
+/// offset, twice.
+const CONTENT_SPAN_NAME_BYTES: usize = CONTENT_ID_BYTES + 2 * 21;
+
 /// Most namespace ids one [`list_namespace_ids`] page holds: the most keys
 /// S3 and Google Cloud Storage return for one list request.
 pub const MAX_NAMESPACE_IDS_PER_PAGE: u32 = 1_000;
@@ -75,7 +82,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
         [NAMESPACES_DIRECTORY, owner_namespace_id, CONTENT_DIRECTORY, content_id]
-            if content_id.len() == 36 =>
+            if content_id.len() == CONTENT_ID_BYTES =>
         {
             Some(parsed(
                 DurableObjectFamily::ContentBlob,
@@ -84,17 +91,21 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             ))
         }
         [NAMESPACES_DIRECTORY, owner_namespace_id, CONTENT_DIRECTORY, object]
-            if object.len() == 78
+            if object.len() == CONTENT_SPAN_NAME_BYTES
                 && object.is_ascii()
-                && object.as_bytes()[36] == b'-'
-                && object.as_bytes()[57] == b'-'
-                && object[37..57].bytes().all(|byte| byte.is_ascii_digit())
-                && object[58..].bytes().all(|byte| byte.is_ascii_digit()) =>
+                && object.as_bytes()[CONTENT_ID_BYTES] == b'-'
+                && object.as_bytes()[CONTENT_ID_BYTES + 21] == b'-'
+                && object[CONTENT_ID_BYTES + 1..CONTENT_ID_BYTES + 21]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())
+                && object[CONTENT_ID_BYTES + 22..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit()) =>
         {
             Some(parsed(
                 DurableObjectFamily::ContentBlob,
                 owner_namespace_id,
-                Some(&object[..36]),
+                Some(&object[..CONTENT_ID_BYTES]),
             ))
         }
         [NAMESPACES_DIRECTORY, namespace, WAL_DIRECTORY, object] => object
@@ -329,12 +340,11 @@ mod tests {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
         let wal_no = WalNo(1);
         let manifest_object_id = ManifestNo(400);
-        let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+        let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000001")
             .expect("metadata segment id");
         let pin_id = PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id");
-        let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
-        let content_id =
-            ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("content id");
+        let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("upload id");
+        let content_id = ContentId::parse("con_5bsqqg28t5cy4tqkff04hmasw9").expect("content id");
         let temporary = temporary_object(&namespace_id);
         let temporary_id = temporary.rsplit('/').next();
         let cases = [
@@ -404,8 +414,8 @@ mod tests {
     fn an_upload_outcome_key_sorts_directly_after_its_session_key() {
         // Garbage collection pairs a session's two records by listing order.
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
-        let first = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
-        let second = UploadId::parse("upl_00000000000000000000000000000010").expect("upload id");
+        let first = UploadId::parse("upl_00000000000000000000000001").expect("upload id");
+        let second = UploadId::parse("upl_0000000000000000000000000g").expect("upload id");
         let mut keys = [
             upload_outcome(&namespace_id, &second),
             upload_session(&namespace_id, &second),
@@ -431,7 +441,7 @@ mod tests {
     fn listing_prefixes_hold_only_their_family() {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
         let segment_id =
-            MetadataSegmentId::parse("seg_00000000000000000000000000000001").expect("segment id");
+            MetadataSegmentId::parse("seg_00000000000000000000000001").expect("segment id");
         let segment = metadata_segment(&namespace_id, &segment_id);
 
         assert!(segment.starts_with(&metadata_segment_prefix(&namespace_id)));

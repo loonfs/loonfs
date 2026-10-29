@@ -258,7 +258,7 @@ impl LocalFsStore {
 
         let staged: Result<u64> = async {
             let mut size_bytes = 0u64;
-            let mut checksum = expected.map(|expected| ChecksumDigest::new(expected.algorithm));
+            let mut checksum = expected.map(|expected| ChecksumDigest::new(expected.algorithm()));
             while let Some(chunk) = body.next().await {
                 let chunk = chunk?;
                 #[cfg(test)]
@@ -876,8 +876,8 @@ fn temp_path(path: &Path) -> PathBuf {
 fn etag(checksum: &Checksum) -> String {
     format!(
         "local-fs-v1:{}:{}",
-        checksum.algorithm.as_str(),
-        checksum.value
+        checksum.algorithm().as_str(),
+        checksum.value()
     )
 }
 
@@ -1178,7 +1178,7 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = upload_session(
             &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &loonfs_types::UploadId::parse("upl_00000000000000000000000000000001")
+            &loonfs_types::UploadId::parse("upl_00000000000000000000000001")
                 .expect("valid upload id"),
         );
 

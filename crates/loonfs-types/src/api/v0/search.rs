@@ -13,17 +13,26 @@ pub struct GrepRequest {
     pub pattern: String,
     /// Whether matching ignores case.
     pub case_insensitive: bool,
-    /// The absolute directory path that limits matching to its descendants. It can't be combined
-    /// with `inode_id`.
-    pub path_prefix: Option<AbsolutePath>,
-    /// The inode that limits matching to its descendants. It can't be combined with `path_prefix`.
-    pub inode_id: Option<InodeId>,
+    /// The part of the namespace that matching covers.
+    pub scope: GrepScope,
     /// Whether a lagging index returns results from the index alone, with `tail_scanned: false`,
     /// instead of returning `index_lagging`.
     pub allow_stale: bool,
     /// Whether a pattern without required literal bytes can use a scan, which the server's budget
     /// limits.
     pub allow_scan: bool,
+}
+
+/// The part of a namespace that one content search covers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum GrepScope {
+    /// Every file in the namespace.
+    #[default]
+    Namespace,
+    /// The descendants of one absolute directory path.
+    PathPrefix(AbsolutePath),
+    /// The descendants of one inode.
+    Inode(InodeId),
 }
 
 impl GrepRequest {
@@ -34,17 +43,13 @@ impl GrepRequest {
     /// change between builds.
     pub fn fingerprint(&self) -> u64 {
         let mut seed = xxh64(self.pattern.as_bytes(), 0);
-        seed = xxh64(
-            self.path_prefix
-                .as_ref()
-                .map_or("", AbsolutePath::as_str)
-                .as_bytes(),
-            seed,
-        );
-        seed = xxh64(
-            &self.inode_id.map_or(0, |inode_id| inode_id.0).to_le_bytes(),
-            seed,
-        );
+        let (path_prefix, inode_id) = match &self.scope {
+            GrepScope::Namespace => ("", 0),
+            GrepScope::PathPrefix(path) => (path.as_str(), 0),
+            GrepScope::Inode(inode_id) => ("", inode_id.0),
+        };
+        seed = xxh64(path_prefix.as_bytes(), seed);
+        seed = xxh64(&inode_id.to_le_bytes(), seed);
         let flags = [
             u8::from(self.case_insensitive),
             u8::from(self.allow_stale),

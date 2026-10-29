@@ -695,7 +695,7 @@ mod tests {
 
     fn probe_response(outcomes: &[StoreProbeCheckOutcome]) -> StoreProbeResponse {
         StoreProbeResponse {
-            run_id: loonfs_types::ProbeRunId::parse("probe_00000000000000000000000000000001")
+            run_id: loonfs_types::ProbeRunId::parse("probe_00000000000000000000000001")
                 .expect("probe run id"),
             checks: outcomes
                 .iter()
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(check.status, DoctorStatus::Failed);
         assert_eq!(
             check.message,
-            "store probe probe_00000000000000000000000000000001: 1 of 1 checks failed"
+            "store probe probe_00000000000000000000000001: 1 of 1 checks failed"
         );
         assert_eq!(check.store_probe, Some(response));
     }
@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(check.status, DoctorStatus::Warning);
         assert_eq!(
             check.message,
-            "store probe probe_00000000000000000000000000000001: 1 of 2 checks are unsupported"
+            "store probe probe_00000000000000000000000001: 1 of 2 checks are unsupported"
         );
         assert_eq!(
             check.message,
@@ -743,7 +743,7 @@ mod tests {
         assert_eq!(store_probe_check(passed.clone()).status, DoctorStatus::Ok);
         assert_eq!(
             store_probe_summary_line(&passed),
-            "store probe probe_00000000000000000000000000000001: 1 checks passed"
+            "store probe probe_00000000000000000000000001: 1 checks passed"
         );
     }
 }

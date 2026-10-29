@@ -687,7 +687,7 @@ mod tests {
         let requests = UploadRequests::default();
         let signer = test_signer(&path, HttpClient::new(requests.clone()));
         let expected = Checksum::crc32c(b"hello");
-        let key = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
+        let key = "namespaces/demo/content/con_014d2pf2dbsqqg28t5cy4tqkff";
         for sources in [
             vec![],
             vec![AssemblySource {
@@ -829,7 +829,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                stored_crc32c_from_headers(&headers).map(|checksum| checksum.value.to_string()),
+                stored_crc32c_from_headers(&headers).map(|checksum| checksum.value().to_string()),
                 Some(crc32c_of_hello.to_owned()),
                 "crc32c not found in {values:?}"
             );

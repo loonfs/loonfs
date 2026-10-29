@@ -110,7 +110,7 @@ fn send_errors_surface_the_root_cause_and_the_url() {
 async fn store_contention_is_not_retried_by_the_client() {
     let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
     let upload_id =
-        loonfs_types::UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
+        loonfs_types::UploadId::parse("upl_00000000000000000000000001").expect("upload id");
     for (code, attempts) in [
         (ErrorCode::CommitQueueFull, 4),
         (ErrorCode::ServerBusy, 4),

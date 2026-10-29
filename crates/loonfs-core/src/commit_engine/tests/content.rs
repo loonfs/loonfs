@@ -686,7 +686,7 @@ async fn retained_evidence_minting_stops_at_the_upload_issuance_deadline() {
             loonfs_types::decode_token_bytes(token.token.split_once('.').expect("signed token").0)
                 .expect("payload");
         let payload: serde_json::Value = serde_json::from_slice(&payload).expect("token payload");
-        let expires_at_ms = payload["expires_at_ms"].as_u64().expect("expiry");
+        let expires_at_ms = payload["token"]["expires_at_ms"].as_u64().expect("expiry");
         assert_eq!(expires_at_ms, now_ms + CONTENT_RECEIPT_TTL_MS);
         assert!(expires_at_ms <= setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS);
     }

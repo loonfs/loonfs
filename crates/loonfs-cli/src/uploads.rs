@@ -635,7 +635,7 @@ mod tests {
     fn begin(journal: &UploadJournal) {
         journal
             .began(
-                &UploadId::parse("upl_00000000000000000000000000000001").expect("id"),
+                &UploadId::parse("upl_00000000000000000000000001").expect("id"),
                 1024,
                 ChecksumAlgorithm::Crc64nvme,
             )

@@ -193,8 +193,8 @@ mod tests {
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, ProbeRunId, UploadId, WalNo,
     };
 
-    const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
-    const PROBE_RUN_ID: &str = "probe_00000000000000000000000000000001";
+    const CONTENT_ID: &str = "con_5bsqqg28t5cy4tqkff04hmasw9";
+    const PROBE_RUN_ID: &str = "probe_00000000000000000000000001";
 
     fn content_id() -> ContentId {
         ContentId::parse(CONTENT_ID).expect("valid content id")
@@ -209,12 +209,12 @@ mod tests {
     }
 
     fn metadata_segment_id() -> MetadataSegmentId {
-        MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+        MetadataSegmentId::parse("seg_00000000000000000000000001")
             .expect("valid metadata segment id")
     }
 
     fn upload_id() -> UploadId {
-        UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id")
+        UploadId::parse("upl_00000000000000000000000001").expect("valid upload id")
     }
 
     #[test]
@@ -265,10 +265,10 @@ mod tests {
                 .replace("{suffix}", "0123456789abcdef")
                 .replace("{manifest_no:020}", "00000000000000000400")
                 .replace("{pin_id}", "pin_00000000000000000001-0000000000000001")
-                .replace("{job_id}", "cmp_00000000000000000000000000000001")
+                .replace("{job_id}", "cmp_00000000000000000000000001")
                 .replace("{group}", "bindings")
-                .replace("{segment_id}", "seg_00000000000000000000000000000001")
-                .replace("{upload_id}", "upl_00000000000000000000000000000001")
+                .replace("{segment_id}", "seg_00000000000000000000000001")
+                .replace("{upload_id}", "upl_00000000000000000000000001")
                 .replace("{start:020}", "00000000000000000002")
                 .replace("{end:020}", "00000000000000000019")
                 .replace("{content_id}", CONTENT_ID)

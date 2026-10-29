@@ -120,10 +120,11 @@ fn ensure_outcome_matches_session(
         )));
     }
     if let Some(algorithm) = session.mode.checksum_algorithm() {
-        if content_ref.checksum.algorithm != algorithm {
+        if content_ref.checksum.algorithm() != algorithm {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "upload session `{}` requires `{algorithm}` but its completed content uses `{}`",
-                session.upload_id, content_ref.checksum.algorithm
+                session.upload_id,
+                content_ref.checksum.algorithm()
             )));
         }
     }

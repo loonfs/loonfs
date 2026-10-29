@@ -1386,11 +1386,11 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
 
     assert_eq!(
         content_id.get("pattern").and_then(Value::as_str),
-        Some(r"^con_[0-9a-f]{32}$")
+        Some(r"^con_[0-7][0-9a-hjkmnp-tv-z]{25}$")
     );
     assert_eq!(
         content_id.get("example").and_then(Value::as_str),
-        Some("con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41")
+        Some("con_4z59p0wjvx9a8b2frdhhf6mat1")
     );
 }
 

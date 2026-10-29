@@ -93,7 +93,7 @@ impl PreparedContent {
                 .as_str()
                 .len()
                 .saturating_add(content_ref.content_id.as_str().len())
-                .saturating_add(content_ref.checksum.value.as_str().len()),
+                .saturating_add(content_ref.checksum.value().as_str().len()),
         }
     }
 
@@ -106,7 +106,7 @@ impl PreparedContent {
             .as_str()
             .len()
             .saturating_add(content_ref.content_id.as_str().len())
-            .saturating_add(content_ref.checksum.value.as_str().len())
+            .saturating_add(content_ref.checksum.value().as_str().len())
     }
 
     pub(crate) fn content_id(&self) -> &ContentId {
@@ -343,7 +343,7 @@ mod tests {
     fn fixed_content(namespace: &NamespaceId) -> ContentRef {
         ContentRef::blob_v1(
             namespace.clone(),
-            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+            ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
             b"hello",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         )

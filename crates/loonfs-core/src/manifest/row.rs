@@ -8,11 +8,9 @@ use loonfs_types::{ChangeSeq, ContentId};
 use std::collections::HashMap;
 
 #[cfg(test)]
-use super::runs::MANIFEST_ROW_FAMILIES;
-
 #[cfg(test)]
 pub(super) fn metadata_states_equivalent(left: &MetadataState, right: &MetadataState) -> bool {
-    MANIFEST_ROW_FAMILIES.into_iter().all(|family| {
+    MetadataRowFamily::ALL.into_iter().all(|family| {
         manifest_rows_for_family(left, family) == manifest_rows_for_family(right, family)
     })
 }

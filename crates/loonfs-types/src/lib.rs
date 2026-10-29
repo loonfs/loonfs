@@ -30,12 +30,14 @@ mod id_macros;
 mod ids;
 mod layout;
 mod manifest;
+mod metadata_rows;
 mod name_policy;
 pub mod options;
 mod pagination;
 mod path;
 pub mod public_inode_id;
 mod retry;
+mod row_keys;
 mod secret;
 mod segment_blocks;
 mod wal;
@@ -60,6 +62,8 @@ pub mod format {
         //! Namespace-manifest envelopes, rows, and key constructors.
 
         pub use crate::manifest::*;
+        pub use crate::metadata_rows::*;
+        pub use crate::row_keys::*;
     }
 
     pub mod control {
@@ -119,34 +123,39 @@ pub use capability::{
 };
 pub use civil_date::{civil_from_days, CivilDate};
 pub use commit_identity::{
-    semantic_commit_fingerprint, CommitFingerprint, InlineContentIdentity, SemanticFingerprintError,
+    semantic_commit_fingerprint, CommitFingerprint, CommitFingerprintValidationError,
+    InlineContentIdentity, SemanticFingerprintError,
 };
 pub use content::{
     Checksum, ChecksumAlgorithm, ChecksumDigest, ChecksumHex, ChecksumHexValidationError,
     ChecksumValidationError, ChunkAfterEndError, ContentMismatchError, ContentRef, ContentRefKind,
-    ContentRefValidationError, ContentVerifier, ResumedPrefixError, ResumedPrefixIncompleteError,
+    ContentVerifier, ResumedPrefixError, ResumedPrefixIncompleteError,
 };
-pub use digest::{sha256_digest, sha256_hex, SHA256_DIGEST_BYTES};
+pub use digest::{
+    sha256_digest, sha256_hex, PayloadChecksum, PayloadChecksumValidationError, SHA256_DIGEST_BYTES,
+};
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
-    generated_id, next_public_ordinal, BindingVersion, BindingVersionValidationError, ChangeSeq,
-    CommitId, CommitIdValidationError, CompactorEpoch, ContentId, GeneratedIdValidationError,
-    IndexSegmentId, InodeId, ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey,
-    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PinId, ProbeRunId,
-    PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch, WriterId,
-    WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
-    MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
+    generated_id, generated_id_body_prefixes, next_public_ordinal, BindingVersion,
+    BindingVersionValidationError, ChangeSeq, CommitId, CommitIdValidationError, CompactorEpoch,
+    ContentId, GeneratedIdValidationError, IndexSegmentId, InodeId, ManifestNo,
+    MetadataCompactionId, MetadataSegmentId, NameKey, NameKeyValidationError, NamespaceId,
+    NamespaceIdValidationError, PinId, ProbeRunId, PublicOrdinalRangeError, RevisionNo, RunNo,
+    UploadId, WalNo, WriterEpoch, WriterId, WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID,
+    GENERATED_ID_BODY_BYTES, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER,
+    MAX_WRITER_ID_BYTES, ROOT_INODE_ID,
 };
 pub use layout::{ContentExtent, ContentLayout, ContentLayoutError, ExtentObject};
-pub use manifest::{MetadataFamilyGroup, NamespaceAccess};
+pub use manifest::NamespaceAccess;
+pub use metadata_rows::MetadataFamilyGroup;
 pub use name_policy::name_key_for_display_name;
 pub use options::AttributeInclusion;
 pub use pagination::{
     decode_cursor, decode_token, decode_token_bytes, encode_cursor, encode_token,
     encode_token_bytes, DirectoryPageCursor, DirectoryTreeFrame, DirectoryTreePageCursor,
-    EffectiveLimit, FileRevisionsPageCursor, GrepPageCursor, LimitError, ListPageCursor,
-    OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse, Pager,
-    PaginationPolicy, TrashPageCursor, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    EffectiveLimit, FileRevisionsPageCursor, GrepCursorPosition, GrepPageCursor, LimitError,
+    ListPageCursor, OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse,
+    Pager, PaginationPolicy, TrashPageCursor, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
     PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
@@ -170,7 +179,7 @@ pub use api::v0::{
     DestinationPrecondition, DestinationPreconditionError, EntryInodeKind, ErrorDetails,
     ErrorResponse, ExpectedFileState, ExtendSnapshotRequest, ExtensionGcReports, FileRevision,
     FilesystemOperation, ForkNamespaceRequest, GcRequest, GcResponse, GrepGcReport, GrepMatch,
-    GrepRequest, GrepResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
+    GrepRequest, GrepResponse, GrepScope, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListInodeChildrenResponse, ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse,
     MetadataCompactionOutcome, MetadataCompactionResponse, MetadataMaintenanceOutcome,
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, MetadataPassReport,

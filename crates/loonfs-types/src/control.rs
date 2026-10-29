@@ -5,8 +5,8 @@
 use crate::envelope::EnvelopeCodecError;
 use crate::WriterId;
 use crate::{
-    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceId, PinId,
-    SubjectId, UploadId,
+    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceId,
+    PayloadChecksum, PinId, SubjectId, UploadId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -94,7 +94,7 @@ pub struct ManifestRef {
     /// Greatest owner-namespace sequence the referenced manifest materializes.
     pub head_seq: ChangeSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
-    pub payload_checksum: String,
+    pub payload_checksum: PayloadChecksum,
 }
 
 /// Durable owner and expiry policy of a pin.
@@ -140,7 +140,7 @@ pub struct PinPayload {
     /// Greatest sequence in the pinned manifest.
     pub head_seq: ChangeSeq,
     /// Verifies the referenced manifest payload.
-    pub payload_checksum: String,
+    pub payload_checksum: PayloadChecksum,
     /// Creation time used by collection grace.
     pub created_at_ms: u64,
     /// Determines when collection may delete this record.
@@ -381,12 +381,6 @@ impl UploadOutcomePayload {
         let UploadOutcome::Completed { content_ref, .. } = &self.outcome else {
             return Ok(());
         };
-        content_ref.validate().map_err(|error| {
-            format!(
-                "upload outcome `{}` holds an invalid content ref: {error}",
-                self.upload_id
-            )
-        })?;
         if content_ref.owner_namespace_id != self.namespace_id {
             return Err(format!(
                 "upload outcome `{}` belongs to namespace `{}` but holds a reference owned by \
@@ -478,16 +472,14 @@ mod tests {
         let content_ref = |owner: &str| ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: NamespaceId::parse(owner).expect("namespace id"),
-            content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
-                .expect("content id"),
+            content_id: ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
             size_bytes: 5,
             checksum: Checksum::crc64nvme(b"hello"),
         };
         for (owner, valid) in [("demo", true), ("other", false)] {
             let record = UploadOutcomePayload {
                 namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-                upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
-                    .expect("upload id"),
+                upload_id: UploadId::parse("upl_014d2pf2dbsqqg28t5cy4tqkff").expect("upload id"),
                 outcome: UploadOutcome::Completed {
                     completed_at_ms: 2_000,
                     content_ref: content_ref(owner),

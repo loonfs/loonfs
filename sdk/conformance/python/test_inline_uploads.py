@@ -39,7 +39,7 @@ class Endpoint:
         self.claim = dict(
             kind="blob_v1",
             owner_namespace_id="demo",
-            content_id="con_00000000000000000000000000000001",
+            content_id="con_00000000000000000000000001",
             size_bytes=len(content),
             checksum=_checksum(fixture["algorithm"], content).model_dump(),
         )

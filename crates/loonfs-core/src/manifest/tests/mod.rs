@@ -35,7 +35,7 @@ use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
     flatten_manifest_segments, runs_in_materialization_order, runs_newest_first,
     MetadataFamilyGroup, MetadataFamilySegments, MetadataRunManifest, MetadataRunPolicy,
-    DEFAULT_MAX_DELTA_RUNS, MANIFEST_ROW_FAMILIES,
+    DEFAULT_MAX_DELTA_RUNS,
 };
 use super::streaming_compaction::{
     finalize_metadata_compaction, input_segment_keys, retention_clusters, run_metadata_compaction,
@@ -111,7 +111,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     let tail_state = projection.tail_with_deletion_inodes().await?;
     let tail_rows = projection.tail_state.merged_rows();
     let mut metadata_state = MetadataStateBuilder::default();
-    for family in MANIFEST_ROW_FAMILIES {
+    for family in ApiMetadataRowFamily::ALL {
         let mut rows = projection.manifest_segments.scan_prefix(family, "").await?;
         let state = if family == ApiMetadataRowFamily::ActiveDeletions {
             &tail_state
@@ -657,7 +657,7 @@ fn base_tier(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataFamilySegments
         .filter(|run| run.tier == RunTier::Base)
         .collect::<Vec<_>>();
     assert!(!base_runs.is_empty(), "base tier");
-    MANIFEST_ROW_FAMILIES
+    ApiMetadataRowFamily::ALL
         .into_iter()
         .map(|family| MetadataFamilySegments {
             family,

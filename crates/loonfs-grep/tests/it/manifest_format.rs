@@ -36,7 +36,8 @@ fn edited_document(
         serde_json::from_slice(&read_golden(fixture)).expect("decode a grep fixture");
     edit(&mut document["payload"]);
     let payload = serde_json::to_string(&document["payload"]).expect("encode the edited payload");
-    let payload_checksum = serde_json::Value::from(loonfs_types::sha256_digest(payload.as_bytes()));
+    let payload_checksum =
+        serde_json::Value::from(loonfs_types::sha256_digest(payload.as_bytes()).as_str());
     format!(
         "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{payload_checksum},\
          \"payload\":{payload}{extra_envelope}}}",

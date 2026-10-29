@@ -1388,7 +1388,7 @@ Returns one authoritative path entry, addressed by path or by inode ID. Enum val
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 19482,
     "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
   },
@@ -1473,7 +1473,7 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+        "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
         "size_bytes": 19482,
         "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
       }
@@ -1562,7 +1562,7 @@ For example, a revision listing returns:
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+        "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
         "size_bytes": 19482,
         "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
       }
@@ -2131,7 +2131,7 @@ Representative begin-upload response:
 ```json
 {
   "namespace_id": "demo",
-  "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
+  "upload_id": "upl_2dhwp939xk9r7srv8t5cz5yw4c",
   "mode": "service_proxied",
   "status": "open",
   "expires_at_ms": 1730000000000,
@@ -2144,7 +2144,7 @@ Representative content-upload response:
 ```json
 {
   "namespace_id": "demo",
-  "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
+  "upload_id": "upl_2dhwp939xk9r7srv8t5cz5yw4c",
   "mode": "service_proxied",
   "status": "open",
   "expires_at_ms": 1730000000000,
@@ -2152,7 +2152,7 @@ Representative content-upload response:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 20591,
     "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
   }
@@ -2170,14 +2170,14 @@ Representative complete-upload response:
 ```json
 {
   "namespace_id": "demo",
-  "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
+  "upload_id": "upl_2dhwp939xk9r7srv8t5cz5yw4c",
   "mode": "service_proxied",
   "status": "completed",
   "completed_at_ms": 1730000001000,
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 20591,
     "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
   },
@@ -2185,7 +2185,7 @@ Representative complete-upload response:
     "content_ref": {
       "kind": "blob_v1",
       "owner_namespace_id": "demo",
-      "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+      "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
       "size_bytes": 20591,
       "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
     },
@@ -2224,7 +2224,7 @@ The response contains a short-lived read capability, plus everything the reader 
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
   },
@@ -2252,7 +2252,7 @@ The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
   },
@@ -2319,7 +2319,7 @@ One request operation can apply several semantic operations. For example, a put 
           "content_ref": {
             "kind": "blob_v1",
             "owner_namespace_id": "demo",
-            "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+            "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
             "size_bytes": 20591,
             "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
           }
@@ -2366,7 +2366,7 @@ Directory and file creation use separate event shapes. A file creation always in
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 20591,
     "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
   }
@@ -2383,7 +2383,7 @@ A `content_changed` event for an append includes `append_offset`, the offset whe
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "content_id": "con_4b7d4a90b13f0d8c5e6a2b419f2a6c0e",
+    "content_id": "con_2bfn591c9z1p65wthb86fjmv0e",
     "size_bytes": 1036,
     "checksum": { "algorithm": "crc64nvme", "value": "3c1..." }
   },

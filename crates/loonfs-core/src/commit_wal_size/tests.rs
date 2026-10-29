@@ -56,13 +56,13 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
         owner_namespace_id: namespace_id.clone(),
-        content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+        content_id: ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
         size_bytes: u64::MAX,
         checksum: Checksum::crc64nvme(b"content"),
     };
     let log_ref = ContentRef::blob_v1(
         NamespaceId::parse("o".repeat(MAX_ID_BYTES)).expect("owner"),
-        ContentId::parse("con_fedcba9876543210fedcba9876543210").expect("content id"),
+        ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg").expect("content id"),
         b"log",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );

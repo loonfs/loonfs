@@ -496,7 +496,10 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .clone();
     let content_token = completed.content_token().cloned();
     assert_eq!(content_ref.size_bytes, expected.size_bytes);
-    harness.assert_checksum_algorithm(content_ref.checksum.algorithm, expected.checksum_algorithm);
+    harness.assert_checksum_algorithm(
+        content_ref.checksum.algorithm(),
+        expected.checksum_algorithm,
+    );
     assert!(content_ref.checksum.matches(payload));
 
     let spec = namespace_path(&request.namespace_id, &request.path);
@@ -814,7 +817,7 @@ async fn run_download(harness: &Harness, case: &Case) {
     assert_eq!(stat.content_ref(), Some(&grant.content_ref));
     assert_eq!(grant.content_ref.size_bytes, expected.size_bytes);
     harness.assert_checksum_algorithm(
-        grant.content_ref.checksum.algorithm,
+        grant.content_ref.checksum.algorithm(),
         expected.checksum_algorithm,
     );
 

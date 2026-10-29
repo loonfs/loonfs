@@ -111,7 +111,7 @@ async fn records_an_assembly_with_its_tail_as_bytes_in() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let key = "namespaces/ns-1/content/con_00000000000000000000000000000001";
+    let key = "namespaces/ns-1/content/con_00000000000000000000000001";
     let metadata = store
         .put("source", bytes(b"base"), PutMode::CreateIfAbsent)
         .await
@@ -178,7 +178,7 @@ async fn a_verified_write_reaches_the_inner_store_and_records_one_put() {
 
     store
         .put_immutable_verified(
-            "namespaces/ns-1/content/con_00000000000000000000000000000001",
+            "namespaces/ns-1/content/con_00000000000000000000000001",
             bytes(b"content"),
         )
         .await
@@ -204,14 +204,14 @@ async fn records_get_success_bytes_out() {
 
     store
         .put_if_absent(
-            "namespaces/demo/content/con_abcdef0123456789abcdef0123456789",
+            "namespaces/demo/content/con_5bsqqg28t5cy4tqkff04hmasw9",
             bytes(b"abcdef"),
         )
         .await
         .expect("put object");
     let bytes = store
         .get(
-            "namespaces/demo/content/con_abcdef0123456789abcdef0123456789",
+            "namespaces/demo/content/con_5bsqqg28t5cy4tqkff04hmasw9",
             Some(ByteRange {
                 start_inclusive: 1,
                 end_exclusive: 4,
@@ -369,7 +369,7 @@ async fn classifies_durable_key_families() {
         .put_if_absent(
             &metadata_segment(
                 &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &loonfs_types::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+                &loonfs_types::MetadataSegmentId::parse("seg_00000000000000000000000001")
                     .expect("valid metadata segment id"),
             ),
             bytes(b"segment"),

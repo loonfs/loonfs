@@ -150,7 +150,7 @@ where
     let range = source.range.clone();
     let source = source.source;
     let chunks = read_chunks(&source.key, range, read_chunk).boxed();
-    let digest = ChecksumDigest::new(source.checksum.algorithm);
+    let digest = ChecksumDigest::new(source.checksum.algorithm());
     stream::try_unfold(
         (chunks, Some(digest)),
         move |(mut chunks, digest)| async move {
@@ -178,10 +178,10 @@ pub(crate) fn validate_algorithms(
     sources: &[AssemblySource],
     expected: &Checksum,
 ) -> Result<()> {
-    if expected.algorithm != algorithm
+    if expected.algorithm() != algorithm
         || sources
             .iter()
-            .any(|source| source.checksum.algorithm != algorithm)
+            .any(|source| source.checksum.algorithm() != algorithm)
     {
         return Err(ObjectStoreError::ChecksumMismatch {
             object_key: key.to_owned(),
@@ -269,7 +269,7 @@ pub(crate) async fn read_sources<S: ObjectStore + ?Sized>(
     verify_expected(
         key,
         expected,
-        &Checksum::compute(expected.algorithm, &bytes),
+        &Checksum::compute(expected.algorithm(), &bytes),
     )?;
     Ok(bytes.into())
 }
@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(assembled.checksum, Some(expected.clone()));
         assert_eq!(
             assembled.etag,
-            Some(format!("local-fs-v1:crc64nvme:{}", expected.value))
+            Some(format!("local-fs-v1:crc64nvme:{}", expected.value()))
         );
         assert_matches!(
             store

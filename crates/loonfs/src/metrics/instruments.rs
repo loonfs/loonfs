@@ -1155,7 +1155,7 @@ mod tests {
                             .expect("valid namespace id"),
                         manifest_no: loonfs_types::ManifestNo(1),
                         head_seq: loonfs_types::ChangeSeq(1),
-                        payload_checksum: String::new(),
+                        payload_checksum: loonfs_types::sha256_digest(b""),
                     },
                     writer_epoch: loonfs_types::WriterEpoch(1),
                     status: loonfs_types::format::control::NamespaceStatus::Active {},

@@ -171,15 +171,12 @@ mod tests {
                 checks: vec![DoctorCheck {
                     name: "store_probe".to_owned(),
                     status: DoctorStatus::Failed,
-                    message:
-                        "store probe probe_00000000000000000000000000000001: 4 of 4 checks failed"
-                            .to_owned(),
+                    message: "store probe probe_00000000000000000000000001: 4 of 4 checks failed"
+                        .to_owned(),
                     request_id: None,
                     store_probe: Some(StoreProbeResponse {
-                        run_id: loonfs_types::ProbeRunId::parse(
-                            "probe_00000000000000000000000000000001",
-                        )
-                        .expect("probe run id"),
+                        run_id: loonfs_types::ProbeRunId::parse("probe_00000000000000000000000001")
+                            .expect("probe run id"),
                         checks: checks.clone(),
                     }),
                 }],

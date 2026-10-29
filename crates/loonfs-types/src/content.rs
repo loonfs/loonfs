@@ -105,18 +105,65 @@ fn validate_checksum_hex(value: &str) -> Result<(), ChecksumHexValidationError> 
 // This type also appears in request bodies, so it rejects unknown fields in
 // every context. Add new algorithms instead of new fields. This is not
 // rustdoc because it describes storage behavior, not the public API.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Checksum {
     /// The algorithm that produced `value`.
-    pub algorithm: ChecksumAlgorithm,
+    algorithm: ChecksumAlgorithm,
     /// The checksum in canonical lowercase hexadecimal, without a prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub value: ChecksumHex,
+    value: ChecksumHex,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictChecksum {
+    algorithm: ChecksumAlgorithm,
+    value: ChecksumHex,
+}
+
+impl<'de> Deserialize<'de> for Checksum {
+    /// Reads one checksum and refuses a value whose width doesn't match its
+    /// algorithm.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let checksum = StrictChecksum::deserialize(deserializer)?;
+        Self::new(checksum.algorithm, checksum.value).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Checksum {
+    /// Builds a checksum from its algorithm and value, and rejects a value
+    /// whose width doesn't match the algorithm.
+    pub fn new(
+        algorithm: ChecksumAlgorithm,
+        value: ChecksumHex,
+    ) -> Result<Self, ChecksumValidationError> {
+        let expected_bytes = algorithm.value_bytes() * 2;
+        let actual_bytes = value.as_str().len();
+        if actual_bytes != expected_bytes {
+            return Err(ChecksumValidationError::InvalidWidth {
+                algorithm,
+                expected_bytes,
+                actual_bytes,
+            });
+        }
+        Ok(Self { algorithm, value })
+    }
+
+    /// Returns the algorithm that produced the value.
+    pub fn algorithm(&self) -> ChecksumAlgorithm {
+        self.algorithm
+    }
+
+    /// Returns the checksum in canonical lowercase hexadecimal.
+    pub fn value(&self) -> &ChecksumHex {
+        &self.value
+    }
+
     /// Builds the `algorithm` checksum for these complete bytes.
     ///
     /// The one-shot forms below are this with the algorithm spelled out, so
@@ -145,14 +192,13 @@ impl Checksum {
 
     /// Combines equal CRC algorithms without reading either payload.
     pub fn crc_combine(&self, next: &Checksum, next_len: u64) -> Option<Checksum> {
-        if self.algorithm != next.algorithm || self.validate().is_err() || next.validate().is_err()
-        {
+        if self.algorithm != next.algorithm {
             return None;
         }
         let combined = crc_fast::checksum_combine(
             crc_fast_algorithm(self.algorithm),
-            u64::from_str_radix(self.value.as_str(), 16).ok()?,
-            u64::from_str_radix(next.value.as_str(), 16).ok()?,
+            self.crc_value(),
+            next.crc_value(),
             next_len,
         );
         let bytes = combined.to_be_bytes();
@@ -162,18 +208,10 @@ impl Checksum {
         })
     }
 
-    /// Validates the exact width for `algorithm`.
-    pub fn validate(&self) -> Result<(), ChecksumValidationError> {
-        let expected_bytes = self.algorithm.value_bytes() * 2;
-        let actual_bytes = self.value.as_str().len();
-        if actual_bytes != expected_bytes {
-            return Err(ChecksumValidationError::InvalidWidth {
-                algorithm: self.algorithm,
-                expected_bytes,
-                actual_bytes,
-            });
-        }
-        Ok(())
+    /// Reads the value as the CRC integer that it spells.
+    fn crc_value(&self) -> u64 {
+        u64::from_str_radix(self.value.as_str(), 16)
+            .expect("a checksum of at most 16 hex characters should fit in a `u64`")
     }
 }
 
@@ -444,15 +482,6 @@ fn crc32_from_u64(value: u64) -> u32 {
     u32::try_from(value).expect("a CRC-32 value should fit in 32 bits")
 }
 
-/// Describes why a content reference cannot be part of a durable commit.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[non_exhaustive]
-pub enum ContentRefValidationError {
-    /// The checksum is not in the algorithm's canonical form.
-    #[error("invalid content ref checksum: {0}")]
-    InvalidChecksum(#[from] ChecksumValidationError),
-}
-
 /// A reference to a prefix of one content chain, by its owner, content ID, size, and checksum.
 // Request bodies and durable records share this type, so it rejects unknown
 // fields in every context. After release, new content kinds, not new fields.
@@ -492,28 +521,19 @@ impl ContentRef {
             checksum: Checksum::compute(algorithm, bytes),
         }
     }
-
-    /// Reports whether the reference is well formed enough to publish.
-    ///
-    /// This is a shape check on the reference itself; proving that the
-    /// object exists and matches is the storage layer's job.
-    pub fn validate(&self) -> Result<(), ContentRefValidationError> {
-        self.checksum.validate()?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Checksum, ChecksumAlgorithm, ChecksumDigest, ChecksumHex, ChecksumValidationError,
-        ContentRef, ContentRefKind, ContentRefValidationError,
+        ContentRef, ContentRefKind,
     };
     use crate::ids::ContentId;
     use std::assert_matches;
 
     fn content_id() -> ContentId {
-        ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id")
+        ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("valid content id")
     }
 
     #[test]
@@ -549,7 +569,7 @@ mod tests {
         let json = r#"{
             "kind": "blob_v1",
             "owner_namespace_id": "demo",
-            "content_id": "con_0123456789abcdef0123456789abcdef",
+            "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
             "size_bytes": 5,
             "checksum": {"algorithm": "md5", "value": "00000000000000000000000000000000"}
         }"#;
@@ -569,7 +589,6 @@ mod tests {
         assert_eq!(content_ref.kind, ContentRefKind::BlobV1);
         assert_eq!(content_ref.size_bytes, 5);
         assert_eq!(content_ref.checksum.algorithm, ChecksumAlgorithm::Crc64nvme);
-        content_ref.validate().expect("produced refs validate");
 
         let document = serde_json::to_value(&content_ref).expect("encode content ref");
         let object = document.as_object().expect("content ref object");
@@ -586,44 +605,47 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_a_malformed_checksum() {
-        let mut content_ref = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
-            content_id(),
-            b"hello",
-            crate::ChecksumAlgorithm::Crc64nvme,
-        );
-        content_ref.checksum = Checksum {
-            algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: ChecksumHex::parse("0".repeat(64)).expect("a lowercase hex checksum"),
-        };
-        assert_matches!(
-            content_ref.validate(),
-            Err(ContentRefValidationError::InvalidChecksum(
-                ChecksumValidationError::InvalidWidth { .. }
-            ))
-        );
-    }
-
-    #[test]
-    fn checksum_validation_enforces_exact_widths() {
+    fn a_checksum_of_the_wrong_width_fails_to_build_and_to_decode() {
         for (algorithm, width) in [
             (ChecksumAlgorithm::Crc64nvme, 16),
             (ChecksumAlgorithm::Crc32c, 8),
         ] {
-            let checksum = |len: usize| Checksum {
-                algorithm,
-                value: ChecksumHex::parse("a".repeat(len)).expect("a lowercase hex checksum"),
+            let checksum = |len: usize| {
+                Checksum::new(
+                    algorithm,
+                    ChecksumHex::parse("a".repeat(len)).expect("a lowercase hex checksum"),
+                )
             };
-            checksum(width).validate().expect("exact width");
-            assert_matches!(
-                checksum(width - 2).validate(),
-                Err(ChecksumValidationError::InvalidWidth { .. })
+            let exact = checksum(width).expect("exact width");
+            assert_eq!(
+                serde_json::from_value::<Checksum>(
+                    serde_json::to_value(&exact).expect("encode checksum")
+                )
+                .expect("decode checksum"),
+                exact
             );
-            assert_matches!(
-                checksum(width + 2).validate(),
-                Err(ChecksumValidationError::InvalidWidth { .. })
-            );
+            for len in [width - 2, width + 2] {
+                assert_matches!(
+                    checksum(len),
+                    Err(ChecksumValidationError::InvalidWidth { .. })
+                );
+                let document = serde_json::json!({
+                    "algorithm": algorithm.as_str(),
+                    "value": "a".repeat(len),
+                });
+                let error =
+                    serde_json::from_value::<Checksum>(document).expect_err("the wrong width");
+                assert!(error.to_string().contains("hex characters"), "{error}");
+                let content_ref = serde_json::json!({
+                    "kind": "blob_v1",
+                    "owner_namespace_id": "demo",
+                    "content_id": content_id(),
+                    "size_bytes": 5,
+                    "checksum": { "algorithm": algorithm.as_str(), "value": "a".repeat(len) },
+                });
+                serde_json::from_value::<ContentRef>(content_ref)
+                    .expect_err("a content ref whose checksum has the wrong width");
+            }
         }
     }
 

@@ -25,10 +25,6 @@ fn name_key(value: &str) -> NameKey {
     NameKey::parse(value).expect("valid name key")
 }
 
-fn fingerprint(value: &str) -> loonfs_types::CommitFingerprint {
-    serde_json::from_value(value.into()).expect("fingerprint")
-}
-
 fn deleted_binding(parent_inode_id: InodeId, display_name: &str) -> DeletedBinding {
     DeletedBinding {
         parent_inode_id,
@@ -43,7 +39,7 @@ fn commit_rows_reject_inline_content_and_decode_without_it() {
         committed_seq: ChangeSeq(9),
         commit_id: commit_id(9),
         committed_by: actor(),
-        semantic_commit_fingerprint: fingerprint("v1:sha256:commit-row"),
+        semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("commit-row"),
         committed_at_ms: 9_000,
         message: None,
         deltas: Vec::new(),
@@ -123,7 +119,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         committed_seq: ChangeSeq(9),
         commit_id: owning_commit_id.clone(),
         committed_by: actor(),
-        semantic_commit_fingerprint: fingerprint("v1:sha256:test"),
+        semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
         committed_at_ms: 4_200,
         message: None,
         deltas,

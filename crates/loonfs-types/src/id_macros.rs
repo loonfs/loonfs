@@ -43,8 +43,8 @@ macro_rules! validation_error {
 /// - `string_id!(Name, error = ErrType, validate = validator)` uses a custom
 ///   `fn(&str) -> Result<(), ErrType>` validator.
 /// - `string_id!(Name, prefix = "xyz")` validates the project-standard
-///   server-generated shape `xyz_<32 lowercase hex>` and adds a
-///   `generate()` constructor.
+///   server-generated shape, `xyz_` and 26 lowercase Crockford base 32
+///   characters, and adds a `generate()` constructor.
 ///
 /// Either form may end with `schema(...)` metadata. Its optional `pattern`
 /// and `example` are added to the OpenAPI string schema when that feature is

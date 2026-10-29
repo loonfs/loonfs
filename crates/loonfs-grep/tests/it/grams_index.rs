@@ -16,7 +16,9 @@ use loonfs_test_support::stores::{
     ConcurrencyWatchStore, KeyPredicate, OperationSelector, RecordingStore,
 };
 use loonfs_types::api::v0::GrepIndexStatus;
-use loonfs_types::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
+use loonfs_types::{
+    decode_cursor, AbsolutePath, GrepCursorPosition, GrepPageCursor, GrepRequest, GrepScope,
+};
 use std::assert_matches;
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
@@ -27,8 +29,7 @@ fn request(pattern: &str) -> GrepRequest {
     GrepRequest {
         pattern: pattern.to_owned(),
         case_insensitive: false,
-        path_prefix: None,
-        inode_id: None,
+        scope: GrepScope::Namespace,
         allow_stale: false,
         allow_scan: false,
     }
@@ -899,7 +900,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         cursor.last_inode_id > page_one.matches[0].inode_id,
         "the cursor must have advanced past the oversized candidate"
     );
-    assert_eq!(cursor.last_byte_offset, u64::MAX);
+    assert_eq!(cursor.resume, GrepCursorPosition::AfterFile {});
 
     let page_two = host
         .grep(

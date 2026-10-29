@@ -3,7 +3,7 @@
 
 use crate::digest::{sha256_digest, SHA256_DIGEST_BYTES};
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
-use crate::manifest::{DeletedBinding, DeltaPosition};
+use crate::metadata_rows::{DeletedBinding, DeltaPosition};
 use crate::{
     AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitFingerprint,
     CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
@@ -368,7 +368,7 @@ pub type WalObjectEnvelope = crate::envelope::VerifiedEnvelope<WalObjectPayload>
 struct WalObjectDocument {
     kind: String,
     format_version: u32,
-    payload_checksum: String,
+    payload_checksum: crate::PayloadChecksum,
     #[serde(with = "serde_bytes")]
     payload: Vec<u8>,
 }
@@ -637,13 +637,16 @@ mod tests {
             .map(|(index, &length)| {
                 let bytes = vec![42; length];
                 let content_id =
-                    ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id");
+                    ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id");
                 WalCommitPayload {
                     committed_seq: ChangeSeq(index as u64 + 1),
                     commit_id: CommitId::parse(format!("c_{index:032x}")).expect("commit id"),
                     committed_by: crate::ActorId::parse("test").expect("actor"),
-                    semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:test""#)
-                        .expect("fingerprint"),
+                    semantic_commit_fingerprint: CommitFingerprint::parse(format!(
+                        "v1:sha256:{}",
+                        crate::sha256_hex(b"test")
+                    ))
+                    .expect("fingerprint"),
                     committed_at_ms: 0,
                     message: None,
                     deltas: vec![WalCommitDelta {
@@ -747,7 +750,7 @@ mod tests {
 
         let mut wrong_id = inline_wal_object(&[3]);
         wrong_id.records[0].inline_content[0].content_id =
-            ContentId::parse("con_fedcba9876543210fedcba9876543210").expect("content id");
+            ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg").expect("content id");
         assert_inline_content_rejected(wrong_id, 0, expected_reason);
 
         let mut foreign = inline_wal_object(&[3]);
@@ -936,7 +939,7 @@ mod tests {
             *layout = layout_size.map(|length| crate::ContentLayout {
                 extents: vec![crate::ContentExtent {
                     owner_namespace_id: NamespaceId::parse("other").expect("namespace"),
-                    content_id: ContentId::parse("con_fedcba9876543210fedcba9876543210")
+                    content_id: ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg")
                         .expect("content"),
                     object: crate::ExtentObject::Whole,
                     offset: 0,

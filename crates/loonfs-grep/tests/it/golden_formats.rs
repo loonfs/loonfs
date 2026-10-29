@@ -191,7 +191,7 @@ pub(crate) fn segment_ref(number: u8, run_no: u64, level: u32) -> GrepSegmentRef
 }
 
 pub(crate) fn segment_id(number: u8) -> IndexSegmentId {
-    IndexSegmentId::parse(format!("idx_{number:032x}")).expect("valid segment id")
+    IndexSegmentId::parse(format!("idx_{number:026}")).expect("valid segment id")
 }
 
 fn posting(inode_id: u64, revision_no: u64) -> GramPosting {

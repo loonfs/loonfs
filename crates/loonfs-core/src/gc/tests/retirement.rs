@@ -373,7 +373,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         .expect("target");
     let mut payload = current.state.envelope.payload().clone();
     let basis = payload.fork_basis.as_mut().expect("fork basis");
-    basis.manifest.payload_checksum = format!("sha256:{}", "0".repeat(64));
+    basis.manifest.payload_checksum = loonfs_types::sha256_digest(b"retired");
     let pin_id = basis.source_pin_id.clone();
     let bytes = crate::manifest::publish::encode_manifest(payload);
     replace_object(&store, &current.object_key, bytes.into_bytes().into())

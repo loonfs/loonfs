@@ -782,7 +782,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         {
             view.resolve_content_location(content_ref).await
         } else {
-            Ok(ContentLocation::whole(content_ref)?)
+            Ok(ContentLocation::whole(content_ref))
         }
     }
 
@@ -1094,7 +1094,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let context = self.mutation_context();
         let location = match owner_location {
             Some(location) => location,
-            None => ContentLocation::whole(content_ref)?,
+            None => ContentLocation::whole(content_ref),
         };
         let body = open_content_import_reader(self.store.clone(), location, content_ref).await?;
         let _permit = self.content_writes.acquire().await;

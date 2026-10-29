@@ -709,9 +709,6 @@ async fn stored_checksum_readback(store: &dyn ObjectStore, run: &ProbeRun) -> Ch
     let checksum = stored
         .checksum
         .ok_or_else(|| wrong("the provider reports no stored checksum"))?;
-    checksum
-        .validate()
-        .map_err(|_| wrong("the provider returned an invalid stored checksum"))?;
     if checksum != Checksum::compute(store.checksum_algorithm(), &payload) {
         return Err(wrong(
             "the stored checksum does not describe the bytes actually stored",

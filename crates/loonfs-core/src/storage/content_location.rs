@@ -51,7 +51,7 @@ impl ContentLocation {
         content: Option<&ProjectedContent>,
         content_ref: &ContentRef,
     ) -> Result<Self> {
-        let object_key = content_object_key_for_ref(content_ref)?;
+        let object_key = content_object_key_for_ref(content_ref);
         let mut end = content_ref.size_bytes;
         let content = content.filter(|content| content.pieces[0].offset <= end);
         let mut pieces = Vec::new();
@@ -109,7 +109,7 @@ impl ContentLocation {
                 extents.push(LocatedExtent { object_key, extent });
             }
         } else if content_ref.size_bytes == 0 && content.is_none() {
-            return Self::whole(content_ref).map_err(Into::into);
+            return Ok(Self::whole(content_ref));
         }
         Ok(Self {
             object_key,
@@ -118,11 +118,9 @@ impl ContentLocation {
         })
     }
 
-    pub(crate) fn whole(
-        content_ref: &ContentRef,
-    ) -> std::result::Result<Self, DurableContentValidationError> {
-        let object_key = content_object_key_for_ref(content_ref)?;
-        Ok(Self {
+    pub(crate) fn whole(content_ref: &ContentRef) -> Self {
+        let object_key = content_object_key_for_ref(content_ref);
+        Self {
             extents: vec![LocatedExtent {
                 object_key: object_key.clone(),
                 extent: ContentExtent {
@@ -135,7 +133,7 @@ impl ContentLocation {
             }],
             object_key,
             pieces: Vec::new(),
-        })
+        }
     }
 
     pub(crate) fn object_key(&self) -> &str {

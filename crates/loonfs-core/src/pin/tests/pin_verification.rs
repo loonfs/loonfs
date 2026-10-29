@@ -275,7 +275,7 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
             .expect("next number"),
     );
     let mut changed_checksum = record.clone();
-    changed_checksum.payload_checksum = "sha256:different".to_owned();
+    changed_checksum.payload_checksum = loonfs_types::sha256_digest(b"different");
     for (record, expected_verification) in [
         (record, record::PinBasisVerification::Verified),
         (changed_number, record::PinBasisVerification::Invalid),

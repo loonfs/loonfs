@@ -292,7 +292,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .await
         .expect("head");
     assert_eq!(genesis.replay_head(&head), head);
-    for family in MANIFEST_ROW_FAMILIES {
+    for family in ApiMetadataRowFamily::ALL {
         assert!(genesis
             .segments
             .scan_prefix(family, "")

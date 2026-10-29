@@ -39,7 +39,7 @@ use loonfs_types::{
 };
 use loonfs_types::{
     CapabilityDocument, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    GrepRequest, NamespaceId, RevisionNo, FEATURE_QUERY_GREP,
+    GrepRequest, GrepScope, NamespaceId, RevisionNo, FEATURE_QUERY_GREP,
 };
 use std::path::Path;
 
@@ -391,7 +391,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         precondition_index: Some(0),
         commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
         committed_seq: Some(ChangeSeq::from(1)),
-        committed_fingerprint: Some(serde_json::from_str(r#""fingerprint""#).expect("fingerprint")),
+        committed_fingerprint: Some(loonfs_test_support::ids::commit_fingerprint("fingerprint")),
         operation_index: Some(0),
         fenced_writer_epoch: Some(WriterEpoch::from(1)),
         active_writer_epoch: Some(WriterEpoch::from(2)),
@@ -1850,6 +1850,21 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "invalid_request",
     );
     assert_eq!(body["param"], "inode_id");
+    let grep_two_scopes_url = format!(
+        "http://{addr}/v0/namespaces/demo/grep?pattern=needle&path_prefix=/docs&inode_id=ino_27"
+    );
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .get(&grep_two_scopes_url)
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "a grep with both scopes should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert_eq!(body["param"], "inode_id");
 
     let runs_url = format!("http://{addr}/v0/maintenance/namespaces/demo/runs");
     expect_enveloped(
@@ -2046,8 +2061,7 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
     let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
     let key = loonfs_objectstore::keys::content_blob(
         &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
-        &loonfs_types::ContentId::parse("con_0123456789abcdef0123456789abcdef")
-            .expect("content id"),
+        &loonfs_types::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
     );
     // Use HTTP-sized chunks so the store must regroup them.
     let chunks: Vec<Bytes> = payload
@@ -2628,8 +2642,7 @@ fn grep_error_request() -> GrepRequest {
     GrepRequest {
         pattern: "needle".to_owned(),
         case_insensitive: false,
-        path_prefix: None,
-        inode_id: None,
+        scope: GrepScope::Namespace,
         allow_stale: false,
         allow_scan: false,
     }

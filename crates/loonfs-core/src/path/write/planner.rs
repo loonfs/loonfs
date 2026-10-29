@@ -680,7 +680,7 @@ mod tests {
             store,
             &crate::test_support::content_writes(),
             &CommitCandidate::prepared(request.clone(), content),
-            serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
+            loonfs_test_support::ids::commit_fingerprint("test"),
             &session,
             view.projected_metadata_view(),
             1,

@@ -872,7 +872,7 @@ mod tests {
             );
             let keys: Vec<_> = (0..64)
                 .map(|index| {
-                    MetadataSegmentId::parse(format!("seg_{index:032x}")).expect("segment id")
+                    MetadataSegmentId::parse(format!("seg_{index:026}")).expect("segment id")
                 })
                 .collect();
             let mut loads = Vec::new();
@@ -1054,9 +1054,9 @@ mod tests {
     fn small_entries_are_evicted_one_per_insert_from_the_budget_on() {
         const ENTRIES: usize = 1_000;
         let keys: Vec<_> = (0..4 * ENTRIES)
-            .map(|index| MetadataSegmentId::parse(format!("seg_{index:032x}")).expect("segment id"))
+            .map(|index| MetadataSegmentId::parse(format!("seg_{index:026}")).expect("segment id"))
             .collect();
-        // Every key is 36 characters long, so every entry is charged the same.
+        // Every key is 30 characters long, so every entry is charged the same.
         let budget = ENTRIES * charged_bytes(&keys[0], &Block(32));
         let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(budget));
         let (mut capacity, mut resizes) = (0, 0);

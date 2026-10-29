@@ -66,7 +66,7 @@ func TestStreamingUploads(t *testing.T) {
 			source := &uploadSource{reader: strings.NewReader(fixture.Content), fault: fixture.Fault == "source_error"}
 			var payload, abort, complete atomic.Int64
 			var bodies bytes.Buffer // server handlers complete before their response is consumed
-			claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
+			claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_00000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				path := r.URL.Path
 				if path == "/object" {

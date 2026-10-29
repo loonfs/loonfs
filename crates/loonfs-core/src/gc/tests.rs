@@ -1388,7 +1388,7 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
         &namespace_id,
         "/file",
         b"first",
-        loonfs_types::ContentId::parse("con_00000000000000000000000000000001").expect("first id"),
+        loonfs_types::ContentId::parse("con_00000000000000000000000001").expect("first id"),
     )
     .await;
     crate::manifest::fold_wal(&store, &namespace_id)
@@ -1399,7 +1399,7 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
         &namespace_id,
         "/file",
         b"second",
-        loonfs_types::ContentId::parse("con_00000000000000000000000000000002").expect("second id"),
+        loonfs_types::ContentId::parse("con_00000000000000000000000002").expect("second id"),
     )
     .await;
     compact_below_the_floor(&store, &namespace_id).await;
@@ -1538,7 +1538,7 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
         &namespace_id,
         "/file",
         b"pinned",
-        loonfs_types::ContentId::parse("con_00000000000000000000000000000001").expect("pinned id"),
+        loonfs_types::ContentId::parse("con_00000000000000000000000001").expect("pinned id"),
     )
     .await;
     let checkpoint = create_checkpoint(&store, &namespace_id, &setup)
@@ -1549,7 +1549,7 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
         &namespace_id,
         "/file",
         b"current",
-        loonfs_types::ContentId::parse("con_00000000000000000000000000000002").expect("current id"),
+        loonfs_types::ContentId::parse("con_00000000000000000000000002").expect("current id"),
     )
     .await;
     compact_below_the_floor(&store, &namespace_id).await;
@@ -3389,13 +3389,11 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
         .collect();
     let old = metadata_segment(
         &namespace_id,
-        &loonfs_types::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
-            .expect("segment"),
+        &loonfs_types::MetadataSegmentId::parse("seg_00000000000000000000000001").expect("segment"),
     );
     let young = metadata_segment(
         &namespace_id,
-        &loonfs_types::MetadataSegmentId::parse("seg_00000000000000000000000000000002")
-            .expect("segment"),
+        &loonfs_types::MetadataSegmentId::parse("seg_00000000000000000000000002").expect("segment"),
     );
     for key in [&old, &young] {
         inner
@@ -3476,7 +3474,7 @@ async fn unreferenced_segments_are_deleted_concurrently_within_the_write_wave() 
         .map(|number| {
             metadata_segment(
                 &namespace_id,
-                &loonfs_types::MetadataSegmentId::parse(format!("seg_{number:032x}"))
+                &loonfs_types::MetadataSegmentId::parse(format!("seg_{number:026}"))
                     .expect("segment"),
             )
         })

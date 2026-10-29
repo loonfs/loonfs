@@ -637,7 +637,7 @@ fn probe_report_lines(report: &StoreProbeReport) -> String {
 fn stored_checksum_test_key() -> String {
     content_blob(
         &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
-        &ContentId::parse("con_9a41c07d55e2410fb3c6d8e1f2a3b4c5").expect("valid content id"),
+        &ContentId::parse("con_4t8707tnf2847v7hprw7sa7d65").expect("valid content id"),
     )
 }
 
@@ -680,7 +680,7 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
 fn streamed_write_key() -> String {
     content_blob(
         &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
-        &ContentId::parse("con_5723ea9d1c4b48f0a1d2e3f4a5b6c7d8").expect("valid content id"),
+        &ContentId::parse("con_2q4fn9t72b93ra3mq3yjjvdhyr").expect("valid content id"),
     )
 }
 
@@ -936,7 +936,7 @@ async fn assert_put_and_assembly_share_identity<S: ObjectStore>(
                 &put_key,
                 sources,
                 vec![tail.clone(), Bytes::from_static(b"other")],
-                &Checksum::compute(expected.algorithm, &[payload, b"other"].concat())
+                &Checksum::compute(expected.algorithm(), &[payload, b"other"].concat())
             )
             .await,
         Err(ObjectStoreError::DifferentObject { .. })

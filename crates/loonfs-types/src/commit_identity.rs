@@ -9,6 +9,8 @@
 //! The commit ID is not part of the fingerprint input. The commit ID selects
 //! a receipt, which identifies the commit row containing the fingerprint.
 
+use crate::digest::is_sha256_hex;
+use crate::id_macros::{string_id, validation_error};
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, AttributesRevisionNo, ChangeSeq, CommitPrecondition, ContentId, ContentRef,
@@ -31,15 +33,38 @@ const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v1";
 /// different hash without changing existing fingerprints.
 const FINGERPRINT_SCHEME: &str = "v1:sha256";
 
-/// The semantic identity of one mutation request.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
-pub struct CommitFingerprint(String);
+validation_error!(
+    CommitFingerprintValidationError,
+    "invalid commit fingerprint {value:?}: {reason}"
+);
 
-impl CommitFingerprint {
-    /// Returns the stored fingerprint string.
-    pub fn as_str(&self) -> &str {
-        &self.0
+string_id! {
+    /// The semantic identity of one mutation request, spelled `v1:sha256:` and
+    /// 64 lowercase hex characters.
+    CommitFingerprint,
+    error = CommitFingerprintValidationError,
+    validate = validate_commit_fingerprint,
+}
+
+fn validate_commit_fingerprint(value: &str) -> Result<(), CommitFingerprintValidationError> {
+    if value
+        .strip_prefix(FINGERPRINT_SCHEME)
+        .and_then(|digest| digest.strip_prefix(':'))
+        .is_some_and(is_sha256_hex)
+    {
+        return Ok(());
     }
+    // A longer value can't be a fingerprint, and echoing it would make the
+    // error as large as the bad input.
+    let echoed = if value.len() <= FINGERPRINT_SCHEME.len() + 1 + 64 {
+        value
+    } else {
+        ""
+    };
+    Err(CommitFingerprintValidationError::new(
+        echoed,
+        format!("must be `{FINGERPRINT_SCHEME}:` followed by 64 lowercase hex characters"),
+    ))
 }
 
 /// A request cannot be represented by the version 1 fingerprint scheme.
@@ -1230,7 +1255,7 @@ mod tests {
     fn put_file_preconditions_change_the_fingerprint_deterministically() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+            ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
             b"put bytes",
             crate::ChecksumAlgorithm::Crc64nvme,
         );
@@ -1305,8 +1330,7 @@ mod tests {
     #[test]
     fn a_put_has_the_pinned_fingerprint_under_every_checksum_algorithm() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let content_id =
-            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id");
+        let content_id = ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id");
         let bytes = b"pinned put bytes";
 
         for content_ref in [
@@ -1336,7 +1360,7 @@ mod tests {
                 )
                 .expect("retry fingerprint")
                 .as_str(),
-                "v1:sha256:713de4c58dac816a19e7fb4439074b8103d1bf377f08176027cf39eaa7dc3d2d"
+                "v1:sha256:9355b7faba7360d50aad432c2035de5fb34d6106333821f1eedadc6d396b54e3"
             );
         }
     }

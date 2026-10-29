@@ -283,8 +283,7 @@ mod tests {
         let request = GrepRequest {
             pattern: pattern.to_owned(),
             case_insensitive,
-            path_prefix: None,
-            inode_id: None,
+            scope: loonfs_types::GrepScope::Namespace,
             allow_stale: false,
             allow_scan: false,
         };

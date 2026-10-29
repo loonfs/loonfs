@@ -36,9 +36,9 @@ use loonfs_types::format::wal::{
 use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
-    ChecksumHex, CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
-    MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, RevisionNo, RunNo,
-    UploadId, WalNo, WriterEpoch,
+    ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef, ContentRefKind, InodeId,
+    InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PayloadChecksum, PinId,
+    PrincipalId, PrincipalScope, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -132,7 +132,7 @@ fn content_id(value: &str) -> ContentId {
 fn sample_content_ref() -> ContentRef {
     ContentRef::blob_v1(
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
-        content_id("con_0123456789abcdef0123456789abcdef"),
+        content_id("con_014d2pf2dbsqqg28t5cy4tqkff"),
         b"golden bytes",
         crate::ChecksumAlgorithm::Crc64nvme,
     )
@@ -142,12 +142,13 @@ fn sample_crc_content_ref() -> ContentRef {
     ContentRef {
         kind: ContentRefKind::BlobV1,
         owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
-        content_id: content_id("con_fedcba9876543210fedcba9876543210"),
+        content_id: content_id("con_7yvjx9gxjm688fxq5tk1v58cgg"),
         size_bytes: 11_534_336,
-        checksum: Checksum {
-            algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: ChecksumHex::parse("bbb7305bdf118bcb").expect("a lowercase hex checksum"),
-        },
+        checksum: Checksum::new(
+            ChecksumAlgorithm::Crc64nvme,
+            ChecksumHex::parse("bbb7305bdf118bcb").expect("a lowercase hex checksum"),
+        )
+        .expect("a CRC-64/NVME checksum"),
     }
 }
 
@@ -159,12 +160,13 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
         ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
-            content_id: content_id("con_00112233445566778899aabbccddeeff"),
+            content_id: content_id("con_0024h36h2ncsvrh6daqf6dvvqz"),
             size_bytes: 4_096,
-            checksum: Checksum {
-                algorithm: ChecksumAlgorithm::Crc32c,
-                value: ChecksumHex::parse("1a2b3c4d").expect("a lowercase hex checksum"),
-            },
+            checksum: Checksum::new(
+                ChecksumAlgorithm::Crc32c,
+                ChecksumHex::parse("1a2b3c4d").expect("a lowercase hex checksum"),
+            )
+            .expect("a CRC-32C checksum"),
         },
     ];
     let encoded = serde_json::to_vec_pretty(&references).expect("encode content refs");
@@ -173,9 +175,6 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
     let decoded: Vec<ContentRef> =
         serde_json::from_slice(&read_golden("content_refs.v1.json")).expect("decode content refs");
     assert_eq!(decoded, references);
-    for content_ref in &decoded {
-        content_ref.validate().expect("golden references are valid");
-    }
 }
 
 #[test]
@@ -192,7 +191,7 @@ fn content_ref_decode_rejects_unknown_fields() {
 }
 
 fn segment_id() -> MetadataSegmentId {
-    MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdef").expect("valid segment id")
+    MetadataSegmentId::parse("seg_014d2pf2dbsqqg28t5cy4tqkff").expect("valid segment id")
 }
 
 fn name_key(value: &str) -> NameKey {
@@ -380,7 +379,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             *layout = None;
         }
     }
-    let chain_id = content_id("con_00112233445566778899aabbccddeeff");
+    let chain_id = content_id("con_0024h36h2ncsvrh6daqf6dvvqz");
     payload.records[0].inline_content = vec![
         WalInlineContent {
             content_id: sample_content_ref().content_id,
@@ -388,7 +387,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             bytes: b"golden bytes".to_vec(),
         },
         WalInlineContent {
-            content_id: content_id("con_fedcba9876543210fedcba9876543210"),
+            content_id: content_id("con_7yvjx9gxjm688fxq5tk1v58cgg"),
             offset: 0,
             bytes: Vec::new(),
         },
@@ -508,7 +507,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
     let mut publication = manifest.runs[0].segments[0].clone();
     publication.family = MetadataRowFamily::ContentLayouts;
     publication.segment_id =
-        MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdee").expect("segment id");
+        MetadataSegmentId::parse("seg_014d2pf2dbsqqg28t5cy4tqkfe").expect("segment id");
     publication.min_row_key = sample_content_layout_row().row_key();
     publication.max_row_key = publication.min_row_key.clone();
     publication.row_count = 1;
@@ -517,14 +516,20 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
 }
 
 /// Returns a manifest reference owned by the sample namespace.
+fn payload_checksum() -> PayloadChecksum {
+    PayloadChecksum::parse(
+        "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    )
+    .expect("valid payload checksum")
+}
+
 fn sample_manifest_ref(number: u64) -> ManifestRef {
     ManifestRef {
         owner_namespace_id: namespace_id(),
         manifest_no: ManifestNo(number),
 
         head_seq: ChangeSeq(number),
-        payload_checksum: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            .to_owned(),
+        payload_checksum: payload_checksum(),
     }
 }
 
@@ -568,9 +573,7 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
                 manifest_no: ManifestNo(2),
 
                 head_seq: ChangeSeq(2),
-                payload_checksum:
-                    "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                        .to_owned(),
+                payload_checksum: payload_checksum(),
             },
             source_pin_id: pin_id("pin_00000000000000000002-0000000000000002"),
         }),
@@ -675,7 +678,8 @@ fn control_document_with_payload_edit(
         serde_json::from_slice(&read_golden(fixture)).expect("decode control fixture");
     edit(&mut document["payload"]);
     let payload = serde_json::to_string(&document["payload"]).expect("encode edited payload");
-    document["payload_checksum"] = serde_json::Value::from(sha256_digest(payload.as_bytes()));
+    document["payload_checksum"] =
+        serde_json::Value::from(sha256_digest(payload.as_bytes()).as_str());
     format!(
         "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
         document["kind"], document["format_version"], document["payload_checksum"], payload,
@@ -810,9 +814,8 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
-                .expect("valid upload id"),
-            content_id: content_id("con_0123456789abcdef0123456789abcdef"),
+            upload_id: UploadId::parse("upl_014d2pf2dbsqqg28t5cy4tqkff").expect("valid upload id"),
+            content_id: content_id("con_014d2pf2dbsqqg28t5cy4tqkff"),
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {},
             expires_at_ms: 87_400_000,
@@ -823,9 +826,8 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            upload_id: UploadId::parse("upl_abcdef0123456789abcdef0123456789")
-                .expect("valid upload id"),
-            content_id: content_id("con_0123456789abcdef0123456789abcdef"),
+            upload_id: UploadId::parse("upl_5bsqqg28t5cy4tqkff04hmasw9").expect("valid upload id"),
+            content_id: content_id("con_014d2pf2dbsqqg28t5cy4tqkff"),
             subject_id: None,
             mode: UploadSessionMode::DirectPut {
                 checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
@@ -842,9 +844,8 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            upload_id: UploadId::parse("upl_22222222222222222222222222222222")
-                .expect("valid upload id"),
-            content_id: content_id("con_22222222222222222222222222222222"),
+            upload_id: UploadId::parse("upl_1248h248h248h248h248h248h2").expect("valid upload id"),
+            content_id: content_id("con_1248h248h248h248h248h248h2"),
             subject_id: None,
             mode: UploadSessionMode::DirectMultipart {
                 provider_upload_id: "provider-upload-id".to_owned(),
@@ -859,9 +860,8 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            upload_id: UploadId::parse("upl_33333333333333333333333333333333")
-                .expect("valid upload id"),
-            content_id: content_id("con_0123456789abcdef0123456789abcdef"),
+            upload_id: UploadId::parse("upl_1k6csk6csk6csk6csk6csk6csk").expect("valid upload id"),
+            content_id: content_id("con_014d2pf2dbsqqg28t5cy4tqkff"),
             subject_id: Some(loonfs_types::SubjectId::parse("usr_ada").expect("subject id")),
             mode: UploadSessionMode::ServiceProxied {},
             expires_at_ms: 87_400_000,
@@ -872,8 +872,7 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadOutcome,
         UploadOutcomePayload {
             namespace_id: namespace_id(),
-            upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
-                .expect("valid upload id"),
+            upload_id: UploadId::parse("upl_014d2pf2dbsqqg28t5cy4tqkff").expect("valid upload id"),
             outcome: UploadOutcome::Completed {
                 completed_at_ms: 2_000,
                 content_ref: sample_content_ref(),
@@ -885,8 +884,7 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadOutcome,
         UploadOutcomePayload {
             namespace_id: namespace_id(),
-            upload_id: UploadId::parse("upl_11111111111111111111111111111111")
-                .expect("valid upload id"),
+            upload_id: UploadId::parse("upl_0h248h248h248h248h248h248h").expect("valid upload id"),
             outcome: UploadOutcome::Aborted {
                 aborted_at_ms: 5_000,
             },
@@ -1201,9 +1199,9 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
             ControlObjectKind::UploadSession,
             serde_json::to_value(UploadSessionPayload {
                 namespace_id: namespace_id(),
-                upload_id: UploadId::parse("upl_11111111111111111111111111111111")
+                upload_id: UploadId::parse("upl_0h248h248h248h248h248h248h")
                     .expect("valid upload id"),
-                content_id: content_id("con_11111111111111111111111111111111"),
+                content_id: content_id("con_0h248h248h248h248h248h248h"),
                 subject_id: None,
                 mode: UploadSessionMode::ServiceProxied {},
                 expires_at_ms: 87_400_000,
@@ -1214,7 +1212,7 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
             ControlObjectKind::UploadOutcome,
             serde_json::to_value(UploadOutcomePayload {
                 namespace_id: namespace_id(),
-                upload_id: UploadId::parse("upl_11111111111111111111111111111111")
+                upload_id: UploadId::parse("upl_0h248h248h248h248h248h248h")
                     .expect("valid upload id"),
                 outcome: UploadOutcome::Aborted {
                     aborted_at_ms: 5_000,
@@ -1245,22 +1243,10 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
 
 #[test]
 fn metadata_row_family_wire_tags_are_pinned() {
-    let tags: Vec<String> = [
-        MetadataRowFamily::Inodes,
-        MetadataRowFamily::DirentryBinds,
-        MetadataRowFamily::DirentryChildBinds,
-        MetadataRowFamily::Revisions,
-        MetadataRowFamily::Tombstones,
-        MetadataRowFamily::ActiveDeletions,
-        MetadataRowFamily::CommitReceipts,
-        MetadataRowFamily::Commits,
-        MetadataRowFamily::ContentLayouts,
-        MetadataRowFamily::Attributes,
-        MetadataRowFamily::Access,
-    ]
-    .iter()
-    .map(|family| serde_json::to_string(family).expect("family tag"))
-    .collect();
+    let tags: Vec<String> = MetadataRowFamily::ALL
+        .iter()
+        .map(|family| serde_json::to_string(family).expect("family tag"))
+        .collect();
     assert_eq!(
         tags,
         [
@@ -1314,7 +1300,7 @@ fn wal_document_with_payload_edit(
         *value = ciborium::Value::Bytes(edited.clone());
     });
     let restated = with_cbor_document_entry(&with_payload, "payload_checksum", |value| {
-        *value = ciborium::Value::from(sha256_digest(&edited));
+        *value = ciborium::Value::from(sha256_digest(&edited).as_str());
     });
     rezstd(&restated)
 }
@@ -1981,7 +1967,11 @@ fn sample_commit_row() -> MetadataRow {
         committed_seq: ChangeSeq(9),
         commit_id: commit_id(),
         committed_by: actor(),
-        semantic_commit_fingerprint: serde_json::from_str(r#""fp:golden""#).expect("fingerprint"),
+        semantic_commit_fingerprint: CommitFingerprint::parse(format!(
+            "v1:sha256:{}",
+            loonfs_types::sha256_hex(b"golden")
+        ))
+        .expect("fingerprint"),
         committed_at_ms: 9_000,
         message: None,
         deltas: vec![

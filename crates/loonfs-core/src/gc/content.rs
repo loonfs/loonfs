@@ -16,18 +16,14 @@ use loonfs_objectstore::layout::content_id_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ContentLayoutRecord, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
-use loonfs_types::{ContentExtent, GcResponse};
+use loonfs_types::{generated_id_body_prefixes, u64_from_usize, ContentExtent, GcResponse};
 use std::ops::ControlFlow;
 
-/// Values one hex digit of a content ID takes, so each digit of shard width
-/// multiplies a pass's shard count by this many.
-const SHARDS_PER_HEX_DIGIT: u64 = 16;
-
-/// Most hex digits of a content ID that one shard prefix covers. At width 4 a
-/// pass makes 65,536 shard listings. Below about 4.3 billion layout rows,
-/// shards of the default 65,536 rows need no more than four digits, so the cap
-/// doesn't bind.
-const MAX_CONTENT_SHARD_WIDTH: u32 = 4;
+/// Most characters of a content ID body that one shard prefix covers. At
+/// width 4 a pass makes 262,144 shard listings. Below about 17 billion layout
+/// rows, shards of the default 65,536 rows need no more than four characters,
+/// so the cap doesn't bind.
+const MAX_CONTENT_SHARD_WIDTH: usize = 4;
 
 /// The layout segments that the pass's rooted manifests list, each scanned on
 /// its own to protect the content objects that its layout rows refer to.
@@ -48,7 +44,7 @@ pub(super) struct ContentSweep<'a> {
     segments: Vec<ScanDescriptor<'a>>,
     _segments_charge: Charge,
     shared: BloomFilter,
-    shard_width: u32,
+    shard_width: usize,
 }
 
 impl<'a> ContentSweep<'a> {
@@ -67,7 +63,9 @@ impl<'a> ContentSweep<'a> {
         let (segments, segments_charge) = distinct_layout_segments(live)?;
         let mut shard_width = 0;
         while shard_width < MAX_CONTENT_SHARD_WIDTH
-            && live.content_layout_rows / SHARDS_PER_HEX_DIGIT.pow(shard_width) > shard_rows as u64
+            && live.content_layout_rows
+                / u64_from_usize(generated_id_body_prefixes(shard_width).len())
+                > u64_from_usize(shard_rows)
         {
             shard_width += 1;
         }
@@ -112,12 +110,8 @@ impl<'a> ContentSweep<'a> {
         sweep: &Sweep<'_, S>,
         report: &mut GcResponse,
     ) -> Result<()> {
-        for shard in 0..SHARDS_PER_HEX_DIGIT.pow(self.shard_width) {
-            let id_prefix = if self.shard_width == 0 {
-                "con_".to_owned()
-            } else {
-                format!("con_{shard:0width$x}", width = self.shard_width as usize)
-            };
+        for body_prefix in generated_id_body_prefixes(self.shard_width) {
+            let id_prefix = format!("con_{body_prefix}");
             let mut keys = ChargedSet::new(&sweep.live.memory);
             let _ = scan_layout_extents(sweep, &self.segments, &id_prefix, |_, extent| {
                 if extent.content_id.as_str().starts_with(&id_prefix) {

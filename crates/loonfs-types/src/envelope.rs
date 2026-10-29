@@ -6,7 +6,7 @@
 //! use the same validation rules and errors, and manifests and WAL objects
 //! store their documents zstd-compressed.
 
-use crate::digest::sha256_digest;
+use crate::digest::{sha256_digest, PayloadChecksum};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -119,9 +119,9 @@ pub enum EnvelopeCodecError {
     #[error("envelope payload checksum mismatch: expected `{expected}`, actual `{actual}`")]
     ChecksumMismatch {
         /// Digest recorded in the durable envelope.
-        expected: String,
+        expected: PayloadChecksum,
         /// Digest recomputed over the exact stored payload bytes.
-        actual: String,
+        actual: PayloadChecksum,
     },
 }
 
@@ -151,11 +151,11 @@ pub fn ensure_version(kind: &str, found: u32, supported: u32) -> Result<(), Enve
 
 /// Requires the stored checksum to match the payload bytes as stored.
 pub fn verify_payload_checksum(
-    expected: &str,
+    expected: &PayloadChecksum,
     payload_bytes: &[u8],
 ) -> Result<(), EnvelopeCodecError> {
     let actual = sha256_digest(payload_bytes);
-    if actual != expected {
+    if actual != *expected {
         return Err(EnvelopeCodecError::ChecksumMismatch {
             expected: expected.to_owned(),
             actual,
@@ -199,7 +199,7 @@ pub(crate) fn decompress_document(
 struct JsonEnvelopeDocument {
     kind: String,
     format_version: u32,
-    payload_checksum: String,
+    payload_checksum: PayloadChecksum,
     payload: Box<RawValue>,
 }
 
@@ -211,13 +211,13 @@ struct JsonEnvelopeDocument {
 /// This type has no serde decoder; durable reads must use a checked codec.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedEnvelope<T> {
-    pub(crate) payload_checksum: String,
+    pub(crate) payload_checksum: PayloadChecksum,
     pub(crate) payload: T,
 }
 
 impl<T> VerifiedEnvelope<T> {
     /// Returns the checksum of the exact stored payload bytes.
-    pub fn payload_checksum(&self) -> &str {
+    pub fn payload_checksum(&self) -> &PayloadChecksum {
         &self.payload_checksum
     }
     /// Returns the payload protected by this framing.
@@ -358,9 +358,9 @@ mod tests {
             serde_json::from_slice(encoded.as_bytes()).expect("document");
         assert_eq!(calls.get(), 1);
         assert_eq!(document.payload.get(), "42");
-        assert_eq!(encoded.envelope().payload_checksum(), sha256_digest(b"42"));
+        assert_eq!(encoded.envelope().payload_checksum(), &sha256_digest(b"42"));
         assert_eq!(
-            document.payload_checksum,
+            &document.payload_checksum,
             encoded.envelope().payload_checksum()
         );
     }
@@ -375,10 +375,10 @@ mod tests {
         let decoded: VerifiedEnvelope<serde_json::Value> =
             decode_json_envelope(bytes.as_bytes(), 1, |kind| ensure_kind("test", kind))
                 .expect("decode exact stored bytes");
-        assert_eq!(decoded.payload_checksum(), checksum);
+        assert_eq!(decoded.payload_checksum(), &checksum);
         let successor =
             encode_json_envelope("test", 1, decoded.into_payload()).expect("canonical encoding");
-        assert_ne!(successor.envelope().payload_checksum(), checksum);
+        assert_ne!(successor.envelope().payload_checksum(), &checksum);
         let reread: VerifiedEnvelope<serde_json::Value> =
             decode_json_envelope(successor.as_bytes(), 1, |kind| ensure_kind("test", kind))
                 .expect("decode canonical bytes");

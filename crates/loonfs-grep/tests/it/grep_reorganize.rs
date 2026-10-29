@@ -92,7 +92,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
 
     let mut segments = Vec::new();
     for run in 0..8 {
-        let segment_id = IndexSegmentId::parse(format!("idx_{run:032x}")).expect("segment id");
+        let segment_id = IndexSegmentId::parse(format!("idx_{run:026}")).expect("segment id");
         store
             .put(
                 &segment_key(&namespace_id, &segment_id),

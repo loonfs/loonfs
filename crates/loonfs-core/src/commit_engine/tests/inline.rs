@@ -519,8 +519,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
             fold::assert_content_before_metadata(&store, values.len());
             for value in &values {
-                let key = crate::storage::content::content_object_key_for_ref(value.content_ref())
-                    .expect("content key");
+                let key = crate::storage::content::content_object_key_for_ref(value.content_ref());
                 assert_eq!(
                     store
                         .get(&key, None)

@@ -413,8 +413,7 @@ mod tests {
             committed_seq: ChangeSeq(seq),
             commit_id: CommitId::parse(format!("c_{seq:032x}")).expect("commit id"),
             committed_by: loonfs_test_support::test_actor(),
-            semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:test""#)
-                .expect("fingerprint"),
+            semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
             committed_at_ms: 0,
             message: None,
             deltas: vec![WalCommitDelta {
@@ -446,7 +445,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("pieces").expect("namespace id");
         let ids: Vec<_> = (0..64)
             .rev()
-            .map(|number| ContentId::parse(format!("con_{number:032x}")).expect("content id"))
+            .map(|number| ContentId::parse(format!("con_{number:026}")).expect("content id"))
             .collect();
         let mut tail = ProjectedWalTail::default();
         for (seq, content_id) in (1..).zip(&ids) {
@@ -486,7 +485,7 @@ mod tests {
     #[test]
     fn appended_pieces_merge_across_chunks_and_an_earlier_view_skips_later_chunks() {
         let namespace_id = NamespaceId::parse("pieces").expect("namespace id");
-        let content_id = ContentId::parse(format!("con_{:032x}", 1)).expect("content id");
+        let content_id = ContentId::parse(format!("con_{:026}", 1)).expect("content id");
         let mut tail = ProjectedWalTail::default();
         for (seq, whole, offset) in [
             (1, &b"value"[..], 0),

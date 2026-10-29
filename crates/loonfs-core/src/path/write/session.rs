@@ -252,7 +252,7 @@ mod tests {
     }
 
     fn test_fingerprint() -> CommitFingerprint {
-        serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint")
+        loonfs_test_support::ids::commit_fingerprint("test")
     }
 
     #[tokio::test]

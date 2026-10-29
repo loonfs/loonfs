@@ -1374,7 +1374,7 @@ mod tests {
     #[tokio::test]
     async fn head_reports_the_stored_checksum_after_a_create() {
         let store = memory_store();
-        let created = "namespaces/demo/content/con_00000000000000000000000000000001";
+        let created = "namespaces/demo/content/con_00000000000000000000000001";
         store
             .put_if_absent(created, Bytes::from_static(b"created"))
             .await
@@ -1658,7 +1658,7 @@ mod tests {
 
     const MULTIPART_TEST_THRESHOLD: usize = 1024;
     const MULTIPART_TEST_PART: usize = 512;
-    const MULTIPART_KEY: &str = "namespaces/demo/content/con_abcdef0123456789abcdef0123456789";
+    const MULTIPART_KEY: &str = "namespaces/demo/content/con_5bsqqg28t5cy4tqkff04hmasw9";
 
     /// Retrying store with a test-sized multipart geometry: payloads of
     /// 1024+ bytes go multipart in 512-byte parts.

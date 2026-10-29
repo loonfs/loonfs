@@ -1090,7 +1090,7 @@ mod tests {
     #[tokio::test]
     async fn retry_policy_proxied_upload_content_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let upload_id = loonfs_types::UploadId::parse("upl_00000000000000000000000000000001")
+        let upload_id = loonfs_types::UploadId::parse("upl_00000000000000000000000001")
             .expect("valid upload id");
         let response = UploadSession {
             namespace_id: namespace_id.clone(),
@@ -1120,7 +1120,7 @@ mod tests {
     #[tokio::test]
     async fn retry_policy_upload_completion_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let upload_id = loonfs_types::UploadId::parse("upl_00000000000000000000000000000001")
+        let upload_id = loonfs_types::UploadId::parse("upl_00000000000000000000000001")
             .expect("valid upload id");
         let content_ref = test_content_ref(b"content");
         let response = UploadSession {
@@ -1153,8 +1153,7 @@ mod tests {
     #[tokio::test]
     async fn staging_rejects_a_non_completed_completion_response() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let upload_id =
-            UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id");
+        let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("valid upload id");
         let statuses = [
             (
                 "open",

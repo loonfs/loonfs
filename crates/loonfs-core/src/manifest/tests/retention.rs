@@ -39,7 +39,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
     right: &MetadataState,
 ) -> bool {
     let normalize = |state: &MetadataState| {
-        MANIFEST_ROW_FAMILIES
+        ApiMetadataRowFamily::ALL
             .into_iter()
             .map(|family| {
                 let mut rows = manifest_rows_for_family(state, family)
@@ -65,7 +65,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             delta_index,
                             content_ref: loonfs_types::ContentRef {
                                 content_id: loonfs_types::ContentId::parse(
-                                    "con_00000000000000000000000000000000",
+                                    "con_00000000000000000000000000",
                                 )
                                 .expect("placeholder content id"),
                                 ..content_ref
@@ -73,7 +73,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                         }),
                         MetadataRow::Commit(mut record) => {
                             record.semantic_commit_fingerprint =
-                                serde_json::from_str(r#""<normalized>""#).expect("fingerprint");
+                                loonfs_test_support::ids::commit_fingerprint("normalized");
                             for delta in &mut record.deltas {
                                 if let loonfs_types::format::wal::WalDelta::AppendFileRevision {
                                     content_ref,
@@ -82,7 +82,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                                 } = &mut delta.delta
                                 {
                                     content_ref.content_id = loonfs_types::ContentId::parse(
-                                        "con_00000000000000000000000000000000",
+                                        "con_00000000000000000000000000",
                                     )
                                     .expect("placeholder content id");
                                     if let Some(layout) = layout {
@@ -95,10 +95,9 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             MetadataRow::Commit(record)
                         }
                         MetadataRow::ContentLayout(mut record) => {
-                            record.content_id = loonfs_types::ContentId::parse(
-                                "con_00000000000000000000000000000000",
-                            )
-                            .expect("placeholder content id");
+                            record.content_id =
+                                loonfs_types::ContentId::parse("con_00000000000000000000000000")
+                                    .expect("placeholder content id");
                             for extent in &mut record.layout.extents {
                                 extent.content_id = record.content_id.clone();
                             }
@@ -116,7 +115,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
 }
 
 fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
-    for family in MANIFEST_ROW_FAMILIES {
+    for family in ApiMetadataRowFamily::ALL {
         let rows = manifest_rows_for_family(metadata_state, family);
         let mut seen = BTreeSet::new();
         for row in rows {
@@ -1240,7 +1239,7 @@ fn a_manifest_whose_acknowledged_floor_breaks_its_bounds_fails_to_load() {
             owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
             manifest_no: ManifestNo(4),
             head_seq: ChangeSeq(5),
-            payload_checksum: "sha256:source".to_owned(),
+            payload_checksum: loonfs_types::sha256_digest(b"source"),
         },
         source_pin_id: PinId::parse("pin_00000000000000000004-0000000000000005").expect("pin id"),
     };

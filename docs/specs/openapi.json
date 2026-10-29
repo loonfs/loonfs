@@ -354,8 +354,8 @@
         "type": "object"
       },
       "CommitId": {
-        "description": "The client's idempotency key for one logical commit.\n\nReuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `c_<32 lowercase hex>`, but callers can supply any value\nthat follows these rules.",
-        "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+        "description": "The client's idempotency key for one logical commit.\n\nReuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `c_` followed by 26 lowercase Crockford base 32\ncharacters, but callers can supply any value that follows these rules.",
+        "example": "c_7kn71d9dq885x91hejz3gvf9p0",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         "type": "string"
       },
@@ -748,8 +748,8 @@
       },
       "ContentId": {
         "description": "The random identity of one immutable content object.",
-        "example": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
-        "pattern": "^con_[0-9a-f]{32}$",
+        "example": "con_4z59p0wjvx9a8b2frdhhf6mat1",
+        "pattern": "^con_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
       },
       "ContentRef": {
@@ -3691,8 +3691,8 @@
       },
       "ProbeRunId": {
         "description": "The ID of one run of the store contract probe.\n\nThe probe stores its temporary objects under a key prefix that includes this ID.",
-        "example": "probe_7c3e9a1f5b2d4c6e8a0f1b3d5e7c9a2b",
-        "pattern": "^probe_[0-9a-f]{32}$",
+        "example": "probe_3w7td1ypsd9hq8m3rv7nf7s6hb",
+        "pattern": "^probe_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
       },
       "ReadConsistency": {
@@ -4342,8 +4342,8 @@
       },
       "UploadId": {
         "description": "The durable ID of one upload session.",
-        "example": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
-        "pattern": "^upl_[0-9a-f]{32}$",
+        "example": "upl_2dhwp939xk9r7srv8t5cz5yw4c",
+        "pattern": "^upl_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
       },
       "UploadMode": {

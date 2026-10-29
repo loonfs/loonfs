@@ -115,7 +115,7 @@ fn spec() -> NamespacePath {
 }
 
 fn upload_id() -> UploadId {
-    UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id")
+    UploadId::parse("upl_00000000000000000000000001").expect("valid upload id")
 }
 
 fn client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
@@ -376,7 +376,7 @@ impl RecordingJournal {
             .lock()
             .expect("journal lock")
             .iter()
-            .map(|part| part.checksum.algorithm)
+            .map(|part| part.checksum.algorithm())
             .collect()
     }
 }
