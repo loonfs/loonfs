@@ -41,7 +41,7 @@ where
     .await;
     match written {
         Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => {
-            decide_occupied(
+            verify_occupied(
                 store,
                 key,
                 &Checksum::compute(store.checksum_algorithm(), bytes),
@@ -53,7 +53,7 @@ where
     }
 }
 
-pub(crate) async fn decide_created<S: ObjectStore + ?Sized>(
+pub(crate) async fn verify_created<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     expected: &Checksum,
@@ -61,13 +61,13 @@ pub(crate) async fn decide_created<S: ObjectStore + ?Sized>(
 ) -> Result<ObjectMetadata> {
     match created {
         Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => {
-            decide_occupied(store, key, expected, conflict).await
+            verify_occupied(store, key, expected, conflict).await
         }
         created => created,
     }
 }
 
-pub(crate) async fn decide_occupied<S: ObjectStore + ?Sized>(
+pub(crate) async fn verify_occupied<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     expected: &Checksum,

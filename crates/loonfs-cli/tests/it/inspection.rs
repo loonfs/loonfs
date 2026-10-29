@@ -2,7 +2,7 @@
 
 use super::common::*;
 #[cfg(unix)]
-use loonfs_objectstore::{probe::PROBE_RUN_PREFIX, ObjectStoreErrorKind};
+use loonfs_objectstore::{keys::PROBE_RUN_PREFIX, ObjectStoreErrorKind};
 use loonfs_types::{CapabilityDocument, PROTOCOL_VERSION};
 use std::collections::BTreeMap;
 

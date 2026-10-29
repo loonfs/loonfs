@@ -18,9 +18,6 @@ use futures::StreamExt;
 use loonfs_types::api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse};
 use loonfs_types::{Checksum, ProbeRunId};
 
-/// Prefix for objects created by store probes.
-pub const PROBE_RUN_PREFIX: &str = "probe-runs";
-
 /// Results from one store probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreProbeReport {

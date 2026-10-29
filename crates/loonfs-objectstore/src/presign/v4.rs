@@ -142,10 +142,12 @@ pub(crate) fn presign_v4(
 }
 
 pub(crate) fn signing_dates(object_key: &str, time: SystemTime) -> Result<SigningDates> {
-    let seconds = time
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| before_unix_epoch(object_key, err))?
-        .as_secs() as i64;
+    let seconds = i64::try_from(
+        time.duration_since(UNIX_EPOCH)
+            .map_err(|err| before_unix_epoch(object_key, err))?
+            .as_secs(),
+    )
+    .expect("unix seconds should fit i64");
     let days = seconds.div_euclid(86_400);
     let seconds_of_day = seconds.rem_euclid(86_400);
     let loonfs_types::CivilDate { year, month, day } = loonfs_types::civil_from_days(days);

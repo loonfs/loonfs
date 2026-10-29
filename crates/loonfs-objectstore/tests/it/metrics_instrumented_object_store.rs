@@ -7,9 +7,9 @@ use futures::TryStreamExt;
 use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_segment, pin, wal_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
-    InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
-    ObjectStoreOperation, ObjectStoreResultKind, PutModeKind, RangeClass,
-    VecObjectStoreMetricsRecorder,
+    InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, ObjectKeyKind,
+    ObjectStoreMetricsRecorder, ObjectStoreOperation, ObjectStoreResultKind, PutModeKind,
+    RangeKind, VecObjectStoreMetricsRecorder,
 };
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
@@ -101,7 +101,7 @@ async fn records_put_success() {
     assert_eq!(sample.bytes_in, Some(4));
     assert_eq!(sample.bytes_out, None);
     assert_eq!(sample.put_mode, Some(PutModeKind::CreateIfAbsent));
-    assert_eq!(sample.key_class, KeyClass::NamespaceManifest);
+    assert_eq!(sample.key_class, ObjectKeyKind::NamespaceManifest);
     assert_eq!(sample.store_kind.as_deref(), Some("local_fs"));
     assert_eq!(sample.attempts, 1);
 }
@@ -135,7 +135,7 @@ async fn records_an_assembly_with_its_tail_as_bytes_in() {
     assert_eq!(sample.operation, ObjectStoreOperation::Assemble);
     assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.bytes_in, Some(5));
-    assert_eq!(sample.key_class, KeyClass::Content);
+    assert_eq!(sample.key_class, ObjectKeyKind::Content);
 }
 
 #[tokio::test]
@@ -192,7 +192,7 @@ async fn a_verified_write_reaches_the_inner_store_and_records_one_put() {
     assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.bytes_in, Some(7));
     assert_eq!(sample.put_mode, Some(PutModeKind::CreateIfAbsent));
-    assert_eq!(sample.key_class, KeyClass::Content);
+    assert_eq!(sample.key_class, ObjectKeyKind::Content);
     assert_eq!(sample.attempts, 1);
 }
 
@@ -227,8 +227,8 @@ async fn records_get_success_bytes_out() {
     assert_eq!(sample.operation, ObjectStoreOperation::Get);
     assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.bytes_out, Some(3));
-    assert_eq!(sample.key_class, KeyClass::Content);
-    assert_eq!(sample.range_class, Some(RangeClass::Bounded));
+    assert_eq!(sample.key_class, ObjectKeyKind::Content);
+    assert_eq!(sample.range_class, Some(RangeKind::Bounded));
 }
 
 #[tokio::test]
@@ -299,7 +299,7 @@ async fn records_list_count() {
     assert_eq!(sample.operation, ObjectStoreOperation::ListPrefix);
     assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.item_count, Some(2));
-    assert_eq!(sample.range_class, Some(RangeClass::Prefix));
+    assert_eq!(sample.range_class, Some(RangeKind::Prefix));
 
     let page = store
         .list_child_prefixes("namespaces/", None, page_limit(10))
@@ -308,7 +308,7 @@ async fn records_list_count() {
     assert_eq!(page.items, ["namespaces/ns-1/"]);
     let sample = recorder.samples().pop().expect("child-prefix sample");
     assert_eq!(sample.operation, ObjectStoreOperation::ListPrefix);
-    assert_eq!(sample.key_class, KeyClass::Unknown);
+    assert_eq!(sample.key_class, ObjectKeyKind::Unknown);
     assert_eq!(sample.item_count, Some(1));
 }
 
@@ -389,10 +389,10 @@ async fn classifies_durable_key_families() {
         .expect("put pin");
 
     let samples = recorder.samples();
-    assert_eq!(samples[0].key_class, KeyClass::WalObject);
-    assert_eq!(samples[1].key_class, KeyClass::NamespaceManifest);
-    assert_eq!(samples[2].key_class, KeyClass::MetadataSegment);
-    assert_eq!(samples[3].key_class, KeyClass::GcControl);
+    assert_eq!(samples[0].key_class, ObjectKeyKind::WalObject);
+    assert_eq!(samples[1].key_class, ObjectKeyKind::NamespaceManifest);
+    assert_eq!(samples[2].key_class, ObjectKeyKind::MetadataSegment);
+    assert_eq!(samples[3].key_class, ObjectKeyKind::GcControl);
 }
 
 #[tokio::test]

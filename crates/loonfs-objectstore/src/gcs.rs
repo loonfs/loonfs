@@ -4,6 +4,7 @@
 mod assembly;
 
 use crate::checksum_header::encode_base64_checksum;
+use crate::clock::wall_now;
 use crate::configured::ConfiguredObjectStoreKind;
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
@@ -11,13 +12,11 @@ use crate::presign::{
     percent_encode_segment, stored_crc32c, DirectTransferIssuers, GcsV4Presigner, CHECKSUM_HEAD_TTL,
 };
 use crate::provider_object_store::{
-    map_provider_error, AbortUploadOnDrop, CompareToken, MultipartController, PartReader,
-    ProviderClient, StoredChecksumReader,
+    map_provider_error, AbortUploadOnDrop, CompareToken, ConfiguredProvider, MultipartController,
+    PartReader, ProviderClient, StoredChecksumReader,
 };
 use crate::retry::{with_transport_retry, RetryWarnings};
-use crate::signed_request::{
-    classify_signed_response, send, send_signed, signing_time, SignedResponse,
-};
+use crate::signed_request::{ensure_succeeded, send, send_signed, SignedResponse};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
 use crate::{
@@ -71,13 +70,11 @@ struct GcsRequestSigner {
 
 /// Builds a native GCS adapter whose compare tokens are object generations.
 pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<ProviderObjectStore> {
-    gcp_gcs_with_issuers(config).map(|(store, _)| store)
+    gcp_gcs_with_issuers(config).map(|provider| provider.store)
 }
 
 /// Returns the store and the issuers that sign direct transfers against it.
-pub(crate) fn gcp_gcs_with_issuers(
-    config: GcpGcsStoreConfig,
-) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
+pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<ConfiguredProvider> {
     let request_signer = Arc::new(GcsV4Presigner::new(&config)?);
     let key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
     let bucket = config.bucket.clone();
@@ -142,12 +139,12 @@ pub(crate) fn gcp_gcs_with_issuers(
         multipart: None,
     };
 
-    Ok((
-        store
+    Ok(ConfiguredProvider {
+        store: store
             .compare_token(CompareToken::Generation)
             .retry_warnings(retry_warnings),
         direct_transfers,
-    ))
+    })
 }
 
 impl GcsRequestSigner {
@@ -170,7 +167,9 @@ impl GcsRequestSigner {
             .await
             .map_err(|error| map_provider_error(key, error, ProviderClient::Retrying))?;
         let request = request.header(AUTHORIZATION, format!("Bearer {}", credential.bearer));
-        succeeded(key, send(&self.http, key, request, body).await?)
+        let response = send(&self.http, key, request, body).await?;
+        ensure_succeeded(key, &response, None)?;
+        Ok(response)
     }
 }
 
@@ -178,9 +177,9 @@ impl GcsRequestSigner {
 impl StoredChecksumReader for GcsRequestSigner {
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let mut metadata = with_transport_retry(&self.retry_warnings, key, "head", 0, || async {
-            let signed =
-                self.request_signer
-                    .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())?;
+            let signed = self
+                .request_signer
+                .presign_head(key, CHECKSUM_HEAD_TTL, wall_now())?;
             let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
             crate::signed_request::metadata_from_signed_head(
                 key,
@@ -292,10 +291,10 @@ impl MultipartController for GcsRequestSigner {
                     let chunk = chunk.clone();
                     async move {
                         let response = send(&self.http, key, request, chunk.into()).await?;
-                        match response.status.as_u16() {
-                            308 => Ok(response),
-                            _ => succeeded(key, response),
+                        if response.status.as_u16() != 308 {
+                            ensure_succeeded(key, &response, None)?;
                         }
+                        Ok(response)
                     }
                 },
             )
@@ -339,13 +338,6 @@ fn precondition_failed_when_missing(error: ObjectStoreError) -> ObjectStoreError
 
 fn crc32c_header(checksum: &Checksum) -> String {
     format!("crc32c={}", encode_base64_checksum(checksum))
-}
-
-fn succeeded(key: &str, response: SignedResponse) -> Result<SignedResponse> {
-    match classify_signed_response(key, response.status, None) {
-        Some(error) => Err(error),
-        None => Ok(response),
-    }
 }
 
 /// How many bytes a resumable upload kept, from its `Range: bytes=0-{last}`.

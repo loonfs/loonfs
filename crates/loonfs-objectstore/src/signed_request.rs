@@ -2,10 +2,10 @@
 
 use crate::object_store::Result;
 use crate::presign::PresignedUrl;
+use crate::provider_object_store::last_modified_at_ms;
 use crate::ObjectStoreError;
 use loonfs_types::Checksum;
 use object_store::client::{HttpClient, HttpRequestBody};
-use std::time::SystemTime;
 
 const RETRYABLE_SIGNED_ERROR_CODES: &[&str] = &[
     "InternalError",
@@ -13,16 +13,6 @@ const RETRYABLE_SIGNED_ERROR_CODES: &[&str] = &[
     "ServiceUnavailable",
     "SlowDown",
 ];
-
-/// Returns the wall time a request this crate signs is dated with.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "a V4 signature is dated, so an internally issued request enters wall time here; \
-              nothing durable is derived from it"
-)]
-pub(crate) fn signing_time() -> SystemTime {
-    SystemTime::now()
-}
 
 pub(crate) struct SignedResponse {
     pub(crate) status: http::StatusCode,
@@ -79,8 +69,8 @@ pub(crate) fn object_length_from_signed_head(
     key: &str,
     response: &SignedResponse,
 ) -> Result<Option<(u64, String)>> {
-    if let Some(error) = classify_signed_response(key, response.status, None) {
-        return match error {
+    if !response.status.is_success() {
+        return match request_error(key, response.status, None) {
             ObjectStoreError::NotFound { .. } => Ok(None),
             error => Err(error),
         };
@@ -116,33 +106,39 @@ pub(crate) fn metadata_from_signed_head(
             .and_then(|value| value.to_str().ok())
     };
     let checksum = stored_checksum(&response.headers);
-    let last_modified_at_ms = header("last-modified")
-        .and_then(|value| httpdate::parse_http_date(value).ok())
-        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|value| u64::try_from(value.as_millis()).ok());
     Ok(Some(crate::ObjectMetadata {
         size_bytes,
         etag: Some(etag),
         version: header(version_header).map(str::to_owned),
-        last_modified_at_ms,
+        last_modified_at_ms: header("last-modified")
+            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .and_then(last_modified_at_ms),
         checksum,
     }))
 }
 
-pub(crate) fn classify_signed_response(
+/// Checks that `response` has a success status and that the provider reported
+/// no error `code`, and otherwise returns the error for the status or the code.
+pub(crate) fn ensure_succeeded(
     key: &str,
-    status: http::StatusCode,
+    response: &SignedResponse,
     code: Option<&str>,
-) -> Option<ObjectStoreError> {
-    if status.is_success() && code.is_none() {
-        return None;
+) -> Result<()> {
+    if response.status.is_success() && code.is_none() {
+        Ok(())
+    } else {
+        Err(request_error(key, response.status, code))
     }
+}
 
+/// The error for a request the provider failed, by its error code when it
+/// reported one, and otherwise by its status.
+fn request_error(key: &str, status: http::StatusCode, code: Option<&str>) -> ObjectStoreError {
     let message = match code {
         Some(code) => format!("provider request failed: {code}"),
         None => format!("provider request failed with {status}"),
     };
-    let error = match code {
+    match code {
         Some("AccessDenied" | "InvalidAccessKeyId" | "SignatureDoesNotMatch") => {
             ObjectStoreError::PermissionDenied {
                 object_key: key.to_owned(),
@@ -186,8 +182,7 @@ pub(crate) fn classify_signed_response(
             ObjectStoreError::retryable_transport(key, message)
         }
         _ => ObjectStoreError::transport(key, message),
-    };
-    Some(error)
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +224,18 @@ mod tests {
             assert_eq!(metadata.checksum, expected);
             assert_eq!(metadata.last_modified_at_ms, Some(1000));
         }
+        let epoch = head(
+            200,
+            &[
+                ("content-length", "5"),
+                ("etag", "version"),
+                ("last-modified", "Thu, 01 Jan 1970 00:00:00 GMT"),
+            ],
+        );
+        let metadata = metadata_from_signed_head("key", &epoch, "x-amz-version-id", |_| None)
+            .expect("head")
+            .expect("object");
+        assert_eq!(metadata.last_modified_at_ms, None);
     }
 
     #[test]

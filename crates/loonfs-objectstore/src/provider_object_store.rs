@@ -7,6 +7,7 @@ use crate::keyspace::{
     unscope_listed_key,
 };
 use crate::object_store::{unsupported_multipart, Result};
+use crate::presign::DirectTransferIssuers;
 use crate::retry::{with_transport_retry, RetryWarnings, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
@@ -33,7 +34,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Configures logical key scoping for a generic provider client, and the
 /// location that the store's identity reports.
@@ -46,12 +47,17 @@ pub struct ProviderObjectStoreConfig {
     pub location: String,
 }
 
-/// Bound for one control-plane HTTP attempt's request phase, and the
-/// response-body idle bound for every request.
+/// Timeout for one control-plane HTTP attempt's request phase.
 ///
 /// An attempt that makes no progress for this long fails and counts against the
 /// operation deadline instead of consuming it invisibly.
 pub const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeout between two frames of a response body, for every request.
+///
+/// A response body that sends no frame for this long fails, and its attempt
+/// counts against the operation deadline.
+pub(crate) const PROVIDER_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One HTTP attempt's connect timeout.
 pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -123,16 +129,16 @@ pub const PROVIDER_PUBLICATION_REQUEST_BOUND: Duration = PROVIDER_OPERATION_DEAD
     .saturating_add(PROVIDER_TRANSFER_ATTEMPT_TIMEOUT);
 
 /// Request bodies at least this large are payload transfers and get
-/// [`PROVIDER_TRANSFER_ATTEMPT_TIMEOUT`] as their request-phase bound;
+/// [`PROVIDER_TRANSFER_ATTEMPT_TIMEOUT`] as their request-phase timeout;
 /// smaller bodies are control-plane traffic bounded by
 /// [`PROVIDER_ATTEMPT_TIMEOUT`]. Sits well below the part size so multipart
 /// tail parts classify with their siblings.
 pub(crate) const PROVIDER_MIN_TRANSFER_BODY_BYTES: u64 = 1024 * 1024;
 
-/// Bound for one HTTP attempt's request phase (connect, request-body
-/// upload, response headers), by request body size: flat and small for
-/// control-plane requests, flat and generous for payload transfers.
-pub(crate) fn request_phase_bound(request_body_bytes: u64) -> Duration {
+/// Returns the timeout for one HTTP attempt's request phase (connect,
+/// request-body upload, response headers), by request body size: flat and
+/// small for control-plane requests, flat and generous for payload transfers.
+pub(crate) fn request_phase_timeout_for(request_body_bytes: u64) -> Duration {
     if request_body_bytes >= PROVIDER_MIN_TRANSFER_BODY_BYTES {
         PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
     } else {
@@ -144,8 +150,8 @@ pub(crate) fn request_phase_bound(request_body_bytes: u64) -> Duration {
 /// total-request timeout and connect timeout, so a client built from these
 /// options alone is bounded by named constants instead of upstream defaults.
 /// [`crate::transfer_timeouts::TransferTimeoutConnector`] strips the
-/// total-request timeout and replaces it with payload-aware request bounds
-/// and response-body idle bounds.
+/// total-request timeout and replaces it with payload-aware request timeouts
+/// and response-body idle timeouts.
 pub(crate) fn provider_client_options() -> provider_store::ClientOptions {
     provider_store::ClientOptions::new()
         .with_timeout(PROVIDER_ATTEMPT_TIMEOUT)
@@ -242,6 +248,12 @@ pub(crate) trait MultipartController: Send + Sync {
     ) -> Result<ObjectMetadata>;
 }
 
+/// A provider store and the issuers that sign direct transfers against it.
+pub(crate) struct ConfiguredProvider {
+    pub(crate) store: ProviderObjectStore,
+    pub(crate) direct_transfers: DirectTransferIssuers,
+}
+
 /// Adapts the upstream `object_store` provider surface to the narrower LoonFS contract.
 #[derive(Clone)]
 pub struct ProviderObjectStore {
@@ -278,7 +290,11 @@ impl ProviderObjectStore {
     /// listings use `inner`, so [`map_provider_error`] can tell which client
     /// an error came from. Construction fails when `config.key_prefix` is not
     /// a normalized, non-escaping logical prefix.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a provider store is assembled from its clients, its configuration, and its \
+                  provider's checksum and multipart adapters"
+    )]
     pub(crate) fn new(
         inner: Arc<dyn provider_store::ObjectStore>,
         one_attempt: Arc<dyn provider_store::ObjectStore>,
@@ -342,6 +358,10 @@ impl ProviderObjectStore {
         })
     }
 
+    fn validate_key(&self, key: &str) -> Result<()> {
+        self.to_path(key).map(|_| ())
+    }
+
     fn unscoped(&self, scoped_key: &str) -> Option<String> {
         match self.key_prefix.as_deref() {
             Some(key_prefix) => unscope_listed_key(Some(key_prefix), scoped_key),
@@ -354,7 +374,7 @@ impl ProviderObjectStore {
             etag: meta.e_tag,
             version: meta.version,
             size_bytes: meta.size,
-            last_modified_at_ms: last_modified_at_ms(meta.last_modified.timestamp_millis()),
+            last_modified_at_ms: last_modified_at_ms(meta.last_modified.into()),
             checksum: None,
         })
     }
@@ -532,7 +552,7 @@ impl ObjectStore for ProviderObjectStore {
     }
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        self.to_path(key)?;
+        self.validate_key(key)?;
         self.checksum_reader.head_metadata(key).await
     }
 
@@ -656,7 +676,43 @@ impl ObjectStore for ProviderObjectStore {
     }
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        self.put_checked(key, bytes, mode).await
+        let path = self.to_path(key)?;
+        self.validate_compare_token(key, &mode)?;
+        if self.kind == ConfiguredObjectStoreKind::GcpGcs && matches!(mode, PutMode::CreateIfAbsent)
+        {
+            let mut rest = PartReader::new(stream::empty().boxed(), 1);
+            rest.next_part().await?;
+            return self
+                .multipart_controller
+                .put_if_absent(key, bytes, rest, 1)
+                .await;
+        }
+        let checksum = Checksum::compute(self.checksum_algorithm(), &bytes);
+        let size_bytes = bytes.len() as u64;
+        // A conditional write is one request at every size, so its
+        // precondition failure is never its own landing, and a publication
+        // ends within one request's allowance.
+        let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
+        let options = PutOptions {
+            mode: self.map_put_mode(mode),
+            ..Default::default()
+        };
+        match self
+            .one_attempt
+            .put_opts(&path, PutPayload::from(bytes), options)
+            .await
+        {
+            Ok(result) => Ok(ObjectMetadata {
+                checksum: Some(checksum),
+                ..self.metadata_from_put_result(result, size_bytes)
+            }),
+            Err(err) if compare_and_swap && provider_not_found(&err) => {
+                Err(ObjectStoreError::PreconditionFailed {
+                    object_key: key.to_owned(),
+                })
+            }
+            Err(err) => Err(map_provider_error(key, err, ProviderClient::OneAttempt)),
+        }
     }
 
     /// A verified write of one part or less is the single-request create
@@ -701,7 +757,7 @@ impl ObjectStore for ProviderObjectStore {
     /// token, and the store doesn't emulate the condition with a separate
     /// read.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
-        self.to_path(key)?;
+        self.validate_key(key)?;
         self.validate_compare_token(key, &mode)?;
         let mut reader = PartReader::new(
             body,
@@ -776,7 +832,7 @@ impl ObjectStore for ProviderObjectStore {
             .multipart_controller
             .assemble(key, sources, tail, expected)
             .await;
-        crate::immutable_write::decide_created(self, key, expected, created).await
+        crate::immutable_write::verify_created(self, key, expected, created).await
     }
 
     fn list_entries_from_stream(
@@ -851,9 +907,7 @@ impl ObjectStore for ProviderObjectStore {
                         }
                         Some(Ok(ListedObject {
                             key,
-                            last_modified_at_ms: last_modified_at_ms(
-                                meta.last_modified.timestamp_millis(),
-                            ),
+                            last_modified_at_ms: last_modified_at_ms(meta.last_modified.into()),
                             size_bytes: meta.size,
                         }))
                     }
@@ -933,46 +987,6 @@ impl ObjectStore for ProviderObjectStore {
 }
 
 impl ProviderObjectStore {
-    async fn put_checked(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        let path = self.to_path(key)?;
-        self.validate_compare_token(key, &mode)?;
-        if self.kind == ConfiguredObjectStoreKind::GcpGcs && matches!(mode, PutMode::CreateIfAbsent)
-        {
-            let mut rest = PartReader::new(stream::empty().boxed(), 1);
-            rest.next_part().await?;
-            return self
-                .multipart_controller
-                .put_if_absent(key, bytes, rest, 1)
-                .await;
-        }
-        let checksum = Checksum::compute(self.checksum_algorithm(), &bytes);
-        let size_bytes = bytes.len() as u64;
-        // A conditional write is one request at every size, so its
-        // precondition failure is never its own landing, and a publication
-        // ends within one request's allowance.
-        let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
-        let options = PutOptions {
-            mode: self.map_put_mode(mode),
-            ..Default::default()
-        };
-        match self
-            .one_attempt
-            .put_opts(&path, PutPayload::from(bytes), options)
-            .await
-        {
-            Ok(result) => Ok(ObjectMetadata {
-                checksum: Some(checksum),
-                ..self.metadata_from_put_result(result, size_bytes)
-            }),
-            Err(err) if compare_and_swap && provider_not_found(&err) => {
-                Err(ObjectStoreError::PreconditionFailed {
-                    object_key: key.to_owned(),
-                })
-            }
-            Err(err) => Err(map_provider_error(key, err, ProviderClient::OneAttempt)),
-        }
-    }
-
     fn map_put_mode(&self, mode: PutMode) -> provider_store::PutMode {
         match mode {
             PutMode::CreateIfAbsent => provider_store::PutMode::Create,
@@ -997,13 +1011,14 @@ impl ProviderObjectStore {
 ///
 /// Some AWS-compatible clients represent a missing `Last-Modified` header as
 /// Unix epoch zero. Returning that value would make garbage collection treat
-/// the object as extremely old. Non-positive timestamps are therefore
-/// returned as `None`, which causes unknown-age objects to be retained.
-fn last_modified_at_ms(timestamp_ms: i64) -> Option<u64> {
-    match timestamp_ms > 0 {
-        true => u64::try_from(timestamp_ms).ok(),
-        false => None,
-    }
+/// the object as extremely old. Timestamps at or before the epoch are
+/// therefore returned as `None`, which causes unknown-age objects to be
+/// retained.
+pub(crate) fn last_modified_at_ms(last_modified: SystemTime) -> Option<u64> {
+    let elapsed = last_modified.duration_since(UNIX_EPOCH).ok()?;
+    u64::try_from(elapsed.as_millis())
+        .ok()
+        .filter(|elapsed_ms| *elapsed_ms > 0)
 }
 
 enum RangedGet {
@@ -1284,9 +1299,7 @@ mod tests {
                         etag: meta.e_tag,
                         version: meta.version,
                         size_bytes: meta.size,
-                        last_modified_at_ms: last_modified_at_ms(
-                            meta.last_modified.timestamp_millis(),
-                        ),
+                        last_modified_at_ms: last_modified_at_ms(meta.last_modified.into()),
                         checksum: Some(Checksum::crc64nvme(&bytes)),
                     }))
                 }
@@ -1370,12 +1383,15 @@ mod tests {
 
     #[test]
     fn a_synthesized_epoch_stamp_reads_as_no_timestamp_at_all() {
-        assert_eq!(last_modified_at_ms(0), None);
-        assert_eq!(last_modified_at_ms(-1), None);
-        assert_eq!(last_modified_at_ms(i64::MIN), None);
-        assert_eq!(last_modified_at_ms(1), Some(1));
+        let after_epoch = |ms| UNIX_EPOCH + Duration::from_millis(ms);
+        assert_eq!(last_modified_at_ms(UNIX_EPOCH), None);
         assert_eq!(
-            last_modified_at_ms(1_754_000_000_000),
+            last_modified_at_ms(UNIX_EPOCH - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(last_modified_at_ms(after_epoch(1)), Some(1));
+        assert_eq!(
+            last_modified_at_ms(after_epoch(1_754_000_000_000)),
             Some(1_754_000_000_000)
         );
     }
@@ -2264,18 +2280,18 @@ mod tests {
     }
 
     #[test]
-    fn request_phase_bound_has_two_flat_tiers() {
-        assert_eq!(request_phase_bound(0), PROVIDER_ATTEMPT_TIMEOUT);
+    fn request_phase_timeout_has_two_flat_tiers() {
+        assert_eq!(request_phase_timeout_for(0), PROVIDER_ATTEMPT_TIMEOUT);
         assert_eq!(
-            request_phase_bound(PROVIDER_MIN_TRANSFER_BODY_BYTES - 1),
+            request_phase_timeout_for(PROVIDER_MIN_TRANSFER_BODY_BYTES - 1),
             PROVIDER_ATTEMPT_TIMEOUT
         );
         assert_eq!(
-            request_phase_bound(PROVIDER_MIN_TRANSFER_BODY_BYTES),
+            request_phase_timeout_for(PROVIDER_MIN_TRANSFER_BODY_BYTES),
             PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
         );
         assert_eq!(
-            request_phase_bound(PROVIDER_MULTIPART_PART_BYTES),
+            request_phase_timeout_for(PROVIDER_MULTIPART_PART_BYTES),
             PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
         );
     }

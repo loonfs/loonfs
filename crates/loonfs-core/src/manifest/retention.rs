@@ -80,7 +80,7 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
                 .map_err(|error| ManifestLoadError::ReadSegment {
                     object_key: object_key.clone(),
                     message: error.public_message().into_owned(),
-                    kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
+                    kind: error.kind(),
                 })? {
                 Some(_) => Ok(()),
                 None => Err(ManifestLoadError::MissingSegment { object_key }),

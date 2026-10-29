@@ -58,7 +58,7 @@ pub(super) async fn load_section_bytes<S: ObjectStore + ?Sized>(
         .map_err(|err| ManifestLoadError::ReadSegment {
             object_key: object_key.to_owned(),
             message: err.public_message().into_owned(),
-            kind: loonfs_objectstore::ObjectStoreErrorKind::of(&err),
+            kind: err.kind(),
         })?
     else {
         return Err(ManifestLoadError::MissingSegment {

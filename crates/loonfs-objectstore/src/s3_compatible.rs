@@ -12,6 +12,7 @@ use crate::aws_credentials::{
     SharedAwsCredentialsSource,
 };
 use crate::checksum_header::decode_base64_checksum;
+use crate::clock::wall_now;
 use crate::configured::ConfiguredObjectStoreKind;
 use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
 use crate::object_store::Result;
@@ -22,11 +23,11 @@ use crate::presign::{
     CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES, S3_CRC64NVME_CHECKSUM_HEADER, S3_IF_MATCH_HEADER,
 };
 use crate::provider_object_store::{
-    AbortUploadOnDrop, CompareToken, MultipartController, PartReader, StoredChecksumReader,
-    PROVIDER_MAX_MULTIPART_PARTS,
+    AbortUploadOnDrop, CompareToken, ConfiguredProvider, MultipartController, PartReader,
+    StoredChecksumReader, PROVIDER_MAX_MULTIPART_PARTS,
 };
 use crate::retry::{with_transport_retry, RetryWarnings};
-use crate::signed_request::{classify_signed_response, send_signed, signing_time, SignedResponse};
+use crate::signed_request::{ensure_succeeded, send_signed, SignedResponse};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
 use crate::{
@@ -117,14 +118,14 @@ struct S3RequestSigner {
 /// Builds an AWS S3 store with bounded retries and native CRC-64/NVME checksums.
 pub fn aws_s3(config: AwsS3StoreConfig) -> Result<ProviderObjectStore> {
     let credentials = aws_credentials_source(&config.credentials, &config.region)?;
-    aws_s3_with_credentials(config, credentials).map(|(store, _)| store)
+    aws_s3_with_credentials(config, credentials).map(|provider| provider.store)
 }
 
 /// Returns the store and the issuers that sign direct transfers against it.
 pub(crate) fn aws_s3_with_credentials(
     config: AwsS3StoreConfig,
     credentials: SharedAwsCredentialsSource,
-) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
+) -> Result<ConfiguredProvider> {
     new(S3CompatibleConfig {
         kind: ConfiguredObjectStoreKind::AwsS3,
         bucket: config.bucket,
@@ -140,14 +141,14 @@ pub(crate) fn aws_s3_with_credentials(
 /// Builds a Cloudflare R2 store with path-style addressing.
 pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<ProviderObjectStore> {
     let credentials = cloudflare_r2_credentials_source(&config.credentials)?;
-    cloudflare_r2_with_credentials(config, credentials).map(|(store, _)| store)
+    cloudflare_r2_with_credentials(config, credentials).map(|provider| provider.store)
 }
 
 /// Returns the store and the issuers that sign direct transfers against it.
 pub(crate) fn cloudflare_r2_with_credentials(
     config: CloudflareR2StoreConfig,
     credentials: SharedAwsCredentialsSource,
-) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
+) -> Result<ConfiguredProvider> {
     new(S3CompatibleConfig {
         kind: ConfiguredObjectStoreKind::CloudflareR2,
         bucket: config.bucket,
@@ -163,7 +164,7 @@ pub(crate) fn cloudflare_r2_with_credentials(
     })
 }
 
-fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransferIssuers)> {
+fn new(config: S3CompatibleConfig) -> Result<ConfiguredProvider> {
     let location = match &config.endpoint_url {
         Some(endpoint) => format!("{endpoint} {}", config.bucket),
         None => config.bucket.clone(),
@@ -253,12 +254,12 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         multipart: Some(request_signer),
     };
 
-    Ok((
-        store
+    Ok(ConfiguredProvider {
+        store: store
             .compare_token(CompareToken::Etag)
             .retry_warnings(retry_warnings),
         direct_transfers,
-    ))
+    })
 }
 
 impl SignedResponse {
@@ -298,7 +299,7 @@ impl StoredChecksumReader for S3RequestSigner {
         with_transport_retry(&self.retry_warnings, key, "head", 0, || async {
             let signed = self
                 .request_signer
-                .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())
+                .presign_head(key, CHECKSUM_HEAD_TTL, wall_now())
                 .await?;
             let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
             crate::signed_request::metadata_from_signed_head(
@@ -358,22 +359,14 @@ impl MultipartController for S3RequestSigner {
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
         let signed = self
             .request_signer
-            .presign_abort_multipart(
-                key,
-                provider_upload_id,
-                MULTIPART_CONTROL_TTL,
-                signing_time(),
-            )
+            .presign_abort_multipart(key, provider_upload_id, MULTIPART_CONTROL_TTL, wall_now())
             .await?;
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         let code = response.provider_error_code();
-        if code.as_deref() == Some("NoSuchUpload") {
+        if is_unknown_upload(code.as_deref()) {
             return Ok(());
         }
-        match classify_signed_response(key, response.status, code.as_deref()) {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        ensure_succeeded(key, &response, code.as_deref())
     }
 
     /// Uploads the parts with up to `part_window` in flight and completes
@@ -423,7 +416,7 @@ impl MultipartController for S3RequestSigner {
         parts.sort_unstable_by_key(|part| part.part_number);
         let crc = crc.finish();
         let etag = self
-            .finish_upload(key, &upload_id, &parts, Some(&crc))
+            .complete_started_upload(key, &upload_id, &parts, Some(&crc))
             .await?;
         abort_on_drop.disarm();
         Ok(ObjectMetadata {
@@ -456,7 +449,7 @@ impl S3RequestSigner {
     async fn create_upload(&self, key: &str) -> Result<String> {
         let signed = self
             .request_signer
-            .presign_create_multipart(key, MULTIPART_CONTROL_TTL, signing_time())
+            .presign_create_multipart(key, MULTIPART_CONTROL_TTL, wall_now())
             .await?;
         let response = self
             .send_checked(key, signed, HttpRequestBody::empty())
@@ -490,7 +483,7 @@ impl S3RequestSigner {
                             checksum: &checksum,
                             ttl: MULTIPART_CONTROL_TTL,
                         },
-                        signing_time(),
+                        wall_now(),
                     )
                     .await?;
                 let response = self
@@ -534,7 +527,7 @@ impl S3RequestSigner {
                     source,
                     source_etag,
                     MULTIPART_CONTROL_TTL,
-                    signing_time(),
+                    wall_now(),
                 )
                 .await?;
             self.send_checked(key, signed, HttpRequestBody::empty())
@@ -569,7 +562,7 @@ impl S3RequestSigner {
                         range: range.clone(),
                         ttl: MULTIPART_CONTROL_TTL,
                     },
-                    signing_time(),
+                    wall_now(),
                 )
                 .await?;
             signed
@@ -591,10 +584,8 @@ impl S3RequestSigner {
     ) -> Result<SignedResponse> {
         let response = send_signed(&self.http, key, signed, body).await?;
         let code = response.provider_error_code();
-        match classify_signed_response(key, response.status, code.as_deref()) {
-            Some(error) => Err(error),
-            None => Ok(response),
-        }
+        ensure_succeeded(key, &response, code.as_deref())?;
+        Ok(response)
     }
 
     /// Sends a create-only `CompleteMultipartUpload`, returning `None` when
@@ -608,13 +599,7 @@ impl S3RequestSigner {
     ) -> Result<Option<SignedResponse>> {
         let signed = self
             .request_signer
-            .presign_complete_multipart(
-                key,
-                upload_id,
-                checksum,
-                MULTIPART_CONTROL_TTL,
-                signing_time(),
-            )
+            .presign_complete_multipart(key, upload_id, checksum, MULTIPART_CONTROL_TTL, wall_now())
             .await?;
         let response = send_signed(
             &self.http,
@@ -624,17 +609,15 @@ impl S3RequestSigner {
         )
         .await?;
         let code = response.provider_error_code();
-        if code.as_deref() == Some("NoSuchUpload") {
+        if is_unknown_upload(code.as_deref()) {
             return Ok(None);
         }
-        match classify_signed_response(key, response.status, code.as_deref()) {
-            Some(error) => Err(error),
-            None => Ok(Some(response)),
-        }
+        ensure_succeeded(key, &response, code.as_deref())?;
+        Ok(Some(response))
     }
 
     /// Completes an upload this signer started and answers the new ETag.
-    async fn finish_upload(
+    async fn complete_started_upload(
         &self,
         key: &str,
         upload_id: &str,
@@ -676,10 +659,13 @@ fn checked_data(key: &str, response: SignedResponse) -> Result<SignedResponse> {
     let code = (!response.status.is_success())
         .then(|| response.provider_error_code())
         .flatten();
-    match classify_signed_response(key, response.status, code.as_deref()) {
-        Some(error) => Err(error),
-        None => Ok(response),
-    }
+    ensure_succeeded(key, &response, code.as_deref())?;
+    Ok(response)
+}
+
+/// Whether the provider reported that it no longer knows the multipart upload.
+fn is_unknown_upload(code: Option<&str>) -> bool {
+    code == Some("NoSuchUpload")
 }
 
 /// The CRC-64/NVME of the object that parts assemble to, combined in part
@@ -796,7 +782,7 @@ mod tests {
         PROVIDER_OPERATION_DEADLINE,
     };
     use crate::retry::{RetryWarnings, DEFAULT};
-    use crate::signed_request::{classify_signed_response, SignedResponse};
+    use crate::signed_request::{ensure_succeeded, SignedResponse};
     use crate::test_support::{
         aws_environment_lock, isolated_aws_environment, time_out, RequestFault,
     };
@@ -1626,9 +1612,14 @@ mod tests {
             ("SlowDown", ObjectStoreErrorKind::RetryableTransport),
             ("MalformedXML", ObjectStoreErrorKind::Other),
         ] {
+            let response = SignedResponse {
+                status: http::StatusCode::BAD_REQUEST,
+                headers: http::HeaderMap::new(),
+                body: bytes::Bytes::new(),
+            };
             assert_eq!(
-                classify_signed_response("private-key", http::StatusCode::BAD_REQUEST, Some(code),)
-                    .expect("provider error should classify")
+                ensure_succeeded("private-key", &response, Some(code))
+                    .expect_err("provider error should classify")
                     .kind(),
                 expected,
                 "wrong class for {code}"

@@ -14,7 +14,7 @@ pub(crate) enum RequestFault {
     FirstTimeout,
 }
 
-/// Waits out the attempt bound of a request whose body is
+/// Waits out the attempt timeout of a request whose body is
 /// `request_body_bytes` long on the test runtime's clock, and returns the
 /// error the transfer timeout connector reports for it.
 #[expect(
@@ -22,13 +22,13 @@ pub(crate) enum RequestFault {
     reason = "a stalled scripted request waits on the paused test clock"
 )]
 pub(crate) async fn time_out(request_body_bytes: u64) -> object_store::client::HttpError {
-    let bound = crate::provider_object_store::request_phase_bound(request_body_bytes);
-    tokio::time::sleep(bound).await;
+    let timeout = crate::provider_object_store::request_phase_timeout_for(request_body_bytes);
+    tokio::time::sleep(timeout).await;
     object_store::client::HttpError::new(
         object_store::client::HttpErrorKind::Timeout,
         crate::transfer_timeouts::TransferTimeoutError::RequestPhase {
             request_body_bytes,
-            bound,
+            timeout,
         },
     )
 }

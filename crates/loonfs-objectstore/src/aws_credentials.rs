@@ -1,5 +1,6 @@
 //! AWS credential sources shared by provider requests and presigners.
 
+use crate::clock::wall_now;
 use crate::store_config::{
     AwsS3Credentials, CloudflareR2Credentials, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
 };
@@ -86,8 +87,10 @@ pub(crate) fn aws_credentials_source(
 pub(crate) fn cloudflare_r2_credentials_source(
     credentials: &CloudflareR2Credentials,
 ) -> Result<SharedAwsCredentialsSource, ObjectStoreError> {
-    let (access_key_id, secret_access_key) =
-        resolve_r2_credentials(credentials, |name| std::env::var(name).ok())?;
+    let R2Credentials {
+        access_key_id,
+        secret_access_key,
+    } = resolve_r2_credentials(credentials, |name| std::env::var(name).ok())?;
     Ok(static_aws_credentials_source(
         access_key_id,
         secret_access_key,
@@ -95,25 +98,35 @@ pub(crate) fn cloudflare_r2_credentials_source(
     ))
 }
 
+/// The access-key pair a Cloudflare R2 store signs requests with.
+#[derive(Debug)]
+pub(crate) struct R2Credentials {
+    pub(crate) access_key_id: SecretString,
+    pub(crate) secret_access_key: SecretString,
+}
+
 /// Resolves an R2 credential source to an access-key pair, reading ambient
 /// keys through `lookup`.
 pub(crate) fn resolve_r2_credentials(
     credentials: &CloudflareR2Credentials,
     lookup: impl Fn(&str) -> Option<String>,
-) -> Result<(SecretString, SecretString), ObjectStoreError> {
+) -> Result<R2Credentials, ObjectStoreError> {
     match credentials {
         CloudflareR2Credentials::Static {
             access_key_id,
             secret_access_key,
-        } => Ok((access_key_id.clone(), secret_access_key.clone())),
+        } => Ok(R2Credentials {
+            access_key_id: access_key_id.clone(),
+            secret_access_key: secret_access_key.clone(),
+        }),
         CloudflareR2Credentials::Ambient {} => {
             let access_key_id = non_blank(lookup(ACCESS_KEY_ID_ENV));
             let secret_access_key = non_blank(lookup(SECRET_ACCESS_KEY_ENV));
             match (access_key_id, secret_access_key) {
-                (Some(access_key_id), Some(secret_access_key)) => Ok((
-                    SecretString::new(access_key_id),
-                    SecretString::new(secret_access_key),
-                )),
+                (Some(access_key_id), Some(secret_access_key)) => Ok(R2Credentials {
+                    access_key_id: SecretString::new(access_key_id),
+                    secret_access_key: SecretString::new(secret_access_key),
+                }),
                 _ => Err(missing_r2_ambient_credentials()),
             }
         }
@@ -190,14 +203,6 @@ impl AmbientAwsCredentialsSource {
         }
     }
 
-    // AWS credentials expire at an absolute wall-clock time. This boundary
-    // affects only process-local credential reuse; the cache takes an explicit
-    // clock so refresh and cancellation tests remain deterministic.
-    #[allow(clippy::disallowed_methods)]
-    fn credential_time() -> SystemTime {
-        SystemTime::now()
-    }
-
     async fn provider(&self) -> &SharedCredentialsProvider {
         self.provider
             .get_or_init(|| async {
@@ -216,7 +221,7 @@ impl AmbientAwsCredentialsSource {
     ) -> Result<AwsSigningCredentials, ObjectStoreError> {
         let credentials = self
             .cache
-            .get(self.provider().await, Self::credential_time, valid_until)
+            .get(self.provider().await, wall_now, valid_until)
             .await
             .map_err(|_| {
                 ObjectStoreError::Configuration(
@@ -435,7 +440,7 @@ mod shared_cache_tests {
 
     #[tokio::test]
     async fn ambient_cache_is_shared_by_requests_and_presigners_and_debug_is_redacted() {
-        let now = AmbientAwsCredentialsSource::credential_time();
+        let now = crate::clock::wall_now();
         let expires_at = now + Duration::from_secs(3600);
         let calls = Arc::new(AtomicUsize::new(0));
         let source = Arc::new(AmbientAwsCredentialsSource::new("us-east-1"));

@@ -379,7 +379,7 @@ impl CoreError {
             error => Self::Store {
                 object_key: object_key.into(),
                 message: error.public_message().into_owned(),
-                kind: ObjectStoreErrorKind::of(error),
+                kind: error.kind(),
             },
         }
     }

@@ -12,9 +12,9 @@ mod instruments;
 mod read_working_memory;
 
 pub use loonfs_objectstore::metrics::{
-    InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricSample,
-    ObjectStoreMetricsRecorder, ObjectStoreOperation, ObjectStoreResultKind, PutModeKind,
-    RangeClass, VecObjectStoreMetricsRecorder,
+    InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, ObjectKeyKind,
+    ObjectStoreMetricSample, ObjectStoreMetricsRecorder, ObjectStoreOperation,
+    ObjectStoreResultKind, PutModeKind, RangeKind, VecObjectStoreMetricsRecorder,
 };
 
 pub(crate) use instruments::{
