@@ -318,7 +318,9 @@ impl Error {
             Self::Core(CoreError::InvalidCursor(_)) => Some("cursor".to_owned()),
             Self::Core(CoreError::ResumeOffsetOutOfRange { .. }) => Some("start_offset".to_owned()),
             Self::Core(CoreError::InvalidSnapshotRequest(_)) => Some("/name".to_owned()),
-            Self::Core(CoreError::SubjectRequired { .. }) => Some("Loonfs-Principals".to_owned()),
+            Self::Core(CoreError::SubjectRequired { .. }) => {
+                Some(loonfs_types::headers::PRINCIPALS.to_owned())
+            }
             Self::Core(CoreError::FailedOperation {
                 operation_index,
                 error,

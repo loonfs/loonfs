@@ -5,42 +5,12 @@ use serde_json::{Map, Value};
 
 pub(super) const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch"];
 
-type Operation<'a> = (&'a str, &'a Map<String, Value>);
 type OperationMut<'a> = (String, &'a mut Map<String, Value>);
 
 pub(super) fn invalid_document(location: impl Into<String>) -> OpenapiPostprocessError {
     OpenapiPostprocessError::InvalidDocument {
         location: location.into(),
     }
-}
-
-pub(super) fn operations(document: &Value) -> Result<Vec<Operation<'_>>, OpenapiPostprocessError> {
-    let paths = document
-        .get("paths")
-        .and_then(Value::as_object)
-        .ok_or_else(|| invalid_document("paths"))?;
-    let mut operations = Vec::new();
-
-    for (path, path_item) in paths {
-        let path_item = path_item
-            .as_object()
-            .ok_or_else(|| invalid_document(format!("paths.{path}")))?;
-        for &method in HTTP_METHODS {
-            let Some(operation) = path_item.get(method) else {
-                continue;
-            };
-            let operation = operation
-                .as_object()
-                .ok_or_else(|| invalid_document(format!("paths.{path}.{method}")))?;
-            let operation_id = operation
-                .get("operationId")
-                .and_then(Value::as_str)
-                .ok_or_else(|| invalid_document(format!("paths.{path}.{method}.operationId")))?;
-            operations.push((operation_id, operation));
-        }
-    }
-
-    Ok(operations)
 }
 
 pub(super) fn operations_mut(

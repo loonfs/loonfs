@@ -32,7 +32,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         &mut document
             .components
             .as_mut()
-            .expect("HTTP components")
+            .expect("the HTTP OpenAPI document should have a components section")
             .schemas,
     );
     document

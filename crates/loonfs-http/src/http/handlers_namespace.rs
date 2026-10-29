@@ -193,7 +193,6 @@ pub(super) async fn get_capabilities(
         extensions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
-            ("x-fern-retries" = json!({"disabled": true})),
         ),
         path = "/v0/namespaces",
         tag = "namespaces",
@@ -318,10 +317,7 @@ pub(super) async fn get_namespace_diagnostics(
     utoipa::path(
         delete,
         operation_id = "delete_namespace",
-        extensions(
-            ("x-loonfs-retry" = json!("not_idempotent")),
-            ("x-fern-retries" = json!({"disabled": true})),
-        ),
+        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Delete namespace",
@@ -354,13 +350,7 @@ pub(super) async fn delete_namespace(
             .map(parse_expected_head_seq)
             .transpose()?,
     };
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = state.open_writer(&namespace_id, subject).await?;
     let response = namespace.delete_with_options(&options).await.map_err(
         ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
     )?;
@@ -380,7 +370,6 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
         extensions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
-            ("x-fern-retries" = json!({"disabled": true})),
         ),
         path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
@@ -408,8 +397,7 @@ pub(super) async fn fork_namespace(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let namespace = runtime
         .fork_namespace_with_options(
             &source_namespace_id,
@@ -429,10 +417,7 @@ pub(super) async fn fork_namespace(
     utoipa::path(
         post,
         operation_id = "create_snapshot",
-        extensions(
-            ("x-loonfs-retry" = json!("not_idempotent")),
-            ("x-fern-retries" = json!({"disabled": true})),
-        ),
+        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "Create snapshot",
@@ -457,13 +442,7 @@ pub(super) async fn create_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateSnapshotRequest>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = state.open_writer(&namespace_id, subject).await?;
     let snapshot = namespace
         .create_snapshot(
             &request.name,
@@ -472,10 +451,10 @@ pub(super) async fn create_snapshot(
             },
         )
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
-                .with_invalid_request_param("/name")
-        })?;
+        .map_err(ApiResponseError::for_namespace_writer(
+            &state.namespaces,
+            &namespace_id,
+        ))?;
     Ok(Json(snapshot))
 }
 
@@ -484,14 +463,7 @@ pub(super) async fn create_snapshot(
     utoipa::path(
         get,
         operation_id = "list_snapshots",
-        extensions(
-            ("x-loonfs-retry" = json!("idempotent")),
-            ("x-fern-pagination" = json!({
-                "cursor": "$request.cursor",
-                "next_cursor": "$response.next_cursor",
-                "results": "$response.snapshots",
-            })),
-        ),
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "List snapshots",
@@ -516,8 +488,7 @@ pub(super) async fn list_snapshots(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
     let cursor = checked_cursor::<SnapshotPageCursor>(query.cursor)?;
     let response = namespace
@@ -526,8 +497,7 @@ pub(super) async fn list_snapshots(
         .cursor(cursor)
         .page()
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))
-        .map_err(|error| error.with_invalid_request_param("cursor"))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
@@ -565,13 +535,7 @@ pub(super) async fn extend_snapshot(
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = state.open_writer(&namespace_id, subject).await?;
     let response = namespace
         .extend_snapshot(&snapshot_id, request.ttl_ms)
         .await
@@ -613,8 +577,7 @@ pub(super) async fn get_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let snapshot = runtime
         .namespace(&namespace_id)
         .get_snapshot(&snapshot_id)
@@ -683,14 +646,7 @@ pub(super) struct SnapshotPathParams {
     utoipa::path(
         get,
         operation_id = "list_checkpoints",
-        extensions(
-            ("x-loonfs-retry" = json!("idempotent")),
-            ("x-fern-pagination" = json!({
-                "cursor": "$request.cursor",
-                "next_cursor": "$response.next_cursor",
-                "results": "$response.checkpoints",
-            })),
-        ),
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
         tag = "maintenance",
         summary = "List checkpoints",
@@ -722,8 +678,7 @@ pub(super) async fn list_checkpoints(
         .cursor(cursor)
         .page()
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))
-        .map_err(|error| error.with_invalid_request_param("cursor"))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 
@@ -775,10 +730,7 @@ pub(super) struct CheckpointPathParams {
     utoipa::path(
         post,
         operation_id = "run_maintenance",
-        extensions(
-            ("x-loonfs-retry" = json!("not_idempotent")),
-            ("x-fern-retries" = json!({"disabled": true})),
-        ),
+        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
         path = "/v0/maintenance/namespaces/{namespace_id}/runs",
         tag = "maintenance",
         summary = "Run one maintenance job",
@@ -845,11 +797,7 @@ pub(super) async fn run_maintenance(
         }
         RunMaintenanceRequest::RecoverAdministrator(request) => {
             let actor_id = actor_id.ok_or_else(missing_actor)?;
-            let namespace = state
-                .namespaces
-                .open(&namespace_id)
-                .await
-                .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+            let namespace = state.open_writer(&namespace_id, None).await?;
             return namespace
                 .recover_administrator(&request.principal_id, &actor_id)
                 .await

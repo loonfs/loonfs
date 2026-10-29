@@ -15,8 +15,8 @@ mod request_limit;
 mod surface;
 mod usage;
 
-use super::error::{status_for_core_error_code, ServedErrorCode};
-use super::{request_log_severity, RequestLogSeverity};
+use super::error::{status_for, ServedErrorCode};
+use super::middleware::{request_log_severity, RequestLogSeverity};
 use crate::{BindingState, JobMode};
 use loonfs::SharedObjectStore;
 mod fixtures;
@@ -273,7 +273,7 @@ fn error_status_mapping_matches_the_api_spec_table() {
             )
         });
         assert_eq!(
-            status_for_core_error_code(code).as_u16(),
+            status_for(code).as_u16(),
             documented_status,
             "served status for `{}` disagrees with the api.md error table",
             code.as_str()
@@ -547,7 +547,7 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let request_id = response
         .headers()
-        .get(super::REQUEST_ID_HEADER)
+        .get(super::middleware::REQUEST_ID_HEADER)
         .expect("request id header")
         .to_str()
         .expect("request id header is text")
@@ -568,7 +568,7 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
 async fn provider_failure_is_projected_in_the_presign_api_envelope() {
     use axum::response::IntoResponse;
 
-    let response = super::REQUEST_ID
+    let response = super::middleware::REQUEST_ID
         .scope("req_presign_hygiene".to_owned(), async {
             super::handlers_uploads::presign_issuer_error(PoisonProviderStore::denied(
                 "namespaces/customer-a/hint.json",
@@ -700,10 +700,12 @@ async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
         .route("/fast", axum::routing::get(|| async { "fast" }))
         .route_layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
-                super::with_request_deadline(request_deadline_ms, request, next)
+                super::middleware::with_request_deadline(request_deadline_ms, request, next)
             },
         ))
-        .layer(axum::middleware::from_fn(super::with_request_id));
+        .layer(axum::middleware::from_fn(
+            super::middleware::with_request_id,
+        ));
 
     let slow = router
         .clone()
@@ -724,7 +726,7 @@ async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
         .is_none());
     let request_id = slow
         .headers()
-        .get(super::REQUEST_ID_HEADER)
+        .get(super::middleware::REQUEST_ID_HEADER)
         .expect("request id header")
         .to_str()
         .expect("request id header text")
@@ -774,12 +776,12 @@ async fn deadline_exemptions_name_served_routes_and_cover_both_content_spellings
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
     ] {
         assert!(
-            super::DEADLINE_EXEMPT_ROUTES.contains(&content_route),
+            super::middleware::DEADLINE_EXEMPT_ROUTES.contains(&content_route),
             "content route `{content_route}` is not deadline exempt"
         );
     }
 
-    for route in super::DEADLINE_EXEMPT_ROUTES {
+    for route in super::middleware::DEADLINE_EXEMPT_ROUTES {
         let uri = route
             .replace("{namespace_id}", "deadline-exempt")
             .replace("{upload_id}", "upl_deadline_exempt")

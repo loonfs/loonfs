@@ -1,9 +1,11 @@
 //! The first due step for each held session and the two host intervals.
 
-use super::{lock, panic_message, GarbageCollection, Overlap, RunningSweep, Sweep, SweepCall};
+use super::{lock, GarbageCollection, Overlap, RunningSweep, Sweep, SweepCall};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, NamespaceId};
+use loonfs_http::panic_message;
 use std::panic::AssertUnwindSafe;
+use std::time::Duration;
 use tokio::time::MissedTickBehavior;
 
 enum Due {
@@ -25,9 +27,10 @@ impl Sweep {
         });
         futures::stream::iter(held)
             .take_until(inner.stop.cancelled())
-            .for_each_concurrent(inner.max_concurrent_visits, |namespace_id| {
-                self.tick_session(namespace_id).boxed()
-            })
+            .for_each_concurrent(
+                inner.config.max_concurrent_maintenance.get(),
+                |namespace_id| self.tick_session(namespace_id).boxed(),
+            )
             .await;
     }
 
@@ -57,8 +60,7 @@ impl Sweep {
                 .handle
                 .last_published_at_ms()
                 .is_some_and(|published_at_ms| {
-                    u128::from(now_ms.saturating_sub(published_at_ms))
-                        < inner.tick_interval.as_millis()
+                    now_ms.saturating_sub(published_at_ms) < inner.config.tick_interval_ms
                 })
             {
                 return;
@@ -77,7 +79,7 @@ impl Sweep {
                         now_ms >= fold_due_at_ms
                             && metadata_retry
                                 .retry_at_ms
-                                .saturating_sub(inner.metadata_retry_interval_ms)
+                                .saturating_sub(inner.config.maintenance_interval_ms)
                                 < fold_due_at_ms
                     });
             let metadata_due =
@@ -85,13 +87,12 @@ impl Sweep {
             let due = if metadata_due {
                 Due::Metadata
             } else if inner.grep.is_some()
-                && (held.index_dirty || held.indexed_seq != seq)
+                && held.index_pending(seq)
                 && now_ms >= held.index_retry.retry_at_ms
             {
                 Due::Index
             } else if seq.is_some()
-                && seq != held.collected_seq
-                && now_ms.saturating_sub(held.collected_at_ms) >= inner.collection_interval_ms
+                && held.collection_pending(seq, now_ms, inner.config.gc_interval_ms)
                 && now_ms >= held.gc_retry.retry_at_ms
             {
                 Due::Collection
@@ -139,7 +140,7 @@ impl Sweep {
             .close_if_idle(
                 namespace_id,
                 seq,
-                inner.idle_session_close_after_ms,
+                inner.config.idle_session_close_after_ms,
                 |held| {
                     // A failing call keeps an idle session held, so ticks
                     // retry it on its backoff, until its backoff reaches the
@@ -151,15 +152,13 @@ impl Sweep {
                     };
                     (held.handle.metadata_caught_up() || at_cap(SweepCall::Metadata))
                         && (inner.grep.is_none()
-                            || (!held.index_dirty && held.indexed_seq == seq)
+                            || !held.index_pending(seq)
                             || at_cap(SweepCall::GrepIndex))
-                        && (held.collected_seq == seq
-                            || inner
-                                .namespaces
-                                .now_ms()
-                                .saturating_sub(held.collected_at_ms)
-                                < inner.collection_interval_ms
-                            || at_cap(SweepCall::Gc))
+                        && (!held.collection_pending(
+                            seq,
+                            inner.namespaces.now_ms(),
+                            inner.config.gc_interval_ms,
+                        ) || at_cap(SweepCall::Gc))
                 },
             )
             .await
@@ -170,13 +169,14 @@ impl Sweep {
 
     pub(crate) fn start(&self) -> RunningSweep {
         let inner = &self.inner;
+        let config = &inner.config;
         tracing::info!(
-            tick_interval_ms = loonfs_types::saturating_duration_ms(inner.tick_interval),
-            maintenance_interval_ms = inner.metadata_retry_interval_ms,
-            gc_interval_ms = inner.collection_interval_ms,
-            full_sweep_interval_ms = loonfs_types::saturating_duration_ms(inner.full_interval),
-            retention_window_ms = inner.retention_window_ms.map(std::num::NonZeroU64::get),
-            max_concurrent_maintenance = inner.max_concurrent_visits,
+            tick_interval_ms = config.tick_interval_ms,
+            maintenance_interval_ms = config.maintenance_interval_ms,
+            gc_interval_ms = config.gc_interval_ms,
+            full_sweep_interval_ms = config.full_sweep_interval_ms,
+            retention_window_ms = config.retention_window_ms.map(std::num::NonZeroU64::get),
+            max_concurrent_maintenance = config.max_concurrent_maintenance.get(),
             maintains_grep_index = inner.grep.is_some(),
             "maintenance sweep started"
         );
@@ -195,7 +195,8 @@ impl Sweep {
     )]
     async fn run_passes(&self) {
         let inner = &self.inner;
-        let mut ticks = tokio::time::interval(inner.full_interval);
+        let mut ticks =
+            tokio::time::interval(Duration::from_millis(inner.config.full_sweep_interval_ms));
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -213,7 +214,7 @@ impl Sweep {
     )]
     async fn run_ticks(&self) {
         let inner = &self.inner;
-        let mut ticks = tokio::time::interval(inner.tick_interval);
+        let mut ticks = tokio::time::interval(Duration::from_millis(inner.config.tick_interval_ms));
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {

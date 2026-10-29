@@ -12,7 +12,7 @@ pub use http::metrics::HttpMetrics;
 pub use http::openapi_document;
 pub use http::request_limit::RequestLimit;
 pub use http::usage::{UsageRecorder, UsageReport};
-pub use http::{authenticate_routes, error_response, observe_routes, router};
+pub use http::{authenticate_routes, error_response, observe_routes, panic_message, router};
 pub use state::{
     transfer_permits, AuthPolicy, BindingConfig, BindingState, GrepBinding, HeldNamespace, JobMode,
     Namespaces, SweepRetry, DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS,

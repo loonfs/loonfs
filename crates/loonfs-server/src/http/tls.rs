@@ -2,6 +2,7 @@
 //! listener that wraps accepted TCP connections in a rustls session.
 
 use crate::config::TlsServerConfig;
+use loonfs_types::{MonotonicTimer as _, StdMonotonicTimer};
 use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::future::Future;
@@ -121,6 +122,12 @@ fn open(path: &str) -> Result<std::fs::File, TlsConfigError> {
 pub(super) struct TlsListener {
     tcp: TcpListener,
     acceptor: TlsAcceptor,
+    timer: StdMonotonicTimer,
+    /// When the listener last logged a failed accept, or `None` after a
+    /// successful accept.
+    last_logged_at_ms: Option<u64>,
+    /// The failed accepts since the last logged one.
+    suppressed: u64,
 }
 
 impl TlsListener {
@@ -128,6 +135,53 @@ impl TlsListener {
         Self {
             tcp,
             acceptor: TlsAcceptor::from(Arc::new(config)),
+            timer: StdMonotonicTimer::default(),
+            last_logged_at_ms: None,
+            suppressed: 0,
+        }
+    }
+
+    /// Mirrors what axum's own `Listener for TcpListener` does with a failed
+    /// accept, because the trait makes each implementor responsible for it:
+    /// a per-connection error is dropped, and anything else — `EMFILE` being
+    /// the case worth naming — is logged and retried after a pause rather
+    /// than ending the accept loop. The first failure logs, and then at most
+    /// one line per [`ACCEPT_ERROR_LOG_INTERVAL_MS`], with the failures
+    /// suppressed since the last line.
+    async fn handle_accept_error(&mut self, error: io::Error) {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::ConnectionReset
+        ) {
+            return;
+        }
+        let now_ms = self.timer.monotonic_now_ms();
+        let since_ms = self
+            .last_logged_at_ms
+            .map(|logged_at_ms| now_ms.saturating_sub(logged_at_ms));
+        if since_ms.is_some_and(|since_ms| since_ms < ACCEPT_ERROR_LOG_INTERVAL_MS) {
+            self.suppressed = self.suppressed.saturating_add(1);
+        } else {
+            tracing::error!(
+                error = %error,
+                suppressed = std::mem::take(&mut self.suppressed),
+                since_ms,
+                "accept error"
+            );
+            self.last_logged_at_ms = Some(now_ms);
+        }
+        accept_retry_pause().await;
+    }
+
+    /// Logs the first successful accept after a logged accept error.
+    fn accept_recovered(&mut self) {
+        if self.last_logged_at_ms.take().is_some() {
+            tracing::info!(
+                suppressed = std::mem::take(&mut self.suppressed),
+                "accepts succeed again after accept errors"
+            );
         }
     }
 }
@@ -140,12 +194,13 @@ impl axum::serve::Listener for TlsListener {
         loop {
             match self.tcp.accept().await {
                 Ok((stream, addr)) => {
+                    self.accept_recovered();
                     return (
                         TlsIo::Handshaking(Box::new(self.acceptor.accept(stream))),
                         addr,
-                    )
+                    );
                 }
-                Err(error) => handle_accept_error(error).await,
+                Err(error) => self.handle_accept_error(error).await,
             }
         }
     }
@@ -155,32 +210,18 @@ impl axum::serve::Listener for TlsListener {
     }
 }
 
-/// Mirrors what axum's own `Listener for TcpListener` does with a failed
-/// accept, because the trait makes each implementor responsible for it:
-/// a per-connection error is dropped, and anything else — `EMFILE` being the
-/// case worth naming — is logged and retried after a pause rather than
-/// ending the accept loop.
-async fn handle_accept_error(error: io::Error) {
-    if matches!(
-        error.kind(),
-        io::ErrorKind::ConnectionRefused
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionReset
-    ) {
-        return;
-    }
-    tracing::error!(error = %error, "accept error");
-    accept_retry_pause().await;
-}
-
-// Backs off an accept loop that would otherwise spin on a resource the
-// process has run out of. No protocol time depends on it.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "backs off an accept loop that would otherwise spin on a resource the process has run out of, and no protocol time depends on it"
+)]
 async fn accept_retry_pause() {
     tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
 }
 
 const ACCEPT_RETRY_PAUSE: Duration = Duration::from_secs(1);
+
+/// Shortest time between two logged accept errors.
+const ACCEPT_ERROR_LOG_INTERVAL_MS: u64 = 60_000;
 
 /// One accepted connection, before or after its TLS handshake.
 ///

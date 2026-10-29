@@ -1,10 +1,10 @@
 //! HTTP application construction, the listener service, and where its
 //! graceful shutdown is triggered from.
 
-use super::router;
+use super::host_routes::router;
 use super::tls::{self, TlsConfigError, TlsListener};
 use crate::config::{JobMode, MemorySizing, ServerConfig, ServerConfigError};
-use crate::sweep::Sweep;
+use crate::sweep::{GrepIndexing, Sweep};
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
@@ -167,7 +167,10 @@ pub async fn app(
     let metrics = HttpMetrics::new();
     // Grep reads and checkpoints through the same runtime the HTTP API
     // groups use, so it is composed after it.
-    let (runtime, maintenance) = build_handles(
+    let RuntimeHandles {
+        runtime,
+        maintenance,
+    } = build_handles(
         &config,
         &memory,
         store,
@@ -222,14 +225,18 @@ pub async fn app(
         .maintenance
         .maintains()
         .then(|| {
-            Sweep::new(
-                &config,
+            let grep = grep
+                .worker()
+                .map(|worker| GrepIndexing::new(worker.clone(), config.grep.worker_config()))
+                .transpose()?;
+            Ok::<_, ServerConfigError>(Sweep::new(
+                config.sweep_config(),
                 runtime.object_store(),
                 maintenance.clone(),
                 Arc::clone(&namespaces),
-                grep.worker().cloned(),
+                grep,
                 metrics.recorder().as_ref(),
-            )
+            ))
         })
         .transpose()?;
     let options = Arc::new(BindingConfig {
@@ -271,6 +278,12 @@ pub async fn app(
     Ok((router(state.clone()), state))
 }
 
+/// The process runtime and the maintenance handle of its host.
+pub(super) struct RuntimeHandles {
+    pub(super) runtime: LoonFs<Writable>,
+    pub(super) maintenance: Maintenance,
+}
+
 /// Builds the process runtime and its maintenance over one store and one
 /// metrics recorder.
 ///
@@ -288,7 +301,7 @@ pub(super) async fn build_handles(
     store: SharedObjectStore,
     metrics: &HttpMetrics,
     metrics_jsonl_path: Option<OsString>,
-) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
+) -> Result<RuntimeHandles, ServerConfigError> {
     let store_kind = config.store.kind();
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
     let ssd = match &config.metadata_cache.ssd {
@@ -336,7 +349,10 @@ pub(super) async fn build_handles(
         })?;
     let maintenance = runtime.maintenance(maintenance_writer_id);
 
-    Ok((runtime, maintenance))
+    Ok(RuntimeHandles {
+        runtime,
+        maintenance,
+    })
 }
 
 fn object_store_metrics_recorder(
@@ -491,8 +507,10 @@ where
 ///
 /// Kept apart from [`serve_on`] so the settling order is a thing a test can
 /// drive with handles it holds.
-#[allow(clippy::disallowed_methods)]
-// Monotonic time is used only to limit graceful shutdown.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "monotonic time is used only to limit graceful shutdown"
+)]
 pub(super) async fn serve_and_settle<L>(
     listener: L,
     router: Router,

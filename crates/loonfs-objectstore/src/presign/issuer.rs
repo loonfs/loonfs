@@ -3,6 +3,7 @@
 use crate::object_store::Result;
 use crate::ByteRange;
 use async_trait::async_trait;
+use loonfs_types::api::v0::ObjectTransferAccess;
 use loonfs_types::Checksum;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -81,6 +82,17 @@ pub struct PresignedUrl {
     pub headers: BTreeMap<String, String>,
     /// Unix-millisecond instant after which the provider rejects the capability.
     pub expires_at_ms: u64,
+}
+
+impl From<PresignedUrl> for ObjectTransferAccess {
+    fn from(signed: PresignedUrl) -> Self {
+        Self::PresignedUrl {
+            method: signed.method,
+            url: signed.url,
+            headers: signed.headers,
+            expires_at_ms: signed.expires_at_ms,
+        }
+    }
 }
 
 /// Issues create-only write permissions for complete objects.

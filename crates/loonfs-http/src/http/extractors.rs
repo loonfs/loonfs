@@ -12,7 +12,9 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
 use loonfs_objectstore::crypto::constant_time_eq;
-use loonfs_types::{AbsolutePath, ActorId, NamespaceId, Subject, SubjectPart, SubjectPartsError};
+use loonfs_types::{
+    headers, AbsolutePath, ActorId, NamespaceId, Subject, SubjectPart, SubjectPartsError,
+};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -80,7 +82,7 @@ impl<S: Send + Sync> FromRequestParts<S> for OptionalActorHeader {
     type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(value) = parts.headers.get("Loonfs-Actor") else {
+        let Some(value) = parts.headers.get(headers::ACTOR) else {
             return Ok(Self(None));
         };
         let value = String::from_utf8_lossy(value.as_bytes());
@@ -88,7 +90,7 @@ impl<S: Send + Sync> FromRequestParts<S> for OptionalActorHeader {
             .map(|actor_id| Self(Some(actor_id)))
             .map_err(|error| {
                 ApiResponseError::new(ErrorCode::InvalidRequest, error.reason())
-                    .with_param("Loonfs-Actor")
+                    .with_param(headers::ACTOR)
             })
     }
 }
@@ -96,9 +98,9 @@ impl<S: Send + Sync> FromRequestParts<S> for OptionalActorHeader {
 pub(super) fn missing_actor() -> ApiResponseError {
     ApiResponseError::new(
         ErrorCode::InvalidRequest,
-        "missing required header Loonfs-Actor",
+        &format!("missing required header {}", headers::ACTOR),
     )
-    .with_param("Loonfs-Actor")
+    .with_param(headers::ACTOR)
 }
 
 fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
@@ -119,33 +121,24 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
                 .map(|value| String::from_utf8_lossy(value.as_bytes()))
         };
         Subject::from_parts(
-            header("Loonfs-Principal-Scope").as_deref(),
-            header("Loonfs-Subject").as_deref(),
-            header("Loonfs-Actor").as_deref(),
-            header("Loonfs-Principals").as_deref(),
+            header(headers::PRINCIPAL_SCOPE).as_deref(),
+            header(headers::SUBJECT).as_deref(),
+            header(headers::ACTOR).as_deref(),
+            header(headers::PRINCIPALS).as_deref(),
         )
         .map(Self)
         .map_err(|error| {
             let (part, message) = match error {
                 SubjectPartsError::Missing { part, .. } => (
                     part,
-                    format!("missing required header {}", subject_header(part)),
+                    format!("missing required header {}", part.header_name()),
                 ),
                 SubjectPartsError::Invalid { part, message } => (part, message),
                 other => (SubjectPart::Principals, other.to_string()),
             };
             ApiResponseError::new(ErrorCode::InvalidRequest, &message)
-                .with_param(subject_header(part))
+                .with_param(part.header_name())
         })
-    }
-}
-
-fn subject_header(part: SubjectPart) -> &'static str {
-    match part {
-        SubjectPart::Principals => "Loonfs-Principals",
-        SubjectPart::PrincipalScope => "Loonfs-Principal-Scope",
-        SubjectPart::SubjectId => "Loonfs-Subject",
-        SubjectPart::ActorId => "Loonfs-Actor",
     }
 }
 

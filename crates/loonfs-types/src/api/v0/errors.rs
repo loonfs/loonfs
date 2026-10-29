@@ -1,5 +1,6 @@
 //! The error response body for the v0 HTTP API.
 
+use crate::ErrorCode;
 use crate::{
     AccessRevisionNo, AttributesRevisionNo, BindingVersion, ChangeSeq, CommitFingerprint, CommitId,
     InodeId, NamespaceId, RevisionNo, WriterEpoch, WriterId,
@@ -30,6 +31,20 @@ pub struct ErrorResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub details: Option<Box<ErrorDetails>>,
+}
+
+impl ErrorResponse {
+    /// Builds the body of an error with `code` and `message` and no other fields.
+    pub fn new(code: ErrorCode, message: &str) -> Self {
+        Self {
+            code: code.as_str().to_owned(),
+            feature: None,
+            message: message.to_owned(),
+            param: None,
+            request_id: None,
+            details: None,
+        }
+    }
 }
 
 /// The machine-readable identifiers and state that explain an error response.

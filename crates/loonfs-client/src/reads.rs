@@ -7,7 +7,7 @@ use loonfs_types::options::{
     Consistency, ListChangesOptions, ListFileRevisionsOptions, ListTrashOptions, ReadAt,
     ReadFileOptions,
 };
-use loonfs_types::PageRequest;
+use loonfs_types::{headers, PageRequest};
 
 /// Options for creating a namespace.
 ///
@@ -208,7 +208,7 @@ impl Client {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
         self.request_json::<_, NamespaceMetadata>(
-            self.post(&url).header("Loonfs-Actor", actor.as_str()),
+            self.post(&url).header(headers::ACTOR, actor.as_str()),
             Some(&CreateNamespaceRequest {
                 access: options.access.clone(),
                 namespace_id: namespace_id.clone(),
@@ -285,7 +285,7 @@ impl Client {
         );
         // Namespace forks have no durable request identity to replay after an ambiguous success.
         self.request_json::<_, NamespaceMetadata>(
-            self.post(&url).header("Loonfs-Actor", actor.as_str()),
+            self.post(&url).header(headers::ACTOR, actor.as_str()),
             Some(&ForkNamespaceRequest {
                 new_namespace_id: new_namespace_id.clone(),
                 snapshot_id: options.snapshot_id.clone(),

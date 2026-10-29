@@ -1,6 +1,6 @@
 //! Session ticks and the daily listing pass share namespace visits.
 
-use crate::config::{ServerConfig, ServerConfigError};
+use crate::config::ServerConfigError;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::metrics::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, RESULT_ERROR, RESULT_OK,
@@ -12,17 +12,17 @@ use loonfs::{
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
+    GrepWorkerConfig,
 };
-use loonfs_http::{HeldNamespace, Namespaces, SweepRetry};
+use loonfs_http::{panic_message, HeldNamespace, Namespaces, SweepRetry};
 use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::config::ConfigFieldError;
 use loonfs_types::EffectiveLimit;
-use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::future::Future;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -112,23 +112,29 @@ pub struct Sweep {
     inner: Arc<SweepInner>,
 }
 
+/// The cadence and limits of a sweep, under the names of the server config
+/// settings.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SweepConfig {
+    pub(crate) max_concurrent_maintenance: NonZeroUsize,
+    pub(crate) tick_interval_ms: u64,
+    pub(crate) maintenance_interval_ms: u64,
+    pub(crate) gc_interval_ms: u64,
+    pub(crate) full_sweep_interval_ms: u64,
+    /// The server's retention window, which applies to each namespace
+    /// without a window of its own.
+    pub(crate) retention_window_ms: Option<NonZeroU64>,
+    pub(crate) idle_session_close_after_ms: u64,
+}
+
 struct SweepInner {
     store: SharedObjectStore,
     maintenance: Maintenance,
     grep: Option<GrepIndexing>,
     namespaces: Arc<Namespaces>,
-    max_concurrent_visits: usize,
-    tick_interval: Duration,
-    metadata_retry_interval_ms: u64,
-    collection_interval_ms: u64,
-    full_interval: Duration,
-    /// The server's retention window, which applies to each namespace
-    /// without a window of its own.
-    retention_window_ms: Option<NonZeroU64>,
-    idle_session_close_after_ms: u64,
-    /// The namespaces being visited, each with whether a full pass found it
-    /// here and left its retention advance to the visit.
-    visiting: Mutex<HashMap<NamespaceId, bool>>,
+    config: SweepConfig,
+    /// The namespaces being visited.
+    visiting: Mutex<HashMap<NamespaceId, VisitClaim>>,
     slots: Semaphore,
     page_limit: EffectiveLimit,
     stop: MaintenanceCancellation,
@@ -179,9 +185,27 @@ struct Retry {
     wait_ms: u64,
 }
 
-struct GrepIndexing {
+/// The grep worker of a server that maintains the grep index, and the build
+/// policy of its steps.
+pub(crate) struct GrepIndexing {
     worker: GrepWorker<SharedObjectStore>,
     policy: GramIndexBuildPolicy,
+}
+
+impl GrepIndexing {
+    /// Builds the indexing of `worker` with the build policy of `config`.
+    pub(crate) fn new(
+        worker: GrepWorker<SharedObjectStore>,
+        config: GrepWorkerConfig,
+    ) -> Result<Self, ServerConfigError> {
+        let policy = config.build_policy().map_err(|error| {
+            ServerConfigError::Field(ConfigFieldError::Invalid {
+                field: "grep",
+                reason: error.to_string(),
+            })
+        })?;
+        Ok(Self { worker, policy })
+    }
 }
 
 /// The calls one visit makes. Failures are counted by these names.
@@ -244,44 +268,23 @@ impl SweepCall {
 
 impl Sweep {
     /// Builds a sweep over `store` with the cadence and limits in `config`.
-    /// `grep_worker` is the worker of a server that maintains the grep
-    /// index, and `None` otherwise.
+    /// `grep` is the indexing of a server that maintains the grep index, and
+    /// `None` otherwise.
     pub(crate) fn new(
-        config: &ServerConfig,
+        config: SweepConfig,
         store: SharedObjectStore,
         maintenance: Maintenance,
         namespaces: Arc<Namespaces>,
-        grep_worker: Option<GrepWorker<SharedObjectStore>>,
+        grep: Option<GrepIndexing>,
         recorder: &dyn MetricsRecorder,
-    ) -> Result<Self, ServerConfigError> {
-        let grep = grep_worker
-            .map(|worker| {
-                let policy = config
-                    .grep
-                    .worker_config()
-                    .build_policy()
-                    .map_err(|error| {
-                        ServerConfigError::Field(ConfigFieldError::Invalid {
-                            field: "grep",
-                            reason: error.to_string(),
-                        })
-                    })?;
-                Ok::<_, ServerConfigError>(GrepIndexing { worker, policy })
-            })
-            .transpose()?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             inner: Arc::new(SweepInner {
                 store,
                 maintenance,
                 grep,
                 namespaces,
-                max_concurrent_visits: config.max_concurrent_maintenance.get(),
-                tick_interval: Duration::from_millis(config.tick_interval_ms),
-                metadata_retry_interval_ms: config.maintenance_interval_ms,
-                collection_interval_ms: config.gc_interval_ms,
-                full_interval: Duration::from_millis(config.full_sweep_interval_ms),
-                retention_window_ms: config.retention_window_ms,
-                idle_session_close_after_ms: config.idle_session_close_after_ms,
+                config,
                 visiting: Mutex::default(),
                 slots: Semaphore::new(config.max_concurrent_maintenance.get()),
                 page_limit: EffectiveLimit::new(
@@ -291,7 +294,7 @@ impl Sweep {
                 stop: MaintenanceCancellation::new(),
                 metrics: SweepMetrics::register(recorder),
             }),
-        })
+        }
     }
 
     /// Lists `page_limit` namespace ids per store request instead of the
@@ -386,11 +389,14 @@ impl Sweep {
             })
             .flatten()
             .take_until(inner.stop.cancelled())
-            .for_each_concurrent(inner.max_concurrent_visits, |namespace_id| {
-                // Boxed so the spawned sweep's `Send` check does not recurse
-                // through every engine future a visit awaits.
-                self.visit(namespace_id, garbage).map(drop).boxed()
-            })
+            .for_each_concurrent(
+                inner.config.max_concurrent_maintenance.get(),
+                |namespace_id| {
+                    // Boxed so the spawned sweep's `Send` check does not recurse
+                    // through every engine future a visit awaits.
+                    self.visit(namespace_id, garbage).map(drop).boxed()
+                },
+            )
             .await;
         listing.map(|()| listed)
     }
@@ -444,7 +450,7 @@ impl Sweep {
         let work_wait_ms = if outcome == MetadataMaintenanceOutcome::CaughtUp {
             0
         } else {
-            inner.metadata_retry_interval_ms
+            inner.config.maintenance_interval_ms
         };
         self.record_call(
             namespace_id,
@@ -496,12 +502,12 @@ impl Sweep {
         match lock(&inner.visiting).entry(namespace_id.clone()) {
             Entry::Occupied(mut visit) => {
                 if overlap == Overlap::LeaveRetentionAdvance {
-                    visit.insert(true);
+                    visit.insert(VisitClaim::RetentionAdvanceLeft);
                 }
                 return None;
             }
             Entry::Vacant(free) => {
-                free.insert(false);
+                free.insert(VisitClaim::Claimed);
             }
         }
         let visit = Visiting {
@@ -544,7 +550,7 @@ impl Sweep {
 
     /// The backoff after a call's first failure: one tick interval.
     fn first_backoff_ms(&self) -> u64 {
-        loonfs_types::saturating_duration_ms(self.inner.tick_interval)
+        self.inner.config.tick_interval_ms
     }
 
     async fn gc(
@@ -622,7 +628,7 @@ impl Sweep {
         }
         let options = AdvanceRetentionFloorOptions {
             target: RetentionTarget::Window {
-                default_window_ms: inner.retention_window_ms,
+                default_window_ms: inner.config.retention_window_ms,
             },
         };
         let result = contain(
@@ -814,6 +820,16 @@ impl Drop for IndexBuild<'_> {
     }
 }
 
+/// How a visit holds a namespace in the sweep's visiting map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisitClaim {
+    /// A visit has the namespace.
+    Claimed,
+    /// A visit has the namespace, and a full pass that reached it left its
+    /// retention advance to the visit.
+    RetentionAdvanceLeft,
+}
+
 /// What a claim does when another visit has the namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Overlap {
@@ -838,10 +854,10 @@ impl Visiting<'_> {
     /// `true`.
     fn release_unless_retention_due(&mut self) -> bool {
         let mut visiting = lock(&self.inner.visiting);
-        let retention_due = visiting
+        let claim = visiting
             .get_mut(&self.namespace_id)
             .expect("a claimed namespace should stay in the visiting map until it's released");
-        if std::mem::take(retention_due) {
+        if std::mem::replace(claim, VisitClaim::Claimed) == VisitClaim::RetentionAdvanceLeft {
             return true;
         }
         visiting.remove(&self.namespace_id);
@@ -881,15 +897,6 @@ async fn contain<T>(work: impl Future<Output = Result<T, CallFailure>>) -> Resul
                 panic: panic_message(payload.as_ref()).to_owned(),
             })
         })
-}
-
-/// The message a panic carried, when it carried a string.
-fn panic_message(payload: &(dyn Any + Send)) -> &str {
-    payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("a panic payload that isn't a string")
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

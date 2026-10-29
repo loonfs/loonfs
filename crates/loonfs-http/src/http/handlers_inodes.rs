@@ -93,8 +93,7 @@ pub(super) async fn get_inode(
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<StatInodeQuery>,
 ) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let mut options = StatOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
@@ -130,14 +129,7 @@ pub(super) struct ListInodeChildrenQuery {
     utoipa::path(
         get,
         operation_id = "list_inode_children",
-        extensions(
-            ("x-loonfs-retry" = json!("idempotent")),
-            ("x-fern-pagination" = json!({
-                "cursor": "$request.cursor",
-                "next_cursor": "$response.next_cursor",
-                "results": "$response.entries",
-            })),
-        ),
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         tag = "inodes",
         summary = "List directory children by inode",
@@ -171,8 +163,7 @@ pub(super) async fn list_inode_children(
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<ListInodeChildrenQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let mut options = ListOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
@@ -202,14 +193,7 @@ pub(super) async fn list_inode_children(
     utoipa::path(
         get,
         operation_id = "list_file_revisions_by_inode",
-        extensions(
-            ("x-loonfs-retry" = json!("idempotent")),
-            ("x-fern-pagination" = json!({
-                "cursor": "$request.cursor",
-                "next_cursor": "$response.next_cursor",
-                "results": "$response.revisions",
-            })),
-        ),
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
         tag = "inodes",
         summary = "List file revisions by inode",
@@ -240,8 +224,7 @@ pub(super) async fn list_file_revisions_by_inode(
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<LivePageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let options = ListFileRevisionsOptions {
@@ -300,8 +283,7 @@ pub(super) async fn get_file_content_by_inode(
     AppQuery(query): AppQuery<InodeContentQuery>,
     range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let at = parse_read_at(
         parse_optional_snapshot_id(query.snapshot_id)?,
@@ -314,13 +296,7 @@ pub(super) async fn get_file_content_by_inode(
         .read_file_stream_by_inode(inode_id, range.stream_range())
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    streamed_download_response(
-        stream,
-        range.0,
-        permit,
-        state.options.max_download_bytes,
-        &namespace_id,
-    )
+    streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)
 }
 
 #[cfg_attr(
@@ -363,8 +339,7 @@ pub(super) async fn get_file_revision_content_by_inode(
     AppQuery(query): AppQuery<InodeContentQuery>,
     range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
@@ -383,11 +358,5 @@ pub(super) async fn get_file_revision_content_by_inode(
         .read_file_revision_stream_by_inode_with_options(inode_id, revision_no, &options)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    streamed_download_response(
-        stream,
-        range.0,
-        permit,
-        state.options.max_download_bytes,
-        &namespace_id,
-    )
+    streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)
 }

@@ -297,7 +297,7 @@ async fn append_commits_write_only_wal_and_replay_by_bytes() {
         ),
     ] {
         let (status, error) = harness.commit(append("refused", &bytes)).await;
-        assert_eq!(status, status_for_core_error_code(code), "{error}");
+        assert_eq!(status, status_for(code), "{error}");
         assert_eq!(error["code"], code.as_str());
         assert_eq!(error["details"]["operation_index"], 0);
         if code == ErrorCode::InvalidRequest {
@@ -360,7 +360,7 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
                 let (status, error) = harness
                     .commit(json!({"commit_id": "rejected", "operations": [operation]}))
                     .await;
-                assert_eq!(status, status_for_core_error_code(code), "{error}");
+                assert_eq!(status, status_for(code), "{error}");
                 assert_eq!(error["code"], code.as_str());
                 if code == ErrorCode::NotSupported {
                     assert_eq!(error["feature"], FEATURE_COMMIT_INLINE_CONTENT);
