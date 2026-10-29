@@ -22,6 +22,12 @@ pub struct NamespaceReadState {
     pub next_inode_id: InodeId,
     pub wal_no: WalNo,
     pub folded_wal_no: WalNo,
+    /// The lowest basis floor that the WAL object after `wal_no` can
+    /// record: the basis floor of the WAL object at `wal_no`, or the
+    /// manifest's acknowledged floor when no WAL object is above the
+    /// manifest. Basis floors never decrease along the WAL (see the design
+    /// note's [Acknowledging the floor](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#acknowledging-the-floor)).
+    pub basis_floor_seq: ChangeSeq,
 }
 
 impl NamespaceReadState {
@@ -33,6 +39,7 @@ impl NamespaceReadState {
             seq: payload.head_seq,
             next_inode_id: payload.next_inode_id,
             wal_no: payload.wal_no,
+            basis_floor_seq: payload.basis_floor_seq,
             ..self.clone()
         }
     }
@@ -59,6 +66,7 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             next_inode_id: manifest.next_inode_id,
             wal_no: manifest.folded_wal_no,
             folded_wal_no: manifest.folded_wal_no,
+            basis_floor_seq: manifest.acknowledged_floor_seq,
         }
     }
 }

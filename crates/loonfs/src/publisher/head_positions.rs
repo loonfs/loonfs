@@ -121,6 +121,112 @@ async fn a_fold_moves_the_read_position_to_its_manifest() {
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Returns the basis floor of the WAL object that commits `committed_seq`.
+async fn basis_floor_of_commit(
+    store: &dyn ObjectStore,
+    namespace_id: &NamespaceId,
+    committed_seq: ChangeSeq,
+) -> ChangeSeq {
+    for key in store
+        .list_prefix(&wal_prefix(namespace_id))
+        .await
+        .expect("list the WAL")
+    {
+        let bytes = store
+            .get(&key, None)
+            .await
+            .expect("read a WAL object")
+            .expect("the WAL object exists");
+        let payload = decode_wal_object_envelope_zstd(&bytes)
+            .expect("decode a WAL object")
+            .into_payload();
+        if payload
+            .records
+            .iter()
+            .any(|record| record.committed_seq == committed_seq)
+        {
+            return payload.basis_floor_seq;
+        }
+    }
+    panic!("no WAL object commits sequence {committed_seq}")
+}
+
+/// Checks that a retention advance through maintenance moves the position
+/// onto the advance's manifest, so that the session's next WAL object
+/// records the advanced floor, and that the diagnostics report the
+/// acknowledged floor before and after a fold of that WAL object.
+#[tokio::test]
+async fn the_next_wal_object_after_an_advance_records_the_advanced_floor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let clock = Arc::new(ManualClock::at_system_time());
+    let writer = crate::LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .min_publish_interval_ms(0)
+        .wall_clock(clock.clone())
+        .build()
+        .await
+        .expect("build writer");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let commit = |name: &str| {
+        namespace.commit_candidate(CommitCandidate::new(create_directory_request(name, name)))
+    };
+    let before = commit("before").await.expect("commit");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
+    maintenance.fold_wal(&namespace_id).await.expect("fold");
+    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    let advanced = maintenance
+        .advance_retention_floor(&namespace_id)
+        .await
+        .expect("advance the floor");
+    assert_eq!(advanced.retention_floor_seq, before.committed_seq);
+    let diagnostics = maintenance
+        .diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics");
+    assert_eq!(
+        (
+            diagnostics.retention_floor_seq,
+            diagnostics.acknowledged_floor_seq
+        ),
+        (before.committed_seq, ChangeSeq(0))
+    );
+    assert_eq!(
+        writer
+            .core
+            .writer_position(&namespace_id)
+            .expect("a position after the advance")
+            .basis
+            .manifest_no(),
+        current_manifest_no(&store, &namespace_id).await,
+        "the advance moves the position onto its manifest"
+    );
+
+    let after = commit("after").await.expect("commit");
+    assert_eq!(
+        basis_floor_of_commit(&store, &namespace_id, before.committed_seq).await,
+        ChangeSeq(0)
+    );
+    assert_eq!(
+        basis_floor_of_commit(&store, &namespace_id, after.committed_seq).await,
+        before.committed_seq
+    );
+    maintenance.fold_wal(&namespace_id).await.expect("fold");
+    let diagnostics = maintenance
+        .diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics");
+    assert_eq!(diagnostics.acknowledged_floor_seq, before.committed_seq);
+    writer.shutdown().await.expect("shutdown");
+}
+
 /// Checks that a change of unknown effect drops the position, and that the
 /// next commit stores one again.
 #[tokio::test]

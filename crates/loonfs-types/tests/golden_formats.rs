@@ -363,6 +363,7 @@ fn sample_wal_payload() -> WalObjectPayload {
         writer_epoch: WriterEpoch(3),
         head_seq: ChangeSeq(2),
         next_inode_id: InodeId(10),
+        basis_floor_seq: ChangeSeq(0),
         records: vec![WalCommitPayload {
             committed_seq: ChangeSeq(2),
             commit_id: commit_id(),
@@ -485,6 +486,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         next_inode_id: InodeId(10),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
+        acknowledged_floor_seq: ChangeSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
             run_seq: ChangeSeq(2),

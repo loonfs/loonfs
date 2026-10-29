@@ -873,6 +873,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         next_inode_id: head.next_inode_id,
         next_run_no,
         retention_floor_seq: source.retention_floor_seq,
+        acknowledged_floor_seq: head.basis_floor_seq,
         runs,
     })
     .map(|encoded| encoded.into_envelope())
@@ -982,6 +983,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         next_inode_id: InodeId(64),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
+        acknowledged_floor_seq: ChangeSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
             run_seq: head_seq,

@@ -186,6 +186,7 @@ impl Maintenance {
             fork_basis: diagnostics.fork_basis,
             head_seq: diagnostics.head_seq,
             retention_floor_seq: diagnostics.retention_floor_seq,
+            acknowledged_floor_seq: diagnostics.acknowledged_floor_seq,
             current_manifest_no: Some(diagnostics.current_manifest_no),
             wal_tail_objects: diagnostics.wal_tail_objects,
             live_snapshots,

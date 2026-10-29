@@ -377,7 +377,7 @@ WAL:        [7]  [8]  [9]  [10]  [11]   <- WAL tip
 ```
 
 - A manifest records the namespace's lifecycle status, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that contain its rows through `head_seq`.
-- A WAL object contains the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it. A fence contains no commits.
+- A WAL object contains the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it and with the retention floor of the manifest that the session validated them against. A fence contains no commits.
 - The hint is mutable. It records a manifest number that never decreases, and the runtime that publishes a manifest raises the hint afterward, with compare-and-swap.
 - Content objects store immutable ranges of file bytes, and a layout lists those ranges in chain order.
 - Pins are retained manifests (see [Pins](#8-pins)).
@@ -747,7 +747,7 @@ A writer session acquires authority lazily, before its first publication that ch
    - The claim runs under `METADATA_PUBLICATION_BUDGET_MS`, measured from the start of the acquisition (before the session loads the manifest it copies). If the budget has expired before the put starts, or by the time the put is confirmed, the acquisition fails.
    - If another publisher took the claim's number, the session reloads the current manifest and claims again with the next epoch.
    - If the put's outcome is unknown, the session reads back the manifest at its number. If it finds its own bytes, that manifest covers the claim, and the session claims again (the epoch it leaves behind never gets a fence). If it finds another manifest, the claim lost, and the session claims again. If it finds no manifest, the acquisition fails.
-2. **Fence.** The session discovers the tip. If the current manifest now has a higher epoch than the claim, another session has claimed since, and the acquisition returns `writer_fenced`. Otherwise, the session creates a fence (a WAL object with no records) with its epoch at the next WAL number.
+2. **Fence.** The session discovers the tip. If the current manifest now has a higher epoch than the claim, another session has claimed since, and the acquisition returns `writer_fenced`. Otherwise, the session creates a fence (a WAL object with no records) with its epoch at the next WAL number. The fence records the retention floor of the manifest the session discovered as its `basis_floor_seq` (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
    - The fence put is planned against a discovered tip, under `WAL_PUBLISH_BUDGET_MS`, like any numbered put.
    - After a collision, or a budget that expired before the put, the session discovers the tip again and retries at the new number. These retries stop when the acquisition's `METADATA_PUBLICATION_BUDGET_MS` expires, and the next retry fails the acquisition instead.
    - A transport failure, or a put that returns after its budget, fails the acquisition. The next attempt claims a new epoch.
@@ -797,7 +797,7 @@ To publish a batch, a writer:
 
 1. Resolves retained commit IDs, and then validates new requests against the discovered view and the requests accepted earlier in the batch.
 2. Keeps new commits in the writer's queue while the unfolded WAL is at its write-stop threshold (fence objects count toward that threshold), until a fold frees room. A commit that's still waiting when the [write-stop wait](#73-recovery-material-and-maintenance-policy) passes (measured from when it entered the queue) returns `maintenance_required` and isn't committed.
-3. Assigns contiguous sequences to the accepted requests, and builds one WAL object at `tip + 1`, including the resulting `next_inode_id`.
+3. Assigns contiguous sequences to the accepted requests, and builds one WAL object at `tip + 1`, including the resulting `next_inode_id` and, as `basis_floor_seq`, the retention floor of the manifest that the batch was validated against (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
 4. Checks the publication budget and the content-admission evidence immediately before the put-if-absent. If a request's evidence has expired, the writer returns that request's own error, and `stale_head` for the other accepted requests so they can be planned again. It writes no WAL object for that batch.
 5. On success, moves its [writer position](glossary.md#writer-position) to the new head and acknowledges the requests.
 
@@ -966,7 +966,7 @@ The first manifest of a namespace has these values:
 | Fork basis | None | The pinned source manifest and the source pin's ID |
 | Runs | None | The source's runs |
 | Next inode ID | 2 | The source's |
-| Head sequence and retention floor | 0 | The pinned source sequence |
+| Head sequence, retention floor, and acknowledged floor | 0 | The pinned source sequence |
 | Base sequence | 0 | Derived from the inherited runs |
 | Next run number | 0 | The source's |
 
@@ -976,7 +976,7 @@ A fold works in these steps:
 2. Check every chain's pieces in the tail (see below).
 3. Write each chain's new extent to a content object (see below).
 4. Write new metadata segments for the WAL objects after `folded_wal_no`, including the new layout rows. A fence is folded even when the sequence doesn't change, and an ordinary fold writes a run at the head when it materializes new state.
-5. Publish the next manifest, with `folded_wal_no` set to the tip it captured, using put-if-absent at the predecessor's `manifest_no + 1`.
+5. Publish the next manifest, with `folded_wal_no` set to the tip it captured and `acknowledged_floor_seq` raised to the highest `basis_floor_seq` of the objects it folds (see [Advancing the retention floor](#101-advancing-the-retention-floor)), using put-if-absent at the predecessor's `manifest_no + 1`.
 
 A fold is a publication by the namespace's "maintainer", the role that folds, compacts, advances the retention floor, and collects garbage, while the writer session commits and deletes the namespace. A fold publishes under the current compactor epoch without claiming it, and it copies the predecessor's writer and compactor epochs forward, so it doesn't need a writer epoch, and any process can run one. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
@@ -1006,7 +1006,7 @@ Folds, validation (when it writes pending pieces to content objects), direct-dow
 Every successor manifest MUST:
 
 - keep the namespace's identity, including its access and naming modes,
-- not lower the head sequence, the writer or compactor epoch, the folded WAL number, the retention floor, the allocators, or the cumulative activity counters, and
+- not lower the head sequence, the writer or compactor epoch, the folded WAL number, the retention floor, the acknowledged floor, the allocators, or the cumulative activity counters, and
 - keep the activity counters exactly the same, if it's at the same head.
 
 A successor can set, change, or clear the [retention window](glossary.md#retention-window), because the window is a maintenance setting and not part of the namespace's identity. A namespace tombstone has no successor.
@@ -1147,7 +1147,7 @@ A fork starts its own history from the source's retained metadata. To create one
 
 1. Loads the target's current manifest before it writes a source pin, and continues only if the target doesn't exist. It then creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
 2. Loads and verifies the pinned manifest.
-3. Copies the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, naming mode, and retention window. The inherited runs determine the same base sequence. Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
+3. Copies the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, naming mode, and retention window. The inherited runs determine the same base sequence. The fork's retention floor and acknowledged floor are both the pinned manifest's head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
 4. Builds the rest of the first manifest's fields (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
 
 The fork copies no file bytes or metadata segments. Its first commit is one sequence above its initial head. The fork can itself be forked right away, because its manifest already lists its inherited runs.
@@ -1237,6 +1237,14 @@ A namespace's "retention window" (`retention_window_ms`) is an optional setting 
 A create request can set the window, and a later publication can set, change, or clear it. That publication copies every other field of the current manifest. If the current manifest already has the requested window, LoonFS publishes nothing. A fork's first manifest copies the window of the pinned source manifest.
 
 A pin below the new floor still protects its own manifest and runs.
+
+The writer's log records which floor each of its objects was validated against. Every WAL object records a "basis floor" (`basis_floor_seq`), which MUST be the `retention_floor_seq` of the manifest that the writer validated the object's commits against (for a fence, the manifest that the acquiring session discovered before it wrote the fence). Every manifest records an "acknowledged floor" (`acknowledged_floor_seq`). A fold MUST set it to the greater of the predecessor's value and the highest basis floor of the WAL objects it folds, and every other publication copies the predecessor's value. A new namespace's first manifest has an acknowledged floor of 0, and a fork's first manifest has the fork point. A manifest whose acknowledged floor is above its retention floor is invalid, and so is a WAL tail whose basis floors decrease from one object to the next, or whose first object's basis floor is below the manifest's acknowledged floor.
+
+For example, suppose the floor and the acknowledged floor are both 5, and an advance moves the floor to 20. The writer's next WAL object is validated against the advance's manifest, so it records a basis floor of 20, and the fold of that object publishes a manifest with an acknowledged floor of 20.
+
+Why do basis floors never decrease along the WAL? Within one writer session, the basis moves only forward, and a successor manifest never lowers the floor. When a new session takes over, its claim manifest is a successor of every manifest the old session used (a session never adopts a manifest with another writer epoch), its fence and later objects are planned against the claim or its successors, and every object of the old session comes before the fence.
+
+Why is the acknowledged floor never above the retention floor? A WAL object's basis was the current manifest before the object was written, and a fold publishes its manifest as a successor of a manifest that was current after the fold read the object. So the fold's predecessor comes at or after the basis in the manifest chain, and its floor is at least the basis floor.
 
 The floor also bounds how long a deletion stays recoverable. Once the floor is at or above a deletion's sequence, the namespace's writer expires the deletion by committing an `expire` event for it (see [File and subtree deletion](#16-file-and-subtree-deletion)). The advance doesn't change any deletion itself, so a deletion at or below the floor stays recoverable until its `expire` is committed. A [writer session](glossary.md#writer-session) keeps the last floor whose deletions it has finished expiring, which is 0 in a new session. Whenever the session's [writer position](glossary.md#writer-position) is on a manifest with a higher floor than the last one it finished, the session repeats these steps until no `listed` row at or below the new floor remains:
 
@@ -1818,6 +1826,7 @@ A namespace manifest contains:
 | `next_inode_id` | The first inode ID available at the recorded boundary. |
 | `next_run_no` | The next run number to allocate. |
 | `retention_floor_seq` | The earliest sequence covered by incremental replay and row retention. |
+| `acknowledged_floor_seq` | The highest `basis_floor_seq` of the WAL objects folded into the manifest, at most `retention_floor_seq` (see [Advancing the retention floor](#101-advancing-the-retention-floor)). |
 | `runs` | The complete list of materialized metadata runs. |
 
 A run contains `run_no`, `run_seq`, `tier`, and `segments`, and its tier is `delta` or `base`. A segment descriptor contains:
@@ -1841,7 +1850,7 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`, and its tier is `del
 
 `MAX_WAL_OBJECT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every WAL object within this limit through request and batch admission, and readers refuse larger documents. A writer builds each batch so that the sum of its requests' bounds, plus the document overhead, stays within the limit. This is a format constraint, because every successful publication MUST stay readable with bounded decompression.
 
-A WAL object's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_seq`, `next_inode_id`, and `records`.
+A WAL object's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_seq`, `next_inode_id`, `basis_floor_seq`, and `records`. `basis_floor_seq` is the retention floor of the manifest that the object's commits were validated against, or that a fence was planned against (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
 
 For a data WAL object, `prior_head_seq` is derived (with checked subtraction) from the first record's sequence, and `records` covers the sequences after it through `head_seq`, without gaps. A first sequence of 0 is invalid. The WAL number MUST match the key, and the allocation high-water mark MUST agree with replay. A fence has an empty record list and an unchanged head and allocator, so its derived `prior_head_seq` equals `head_seq`. Fences take part in WAL numbering and epoch validation, but they produce no logical changes.
 

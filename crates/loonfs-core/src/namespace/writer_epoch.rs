@@ -92,7 +92,13 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
         let head = &anchor.read_state;
         ensure_writer_not_fenced(head, &acquired)?;
         super::control::ensure_namespace_live(head)?;
-        let fence = prepare_wal_object(namespace_id.clone(), acquired.writer_epoch, head, &[])?;
+        let fence = prepare_wal_object(
+            namespace_id.clone(),
+            acquired.writer_epoch,
+            head,
+            anchor.retention_floor_seq(),
+            &[],
+        )?;
         match publish_wal_object(store, &fence, &tip).await {
             Ok(()) => {
                 anchor.read_state = head.after_wal_object(fence.envelope().payload());

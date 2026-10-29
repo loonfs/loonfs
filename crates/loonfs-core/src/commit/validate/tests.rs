@@ -221,6 +221,7 @@ fn validation_context(
         next_inode_id,
         wal_no: loonfs_types::WalNo(0),
         folded_wal_no: loonfs_types::WalNo(0),
+        basis_floor_seq: ChangeSeq(0),
         status: NamespaceStatus::Active {},
     };
     TestValidationContext {

@@ -6,8 +6,8 @@ use super::{ReplayedWalTail, ValidatedWalTail};
 use crate::commit::next_inode_after;
 use crate::error::MetadataProjectionLoadError;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_types::format::wal::{WalCommitDelta, WalDelta, WalObjectEnvelope};
-use loonfs_types::{ChangeSeq, InodeId};
+use loonfs_types::format::wal::{WalCommitDelta, WalDelta, WalObjectEnvelope, WalObjectPayload};
+use loonfs_types::{ChangeSeq, InodeId, WalNo};
 
 pub(crate) fn project_validated_wal_tail(
     base_head: &NamespaceReadState,
@@ -82,6 +82,31 @@ pub(crate) fn validate_wal_object_for_replay(
         }
     }
 
+    Ok(())
+}
+
+/// Rejects a WAL object whose basis floor is below `prior_basis_floor_seq`,
+/// the floor at WAL number `prior_wal_no` (the previous object's basis
+/// floor, or the acknowledged floor of the manifest that folds through
+/// `prior_wal_no`).
+///
+/// Basis floors never decrease along the WAL, and the first object above a
+/// manifest records at least the manifest's acknowledged floor, which is why
+/// a fold can take the last object's floor as the highest one it folds (see
+/// the design note's [Acknowledging the floor](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#acknowledging-the-floor)).
+pub(crate) fn validate_basis_floor(
+    prior_wal_no: WalNo,
+    prior_basis_floor_seq: ChangeSeq,
+    payload: &WalObjectPayload,
+) -> Result<(), WalObjectError> {
+    if payload.basis_floor_seq < prior_basis_floor_seq {
+        return Err(WalObjectError::BasisFloorDecrease {
+            wal_no: payload.wal_no,
+            basis_floor_seq: payload.basis_floor_seq,
+            prior_wal_no,
+            prior_basis_floor_seq,
+        });
+    }
     Ok(())
 }
 

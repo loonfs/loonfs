@@ -264,9 +264,14 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             committed_at_ms: u64::MAX,
             inline_content: candidate.inline_content().to_vec(),
         };
-        let encoded =
-            prepare_wal_object(namespace_id.clone(), head.writer_epoch, &head, &[prepared])
-                .expect("encode");
+        let encoded = prepare_wal_object(
+            namespace_id.clone(),
+            head.writer_epoch,
+            &head,
+            head.basis_floor_seq,
+            &[prepared],
+        )
+        .expect("encode");
         assert!(
             encoded.document_bytes() <= estimate,
             "{kind}: {} > {estimate}",
@@ -345,8 +350,14 @@ async fn a_maximum_expiry_encodes_within_its_estimate() {
         committed_at_ms: u64::MAX,
         inline_content: Vec::new(),
     };
-    let encoded =
-        prepare_wal_object(namespace_id, head.writer_epoch, &head, &[prepared]).expect("encode");
+    let encoded = prepare_wal_object(
+        namespace_id,
+        head.writer_epoch,
+        &head,
+        head.basis_floor_seq,
+        &[prepared],
+    )
+    .expect("encode");
     assert!(
         encoded.document_bytes() <= estimate,
         "{} > {estimate}",
