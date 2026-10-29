@@ -1,6 +1,7 @@
 //! Checkpoint retention, compaction, and publication budgets.
 
 use super::*;
+use crate::manifest::{FoldWalOutcome, PublicationReport};
 use crate::time::Deadline;
 use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -1032,6 +1033,248 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         ChangeSeq(0),
         "the failed probe leaves the prior floor in place"
     );
+}
+
+/// Publishes `count` commits through `writer` in one batch, each creating
+/// the directory `/{prefix}-{index}`.
+async fn publish_directories<S: ObjectStore + ?Sized>(
+    writer: &mut NamespaceCommitEngine,
+    store: &S,
+    prefix: &str,
+    count: usize,
+) {
+    let candidates: Vec<_> = (0..count)
+        .map(|index| {
+            CommitCandidate::new(CommitIntent::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse(format!("/{prefix}-{index}")).expect("path"),
+                    parents: false,
+                },
+            ))
+        })
+        .collect();
+    let batch = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    for result in writer
+        .publish_batch(store, candidates, &test_context(), &batch)
+        .await
+        .results
+    {
+        result.expect("create a directory");
+    }
+}
+
+/// The current manifest's retention floor and acknowledged floor.
+async fn current_floors<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> (ChangeSeq, ChangeSeq) {
+    let manifest = load_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest")
+        .state;
+    let payload = manifest.envelope.payload();
+    (payload.retention_floor_seq, payload.acknowledged_floor_seq)
+}
+
+/// The basis floors of the WAL objects above the current manifest, oldest
+/// first.
+async fn tail_basis_floors<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<ChangeSeq> {
+    crate::namespace::read_anchor::load_read_anchor(
+        store,
+        namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("load the WAL tail")
+    .tail
+    .objects()
+    .iter()
+    .map(|object| object.envelope().payload().basis_floor_seq)
+    .collect()
+}
+
+/// Advances the floor to the folded head, at a time when every commit is a
+/// grace window old.
+async fn advance_to_folded_head<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> PublicationReport<loonfs_types::api::v0::AdvanceRetentionResponse> {
+    advance_retention_floor(
+        store,
+        None,
+        namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(test_context().now_ms),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance the floor")
+}
+
+#[tokio::test]
+async fn a_fold_acknowledges_the_highest_basis_floor_that_it_folds() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    bootstrap_namespace(&store, &namespace_id, &test_context())
+        .await
+        .expect("bootstrap");
+    let mut writer = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        Arc::new(crate::test_support::content_writes()),
+    );
+    publish_directories(&mut writer, &store, "folded", 20).await;
+    fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    publish_directories(&mut writer, &store, "first", 1).await;
+    publish_directories(&mut writer, &store, "second", 1).await;
+
+    // An advance raises the floor and copies the acknowledged floor.
+    let advance = advance_to_folded_head(&store, &namespace_id).await;
+    assert_eq!(advance.response.retention_floor_seq, ChangeSeq(20));
+    assert_eq!(
+        current_floors(&store, &namespace_id).await,
+        (ChangeSeq(20), ChangeSeq(0))
+    );
+
+    // The session's position moves onto the advance's manifest, so its next
+    // WAL object records the new floor.
+    writer.record_manifest_published(advance.published.expect("the advance publishes"));
+    publish_directories(&mut writer, &store, "third", 1).await;
+    assert_eq!(
+        tail_basis_floors(&store, &namespace_id).await,
+        [ChangeSeq(0), ChangeSeq(0), ChangeSeq(20)]
+    );
+    fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    assert_eq!(
+        current_floors(&store, &namespace_id).await,
+        (ChangeSeq(20), ChangeSeq(20))
+    );
+
+    // A fold of objects that record the acknowledged floor keeps it.
+    publish_directories(&mut writer, &store, "fourth", 1).await;
+    assert_eq!(
+        tail_basis_floors(&store, &namespace_id).await,
+        [ChangeSeq(20)]
+    );
+    fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    assert_eq!(
+        current_floors(&store, &namespace_id).await,
+        (ChangeSeq(20), ChangeSeq(20))
+    );
+
+    // A fold with no WAL object to fold publishes nothing, so the
+    // acknowledged floor stays where it is.
+    let unchanged = current_manifest_no(&store, &namespace_id).await;
+    assert_eq!(
+        fold::fold_wal(&store, &namespace_id)
+            .await
+            .expect("fold")
+            .outcome,
+        FoldWalOutcome::AlreadyCurrent
+    );
+    assert_eq!(current_manifest_no(&store, &namespace_id).await, unchanged);
+}
+
+#[tokio::test]
+async fn a_fence_acknowledges_the_floor_of_a_namespace_that_nobody_writes_to() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    for path in ["/a.txt", "/b.txt"] {
+        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+            .await
+            .expect("commit");
+    }
+    fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    advance_to_folded_head(&store, &namespace_id).await;
+    assert_eq!(
+        current_floors(&store, &namespace_id).await,
+        (ChangeSeq(2), ChangeSeq(0))
+    );
+    assert_eq!(
+        fold::fold_wal(&store, &namespace_id)
+            .await
+            .expect("fold")
+            .outcome,
+        FoldWalOutcome::AlreadyCurrent,
+        "without a WAL object, no fold acknowledges the new floor"
+    );
+
+    // A new session's fence records the floor of the manifest it found, and
+    // a fold of the fence acknowledges that floor.
+    acquire_writer_epoch(&store, &namespace_id, &context)
+        .await
+        .expect("acquire the writer epoch");
+    assert_eq!(
+        tail_basis_floors(&store, &namespace_id).await,
+        [ChangeSeq(2)]
+    );
+    fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    assert_eq!(
+        current_floors(&store, &namespace_id).await,
+        (ChangeSeq(2), ChangeSeq(2))
+    );
+}
+
+#[test]
+fn a_manifest_whose_acknowledged_floor_breaks_its_bounds_fails_to_load() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let created = NamespaceManifestPayload::initial(
+        namespace_id.clone(),
+        1_000,
+        loonfs_test_support::test_actor(),
+        loonfs_types::NamespaceAccess::Unrestricted {},
+        loonfs_types::NamespaceNaming::CaseInsensitive,
+    );
+    let fork_basis = loonfs_types::format::control::ForkBasis {
+        manifest: loonfs_types::format::control::ManifestRef {
+            owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
+            manifest_no: ManifestNo(4),
+            head_seq: ChangeSeq(5),
+            payload_checksum: "sha256:source".to_owned(),
+        },
+        source_pin_id: PinId::parse("pin_00000000000000000004-0000000000000005").expect("pin id"),
+    };
+    for (manifest, expected) in [
+        (
+            NamespaceManifestPayload {
+                acknowledged_floor_seq: ChangeSeq(1),
+                ..created.clone()
+            },
+            "acknowledged floor `1` is above the retention floor `0`",
+        ),
+        (
+            NamespaceManifestPayload {
+                fork_basis: Some(fork_basis),
+                head_seq: ChangeSeq(5),
+                retention_floor_seq: ChangeSeq(5),
+                acknowledged_floor_seq: ChangeSeq(4),
+                ..created
+            },
+            "acknowledged floor",
+        ),
+    ] {
+        let (_, bytes) = encode_namespace_manifest_json(manifest)
+            .expect("encode the manifest")
+            .into_parts();
+        let error = load::decode_manifest_at(&namespace_id, ManifestNo(1), "manifest", &bytes)
+            .expect_err("the manifest fails to load");
+        assert_matches!(
+            &error,
+            ManifestLoadError::RunManifestMismatch { message, .. } if message.contains(expected),
+            "{error}"
+        );
+    }
 }
 
 /// Reads the files one checkpoint pins at the test clock, or the error that

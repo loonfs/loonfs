@@ -3311,6 +3311,10 @@
       "NamespaceDiagnostics": {
         "description": "A namespace's state and the storage details that maintenance uses.",
         "properties": {
+          "acknowledged_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The highest retention floor that a WAL object folded into the current manifest was\nvalidated against. It's at most `retention_floor_seq`, and it stays below a new floor until\na WAL object validated against that floor is folded."
+          },
           "created_at_ms": {
             "description": "The time the namespace was created, in Unix milliseconds.",
             "format": "int64",
@@ -3360,6 +3364,7 @@
           "created_by",
           "head_seq",
           "retention_floor_seq",
+          "acknowledged_floor_seq",
           "wal_tail_objects",
           "live_snapshots"
         ],

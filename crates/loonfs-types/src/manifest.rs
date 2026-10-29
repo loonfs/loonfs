@@ -1238,6 +1238,10 @@ pub struct NamespaceManifestPayload {
     pub next_run_no: RunNo,
     /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: ChangeSeq,
+    /// Highest `basis_floor_seq` of the WAL objects folded into this
+    /// manifest, at most `retention_floor_seq` (see [Advancing the retention
+    /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
+    pub acknowledged_floor_seq: ChangeSeq,
     /// Complete set of metadata runs required to reconstruct the snapshot.
     pub runs: Vec<MetadataRunRef>,
 }
@@ -1300,6 +1304,7 @@ impl NamespaceManifestPayload {
             next_run_no: RunNo(0),
             folded_wal_no: WalNo(0),
             retention_floor_seq: ChangeSeq(0),
+            acknowledged_floor_seq: ChangeSeq(0),
             runs: Vec::new(),
         }
     }
@@ -1330,6 +1335,9 @@ impl NamespaceManifestPayload {
                 {
                     return invalid("head_seq");
                 }
+                if self.acknowledged_floor_seq != self.head_seq {
+                    return invalid("acknowledged_floor_seq");
+                }
             }
             None => {
                 if !self.runs.is_empty() {
@@ -1337,6 +1345,9 @@ impl NamespaceManifestPayload {
                 }
                 if self.head_seq != ChangeSeq(0) || self.retention_floor_seq != ChangeSeq(0) {
                     return invalid("head_seq");
+                }
+                if self.acknowledged_floor_seq != ChangeSeq(0) {
+                    return invalid("acknowledged_floor_seq");
                 }
                 if self.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
                     return invalid("next_inode_id");
@@ -1376,6 +1387,9 @@ impl NamespaceManifestPayload {
         }
         if successor.retention_floor_seq < self.retention_floor_seq {
             return invalid("retention_floor_seq");
+        }
+        if successor.acknowledged_floor_seq < self.acknowledged_floor_seq {
+            return invalid("acknowledged_floor_seq");
         }
         if successor.next_inode_id < self.next_inode_id {
             return invalid("next_inode_id");
@@ -1642,6 +1656,62 @@ mod tests {
     }
 
     #[test]
+    fn first_manifests_and_successors_keep_the_acknowledged_floor() {
+        let created = NamespaceManifestPayload::initial(
+            NamespaceId::parse("acknowledged").expect("namespace"),
+            1_000,
+            crate::ActorId::parse("test").expect("actor"),
+            super::NamespaceAccess::Unrestricted {},
+            crate::NamespaceNaming::CaseInsensitive,
+        );
+        let fork = NamespaceManifestPayload {
+            fork_basis: Some(crate::control::ForkBasis {
+                manifest: crate::control::ManifestRef {
+                    owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
+                    manifest_no: ManifestNo(2),
+                    head_seq: ChangeSeq(3),
+                    payload_checksum: "sha256:source".to_owned(),
+                },
+                source_pin_id: crate::PinId::parse("pin_00000000000000000002-0000000000000003")
+                    .expect("pin"),
+            }),
+            head_seq: ChangeSeq(3),
+            retention_floor_seq: ChangeSeq(3),
+            acknowledged_floor_seq: ChangeSeq(3),
+            ..created.clone()
+        };
+        created
+            .ensure_first_manifest()
+            .expect("a created namespace acknowledges floor 0");
+        fork.ensure_first_manifest()
+            .expect("a fork acknowledges its fork point");
+        for (first, acknowledged_floor_seq) in [(&created, 1), (&fork, 2)] {
+            let changed = NamespaceManifestPayload {
+                acknowledged_floor_seq: ChangeSeq(acknowledged_floor_seq),
+                ..first.clone()
+            };
+            assert_eq!(
+                changed
+                    .ensure_first_manifest()
+                    .expect_err("a first manifest with another acknowledged floor")
+                    .field,
+                "acknowledged_floor_seq"
+            );
+        }
+        let mut successor = fork.clone();
+        successor.manifest_no = ManifestNo(2);
+        fork.ensure_successor(&successor)
+            .expect("a successor that copies the acknowledged floor");
+        successor.acknowledged_floor_seq = ChangeSeq(2);
+        assert_eq!(
+            fork.ensure_successor(&successor)
+                .expect_err("a successor that lowers the acknowledged floor")
+                .field,
+            "acknowledged_floor_seq"
+        );
+    }
+
+    #[test]
     fn inode_row_keys_sort_by_ascending_inode_id() {
         // The inode family's durable order IS ascending inode id, which is
         // what lets a whole-namespace file walk resume from one bound.
@@ -1695,6 +1765,7 @@ mod tests {
             next_inode_id: InodeId(42),
             next_run_no: RunNo(1),
             retention_floor_seq: ChangeSeq(0),
+            acknowledged_floor_seq: ChangeSeq(0),
             runs: vec![metadata_run_ref(
                 "demo",
                 "seg_00000000000000000000000000000001",
@@ -1741,6 +1812,7 @@ mod tests {
             next_inode_id: InodeId(42),
             next_run_no: RunNo(2),
             retention_floor_seq: ChangeSeq(0),
+            acknowledged_floor_seq: ChangeSeq(0),
             runs: vec![
                 metadata_run_ref(
                     "source",

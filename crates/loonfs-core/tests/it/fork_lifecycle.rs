@@ -377,6 +377,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     .expect("status");
     assert_eq!(status.current_manifest_no, ManifestNo(1));
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(status.acknowledged_floor_seq, ChangeSeq(0));
 
     write_file_bytes(
         &store,
@@ -579,6 +580,21 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let clone_head = head_state(&store, &clone_namespace_id).await;
 
     assert_eq!(clone_head.seq, ChangeSeq(1));
+    let clone_status = loonfs_core::cache::load_namespace_diagnostics(
+        &store,
+        &clone_namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("clone status");
+    assert_eq!(
+        (
+            clone_status.retention_floor_seq,
+            clone_status.acknowledged_floor_seq
+        ),
+        (ChangeSeq(1), ChangeSeq(1)),
+        "a fork's first manifest acknowledges the fork point"
+    );
     let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
     assert_eq!(fork_basis.manifest.head_seq, ChangeSeq(1));

@@ -301,6 +301,10 @@ pub struct NamespaceDiagnostics {
     /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
     /// or any later one, and the feed returns the changes committed after it.
     pub retention_floor_seq: ChangeSeq,
+    /// The highest retention floor that a WAL object folded into the current manifest was
+    /// validated against. It's at most `retention_floor_seq`, and it stays below a new floor until
+    /// a WAL object validated against that floor is folded.
+    pub acknowledged_floor_seq: ChangeSeq,
     /// The number of the namespace's current manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -2040,6 +2044,7 @@ mod tests {
             fork_basis: None,
             head_seq: ChangeSeq(11),
             retention_floor_seq: ChangeSeq(4),
+            acknowledged_floor_seq: ChangeSeq(2),
             current_manifest_no: Some(ManifestNo(8)),
             wal_tail_objects: 3,
             live_snapshots: 2,
@@ -2052,6 +2057,7 @@ mod tests {
                 "created_by": "test",
                 "head_seq": 11,
                 "retention_floor_seq": 4,
+                "acknowledged_floor_seq": 2,
                 "current_manifest_no": 8,
                 "wal_tail_objects": 3,
                 "live_snapshots": 2

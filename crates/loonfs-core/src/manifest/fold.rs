@@ -529,9 +529,37 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         next_inode_id: projection.head.next_inode_id,
         next_run_no,
         folded_wal_no: projection.head.wal_no,
+        acknowledged_floor_seq: acknowledged_floor_after_fold(projection)?,
         runs,
         ..projection.manifest_segments.manifest().payload().clone()
     })
+}
+
+/// Returns the acknowledged floor of a fold's manifest: the predecessor's,
+/// raised to the basis floor of the last WAL object the fold folds.
+///
+/// Basis floors never decrease along the WAL, so the last object's floor is
+/// the highest one the fold folds. A floor above the predecessor's retention
+/// floor is `NamespaceCorrupt`, because every folded object was validated
+/// against a manifest at or before the predecessor (see the design note's
+/// [Acknowledging the floor](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#acknowledging-the-floor)).
+fn acknowledged_floor_after_fold<S: ObjectStore + ?Sized>(
+    projection: &ManifestProjection<'_, S>,
+) -> Result<ChangeSeq> {
+    let predecessor = projection.manifest_segments.manifest().payload();
+    let acknowledged_floor_seq = predecessor
+        .acknowledged_floor_seq
+        .max(projection.head.basis_floor_seq);
+    if acknowledged_floor_seq > predecessor.retention_floor_seq {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "WAL object {} records basis floor {}, above the retention floor {} of manifest {}",
+            projection.head.wal_no,
+            projection.head.basis_floor_seq,
+            predecessor.retention_floor_seq,
+            predecessor.manifest_no
+        )));
+    }
+    Ok(acknowledged_floor_seq)
 }
 
 #[cfg(test)]

@@ -60,6 +60,7 @@ pub struct NamespaceStorageDiagnostics {
     pub fork_basis: Option<NamespaceForkBasis>,
     pub head_seq: ChangeSeq,
     pub retention_floor_seq: ChangeSeq,
+    pub acknowledged_floor_seq: ChangeSeq,
     pub current_manifest_no: ManifestNo,
     pub wal_tail_objects: u64,
     pub wal_tail_newest_commit_at_ms: Option<u64>,
@@ -69,6 +70,7 @@ impl NamespaceStorageDiagnostics {
     fn new(
         head: NamespaceReadState,
         retention_floor_seq: ChangeSeq,
+        acknowledged_floor_seq: ChangeSeq,
         current_manifest_no: ManifestNo,
         wal_tail_objects: u64,
         wal_tail_newest_commit_at_ms: Option<u64>,
@@ -80,6 +82,7 @@ impl NamespaceStorageDiagnostics {
             namespace_id: head.namespace_id,
             head_seq: head.seq,
             retention_floor_seq,
+            acknowledged_floor_seq,
             current_manifest_no,
             wal_tail_objects,
             wal_tail_newest_commit_at_ms,
@@ -137,6 +140,12 @@ impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {
         Self::new(
             anchor.read_state.clone(),
             anchor.retention_floor_seq(),
+            anchor
+                .manifest
+                .state
+                .envelope
+                .payload()
+                .acknowledged_floor_seq,
             anchor.manifest.state.manifest().manifest_no,
             anchor.read_state.unfolded_wal_objects(),
             anchor.tail.newest_commit_at_ms(),

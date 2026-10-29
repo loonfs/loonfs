@@ -358,6 +358,10 @@ pub struct WalObjectPayload {
     pub head_seq: ChangeSeq,
     /// Allocation high-water mark after this WAL object.
     pub next_inode_id: InodeId,
+    /// Retention floor of the manifest that the writer validated this
+    /// object's commits against, or that a fence was planned against (see
+    /// [Advancing the retention floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
+    pub basis_floor_seq: ChangeSeq,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
 }
@@ -684,6 +688,7 @@ mod tests {
             writer_epoch: WriterEpoch(1),
             head_seq: ChangeSeq(lengths.len() as u64),
             next_inode_id: InodeId(3),
+            basis_floor_seq: ChangeSeq(0),
             records,
         }
     }
@@ -884,6 +889,7 @@ mod tests {
             writer_epoch: WriterEpoch(1),
             head_seq: ChangeSeq(0),
             next_inode_id: InodeId(2),
+            basis_floor_seq: ChangeSeq(0),
             records: Vec::new(),
         })
         .expect("encode");

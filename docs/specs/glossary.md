@@ -196,6 +196,10 @@ The sequence number below which a namespace's history is no longer guaranteed. A
 
 A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's maintenance sweep advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. It uses the namespace's own window if the namespace's manifest sets `retention_window_ms`, and the server's `retention_window_ms` setting otherwise. For example, a namespace with a 7-day window keeps at least 7 days of revisions and recoverable deletions. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
+### Acknowledged floor
+
+A manifest field (`acknowledged_floor_seq`) that records the highest [retention floor](#retention-floor) that any WAL object folded into the manifest was validated against. Each WAL object records the floor of the manifest that its writer validated it against (`basis_floor_seq`), and a fold copies the highest one into the manifest. For example, if the floor is 20 and the acknowledged floor is 5, the writer's log has no object yet that was validated against the floor of 20. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+
 ### Control object
 
 A small object used for discovery, retained views, or upload state: the hint, pins, and the session and outcome records of upload sessions. Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
@@ -263,7 +267,7 @@ A manifest publication that increases the writer epoch or the compactor epoch by
 
 ### Fence
 
-A WAL object with no commits. A new writer session publishes a fence as part of starting up, so that it can begin committing with its writer epoch. Once the fence is written, a writer session with an older epoch can't commit.
+A WAL object with no commits. A new writer session publishes a fence as part of starting up, so that it can begin committing with its writer epoch. Once the fence is written, a writer session with an older epoch can't commit. A fence also records the retention floor of the manifest it was planned against (see [Acknowledged floor](#acknowledged-floor)).
 
 ### Compactor epoch
 

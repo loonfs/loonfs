@@ -231,6 +231,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         namespace_id.clone(),
         view.acquired_writer.writer_epoch,
         &view.head,
+        view.retention_floor_seq(),
         next_inode_id,
         accepted_payloads,
     ) {

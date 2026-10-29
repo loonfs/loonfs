@@ -1283,6 +1283,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
+| `acknowledged_floor_seq` | The highest retention floor that a WAL object folded into the current manifest was validated against (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). It's at most `retention_floor_seq`, and after a floor advance it stays below the new floor until a WAL object validated against that floor is folded. |
 | `current_manifest_no` | The current manifest number, present from namespace creation. |
 | `wal_tail_objects` | The WAL tip minus the current manifest's folded WAL number, including fences. |
 | `live_snapshots` | The number of snapshots that hadn't expired when the diagnostics read began, including snapshots without an expiry. |
@@ -1294,6 +1295,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
   "created_by": "usr_8f3c",
   "head_seq": 418,
   "retention_floor_seq": 120,
+  "acknowledged_floor_seq": 120,
   "current_manifest_no": 410,
   "wal_tail_objects": 3,
   "live_snapshots": 2

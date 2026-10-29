@@ -1,7 +1,9 @@
 //! Reads numbered WAL objects: one at a time after a position, or a bounded tail between two heads.
 
 use super::frame::ReplayedWalTail;
-use super::replay::{project_validated_wal_tail, validate_wal_object_for_replay};
+use super::replay::{
+    project_validated_wal_tail, validate_basis_floor, validate_wal_object_for_replay,
+};
 use super::wal_object_key;
 use super::{
     ValidatedWalObject, ValidatedWalTail, WalObjectError, WalTailLoadError, WalTailLoadRequest,
@@ -82,15 +84,18 @@ pub(super) struct WalWalk<'a> {
     seq: ChangeSeq,
     epoch: WriterEpoch,
     epoch_bound: WriterEpoch,
+    basis_floor_seq: ChangeSeq,
 }
 
 impl<'a> WalWalk<'a> {
-    /// Reads until the first absent number.
+    /// Reads until the first absent number. `basis_floor_seq` is the floor
+    /// at `wal_no` (see [`NamespaceReadState::basis_floor_seq`]).
     pub(super) fn after(
         namespace_id: &'a NamespaceId,
         wal_no: WalNo,
         seq: ChangeSeq,
         epoch_bound: WriterEpoch,
+        basis_floor_seq: ChangeSeq,
     ) -> Self {
         Self {
             namespace_id,
@@ -98,6 +103,7 @@ impl<'a> WalWalk<'a> {
             seq,
             epoch: WriterEpoch(0),
             epoch_bound,
+            basis_floor_seq,
         }
     }
 
@@ -124,15 +130,16 @@ impl<'a> WalWalk<'a> {
                 },
             });
         }
-        validate_wal_object_for_replay(self.seq, &envelope).map_err(|error| {
-            WalTailLoadError::Replay {
+        validate_wal_object_for_replay(self.seq, &envelope)
+            .and_then(|()| validate_basis_floor(self.wal_no, self.basis_floor_seq, payload))
+            .map_err(|error| WalTailLoadError::Replay {
                 object_key: object_key.clone(),
                 error,
-            }
-        })?;
+            })?;
         self.wal_no = payload.wal_no;
         self.seq = payload.head_seq;
         self.epoch = payload.writer_epoch;
+        self.basis_floor_seq = payload.basis_floor_seq;
         Ok(ValidatedWalObject::new(object_key, envelope))
     }
 }
@@ -146,6 +153,7 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
         request.base_wal_no,
         request.base_seq,
         request.writer_epoch,
+        request.base_basis_floor_seq,
     );
     let mut loaded = stream::iter(request.base_wal_no.0..request.tip_wal_no.0)
         .map(|number| load_wal_object(store, request.namespace_id, WalNo(number + 1)))
@@ -184,6 +192,7 @@ pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
             base_seq: base_head.seq,
             head_seq: current_head.seq,
             base_wal_no: base_head.wal_no,
+            base_basis_floor_seq: base_head.basis_floor_seq,
             tip_wal_no: current_head.wal_no,
             writer_epoch: current_head.writer_epoch,
         },
