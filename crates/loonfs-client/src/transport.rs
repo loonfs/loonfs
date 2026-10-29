@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
-use loonfs_types::{ErrorCode, ErrorResponse, OperationDeadline, TransportRetryOutcome};
+use loonfs_types::{headers, ErrorCode, ErrorResponse, OperationDeadline, TransportRetryOutcome};
 pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,9 +49,9 @@ impl Client {
             return request;
         };
         request
-            .header("Loonfs-Principal-Scope", subject.principal_scope.as_str())
-            .header("Loonfs-Subject", subject.subject_id.as_str())
-            .header("Loonfs-Principals", subject.principals.to_string())
+            .header(headers::PRINCIPAL_SCOPE, subject.principal_scope.as_str())
+            .header(headers::SUBJECT, subject.subject_id.as_str())
+            .header(headers::PRINCIPALS, subject.principals.to_string())
     }
 
     pub(crate) fn get(&self, url: &str) -> WireRequest {

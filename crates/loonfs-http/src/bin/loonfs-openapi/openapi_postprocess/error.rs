@@ -10,8 +10,6 @@ pub(crate) enum OpenapiPostprocessError {
     MissingSdkName { operation_id: String },
     #[error("openapi SDK-named operation `{operation_id}` does not appear in the document")]
     MissingSdkNameOperation { operation_id: String },
-    #[error("openapi pagination operation `{operation_id}` has no `cursor` query parameter")]
-    MissingPaginationCursorParameter { operation_id: String },
     #[error("openapi pagination operation `{operation_id}` has no 200 response component schema")]
     MissingPaginationResponseSchema { operation_id: String },
     #[error("openapi pagination operation `{operation_id}` response has no `{property}` property")]
@@ -23,10 +21,6 @@ pub(crate) enum OpenapiPostprocessError {
         "openapi pagination operation `{operation_id}` response: expected exactly one array property"
     )]
     InvalidPaginationArrayProperties { operation_id: String },
-    #[error(
-        "openapi operation `{operation_id}` has a `cursor` query parameter but no pagination metadata entry"
-    )]
-    MissingPaginationMetadata { operation_id: String },
     #[error("invalid openapi document at `{location}`")]
     InvalidDocument { location: String },
 }

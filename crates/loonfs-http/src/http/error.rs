@@ -13,8 +13,7 @@ use loonfs_types::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ServedErrorCode(pub(super) ErrorCode);
 
-pub(super) struct ApiResponseError {
-    status: StatusCode,
+pub(crate) struct ApiResponseError {
     code: ErrorCode,
     body: Box<ErrorResponse>,
     /// Emitted as a `Retry-After` header, for retryable capacity errors.
@@ -35,16 +34,8 @@ pub fn error_response(code: ErrorCode, mut body: ErrorResponse) -> Response {
 impl ApiResponseError {
     pub(super) fn new(code: ErrorCode, message: &str) -> Self {
         let response = Self {
-            status: status_for_core_error_code(code),
             code,
-            body: Box::new(ErrorResponse {
-                code: code.as_str().to_owned(),
-                feature: None,
-                message: message.to_owned(),
-                param: None,
-                request_id: None,
-                details: None,
-            }),
+            body: Box::new(ErrorResponse::new(code, message)),
             retry_after_seconds: None,
         };
         if code.retryable_without_operator_action() {
@@ -76,7 +67,7 @@ impl ApiResponseError {
 
     /// Sets `param` only for an `invalid_request` error.
     pub(super) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
-        if self.body.code == ErrorCode::InvalidRequest.as_str() && self.body.param.is_none() {
+        if self.code == ErrorCode::InvalidRequest && self.body.param.is_none() {
             self.with_param(param)
         } else {
             self
@@ -140,7 +131,7 @@ impl ApiResponseError {
         Self::runtime(error)
     }
 
-    pub(super) fn for_namespace(
+    pub(crate) fn for_namespace(
         namespace_id: &NamespaceId,
     ) -> impl FnOnce(loonfs::Error) -> Self + '_ {
         |error| Self::runtime_for_namespace(namespace_id, error)
@@ -168,16 +159,12 @@ impl ApiResponseError {
     }
 }
 
-pub(super) fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
-    status_for_error_kind(code.kind())
-}
-
-/// Maps a caller-action [`ErrorKind`] to the HTTP status this server serves:
-/// the api.md error table is the source of truth, and the spec-table sync
-/// test in `super::tests` enforces that this mapping composed with
-/// [`ErrorCode::kind`] reproduces it exactly.
-fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
-    match kind {
+/// Maps an error code, by its caller-action [`ErrorKind`], to the HTTP status
+/// this server serves: the api.md error table is the source of truth, and the
+/// spec-table sync test in `super::tests` enforces that this mapping
+/// reproduces it exactly.
+pub(super) fn status_for(code: ErrorCode) -> StatusCode {
+    match code.kind() {
         ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
         ErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
         ErrorKind::Forbidden => StatusCode::FORBIDDEN,
@@ -214,7 +201,7 @@ impl IntoResponse for ApiResponseError {
         // The correlation id is scoped by the request-id middleware; a body
         // rendered outside a request scope (tests constructing errors
         // directly) simply omits it.
-        if let Ok(request_id) = super::REQUEST_ID.try_with(|id| id.clone()) {
+        if let Ok(request_id) = super::middleware::REQUEST_ID.try_with(|id| id.clone()) {
             self.body.request_id = Some(request_id);
         }
         // As HTTP specifies, a 416 response includes the file's size in
@@ -224,7 +211,7 @@ impl IntoResponse for ApiResponseError {
             (ErrorCode::RangeNotSatisfiable, Some(details)) => details.size_bytes,
             _ => None,
         };
-        let mut response = (self.status, Json(self.body)).into_response();
+        let mut response = (status_for(self.code), Json(self.body)).into_response();
         response.extensions_mut().insert(ServedErrorCode(self.code));
         if let Some(size_bytes) = unsatisfied_size_bytes {
             response.headers_mut().insert(
@@ -282,7 +269,7 @@ mod tests {
             body.request_id = Some("host-request".into());
             body.param = Some("path".into());
             let response = error_response(code, *body);
-            assert_eq!(response.status(), status_for_core_error_code(code));
+            assert_eq!(response.status(), status_for(code));
             assert_eq!(
                 response.headers().contains_key("retry-after"),
                 code.retryable_without_operator_action()

@@ -5,9 +5,7 @@
 use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
-use super::handlers_uploads::{
-    content_preparation_for_puts, ContentTokenVerifier, PutContentPreparation,
-};
+use super::handlers_uploads::{content_preparation_for_puts, PutContentPreparation};
 use super::query_params::{
     checked_cursor, checked_list_cursor, effective_page_limit, parse_boolean_query_param,
     parse_consistency, parse_include_attributes, parse_public_ordinal, parse_read_at,
@@ -30,9 +28,6 @@ use loonfs::{
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
-// The wire commit request and the runtime's differ only by the content
-// tokens, which this handler resolves and strips; the operations inside them
-// are one type. The alias keeps the two request names readable side by side.
 use loonfs_types::{
     api::v0::{Commit, ListChangesResponse},
     CommitRequest, FileRevisionsPageCursor, FilesystemOperation, ListFileRevisionsResponse,
@@ -336,14 +331,7 @@ impl ReadTarget {
     utoipa::path(
         get,
         operation_id = "list_path_entries",
-        extensions(
-            ("x-loonfs-retry" = json!("idempotent")),
-            ("x-fern-pagination" = json!({
-                "cursor": "$request.cursor",
-                "next_cursor": "$response.next_cursor",
-                "results": "$response.entries",
-            })),
-        ),
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/filesystem/entries",
         tag = "filesystem",
         summary = "List directory",
@@ -375,8 +363,7 @@ pub(super) async fn list_path_entries(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ListPathPageQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let path = required_query_param(query.path, "path")?;
     // An absent parameter leaves the option type's own default in place, so
     // the HTTP surface and the in-process one cannot answer differently.
@@ -442,8 +429,7 @@ pub(super) async fn get_path_entry(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathQuery>,
 ) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let path = required_query_param(query.path, "path")?;
     let mut options = StatOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
@@ -504,8 +490,7 @@ pub(super) async fn get_file_content(
     AppQuery(query): AppQuery<ContentQuery>,
     range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let path = required_query_param(query.path, "path")?;
     let revision_no = query
         .revision_no
@@ -528,13 +513,7 @@ pub(super) async fn get_file_content(
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
                 .with_invalid_request_param("path")
         })?;
-    streamed_download_response(
-        stream,
-        range.0,
-        permit,
-        state.options.max_download_bytes,
-        &namespace_id,
-    )
+    streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)
 }
 
 #[cfg_attr(
@@ -542,14 +521,7 @@ pub(super) async fn get_file_content(
     utoipa::path(
         get,
         operation_id = "list_trash",
-        extensions(
-            ("x-loonfs-retry" = json!("idempotent")),
-            ("x-fern-pagination" = json!({
-                "cursor": "$request.cursor",
-                "next_cursor": "$response.next_cursor",
-                "results": "$response.entries",
-            })),
-        ),
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
         summary = "List recoverable deletions",
@@ -577,8 +549,7 @@ pub(super) async fn list_trash(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<LivePageQuery>,
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
     let options = ListTrashOptions {
         consistency: parse_consistency(
@@ -601,14 +572,7 @@ pub(super) async fn list_trash(
     utoipa::path(
         get,
         operation_id = "list_file_revisions",
-        extensions(
-            ("x-loonfs-retry" = json!("idempotent")),
-            ("x-fern-pagination" = json!({
-                "cursor": "$request.cursor",
-                "next_cursor": "$response.next_cursor",
-                "results": "$response.revisions",
-            })),
-        ),
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/filesystem/revisions",
         tag = "filesystem",
         summary = "List file revisions",
@@ -637,8 +601,7 @@ pub(super) async fn list_file_revisions(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
     let options = ListFileRevisionsOptions {
@@ -727,7 +690,6 @@ pub(super) async fn create_commit(
         .iter()
         .filter_map(FilesystemOperation::content_ref)
         .collect::<Vec<_>>();
-    // A request that puts nothing skips the preparation pass.
     let put_content_preparation = if put_content_refs.is_empty() {
         None
     } else {
@@ -735,8 +697,7 @@ pub(super) async fn create_commit(
             content_preparation_for_puts(
                 &state.namespaces,
                 &namespace,
-                ContentTokenVerifier::new(state.options.content_token_secret.expose()),
-                &namespace_id,
+                state.content_tokens(),
                 &put_content_refs,
                 &content_tokens,
             )
@@ -760,6 +721,10 @@ pub(super) async fn create_commit(
                 CommitCandidate::with_inline_content(request, prepared_content, inline_content)
             }
             PutContentPreparation::Rejected(rejections) => {
+                let rejections = rejections
+                    .into_iter()
+                    .map(|rejected| (rejected.content_id, rejected.error))
+                    .collect();
                 CommitCandidate::with_inline_content(request, Vec::new(), inline_content)
                     .reject_content_preparation(ContentPreparationError::ContentToken(rejections))
             }
@@ -810,8 +775,7 @@ pub(super) async fn list_changes(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ChangesQuery>,
 ) -> Result<Json<ListChangesResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = effective_page_limit(query.limit)?;
     let at = parse_read_at(

@@ -1,5 +1,6 @@
 //! Request and response shapes for the v0 HTTP API.
 //!
+pub mod headers;
 #[cfg(feature = "openapi")]
 pub mod openapi;
 

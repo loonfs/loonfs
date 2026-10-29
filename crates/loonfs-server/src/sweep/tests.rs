@@ -1,6 +1,6 @@
 //! Daily listing, session ticks, and their store request costs.
 
-use super::{GarbageCollection, Sweep, SweepCall};
+use super::{GarbageCollection, GrepIndexing, Sweep, SweepCall};
 use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
@@ -61,15 +61,17 @@ impl SweepServer {
                 loonfs_grep::GrepStepBudget::default(),
             )
         });
+        let grep = grep_worker.clone().map(|worker| {
+            GrepIndexing::new(worker, config.grep.worker_config()).expect("build the grep indexing")
+        });
         let sweep = Sweep::new(
-            config,
+            config.sweep_config(),
             runtime.object_store(),
             maintenance.clone(),
             Arc::new(Namespaces::new(runtime.clone())),
-            grep_worker.clone(),
+            grep,
             recorder.as_ref(),
-        )
-        .expect("build the sweep");
+        );
         Self {
             clock,
             recorder,

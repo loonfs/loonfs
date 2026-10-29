@@ -54,14 +54,14 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         // Either flag includes the startup checks, and combined flags run
         // them once before printing both requested reports.
         loonfs_server::check_config(&config).await?;
-        let mut stdout = std::io::stdout().lock();
         if args.check_config {
-            writeln!(stdout, "{}", config.check_summary())?;
+            writeln!(std::io::stdout(), "{}", config.check_summary())?;
         }
         if args.probe_store {
             let report = loonfs_types::api::v0::StoreProbeResponse::from(
                 loonfs_server::probe_store(&config).await?,
             );
+            let mut stdout = std::io::stdout().lock();
             for check in &report.checks {
                 writeln!(stdout, "{}", check.check_line())?;
             }
@@ -69,7 +69,7 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 exit_code = ExitCode::FAILURE;
             }
         }
-        stdout.flush()?;
+        std::io::stdout().flush()?;
     } else {
         loonfs_server::serve(config).await?;
     }

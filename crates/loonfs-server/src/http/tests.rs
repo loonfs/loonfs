@@ -3,7 +3,7 @@
 mod admission;
 mod composition;
 
-use super::serve::{build_handles, serve_on};
+use super::serve::{build_handles, serve_on, RuntimeHandles};
 use super::{app, AppConfig};
 use crate::config::MetadataCacheConfig;
 use crate::{ServerConfig, StoreConfig};
@@ -30,7 +30,7 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     let metrics_path = metrics_dir.path().join("object-store.ndjson");
 
     {
-        let (runtime, _maintenance) = build_handles(
+        let RuntimeHandles { runtime, .. } = build_handles(
             &config,
             &config.validate().expect("valid config"),
             store,

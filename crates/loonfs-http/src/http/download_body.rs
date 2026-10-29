@@ -8,7 +8,6 @@ use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use loonfs::{ErrorCode, FileContentStream, ReadRange, SharedObjectStore, StreamRange};
-use loonfs_types::NamespaceId;
 use tokio::sync::OwnedSemaphorePermit;
 
 /// The byte range that a content read's `Range` header asks for, or `None`
@@ -60,34 +59,20 @@ pub(super) fn streamed_download_response(
     range: Option<ReadRange>,
     permit: OwnedSemaphorePermit,
     max_content_bytes: Option<u64>,
-    namespace_id: &NamespaceId,
 ) -> Result<Response, ApiResponseError> {
     let offsets = stream.offsets();
     let length = offsets.end - offsets.start;
-    if let Some(max_bytes) = max_content_bytes {
-        match range {
-            None if stream.size_bytes() > max_bytes => {
-                return Err(ApiResponseError::runtime_for_namespace(
-                    namespace_id,
-                    loonfs::Error::Core(loonfs::CoreError::ContentTooLarge {
-                        size_bytes: stream.size_bytes(),
-                        max_bytes,
-                    }),
-                ));
-            }
-            Some(_) if length > max_bytes => {
-                return Err(ApiResponseError::new(
-                    ErrorCode::ContentTooLarge,
-                    &format!(
-                        "the requested range is {length} bytes, over the {max_bytes}-byte \
-                         limit for one proxied read"
-                    ),
-                ));
-            }
-            _ => {}
-        }
-    }
     let size_bytes = stream.size_bytes();
+    let read_bytes = if range.is_some() { length } else { size_bytes };
+    if let Some(max_bytes) = max_content_bytes.filter(|max_bytes| read_bytes > *max_bytes) {
+        return Err(ApiResponseError::new(
+            ErrorCode::ContentTooLarge,
+            &format!(
+                "the requested content is {read_bytes} bytes, over the {max_bytes}-byte limit \
+                 for one proxied read"
+            ),
+        ));
+    }
     let body = futures::stream::try_unfold((stream, permit), |(mut stream, permit)| async move {
         match stream.next_chunk().await {
             Ok(Some(bytes)) => Ok(Some((bytes, (stream, permit)))),

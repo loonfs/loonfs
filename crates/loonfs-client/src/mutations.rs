@@ -4,7 +4,7 @@ use super::*;
 use crate::operations;
 use crate::uploads::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
 use loonfs_types::options::{AccessState, AttributeChanges};
-use loonfs_types::ActorId;
+use loonfs_types::{headers, ActorId};
 
 fn commit_id_or_generated(commit: &CommitOptions) -> CommitId {
     commit.commit_id.clone().unwrap_or_else(CommitId::generate)
@@ -38,7 +38,7 @@ impl Client {
         let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
         // The request's commit id resolves an ambiguous resend through a durable receipt.
         self.request_json::<_, Commit>(
-            self.post(&url).header("Loonfs-Actor", actor.as_str()),
+            self.post(&url).header(headers::ACTOR, actor.as_str()),
             Some(request),
             operations::CREATE_COMMIT,
         )

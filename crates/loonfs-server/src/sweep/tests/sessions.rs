@@ -602,14 +602,13 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
     let namespaces = Arc::new(loonfs_http::Namespaces::new(runtime.clone()));
     namespaces.open(&namespace_id).await.expect("hold");
     let sweep = super::Sweep::new(
-        &sweep_config(None),
+        sweep_config(None).sweep_config(),
         runtime.object_store(),
         runtime.maintenance(writer_id("maintenance")),
         namespaces,
         None,
         &recorder,
-    )
-    .expect("sweep");
+    );
     store.reset();
     for _ in 0..100 {
         clock.advance_ms(5_000);

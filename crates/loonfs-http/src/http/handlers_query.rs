@@ -1,6 +1,7 @@
 //! The `query/v0` API group: derived-index reads.
 
 use super::extractors::SubjectHeaders;
+use super::handlers_inodes::parse_inode_id;
 use super::query_params::{effective_page_limit, parse_boolean_query_param, required_query_param};
 #[cfg(feature = "openapi")]
 use super::query_params::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
@@ -39,14 +40,7 @@ pub(super) struct GrepQuery {
     utoipa::path(
         get,
         operation_id = "grep",
-        extensions(
-            ("x-loonfs-retry" = json!("idempotent")),
-            ("x-fern-pagination" = json!({
-                "cursor": "$request.cursor",
-                "next_cursor": "$response.next_cursor",
-                "results": "$response.matches",
-            })),
-        ),
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/grep",
         tag = "query",
         summary = "Content search",
@@ -113,15 +107,7 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
             })
         })
         .transpose()?;
-    let inode_id = query
-        .inode_id
-        .map(|value| {
-            loonfs_types::public_inode_id::decode(&value).map_err(|error| {
-                ApiResponseError::new(loonfs_types::ErrorCode::InvalidRequest, &error.to_string())
-                    .with_param("inode_id")
-            })
-        })
-        .transpose()?;
+    let inode_id = query.inode_id.as_deref().map(parse_inode_id).transpose()?;
     Ok(GrepRequest {
         pattern,
         case_insensitive: parse_optional_boolean(query.case_insensitive, "case_insensitive")?,
@@ -188,11 +174,7 @@ pub(super) async fn enable_grep_index(
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    let _handle = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let _handle = state.open_writer(&namespace_id, None).await?;
     let outcome = worker
         .enable(&namespace_id)
         .await
@@ -279,11 +261,7 @@ pub(super) async fn disable_grep_index(
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    let _handle = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let _handle = state.open_writer(&namespace_id, None).await?;
     let outcome = worker
         .disable(&namespace_id)
         .await

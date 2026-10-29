@@ -1,6 +1,6 @@
-//! Operation metadata validation and SDK naming rewrites.
+//! Operation retry, SDK naming, and pagination metadata rewrites.
 
-use super::value::{component_schema_for_reference, component_schemas, operations, operations_mut};
+use super::value::{component_schema_for_reference, component_schemas, operations_mut};
 use super::OpenapiPostprocessError;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -339,18 +339,18 @@ pub(crate) struct SdkName {
     pub(crate) request: Option<&'static str>,
 }
 
-pub(crate) fn validate_operation_retry_classes(
-    document: &Value,
-) -> Result<(), OpenapiPostprocessError> {
-    for (operation_id, operation) in operations(document)? {
-        if operation
-            .get("x-loonfs-retry")
-            .and_then(Value::as_str)
-            .is_none()
-        {
-            return Err(OpenapiPostprocessError::MissingRetryClassification {
-                operation_id: operation_id.to_owned(),
-            });
+/// Checks that every operation has a retry class, and disables the
+/// generated SDK retries of every `not_idempotent` operation.
+pub(crate) fn add_retry_metadata(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+    for (operation_id, operation) in operations_mut(document)? {
+        let Some(retry_class) = operation.get("x-loonfs-retry").and_then(Value::as_str) else {
+            return Err(OpenapiPostprocessError::MissingRetryClassification { operation_id });
+        };
+        if retry_class == "not_idempotent" {
+            operation.insert(
+                "x-fern-retries".to_owned(),
+                serde_json::json!({"disabled": true}),
+            );
         }
     }
     Ok(())
@@ -414,38 +414,24 @@ pub(crate) fn add_sdk_names(document: &mut Value) -> Result<(), OpenapiPostproce
     Ok(())
 }
 
-pub(crate) fn validate_pagination_metadata(
-    document: &Value,
-) -> Result<(), OpenapiPostprocessError> {
-    let schemas = component_schemas(document)?;
+/// Adds the Fern pagination extension to every operation with a `cursor`
+/// query parameter, naming the one array property of its response.
+pub(crate) fn add_pagination_metadata(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+    let schemas = component_schemas(document)?.clone();
 
-    for (operation_id, operation) in operations(document)? {
-        let has_cursor = has_query_parameter(operation, "cursor");
-        let Some(metadata) = operation.get("x-fern-pagination") else {
-            if has_cursor {
-                return Err(OpenapiPostprocessError::MissingPaginationMetadata {
-                    operation_id: operation_id.to_owned(),
-                });
-            }
+    for (operation_id, operation) in operations_mut(document)? {
+        if !has_query_parameter(operation, "cursor") {
             continue;
-        };
-        if !has_cursor {
-            return Err(OpenapiPostprocessError::MissingPaginationCursorParameter {
-                operation_id: operation_id.to_owned(),
-            });
         }
-
-        let results_property = validate_pagination_response(schemas, operation, operation_id)?;
-        let expected = serde_json::json!({
-            "cursor": "$request.cursor",
-            "next_cursor": "$response.next_cursor",
-            "results": format!("$response.{results_property}"),
-        });
-        if metadata != &expected {
-            return Err(super::value::invalid_document(format!(
-                "operations.{operation_id}.x-fern-pagination"
-            )));
-        }
+        let results_property = pagination_results_property(&schemas, operation, &operation_id)?;
+        operation.insert(
+            "x-fern-pagination".to_owned(),
+            serde_json::json!({
+                "cursor": "$request.cursor",
+                "next_cursor": "$response.next_cursor",
+                "results": format!("$response.{results_property}"),
+            }),
+        );
     }
 
     Ok(())
@@ -463,7 +449,7 @@ fn has_query_parameter(operation: &Map<String, Value>, parameter_name: &str) -> 
         })
 }
 
-fn validate_pagination_response(
+fn pagination_results_property(
     schemas: &Map<String, Value>,
     operation: &Map<String, Value>,
     operation_id: &str,

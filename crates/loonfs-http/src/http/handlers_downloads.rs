@@ -19,7 +19,6 @@ use loonfs_types::{
     api::v0::{
         CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
         CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, DownloadRange,
-        ObjectTransferAccess,
     },
     FEATURE_DOWNLOADS_DIRECT_GET,
 };
@@ -62,8 +61,7 @@ pub(super) async fn create_download(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateDownloadRequest>,
 ) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadResponse>), ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     reject_snapshot_with_revision(
         request.snapshot_id.as_ref(),
         request.revision_no,
@@ -141,8 +139,7 @@ pub(super) async fn create_download_by_inode(
     OptionalAppJson(request): OptionalAppJson<CreateDownloadByInodeRequest>,
 ) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadByInodeResponse>), ApiResponseError> {
     let request = request.unwrap_or_default();
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let at = read_at(
         request.snapshot_id,
@@ -205,8 +202,7 @@ pub(super) async fn create_revision_download_by_inode(
     OptionalAppJson(request): OptionalAppJson<CreateRevisionDownloadByInodeRequest>,
 ) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadByInodeResponse>), ApiResponseError> {
     let request = request.unwrap_or_default();
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let runtime = state.runtime_for(subject);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let consistency = live_consistency(request.consistency, request.max_staleness_ms)
@@ -297,12 +293,7 @@ async fn presigned_ranges(
         granted.push(DownloadRange {
             start_offset,
             length: range.length,
-            access: ObjectTransferAccess::PresignedUrl {
-                method: signed.method,
-                url: signed.url,
-                headers: signed.headers,
-                expires_at_ms: signed.expires_at_ms,
-            },
+            access: signed.into(),
         });
         start_offset += range.length;
     }

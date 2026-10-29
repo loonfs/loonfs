@@ -15,10 +15,7 @@ use loonfs_types::ErrorResponse;
     utoipa::path(
         post,
         operation_id = "probe_store",
-        extensions(
-            ("x-loonfs-retry" = json!("not_idempotent")),
-            ("x-fern-retries" = json!({"disabled": true})),
-        ),
+        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
         path = "/v0/maintenance/store/probe",
         tag = "maintenance",
         summary = "Probe the store contract",

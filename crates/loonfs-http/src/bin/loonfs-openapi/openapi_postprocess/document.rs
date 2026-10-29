@@ -1,9 +1,8 @@
 //! Builds the published OpenAPI document from the generated one.
 
-use super::operations::{
-    add_sdk_names, validate_operation_retry_classes, validate_pagination_metadata,
-};
+use super::operations::{add_pagination_metadata, add_retry_metadata, add_sdk_names};
 use super::OpenapiPostprocessError;
+use loonfs_types::headers;
 use serde::Serialize;
 
 /// Generates OpenAPI JSON and applies the operation metadata.
@@ -12,13 +11,13 @@ pub(crate) fn openapi_json_pretty(
 ) -> Result<String, OpenapiPostprocessError> {
     let mut document = serde_json::to_value(document)?;
     document["x-fern-global-headers"] = serde_json::json!([
-        {"header": "Loonfs-Actor", "name": "actorId", "optional": true},
-        {"header": "Loonfs-Subject", "name": "subjectId", "optional": true},
-        {"header": "Loonfs-Principal-Scope", "name": "principalScope", "optional": true},
-        {"header": "Loonfs-Principals", "name": "principals", "optional": true}
+        {"header": headers::ACTOR, "name": "actorId", "optional": true},
+        {"header": headers::SUBJECT, "name": "subjectId", "optional": true},
+        {"header": headers::PRINCIPAL_SCOPE, "name": "principalScope", "optional": true},
+        {"header": headers::PRINCIPALS, "name": "principals", "optional": true}
     ]);
-    validate_operation_retry_classes(&document)?;
+    add_retry_metadata(&mut document)?;
     add_sdk_names(&mut document)?;
-    validate_pagination_metadata(&document)?;
+    add_pagination_metadata(&mut document)?;
     Ok(serde_json::to_string_pretty(&document)?)
 }

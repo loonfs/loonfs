@@ -1,5 +1,6 @@
 //! Host-supplied options and handles for HTTP requests.
 
+use crate::http::ApiResponseError;
 use crate::{HttpMetrics, RequestLimit, UsageRecorder};
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt as _;
@@ -10,7 +11,7 @@ use loonfs::{
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
-use loonfs_types::{ErrorCode, MonotonicTimer, NamespaceId, SecretString};
+use loonfs_types::{ErrorCode, MonotonicTimer, NamespaceId, SecretString, Subject};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -149,6 +150,35 @@ pub struct BindingState {
     pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
 }
 
+impl BindingState {
+    /// Returns the runtime scoped to `subject`, or the service runtime when
+    /// the request has no subject.
+    pub(crate) fn runtime_for(&self, subject: Option<Subject>) -> LoonFs<Writable> {
+        match subject {
+            Some(subject) => self.runtime.with_subject(subject),
+            None => self.runtime.clone(),
+        }
+    }
+
+    /// Opens the host's writable handle for `namespace_id`, scoped to
+    /// `subject` unless `subject` is `None`.
+    pub(crate) async fn open_writer(
+        &self,
+        namespace_id: &NamespaceId,
+        subject: Option<Subject>,
+    ) -> Result<Namespace<Writable>, ApiResponseError> {
+        let namespace = self
+            .namespaces
+            .open(namespace_id)
+            .await
+            .map_err(ApiResponseError::for_namespace(namespace_id))?;
+        Ok(match subject {
+            Some(subject) => namespace.with_subject(subject),
+            None => namespace,
+        })
+    }
+}
+
 /// The writable handle this host holds for each namespace.
 ///
 /// The host decides which writer sessions stay open and for how long: a
@@ -197,6 +227,25 @@ pub struct SweepRetry {
 type NamespaceClose = Shared<BoxFuture<'static, loonfs::Result<CloseNamespaceReport>>>;
 
 impl HeldNamespace {
+    /// Whether the grep index has work for a session at `seq`: the index is
+    /// marked dirty, or the sweep last brought the index up to date at
+    /// another seq.
+    pub fn index_pending(&self, seq: Option<ChangeSeq>) -> bool {
+        self.index_dirty || self.indexed_seq != seq
+    }
+
+    /// Whether garbage collection is due for a session at `seq`: the seq
+    /// moved since the last collection, and at least `interval_ms` passed
+    /// since that collection.
+    pub fn collection_pending(
+        &self,
+        seq: Option<ChangeSeq>,
+        now_ms: u64,
+        interval_ms: u64,
+    ) -> bool {
+        seq != self.collected_seq && now_ms.saturating_sub(self.collected_at_ms) >= interval_ms
+    }
+
     fn begin_close(&mut self) -> NamespaceClose {
         self.closing
             .get_or_insert_with(|| self.handle.clone().close().boxed().shared())

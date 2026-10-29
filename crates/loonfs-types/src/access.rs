@@ -4,6 +4,7 @@
 //! or a public audience. LoonFS stores principal ids as opaque strings and
 //! never resolves them.
 
+use crate::api::v0::headers;
 use crate::id_macros::{numeric_id, string_id, validation_error};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -138,6 +139,16 @@ impl SubjectPart {
             Self::PrincipalScope => "principal_scope",
             Self::SubjectId => "subject_id",
             Self::ActorId => "actor_id",
+        }
+    }
+
+    /// Returns the name of the HTTP request header that carries the part.
+    pub const fn header_name(self) -> &'static str {
+        match self {
+            Self::Principals => headers::PRINCIPALS,
+            Self::PrincipalScope => headers::PRINCIPAL_SCOPE,
+            Self::SubjectId => headers::SUBJECT,
+            Self::ActorId => headers::ACTOR,
         }
     }
 }

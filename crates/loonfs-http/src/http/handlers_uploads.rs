@@ -25,8 +25,8 @@ use loonfs_types::ErrorCode;
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
     api::v0::{
-        CompleteUploadBody, CreateUploadBody, ObjectTransferAccess, SignUploadPartsRequest,
-        SignUploadPartsResponse, SignedUploadPart, UploadSession, UploadSessionStatus,
+        CompleteUploadBody, CreateUploadBody, SignUploadPartsRequest, SignUploadPartsResponse,
+        SignedUploadPart, UploadSession, UploadSessionStatus,
     },
     options::DirectMultipartUploadOptions,
     ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
@@ -43,9 +43,15 @@ const MULTIPART_PART_URL_TTL: Duration = Duration::from_secs(60 * 60);
 pub(super) enum PutContentPreparation {
     Absent,
     Ready(Vec<PreparedContent>),
-    /// Every supplied token was rejected, each paired with the content ref
-    /// it was supplied for. Never empty.
-    Rejected(Vec<(ContentId, ContentTokenError)>),
+    /// Every supplied token was rejected. Never empty.
+    Rejected(Vec<RejectedToken>),
+}
+
+/// The content ID of a content token that preparation rejected, and the
+/// rejection.
+pub(super) struct RejectedToken {
+    pub(super) content_id: ContentId,
+    pub(super) error: ContentTokenError,
 }
 
 /// The deployment material allowed to verify and mint content tokens.
@@ -54,6 +60,13 @@ pub(super) enum PutContentPreparation {
 #[derive(Clone, Copy)]
 pub(super) struct ContentTokenVerifier<'a> {
     secret: &'a str,
+}
+
+impl BindingState {
+    /// Returns the verifier of the content tokens that this deployment mints.
+    pub(super) fn content_tokens(&self) -> ContentTokenVerifier<'_> {
+        ContentTokenVerifier::new(self.options.content_token_secret.expose())
+    }
 }
 
 impl<'a> ContentTokenVerifier<'a> {
@@ -102,10 +115,7 @@ pub(super) struct UploadPathParams {
     utoipa::path(
         post,
         operation_id = "create_upload",
-        extensions(
-            ("x-loonfs-retry" = json!("not_idempotent")),
-            ("x-fern-retries" = json!({"disabled": true})),
-        ),
+        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
         path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
@@ -131,22 +141,16 @@ pub(super) async fn create_upload(
     AppQuery(_): AppQuery<NoQuery>,
     UploadControlJson(request): UploadControlJson<CreateUploadBody, MAX_UPLOAD_CONTROL_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = state.open_writer(&namespace_id, subject).await?;
     // Decoding the body settled which transport this is and that it carries
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
     match request {
         CreateUploadBody::DirectPut { size_bytes } => {
-            begin_direct_put_upload(&state, namespace, namespace_id, size_bytes).await
+            begin_direct_put_upload(&state, &namespace, namespace_id, size_bytes).await
         }
         CreateUploadBody::DirectMultipart { part_size_bytes } => {
-            begin_direct_multipart_upload(&state, namespace, namespace_id, part_size_bytes).await
+            begin_direct_multipart_upload(&state, &namespace, namespace_id, part_size_bytes).await
         }
         CreateUploadBody::ServiceProxied {} => {
             let response =
@@ -218,12 +222,7 @@ async fn fill_direct_put_access(
             )
             .await
             .map_err(presign_issuer_error)?;
-        *access = Some(ObjectTransferAccess::PresignedUrl {
-            method: signed.method,
-            url: signed.url,
-            headers: signed.headers,
-            expires_at_ms: signed.expires_at_ms,
-        });
+        *access = Some(signed.into());
     }
     Ok(())
 }
@@ -310,13 +309,7 @@ pub(super) async fn sign_upload_parts(
         ));
     };
 
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = state.open_writer(&namespace_id, subject).await?;
     let targets = namespace
         .sign_upload_parts(&upload_id, &request.parts)
         .await
@@ -355,34 +348,27 @@ async fn sign_parts(
             .map_err(presign_issuer_error)?;
         signed_parts.push(SignedUploadPart {
             part_number: part.part_number,
-            access: ObjectTransferAccess::PresignedUrl {
-                method: signed.method,
-                url: signed.url,
-                headers: signed.headers,
-                expires_at_ms: signed.expires_at_ms,
-            },
+            access: signed.into(),
         });
     }
     Ok(signed_parts)
 }
 
 pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError {
-    let (code, param) = match &error {
-        ObjectStoreError::InvalidContentRef(_) => (ErrorCode::InvalidRequest, Some("/content")),
-        ObjectStoreError::PermissionDenied { .. } => (ErrorCode::StoragePermissionDenied, None),
-        _ => (ErrorCode::ServerError, None),
-    };
-    let response = ApiResponseError::new(code, &error.public_message());
-    if let Some(param) = param {
-        response.with_param(param)
-    } else {
-        response
+    if let ObjectStoreError::InvalidContentRef(_) = &error {
+        return ApiResponseError::new(ErrorCode::InvalidRequest, &error.public_message())
+            .with_param("/content");
     }
+    ApiResponseError::new(
+        loonfs::classify_store_failure(error.kind()),
+        &error.public_message(),
+    )
 }
 
-// Issuing a short-lived transfer capability enters wall time at this HTTP
-// boundary so core replay stays deterministic.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "issuing a short-lived transfer capability enters wall time at this HTTP boundary so core replay stays deterministic"
+)]
 pub(super) fn presign_time() -> SystemTime {
     SystemTime::now()
 }
@@ -400,7 +386,6 @@ pub(super) async fn content_preparation_for_puts(
     namespaces: &Namespaces,
     namespace: &Namespace<Writable>,
     verifier: ContentTokenVerifier<'_>,
-    namespace_id: &NamespaceId,
     content_refs: &[&ContentRef],
     tokens: &[ContentToken],
 ) -> Result<PutContentPreparation, ApiResponseError> {
@@ -416,20 +401,20 @@ pub(super) async fn content_preparation_for_puts(
                 let content_id = token.content_ref.content_id.clone();
                 if is_forged_content_token(&error) {
                     tracing::warn!(
-                        namespace_id = %namespace_id,
+                        namespace_id = %namespace.id(),
                         content_id = %content_id,
                         error = %error,
                         "content token was not minted by this deployment for this namespace"
                     );
                 } else {
                     tracing::debug!(
-                        namespace_id = %namespace_id,
+                        namespace_id = %namespace.id(),
                         content_id = %content_id,
                         error = %error,
                         "content token rejected during put preparation"
                     );
                 }
-                rejections.push((content_id, error));
+                rejections.push(RejectedToken { content_id, error });
             }
         }
     }
@@ -513,13 +498,7 @@ pub(super) async fn put_upload_content(
     body: UploadBodyStream,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = state.open_writer(&namespace_id, subject).await?;
     let (stream, outcome) = body.into_stream();
     match namespace
         .put_upload_content_stream(&upload_id, stream)
@@ -572,13 +551,7 @@ pub(super) async fn complete_upload(
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let completion = decode_json::<CompleteUploadBody>(&body.into_bytes())?;
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = state.open_writer(&namespace_id, subject).await?;
     let completed = namespace
         .complete_upload(&upload_id, completion)
         .await
@@ -588,7 +561,7 @@ pub(super) async fn complete_upload(
         ))?;
     Ok(Json(with_content_token(
         completed.response,
-        ContentTokenVerifier::new(state.options.content_token_secret.expose()),
+        state.content_tokens(),
         completed.evidence.as_ref(),
         state.runtime.now_ms(),
     )?))
@@ -626,13 +599,7 @@ pub(super) async fn get_upload(
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = state.open_writer(&namespace_id, subject).await?;
     let mut view =
         namespace
             .get_upload(&upload_id)
@@ -656,7 +623,7 @@ pub(super) async fn get_upload(
     }
     Ok(Json(with_content_token(
         view.session,
-        ContentTokenVerifier::new(state.options.content_token_secret.expose()),
+        state.content_tokens(),
         view.evidence.as_ref(),
         state.runtime.now_ms(),
     )?))
@@ -696,13 +663,7 @@ pub(super) async fn abort_upload(
     NoBody: NoBody,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = state.open_writer(&namespace_id, subject).await?;
     let response = namespace.abort_upload(&upload_id).await.map_err(
         ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
     )?;

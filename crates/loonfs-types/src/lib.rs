@@ -162,7 +162,7 @@ pub use widths::usize_from_u64;
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `api::v0`; add here only what most consumers touch.
 pub use api::v0::{
-    AdvanceRetentionRequest, AdvanceRetentionResponse, AttributesProjection, Checkpoint,
+    headers, AdvanceRetentionRequest, AdvanceRetentionResponse, AttributesProjection, Checkpoint,
     CheckpointOwner, Commit, CommitPrecondition, CommitRequest, CreateNamespaceRequest,
     CreateSnapshotRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,

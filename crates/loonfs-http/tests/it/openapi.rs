@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 mod openapi_postprocess;
 
 use openapi_postprocess::operations::{
-    add_sdk_names, validate_operation_retry_classes, validate_pagination_metadata,
-    OPERATION_SDK_NAMES, SDK_EXCLUDED_OPERATIONS,
+    add_pagination_metadata, add_retry_metadata, add_sdk_names, OPERATION_SDK_NAMES,
+    SDK_EXCLUDED_OPERATIONS,
 };
 use openapi_postprocess::OpenapiPostprocessError;
 use std::assert_matches;
@@ -28,7 +28,7 @@ const OPENAPI_PATH_SOURCES: &[&str] = &[
 
 #[test]
 fn missing_retry_classification_returns_a_named_error() {
-    let document = serde_json::json!({
+    let mut document = serde_json::json!({
         "paths": {
             "/future": {
                 "post": {"operationId": "future_operation"}
@@ -36,8 +36,8 @@ fn missing_retry_classification_returns_a_named_error() {
         }
     });
 
-    let error = validate_operation_retry_classes(&document)
-        .expect_err("unknown operation should fail generation");
+    let error =
+        add_retry_metadata(&mut document).expect_err("unknown operation should fail generation");
     assert_matches!(
         error,
         OpenapiPostprocessError::MissingRetryClassification { operation_id }
@@ -97,8 +97,8 @@ fn sdk_method_names_are_unique_within_each_group() {
 }
 
 #[test]
-fn unregistered_cursor_operation_returns_a_named_error() {
-    let document = serde_json::json!({
+fn cursor_operation_without_a_page_response_returns_a_named_error() {
+    let mut document = serde_json::json!({
         "components": {"schemas": {}},
         "paths": {
             "/future": {
@@ -109,11 +109,11 @@ fn unregistered_cursor_operation_returns_a_named_error() {
             }
         }
     });
-    let error = validate_pagination_metadata(&document)
-        .expect_err("unregistered cursor operation should fail generation");
+    let error = add_pagination_metadata(&mut document)
+        .expect_err("a cursor operation without a page response should fail generation");
     assert_matches!(
         error,
-        OpenapiPostprocessError::MissingPaginationMetadata { operation_id }
+        OpenapiPostprocessError::MissingPaginationResponseSchema { operation_id }
             if operation_id == "future_list"
     );
 }

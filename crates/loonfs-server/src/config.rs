@@ -749,6 +749,19 @@ impl ServerConfig {
         }
     }
 
+    /// Returns the cadence and limits of the maintenance sweep.
+    pub(crate) fn sweep_config(&self) -> crate::sweep::SweepConfig {
+        crate::sweep::SweepConfig {
+            max_concurrent_maintenance: self.max_concurrent_maintenance,
+            tick_interval_ms: self.tick_interval_ms,
+            maintenance_interval_ms: self.maintenance_interval_ms,
+            gc_interval_ms: self.gc_interval_ms,
+            full_sweep_interval_ms: self.full_sweep_interval_ms,
+            retention_window_ms: self.retention_window_ms,
+            idle_session_close_after_ms: self.idle_session_close_after_ms,
+        }
+    }
+
     /// Builds the execution budget of the server's one runtime from its fold,
     /// compaction, content write, and merge input limits and the totals of
     /// its `[publication]` table, reporting to `recorder`.

@@ -3,7 +3,7 @@
 use super::*;
 use crate::operations;
 use crate::transport::QueryBuilder;
-use loonfs_types::{ActorId, PageRequest};
+use loonfs_types::{headers, ActorId, PageRequest};
 
 /// A pager over existing checkpoints.
 pub type CheckpointsPager = loonfs_types::Pager<ListCheckpointsResponse, ClientError>;
@@ -90,7 +90,7 @@ impl Client {
         );
         let mut wire_request = self.post(&url);
         if let Some(actor_id) = actor_id {
-            wire_request = wire_request.header("Loonfs-Actor", actor_id.as_str());
+            wire_request = wire_request.header(headers::ACTOR, actor_id.as_str());
         }
         self.request_json(wire_request, Some(request), operations::RUN_MAINTENANCE)
             .await
