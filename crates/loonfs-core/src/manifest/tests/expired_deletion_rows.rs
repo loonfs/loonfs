@@ -1024,16 +1024,10 @@ async fn a_kept_inode_filter_over_its_byte_limit_keeps_every_row_and_logs_once()
             .iter()
             .filter(|row| matches!(row, MetadataRow::FileRevision(record) if record.inode_id == a))
             .count();
-        assert_eq!(
-            reads_of(&gets, &trash),
-            trash.len(),
-            "the scan for an expired deletion and the walk read each small trash segment once, \
-             whole"
-        );
         if over_limit {
             assert_eq!(hidden_rows, 1, "the hidden revision stays");
             assert_eq!(
-                reads_of(&gets, &slot_index),
+                reads_of(&gets, &slot_index) + reads_of(&gets, &trash),
                 0,
                 "an over-limit filter walks nothing"
             );
@@ -1044,6 +1038,10 @@ async fn a_kept_inode_filter_over_its_byte_limit_keeps_every_row_and_logs_once()
                 reads_of(&gets, &slot_index),
                 slot_index.len(),
                 "the walk reads each small segment once, whole"
+            );
+            assert!(
+                reads_of(&gets, &trash) <= trash.len(),
+                "the walk reads each small trash segment at most once"
             );
             assert_eq!(logged.load(Ordering::SeqCst), 0);
         }
@@ -1234,64 +1232,108 @@ async fn kept_inode_filter_and_walk_reads(
     (filter, reads_of(&store.take_gets(), &slot_index))
 }
 
-/// Checks that a base compaction builds no kept inode filter, and walks
-/// nothing, while no deletion at or below the acknowledged floor is listed
-/// without a removal: with only an undeleted deletion below the floor, and
-/// with a deletion that a retention advance expired before a fold
-/// acknowledges the advance. Once a fold acknowledges it, the compaction
-/// walks the tree and builds the filter, which leaves out the hidden inode.
+/// Base-compacts `group` over the current manifest and publishes the output.
+async fn compact_group<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    group: MetadataFamilyGroup,
+) {
+    let current = load_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest");
+    let payload = current.state.envelope.payload();
+    let spec = compaction_step::plan_group(
+        payload,
+        &runs_newest_first(payload),
+        group,
+        MetadataRunPolicy::default(),
+        MetadataCompactionPolicy::CompactImmediately,
+    )
+    .expect("plan the group");
+    assert_matches!(spec.placement(), MergePlacement::Base { .. }, "{group:?}");
+    let outcome = run_planned_compaction(
+        store,
+        namespace_id,
+        context,
+        MetadataRunPolicy::default(),
+        &spec,
+    )
+    .await;
+    assert_matches!(
+        outcome,
+        CompactionUnitOutcome::Published { .. },
+        "{group:?}"
+    );
+}
+
+/// The deletion sequences of the `listed` rows in the current manifest's
+/// `active_deletions`.
+async fn listed_deletions<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<ChangeSeq> {
+    family_rows(store, namespace_id, ApiMetadataRowFamily::ActiveDeletions)
+        .await
+        .into_iter()
+        .filter_map(|row| match row {
+            MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
+                deletion_seq,
+                action: loonfs_types::format::manifest::ActiveDeletionRowAction::Listed { .. },
+                ..
+            }) => Some(deletion_seq),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Checks that a base compaction builds no kept inode filter, and reads none
+/// of the slot index, while the basis manifest's acknowledged floor is 0,
+/// even with a recoverable deletion and a deletion that a retention advance
+/// expired. Once a fold acknowledges the floor, the compaction builds the
+/// filter and walks the tree, even after a base compaction of
+/// `active_deletions` removed the expired deletion's `listed` row, and the
+/// filter leaves out the hidden file and keeps the recoverable one.
 #[tokio::test]
-async fn a_base_compaction_walks_the_tree_only_when_a_deletion_has_expired() {
+async fn a_base_compaction_walks_the_tree_once_the_acknowledged_floor_is_above_zero() {
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
-    let namespace_id = NamespaceId::parse("expiry-scan").expect("namespace id");
+    let namespace_id = NamespaceId::parse("acknowledged-walk").expect("namespace id");
     let context = mutation_context("writer-1", 5_000);
     bootstrap_restricted_namespace(&store, &namespace_id, &context).await;
     put(&store, &namespace_id, "/old/a.txt", b"old", &context).await;
-    put(
+    put(&store, &namespace_id, "/recoverable.txt", b"kept", &context).await;
+    let a = inode_id_of(&store, &namespace_id, "/old/a.txt").await;
+    let recoverable = inode_id_of(&store, &namespace_id, "/recoverable.txt").await;
+    let expired_seq = delete_recursively(&store, &namespace_id, "/old", &context).await;
+    let recoverable_seq =
+        delete_recursively(&store, &namespace_id, "/recoverable.txt", &context).await;
+    advance_floor_through(&store, &namespace_id, expired_seq, &context).await;
+    assert_eq!(
+        read_acknowledged_floor_seq(&store, &namespace_id).await,
+        ChangeSeq(0)
+    );
+
+    let (filter, walk_reads) = kept_inode_filter_and_walk_reads(&store, &namespace_id).await;
+    assert!(
+        matches!(filter, KeptInodeFilter::EveryInode),
+        "an acknowledged floor of 0"
+    );
+    assert_eq!(walk_reads, 0);
+
+    acknowledge_floor(&store, &namespace_id, &context).await;
+    compact_group(
         &store,
         &namespace_id,
-        "/restored.txt",
-        b"restored",
         &context,
+        MetadataFamilyGroup::ActiveDeletions,
     )
     .await;
-    let restored = inode_id_of(&store, &namespace_id, "/restored.txt").await;
-    let a = inode_id_of(&store, &namespace_id, "/old/a.txt").await;
-    let restored_seq = delete_recursively(&store, &namespace_id, "/restored.txt", &context).await;
-    commit(
-        &store,
-        &namespace_id,
-        FilesystemOperation::undelete(
-            restored,
-            restored_seq,
-            &loonfs_types::options::UndeleteDestination::Recorded,
-        ),
-        Vec::new(),
-        &context,
-    )
-    .await
-    .expect("undelete");
-    let head_seq = delete_recursively(&store, &namespace_id, "/old", &context).await;
-    advance_floor_through(&store, &namespace_id, ChangeSeq(head_seq.0 - 1), &context).await;
-    acknowledge_floor(&store, &namespace_id, &context).await;
-
-    let (filter, walk_reads) = kept_inode_filter_and_walk_reads(&store, &namespace_id).await;
-    assert!(
-        matches!(filter, KeptInodeFilter::EveryInode),
-        "an undeleted deletion"
+    assert_eq!(
+        listed_deletions(&store, &namespace_id).await,
+        vec![recoverable_seq],
+        "the expired deletion's listed row is gone"
     );
-    assert_eq!(walk_reads, 0);
-
-    advance_floor_through(&store, &namespace_id, head_seq, &context).await;
-    let (filter, walk_reads) = kept_inode_filter_and_walk_reads(&store, &namespace_id).await;
-    assert!(
-        matches!(filter, KeptInodeFilter::EveryInode),
-        "a deletion that the acknowledged floor hasn't reached"
-    );
-    assert_eq!(walk_reads, 0);
-
-    acknowledge_floor(&store, &namespace_id, &context).await;
     let (filter, walk_reads) = kept_inode_filter_and_walk_reads(&store, &namespace_id).await;
     assert!(walk_reads > 0, "the walk reads the slot index");
     let revision = |inode_id| {
@@ -1314,8 +1356,53 @@ async fn a_base_compaction_walks_the_tree_only_when_a_deletion_has_expired() {
     };
     assert!(matches!(filter, KeptInodeFilter::Reached(_)));
     assert!(
-        filter.keeps(&revision(restored)),
-        "a visible file keeps its rows"
+        filter.keeps(&revision(recoverable)),
+        "a recoverably deleted file keeps its rows"
     );
     assert!(!filter.keeps(&revision(a)), "a hidden file loses its rows");
+}
+
+/// Checks that a base compaction of a group that stores rows by inode still
+/// removes the rows that an expired deletion hides when a base compaction of
+/// `active_deletions` has already removed the deletion's `listed` row.
+#[tokio::test]
+async fn a_group_compacted_after_the_trash_still_removes_an_expired_deletions_rows() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("trash-first").expect("namespace id");
+    let context = mutation_context("writer-1", 5_000);
+    let (old, a) = expire_old(&store, &namespace_id, &context).await;
+    let hidden = [old, a];
+    let before = rows_of(&store, &namespace_id, &hidden).await;
+
+    compact_group(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataFamilyGroup::ActiveDeletions,
+    )
+    .await;
+    assert_eq!(
+        rows_of(&store, &namespace_id, &hidden).await[&ApiMetadataRowFamily::ActiveDeletions],
+        Vec::new(),
+        "the base compaction of active_deletions removes the listed row"
+    );
+
+    for group in [
+        MetadataFamilyGroup::Revisions,
+        MetadataFamilyGroup::Inodes,
+        MetadataFamilyGroup::Bindings,
+    ] {
+        compact_group(&store, &namespace_id, &context, group).await;
+    }
+    let after = rows_of(&store, &namespace_id, &hidden).await;
+    for family in [
+        ApiMetadataRowFamily::Inodes,
+        ApiMetadataRowFamily::Revisions,
+        ApiMetadataRowFamily::DirentryBinds,
+        ApiMetadataRowFamily::DirentryChildBinds,
+    ] {
+        assert!(!before[&family].is_empty(), "{family:?} had hidden rows");
+        assert_eq!(after[&family], Vec::new(), "{family:?} keeps no hidden row");
+    }
 }
