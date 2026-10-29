@@ -28,6 +28,14 @@ impl LocalPayload {
         }
     }
 
+    /// Returns the payload's length, or `None` for standard input.
+    pub(crate) fn size_bytes(&self) -> Option<u64> {
+        match self {
+            Self::File { size_bytes, .. } => Some(*size_bytes),
+            Self::Stdin => None,
+        }
+    }
+
     /// Returns a file that may be reopened after an interrupted PUT.
     pub(crate) fn file_path(&self) -> Option<&Path> {
         match self {
@@ -45,9 +53,9 @@ impl LocalPayload {
         progress: &Arc<ProgressReporter>,
     ) -> Result<PayloadSource, CliError> {
         let source = match self {
-            Self::File { path, .. } => PayloadSource::open_file(path).await.map_err(|error| {
-                CliError::io_error(format!("i/o error for `{}`: {error}", path.display()))
-            })?,
+            Self::File { path, .. } => PayloadSource::open_file(path)
+                .await
+                .map_err(|error| CliError::io_for_path(path, error))?,
             Self::Stdin => PayloadSource::reader(tokio::io::stdin()),
         };
         Ok(counted_source(source, Arc::clone(progress)))

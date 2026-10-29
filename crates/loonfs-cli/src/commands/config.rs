@@ -9,7 +9,7 @@ use crate::config::{
     ProfileConfig,
 };
 use crate::error::CliError;
-use crate::profiles::add_profile;
+use crate::profiles::{add_profile, NamedProfile};
 use crate::prompt;
 use std::path::Path;
 
@@ -22,7 +22,7 @@ pub(crate) fn run_config_init(
     config_path: &Path,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let result = (|| -> Result<(String, ProfileConfig), CliError> {
+    let result = (|| -> Result<NamedProfile<ProfileConfig>, CliError> {
         if config_path.exists() {
             return Err(CliError::config_already_exists(
                 &config_path.display().to_string(),
@@ -38,19 +38,19 @@ pub(crate) fn run_config_init(
         let profile = build_profile_interactive(&name, runtime)?;
 
         mutate_config(config_path, |config| {
-            let (profile_name, redacted) = add_profile(config, &name, profile)?;
-            config.default_profile = Some(profile_name.clone());
-            Ok((profile_name, redacted))
+            let added = add_profile(config, &name, profile)?;
+            config.default_profile = Some(added.name.clone());
+            Ok(added)
         })
     })()
     .map_err(|error| fail(kind, None, None, error))?;
 
     Ok(CommandOutput {
         kind,
-        profile: Some(result.0),
-        mode: Some(result.1.mode_str().to_owned()),
+        profile: Some(result.name),
+        mode: Some(result.profile.mode_str().to_owned()),
         data: CommandData::Profile {
-            profile: result.1,
+            profile: result.profile,
             default_profile: None,
         },
     })

@@ -6,6 +6,14 @@ use futures::StreamExt;
 use loonfs_client::{DirectDownloadStream, PayloadStream};
 use loonfs_types::{ContentRef, RevisionNo};
 
+/// The content and revision that a direct download resolved, which a resumed
+/// download has to match.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResumeIdentity<'a> {
+    pub(crate) content_ref: &'a ContentRef,
+    pub(crate) revision_no: RevisionNo,
+}
+
 pub(crate) enum FileDownload {
     Direct {
         stream: Box<DirectDownloadStream>,
@@ -16,13 +24,16 @@ pub(crate) enum FileDownload {
 }
 
 impl FileDownload {
-    pub(crate) fn resume_identity(&self) -> Option<(&ContentRef, RevisionNo)> {
+    pub(crate) fn resume_identity(&self) -> Option<ResumeIdentity<'_>> {
         match self {
             Self::Direct {
                 stream,
                 revision_no,
                 ..
-            } => Some((stream.content_ref(), *revision_no)),
+            } => Some(ResumeIdentity {
+                content_ref: stream.content_ref(),
+                revision_no: *revision_no,
+            }),
             Self::Proxied(_) => None,
         }
     }

@@ -240,19 +240,18 @@ impl ProfileConfig {
         }
     }
 
-    pub(crate) fn validate_store(&self, name: &str) -> Result<(), CliError> {
-        if let Self::Embedded { store, .. } = self {
-            if let StoreConfig::LocalFs { root, .. } = store {
-                if !Path::new(root).is_absolute() {
-                    return Err(CliError::invalid_config(format!(
-                        "profile `{name}` has a relative local_fs root `{root}`; \
-                         set an absolute path with `loonfs profile update local {name} --root <path>`"
-                    )));
-                }
+    pub(crate) fn ensure_store_usable(&self, name: &str) -> Result<(), CliError> {
+        if let Self::Embedded {
+            store: StoreConfig::LocalFs { root, .. },
+            ..
+        } = self
+        {
+            if !Path::new(root).is_absolute() {
+                return Err(CliError::invalid_config(format!(
+                    "profile `{name}` has a relative local_fs root `{root}`; \
+                     set an absolute path with `loonfs profile update local {name} --root <path>`"
+                )));
             }
-            store
-                .validate()
-                .map_err(|error| profile_field_error(name, &error))?;
         }
         Ok(())
     }

@@ -1,9 +1,12 @@
 //! Shared per-command context: target resolution and common helpers.
 
 use super::output::{CommandData, CommandFailure, CommandOutput};
-use crate::args::{ActorSelectorArgs, CommandKind, SubjectSelectorArgs, TargetSelectorArgs};
+use crate::args::{
+    ActorSelectorArgs, CommandKind, ProfileSelectorArgs, SubjectSelectorArgs, TargetSelectorArgs,
+};
 use crate::config::{CliConfig, ConfigLocation, ConfigSource};
 use crate::error::CliError;
+use crate::profiles::{resolve_profile, NamedProfile};
 use crate::resolve::{
     load_cli_config, resolve_actor, resolve_namespace, resolve_subject, ResolvedTarget,
 };
@@ -133,22 +136,19 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
     no_retry: bool,
     subject: Option<&SubjectSelectorArgs>,
 ) -> Result<(CommandContext, &'a crate::config::ProfileConfig), CommandFailure> {
-    let (profile_name, profile) = crate::profiles::resolve_profile(config, explicit_profile)
+    let NamedProfile {
+        name: profile_name,
+        profile,
+    } = resolve_profile(config, explicit_profile)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mut target = ResolvedTarget::resolve(profile_name, profile, no_retry)
+    let mut target = ResolvedTarget::resolve(&profile_name, profile, no_retry)
         .await
-        .map_err(|error| fail(kind, Some(profile_name.to_owned()), None, error))?;
+        .map_err(|error| fail(kind, Some(profile_name.clone()), None, error))?;
     let mode = target.mode_str().to_owned();
     let subject = match subject {
         Some(selector) => {
-            let attribute = |error| {
-                fail(
-                    kind,
-                    Some(profile_name.to_owned()),
-                    Some(mode.clone()),
-                    error,
-                )
-            };
+            let attribute =
+                |error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error);
             let actor = resolve_actor(profile, None).map_err(attribute)?;
             resolve_subject(
                 profile,
@@ -166,7 +166,7 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
     }
     Ok((
         CommandContext {
-            profile_name: profile_name.to_owned(),
+            profile_name,
             mode,
             namespace: None,
             actor_id: None,
@@ -202,10 +202,11 @@ async fn resolve_command_context_with_actor(
     let explicit_profile = target.profile.profile.as_deref();
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let (profile_name, profile) =
-        crate::profiles::resolve_profile(&loaded.config, explicit_profile)
-            .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let profile_name = profile_name.to_owned();
+    let NamedProfile {
+        name: profile_name,
+        profile,
+    } = resolve_profile(&loaded.config, explicit_profile)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mut resolved_target =
         ResolvedTarget::resolve(&profile_name, profile, target.request.no_retry)
             .await
@@ -380,11 +381,31 @@ pub(crate) struct UndeleteHint {
     context_flags: String,
 }
 
+/// Whether the command line named the profile a command ran against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfileSource {
+    /// `--profile` named the profile.
+    Flag,
+    /// The command line named no profile.
+    Default,
+}
+
+impl ProfileSource {
+    /// Returns `Flag` when the selector holds a `--profile` value.
+    pub(crate) fn from_selector(selector: &ProfileSelectorArgs) -> Self {
+        if selector.profile.is_some() {
+            Self::Flag
+        } else {
+            Self::Default
+        }
+    }
+}
+
 impl UndeleteHint {
     pub(crate) fn new(
         context: &CommandContext,
         location: &ConfigLocation,
-        explicit_profile: bool,
+        profile_source: ProfileSource,
     ) -> Self {
         let mut context_flags =
             format!(" --namespace {}", shell_quote(context.namespace().as_str()));
@@ -392,7 +413,7 @@ impl UndeleteHint {
         // exactly the profile this run used whenever `--profile` went
         // unspelled; spelling it means the default may be some other profile,
         // and then the hint has to say which one it meant.
-        if explicit_profile {
+        if profile_source == ProfileSource::Flag {
             context_flags.push_str(&format!(
                 " --profile {}",
                 shell_quote(&context.profile_name)

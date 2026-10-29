@@ -56,8 +56,11 @@ impl SourceIdentity {
         let metadata = std::fs::metadata(path)?;
         let modified = metadata.modified()?;
         let modified_ns = match modified.duration_since(std::time::UNIX_EPOCH) {
-            Ok(since) => since.as_nanos() as i128,
-            Err(before) => -(before.duration().as_nanos() as i128),
+            Ok(since) => {
+                i128::try_from(since.as_nanos()).expect("a duration in nanoseconds should fit i128")
+            }
+            Err(before) => -i128::try_from(before.duration().as_nanos())
+                .expect("a duration in nanoseconds should fit i128"),
         };
         Ok(Self {
             size_bytes: metadata.len(),

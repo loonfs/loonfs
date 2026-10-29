@@ -222,9 +222,8 @@ async fn create_remote_directory(
             &spec,
             &CreateDirectoryOptions {
                 commit: CommitOptions {
-                    preconditions: Vec::new(),
-                    commit_id: None,
                     message,
+                    ..Default::default()
                 },
                 parents,
             },
@@ -293,9 +292,8 @@ pub(crate) async fn run_put_tree(
                 &PutFileOptions {
                     behavior,
                     commit: CommitOptions {
-                        preconditions: Vec::new(),
-                        commit_id: None,
                         message,
+                        ..Default::default()
                     },
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -375,20 +373,24 @@ pub(crate) async fn run_get_tree(
                 Ok(spec) => spec,
                 Err(error) => return (remote, Err(error)),
             };
-            let (mut download, meta) =
-                match super::fs::open_resumable_download(context, &spec, None, snapshot_id, &local)
-                    .await
-                {
-                    Ok(opened) => opened,
-                    Err(error) => return (remote, Err(error)),
-                };
+            let super::fs::ResumableDownload {
+                mut download,
+                partial,
+            } = match super::fs::open_resumable_download(context, &spec, None, snapshot_id, &local)
+                .await
+            {
+                Ok(opened) => opened,
+                Err(error) => return (remote, Err(error)),
+            };
             progress.file_started(&remote, size_bytes);
             let written = super::fs::stream_download_to_file(
                 &mut download,
-                &local,
-                meta.as_ref(),
-                behavior,
-                super::fs::DestinationName::Given,
+                super::fs::LocalDestination {
+                    path: &local,
+                    behavior,
+                    name: super::fs::DestinationName::Given,
+                },
+                partial.as_ref(),
                 &progress,
             )
             .await;
@@ -481,9 +483,8 @@ pub(crate) async fn run_copy_tree(
                     &loonfs_client::CopyOptions {
                         behavior,
                         commit: CommitOptions {
-                            preconditions: Vec::new(),
-                            commit_id: None,
                             message: message.clone(),
+                            ..Default::default()
                         },
                         expected_destination_inode_id: None,
                         expected_destination_revision_no: None,

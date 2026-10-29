@@ -5,7 +5,7 @@ use super::context::{
     create_directory_tolerating_existing, default_remote_put_path, destination_path_for_get,
     destination_user_path, directory_intent, fail, namespace_path, parse_user_path_arg,
     render_target, resolve_command_context, resolve_mutation_context, CommandContext,
-    RemoteDirectoryOutcome, RootPath, UndeleteHint,
+    ProfileSource, RemoteDirectoryOutcome, RootPath, UndeleteHint,
 };
 use super::download::FileDownload;
 use super::output::{
@@ -362,14 +362,7 @@ pub(crate) async fn run_filesystem_cat(
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
-    let revision_no = args.revision;
-    let snapshot_id = args.snapshot_id.clone();
-    let mut download = context
-        .target
-        .open_file_download(&spec, revision_no, snapshot_id.as_ref(), 0)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-    stream_download_to_stdout(&mut download)
+    stream_file_to_stdout(&context, &spec, args.revision, args.snapshot_id.as_ref())
         .await
         .map_err(|error| context.fail(kind, error))?;
     Ok(context.output(kind, CommandData::StreamedToStdout))
@@ -460,12 +453,7 @@ pub(crate) async fn run_filesystem_get(
     if args.local_destination.as_deref() == Some("-") {
         // No progress and no resume: standard output is carrying the file,
         // and bytes already piped onward are somewhere this CLI cannot see.
-        let mut download = context
-            .target
-            .open_file_download(&spec, revision_no, snapshot_id.as_ref(), 0)
-            .await
-            .map_err(|error| context.fail(kind, error))?;
-        stream_download_to_stdout(&mut download)
+        stream_file_to_stdout(&context, &spec, revision_no, snapshot_id.as_ref())
             .await
             .map_err(|error| context.fail(kind, error))?;
         return Ok(context.output(kind, CommandData::StreamedToStdout));
@@ -479,7 +467,10 @@ pub(crate) async fn run_filesystem_get(
     let destination =
         destination_path_for_get(spec.absolute_path(), args.local_destination.as_deref())
             .map_err(|error| context.fail(kind, error))?;
-    let (mut download, meta) = open_resumable_download(
+    let ResumableDownload {
+        mut download,
+        partial,
+    } = open_resumable_download(
         &context,
         &spec,
         revision_no,
@@ -496,7 +487,7 @@ pub(crate) async fn run_filesystem_get(
     ));
     let size_bytes = download
         .resume_identity()
-        .map(|(claim, _)| claim.size_bytes);
+        .map(|identity| identity.content_ref.size_bytes);
     progress.expect(size_bytes, Some(1));
     progress.file_started(spec.absolute_path().as_str(), size_bytes);
     // The local working copy is the one thing this CLI touches that has no
@@ -505,10 +496,12 @@ pub(crate) async fn run_filesystem_get(
     // the completed partial file.
     let written = stream_download_to_file(
         &mut download,
-        &destination,
-        meta.as_ref(),
-        destination_behavior(args.force),
-        name,
+        LocalDestination {
+            path: &destination,
+            behavior: destination_behavior(args.force),
+            name,
+        },
+        partial.as_ref(),
         &progress,
     )
     .await;
@@ -526,6 +519,12 @@ pub(crate) async fn run_filesystem_get(
     Ok(context.output(kind, data))
 }
 
+/// A download and the partial-file metadata that a resumed run has to match.
+pub(super) struct ResumableDownload {
+    pub(super) download: FileDownload,
+    pub(super) partial: Option<PartialDownloadMetadata>,
+}
+
 /// Opens a download at the offset recorded in a matching partial file.
 pub(super) async fn open_resumable_download(
     context: &CommandContext,
@@ -533,14 +532,15 @@ pub(super) async fn open_resumable_download(
     revision_no: Option<RevisionNo>,
     snapshot_id: Option<&PinId>,
     destination: &Path,
-) -> Result<(FileDownload, Option<PartialDownloadMetadata>), CliError> {
+) -> Result<ResumableDownload, CliError> {
     let mut download = context
         .target
         .open_file_download(spec, revision_no, snapshot_id, 0)
         .await?;
     let identity = download.resume_identity();
-    let resolved_revision = identity.map(|(_, revision)| revision);
-    let meta = identity.map(|(claim, _)| PartialDownloadMetadata::describe(claim, revision_no));
+    let resolved_revision = identity.map(|identity| identity.revision_no);
+    let meta = identity
+        .map(|identity| PartialDownloadMetadata::describe(identity.content_ref, revision_no));
     let start_offset = meta
         .as_ref()
         .map_or(0, |meta| partial::resumable_bytes(destination, meta));
@@ -562,7 +562,10 @@ pub(super) async fn open_resumable_download(
             )
             .await?;
     }
-    Ok((download, meta))
+    Ok(ResumableDownload {
+        download,
+        partial: meta,
+    })
 }
 
 /// Writes a download into its destination through the partial file, and
@@ -580,18 +583,14 @@ pub(super) async fn open_resumable_download(
 /// rather than reaching the destination.
 pub(super) async fn stream_download_to_file(
     download: &mut FileDownload,
-    destination: &Path,
+    destination: LocalDestination<'_>,
     meta: Option<&PartialDownloadMetadata>,
-    behavior: DestinationBehavior,
-    name: DestinationName,
     progress: &ProgressReporter,
 ) -> Result<u64, CliError> {
     let resumed_from = download.resumed_from();
-    let mut partial = PartialDownload::open(destination, meta, resumed_from)
-        .map_err(|error| local_open_error(destination, error, behavior, name))?;
-    partial.fold_into(download, |error| {
-        local_destination_error(destination, error, behavior, name)
-    })?;
+    let mut partial = PartialDownload::open(destination.path, meta, resumed_from)
+        .map_err(|error| destination.open_error(error))?;
+    partial.fold_into(download, |error| destination.write_error(error))?;
     progress.already_done(resumed_from);
     if resumed_from > 0 {
         // Folding a head start back into the verification takes time and
@@ -603,13 +602,13 @@ pub(super) async fn stream_download_to_file(
     while let Some(chunk) = download.next_chunk().await? {
         partial
             .write_all(&chunk)
-            .map_err(|error| local_destination_error(destination, error, behavior, name))?;
+            .map_err(|error| destination.write_error(error))?;
         bytes_written += chunk.len() as u64;
         progress.advance(chunk.len() as u64);
     }
     partial
-        .install(destination, behavior)
-        .map_err(|error| local_destination_error(destination, error, behavior, name))?;
+        .install(destination.path, destination.behavior)
+        .map_err(|error| destination.write_error(error))?;
     Ok(bytes_written)
 }
 
@@ -632,14 +631,23 @@ fn destination_behavior(force: bool) -> DestinationBehavior {
     }
 }
 
-/// Writes a download to standard output as it arrives.
+/// Downloads one file and writes it to standard output as it arrives.
 ///
 /// Bytes are handed on chunk by chunk, so a streamed download that fails its
 /// verification at the end fails after some of the file has already been
 /// written. That is what streaming to a pipe means — `cat` behaves the same
 /// way — and it is why the exit status, not the output, is what says whether
 /// the content was verified.
-async fn stream_download_to_stdout(download: &mut FileDownload) -> Result<(), CliError> {
+async fn stream_file_to_stdout(
+    context: &CommandContext,
+    spec: &NamespacePath,
+    revision_no: Option<RevisionNo>,
+    snapshot_id: Option<&PinId>,
+) -> Result<(), CliError> {
+    let mut download = context
+        .target
+        .open_file_download(spec, revision_no, snapshot_id, 0)
+        .await?;
     while let Some(chunk) = download.next_chunk().await? {
         // Locked per chunk rather than held across the fetch: nothing else
         // writes to stdout while a download runs, and a guard held across an
@@ -652,51 +660,52 @@ async fn stream_download_to_stdout(download: &mut FileDownload) -> Result<(), Cl
     io::stdout().lock().flush().map_err(CliError::io)
 }
 
-/// Shapes the failure to open a download's partial file.
-///
-/// A missing directory is the one failure whose underlying error is about the
-/// wrong thing: it names the partial file this CLI picked, which the caller
-/// never asked for and cannot act on. The parent they have to create is what
-/// the message says instead.
-fn local_open_error(
-    destination: &Path,
-    error: std::io::Error,
-    behavior: DestinationBehavior,
-    name: DestinationName,
-) -> CliError {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        let parent_error = std::io::Error::new(
-            error.kind(),
-            format!(
-                "parent directory `{}` does not exist",
-                partial::parent_of(destination).display()
-            ),
-        );
-        return CliError::io_for_path(destination, parent_error);
-    }
-    local_destination_error(destination, error, behavior, name)
+/// A local file that a download writes, and the facts that shape a failure
+/// to write it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct LocalDestination<'a> {
+    pub(super) path: &'a Path,
+    pub(super) behavior: DestinationBehavior,
+    pub(super) name: DestinationName,
 }
 
-/// Shapes a local write failure the way `get` has always reported one.
-fn local_destination_error(
-    destination: &Path,
-    error: std::io::Error,
-    behavior: DestinationBehavior,
-    name: DestinationName,
-) -> CliError {
-    if behavior == DestinationBehavior::NoReplace
-        && error.kind() == std::io::ErrorKind::AlreadyExists
-    {
-        return CliError::destination_exists(destination);
+impl LocalDestination<'_> {
+    /// Shapes the failure to open a download's partial file.
+    ///
+    /// A missing directory is the one failure whose underlying error is about
+    /// the wrong thing: it names the partial file this CLI picked, which the
+    /// caller never asked for and cannot act on. The parent they have to
+    /// create is what the message says instead.
+    fn open_error(&self, error: io::Error) -> CliError {
+        if error.kind() == io::ErrorKind::NotFound {
+            let parent_error = io::Error::new(
+                error.kind(),
+                format!(
+                    "parent directory `{}` does not exist",
+                    partial::parent_of(self.path).display()
+                ),
+            );
+            return CliError::io_for_path(self.path, parent_error);
+        }
+        self.write_error(error)
     }
-    let mut error = CliError::io_for_path(destination, error);
-    if name == DestinationName::Derived {
-        error.message.push_str(
-            "; if the remote name exceeds local filesystem limits, pass an \
-             explicit destination or `-` for stdout",
-        );
+
+    /// Shapes a local write failure the way `get` has always reported one.
+    fn write_error(&self, error: io::Error) -> CliError {
+        if self.behavior == DestinationBehavior::NoReplace
+            && error.kind() == io::ErrorKind::AlreadyExists
+        {
+            return CliError::destination_exists(self.path);
+        }
+        let mut error = CliError::io_for_path(self.path, error);
+        if self.name == DestinationName::Derived {
+            error.message.push_str(
+                "; if the remote name exceeds local filesystem limits, pass an \
+                 explicit destination or `-` for stdout",
+            );
+        }
+        error
     }
-    error
 }
 
 pub(crate) async fn run_filesystem_trash(
@@ -719,7 +728,11 @@ pub(crate) async fn run_filesystem_trash(
     let PagedListing::Collected(response) = listing else {
         return Ok(context.output(kind, CommandData::StreamedToStdout));
     };
-    let hint = UndeleteHint::new(&context, location, args.target.profile.profile.is_some());
+    let hint = UndeleteHint::new(
+        &context,
+        location,
+        ProfileSource::from_selector(&args.target.profile),
+    );
     let recovery_commands = response
         .entries
         .iter()
@@ -857,16 +870,7 @@ pub(crate) async fn run_filesystem_put(
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
     let payload = LocalPayload::file(&local_path, metadata.len());
     let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
-    commit_put(
-        kind,
-        &context,
-        &spec,
-        &payload,
-        &options,
-        runtime,
-        Some(metadata.len()),
-    )
-    .await
+    commit_put(kind, &context, &spec, &payload, &options, runtime).await
 }
 
 /// `loonfs put - <remote>`: standard input, whose length is not knowable, so
@@ -910,7 +914,6 @@ async fn run_filesystem_put_stdin(
         &LocalPayload::Stdin,
         &options,
         runtime,
-        None,
     )
     .await
 }
@@ -923,13 +926,13 @@ async fn commit_put(
     payload: &LocalPayload,
     options: &PutFileOptions,
     runtime: RuntimeBehavior,
-    size_bytes: Option<u64>,
 ) -> Result<CommandOutput, CommandFailure> {
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Put,
         spec.absolute_path().as_str(),
     ));
+    let size_bytes = payload.size_bytes();
     progress.expect(size_bytes, Some(1));
     progress.file_started(spec.absolute_path().as_str(), size_bytes);
     let result = put_payload(context, spec, payload, options, &progress).await;
@@ -1192,9 +1195,12 @@ pub(crate) async fn run_filesystem_rm(
     // printed command restores in place with no destination — and keeps
     // working even if the enclosing directories are renamed before the
     // paste.
-    let recovery_command =
-        UndeleteHint::new(&context, location, args.target.profile.profile.is_some())
-            .command(deleted_inode, result.committed_seq);
+    let recovery_command = UndeleteHint::new(
+        &context,
+        location,
+        ProfileSource::from_selector(&args.target.profile),
+    )
+    .command(deleted_inode, result.committed_seq);
 
     Ok(context.output(
         kind,
