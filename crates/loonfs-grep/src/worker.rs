@@ -35,7 +35,7 @@ use loonfs_types::format::segment_blocks::{
 };
 use loonfs_types::{
     ChangeSeq, ContentRef, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId, RevisionNo,
-    RunNo,
+    RunNo, MAX_PAGE_LIMIT,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -296,6 +296,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildOutcome> {
+        if policy.max_files_per_step.get() > MAX_PAGE_LIMIT as usize {
+            return Err(loonfs::Error::InvalidRequest {
+                message: format!("max_files_per_step must be at most {MAX_PAGE_LIMIT}"),
+                param: "max_files_per_step",
+            }
+            .into());
+        }
         let deadline = Deadline::start(self.timer());
         let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
             return Ok(GrepBuildOutcome::NotEnabled);

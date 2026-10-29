@@ -2928,3 +2928,47 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         ["/team/file"]
     );
 }
+
+#[tokio::test]
+async fn a_direct_build_policy_rejects_oversized_pages_without_panicking() {
+    let directory = tempdir().expect("directory");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("policy-limit").expect("namespace");
+    let host = GrepHost::new(&store, "policy-limit").await;
+    host.writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    host.worker
+        .enable(&namespace_id)
+        .await
+        .expect("enable grep");
+    for limit in [loonfs_types::MAX_PAGE_LIMIT as usize + 1, usize::MAX] {
+        let error = host
+            .worker
+            .build_step(
+                &namespace_id,
+                GramIndexBuildPolicy {
+                    max_files_per_step: nonzero_usize(limit),
+                    ..GramIndexBuildPolicy::default()
+                },
+            )
+            .await
+            .expect_err("an oversized policy returns an error");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+        assert_eq!(
+            error.to_error_response().param.as_deref(),
+            Some("max_files_per_step")
+        );
+    }
+    host.worker
+        .build_step(
+            &namespace_id,
+            GramIndexBuildPolicy {
+                max_files_per_step: nonzero_usize(loonfs_types::MAX_PAGE_LIMIT as usize),
+                ..GramIndexBuildPolicy::default()
+            },
+        )
+        .await
+        .expect("the maximum page size is accepted");
+}
