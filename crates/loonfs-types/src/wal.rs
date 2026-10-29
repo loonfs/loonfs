@@ -1,7 +1,7 @@
 //! The WAL object format: envelopes, commit payloads, and the delta
 //! records replay applies ([Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records)).
 
-use crate::digest::sha256_digest;
+use crate::digest::{sha256_digest, SHA256_DIGEST_BYTES};
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::manifest::{DeletedBinding, DeltaPosition};
 use crate::{
@@ -42,7 +42,7 @@ pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
         cbor_string_bytes(WalEnvelopeKind::WalObject.as_str().len()),
     ),
     ("format_version", 5),
-    ("payload_checksum", cbor_string_bytes(64)),
+    ("payload_checksum", cbor_string_bytes(SHA256_DIGEST_BYTES)),
     ("payload", 9),
 ]) + cbor_map_bytes(&[
     ("namespace_id", cbor_string_bytes(crate::ids::MAX_ID_BYTES)),
@@ -50,6 +50,7 @@ pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
     ("writer_epoch", 9),
     ("head_seq", 9),
     ("next_inode_id", 9),
+    ("basis_floor_seq", 9),
     ("records", 9),
 ]);
 
@@ -872,12 +873,12 @@ mod tests {
     #[test]
     fn decoder_accepts_the_limit_and_rejects_the_next_byte_before_decoding() {
         let encoded = encode_wal_object_envelope_zstd(WalObjectPayload {
-            namespace_id: NamespaceId::parse("bounded").expect("namespace"),
-            wal_no: WalNo(1),
-            writer_epoch: WriterEpoch(1),
-            head_seq: ChangeSeq(0),
-            next_inode_id: InodeId(2),
-            basis_floor_seq: ChangeSeq(0),
+            namespace_id: NamespaceId::parse("n".repeat(crate::MAX_ID_BYTES)).expect("namespace"),
+            wal_no: WalNo(crate::MAX_PUBLIC_INTEGER),
+            writer_epoch: WriterEpoch(crate::MAX_PUBLIC_INTEGER),
+            head_seq: ChangeSeq(crate::MAX_PUBLIC_INTEGER),
+            next_inode_id: InodeId(crate::MAX_PUBLIC_INTEGER),
+            basis_floor_seq: ChangeSeq(crate::MAX_PUBLIC_INTEGER),
             records: Vec::new(),
         })
         .expect("encode");
