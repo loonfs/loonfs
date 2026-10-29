@@ -171,9 +171,13 @@ impl FoldedWalTail {
 /// The manifest copies both epochs from its predecessor (format spec,
 /// "Publishing a materialized file set"). A writer session passes the tail
 /// it holds as `held`, and every other caller passes `None`, which loads the
-/// tail from the store. The publication's first attempt starts from the
-/// manifest that the tail was read above, and each later attempt starts
-/// from the manifest that the attempt before it found (see
+/// tail from the store. A held tail whose last check is at the revalidation
+/// bound is discarded, and the tail is loaded from the store too: garbage
+/// collection keeps the manifest that the tail was read above for one grace
+/// after a successor, and a check within the bound is younger than that
+/// grace (see `update_manifest`). The publication's first attempt starts
+/// from the manifest that the tail was read above, and each later attempt
+/// starts from the manifest that the attempt before it found (see
 /// `update_manifest`).
 /// A current manifest that folds the tail finishes the fold, and any other
 /// manifest after the fold's own predecessor makes the fold rebuild against
@@ -190,6 +194,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     content_writes: &crate::PermitPool,
 ) -> Result<FoldedWalTail> {
+    let held = held.filter(|held| held.basis_checked.is_within_revalidation_bound());
     let projection = match held {
         Some(held) => ManifestProjection {
             manifest_segments: load_basis_metadata_segments(store, segment_cache, &held.basis)

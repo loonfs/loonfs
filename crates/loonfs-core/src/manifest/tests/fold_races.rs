@@ -1,16 +1,18 @@
 //! A fold that loses its manifest number to another publication.
 
-use super::fold::{fold_wal_tail, FoldWalResponse, FoldedWalTail};
+use super::fold::{fold_wal, fold_wal_tail, FoldWalResponse, FoldedWalTail};
 use super::*;
 use crate::error::Result;
-use crate::limits::MAX_CONTENTION_ATTEMPTS;
+use crate::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
 use crate::manifest::{claim_compactor, PublishedManifest};
 use crate::namespace::control::CurrentManifest;
 use crate::publish::{InlineContent, WalFoldInput};
+use crate::time::Observation;
 use crate::wal::WalPublishError;
 use crate::FoldWalOutcome;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::layout::{parse_object_key, wal_no_of, DurableObjectFamily};
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{RecordedOperation, StoreCounts};
 use loonfs_types::{CompactorEpoch, ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
 use std::path::Path;
@@ -525,6 +527,65 @@ async fn a_fold_from_a_fresh_position_puts_on_its_basis_and_reads_no_hint() {
             "the hint lags: {hint_lags}"
         );
     }
+}
+
+/// Checks that a fold from a position whose last check is at the
+/// revalidation bound loads the tail from the store instead of reading the
+/// position's manifest, which garbage collection removes once a successor
+/// is older than the grace window.
+#[tokio::test]
+async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
+    let content_writes = crate::test_support::content_writes();
+    let mut writer = Writer::open().await;
+    writer.commit("first", Vec::new(), &["/a"]).await;
+    let mut held = writer.engine.wal_fold_input().expect("tail");
+    let clock = Arc::new(ManualClock::new(0));
+    held.basis_checked = Observation::now(clock.clone());
+    let superseded = metadata_manifest_object(&writer.namespace_id, &held.basis.manifest_no());
+
+    // Another process folds the tail and raises the hint, and garbage
+    // collection removes the position's manifest once the fold is older
+    // than the grace window.
+    let other = writer.other_process();
+    let folded_by_other = fold_wal(&other, &writer.namespace_id)
+        .await
+        .expect("the other process folds");
+    assert_eq!(folded_by_other.outcome, FoldWalOutcome::Published);
+    crate::test_support::raise_hint_to_current_manifest(&other, &writer.namespace_id).await;
+    writer
+        .store
+        .delete(&superseded)
+        .await
+        .expect("remove the superseded manifest");
+    clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+
+    writer.store.reset();
+    let folded = fold_wal_tail(
+        &*writer.store,
+        None,
+        &writer.namespace_id,
+        Some(held),
+        &deadline(),
+        crate::manifest::MetadataRunPolicy::default(),
+        &content_writes,
+    )
+    .await
+    .expect("a fold past the bound loads the tail from the store");
+    assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
+    assert_eq!(
+        folded.manifest.manifest.manifest_no,
+        folded_by_other.manifest_no
+    );
+    let requests = control_requests(&writer.namespace_id, &writer.store.take());
+    assert_eq!(
+        requests.first(),
+        Some(&("get", hint(&writer.namespace_id))),
+        "the fold starts from the hint: {requests:?}"
+    );
+    assert!(
+        !requests.contains(&("get", superseded)),
+        "the fold never reads the position's manifest: {requests:?}"
+    );
 }
 
 /// Checks that a fold keeps the tail it read through a claim at each

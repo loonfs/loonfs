@@ -1071,9 +1071,11 @@ impl Maintenance {
     ///
     /// In a runtime with the namespace's writer session, the fold folds the
     /// tail of the position that reads start from, so it reads no WAL
-    /// objects, and it publishes on the position's manifest. A commit that
-    /// the session publishes while the fold runs isn't in that position, so
-    /// the commit stays in the WAL tail above the fold's manifest.
+    /// objects, and it publishes on the position's manifest. A position
+    /// whose last check is at the revalidation bound is discarded, and the
+    /// fold loads the tail from the store. A commit that the session
+    /// publishes while the fold runs isn't in that position, so the commit
+    /// stays in the WAL tail above the fold's manifest.
     async fn run_wal_fold(&self, namespace_id: &NamespaceId) -> Result<FoldWalResponse> {
         async {
             let _permit = self.writer.execution_budget.fold_permit().await;

@@ -1312,7 +1312,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// WAL tail into a new manifest, creating no
     /// pin. Superseded manifests become garbage-collection
     /// candidates once nothing pins them. If [`Self::with_writer_position`]
-    /// set a position, the fold takes the tail from that position. The report
+    /// set a position, the fold takes the tail from that position while the
+    /// position's last check is within the revalidation bound. The report
     /// includes the manifest this call published.
     pub async fn fold_wal(&self) -> Result<PublicationReport<FoldWalResponse>> {
         let folded = crate::manifest::fold_wal_tail(
