@@ -5,7 +5,13 @@ use crate::namespace::control::{load_current_manifest_with_hint, raise_namespace
 use loonfs_test_support::stores::MetadataMapStore;
 use std::assert_matches;
 
-async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool) {
+/// Parks a request of discovery, raises the hint to manifest 4 and collects
+/// the manifests below it while the request waits, and checks that
+/// discovery then returns manifest 4 and the raised hint.
+///
+/// With `block_probe`, the parked request is the probe's HEAD of the number
+/// after `start`, and otherwise it's the GET of manifest `start`.
+async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("discovery-gc").expect("namespace");
     let store = MetadataMapStore::aged(
@@ -20,15 +26,9 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
         acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("publish manifest 2");
-        raise_namespace_hint(
-            &store,
-            &namespace_id,
-            start,
-            None,
-            Arc::new(StdMonotonicTimer::default()),
-        )
-        .await
-        .expect("advance initial hint");
+        raise_namespace_hint(&store, &namespace_id, start, None)
+            .await
+            .expect("advance initial hint");
     }
     // A publication doesn't raise the hint, so the hint lags at `start` until
     // the reader below has read it.
@@ -42,12 +42,16 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
         .expect("current manifest");
     assert_eq!(expected.state.manifest().manifest_no, ManifestNo(4));
     assert_eq!(initial_hint.state.manifest_no, start);
-    let blocked_number = ManifestNo(start.0 + u64::from(block_next_manifest));
+    let blocked_number = ManifestNo(start.0 + u64::from(block_probe));
     let blocked_key = metadata_manifest_object(&namespace_id, &blocked_number);
     let blocked = BlockingStore::new(
         store,
         KeyPredicate::exact(&blocked_key),
-        OperationSelector::Get,
+        if block_probe {
+            OperationSelector::Head
+        } else {
+            OperationSelector::Get
+        },
     );
     blocked.block_next();
     let (discovered, ()) = tokio::join!(
@@ -59,7 +63,6 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
                 &namespace_id,
                 expected.state.manifest().manifest_no,
                 None,
-                Arc::new(StdMonotonicTimer::default()),
             )
             .await
             .expect("raise discovery hint");
@@ -100,6 +103,8 @@ async fn discovery_reloads_a_hint_when_gc_removes_its_starting_manifest() {
     }
 }
 
+/// Checks that discovery whose probe finds the manifest after the hinted one
+/// collected reads the newer hint again and finds the newest manifest.
 #[tokio::test]
 async fn discovery_reloads_a_hint_when_gc_removes_the_next_manifest() {
     for start in [ManifestNo(1), ManifestNo(2)] {
@@ -232,4 +237,94 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         .expect("current manifest");
     assert_eq!(current.state.manifest().manifest_no, ManifestNo(3));
     assert_eq!(hint.state.manifest_no, ManifestNo(3));
+}
+
+/// Checks that a publication whose basis was checked the revalidation bound
+/// ago or longer, and whose basis's successor has been deleted by garbage
+/// collection, loads the current manifest through the hint and publishes
+/// after it.
+///
+/// The basis's successor is missing, so a publication that put the
+/// successor's number without discovery would create the deleted number
+/// again, beside the newer manifests.
+#[tokio::test]
+async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current_manifest() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("stale-basis").expect("namespace");
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::manifest(&namespace_id),
+    );
+    let context = test_context();
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("create");
+    acquire_writer_epoch(&store, &namespace_id, &context)
+        .await
+        .expect("publish manifest 2");
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let basis = crate::namespace::PublicationBasis {
+        manifest: load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("manifest 2"),
+        checked: crate::time::Observation::now(clock.clone()),
+    };
+    // Other processes publish manifests 3 to 5 and raise the hint, and a
+    // garbage collection pass one grace later deletes every manifest below
+    // the hint.
+    for _ in 3..=5 {
+        acquire_writer_epoch(&store, &namespace_id, &context)
+            .await
+            .expect("another process publishes");
+    }
+    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
+    let options = crate::gc::GcOptions::default();
+    clock.advance_ms(options.grace_window_ms + 1);
+    let report = crate::gc::gc_namespace(
+        &store,
+        None,
+        None,
+        &namespace_id,
+        &options,
+        &MutationContext {
+            now_ms: options.grace_window_ms + 1,
+            ..context.clone()
+        },
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("collect old manifests");
+    assert_eq!(report.deleted.manifests, 4);
+    let successor = metadata_manifest_object(&namespace_id, &ManifestNo(3));
+    assert!(store
+        .head(&successor)
+        .await
+        .expect("the basis's successor")
+        .is_none());
+
+    let ((), published, hint) = crate::manifest::publish::update_manifest(
+        &store,
+        &namespace_id,
+        Some(basis),
+        &Deadline::start(clock),
+        crate::limits::MAX_CONTENTION_ATTEMPTS,
+        |current: crate::namespace::control::LoadedManifest| async move {
+            Ok(crate::manifest::publish::ManifestChange::Next(
+                Box::new(current.state.envelope.payload().clone()),
+                (),
+            ))
+        },
+    )
+    .await
+    .expect("publish");
+    assert_eq!(published.state.manifest().manifest_no, ManifestNo(6));
+    assert_eq!(hint.expect("discovery").state.manifest_no, ManifestNo(5));
+    assert!(
+        store
+            .head(&successor)
+            .await
+            .expect("the basis's successor")
+            .is_none(),
+        "the publication didn't put the deleted number again"
+    );
 }

@@ -76,7 +76,6 @@ async fn fixture(name: &str) -> Fixture {
         .await
         .expect("commit file");
     writer.drain().await.expect("finish hints");
-    writer.wait_for_hint_raises().await;
     let clock = Arc::new(ManualClock::new(1_000_000));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let reader = LoonFs::builder_with_store(store)
@@ -659,7 +658,7 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
 /// cached head it became, and the read loads the namespace again.
 #[tokio::test]
 async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
-    let fixture = writer_position_reads::fixture("dropped-position", Parked::ManifestChecks).await;
+    let fixture = writer_position_reads::fixture("dropped-position", Parked::LoadChecks).await;
     let gate = fixture.recording.inner();
     // Past the revalidation bound, the next read drops the position and
     // loads the namespace from the store.
@@ -725,7 +724,7 @@ async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
 /// eventual read at the end.
 #[tokio::test]
 async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
-    let fixture = writer_position_reads::fixture("spanning-load", Parked::ManifestChecks).await;
+    let fixture = writer_position_reads::fixture("spanning-load", Parked::LoadChecks).await;
     let gate = fixture.recording.inner();
     // Past the revalidation bound, the next read drops the position and
     // loads the namespace from the store.

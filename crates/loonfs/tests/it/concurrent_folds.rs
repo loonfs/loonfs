@@ -198,9 +198,9 @@ async fn folds_for(shape: Shape) -> u64 {
 /// here batches enough commits that the inline threshold, not the WAL
 /// object count, starts each fold.)
 ///
-/// When every request takes as long as a WAL put, each fold runs slower
-/// than the commits, and the tail grows past the threshold while the fold
-/// runs. The next fold then covers more than one threshold, so the same
+/// When every other request takes twice as long as a WAL put, each fold runs
+/// slower than the commits, and the tail grows past the threshold while the
+/// fold runs. The next fold then covers more than one threshold, so the same
 /// commits take fewer folds. That's why the fold counts of two runs with
 /// different store latency can't be compared.
 #[tokio::test(start_paused = true)]
@@ -222,7 +222,7 @@ async fn concurrent_committers_fold_once_per_threshold_of_inline_bytes() {
 
     let slow_folds = Shape {
         wal_put_elapsed_ms: 20,
-        request_elapsed_ms: 20,
+        request_elapsed_ms: 40,
         ..slow_commits(32, 80)
     };
     let thresholds = slow_folds.fold_thresholds();

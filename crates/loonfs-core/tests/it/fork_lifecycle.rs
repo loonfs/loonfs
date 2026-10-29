@@ -118,6 +118,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     for _ in 0..16 {
         let report = engine
             .compact_metadata_unit(
+                None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
@@ -774,6 +775,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     for _ in 0..16 {
         let report = engine
             .compact_metadata_unit(
+                None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
@@ -872,6 +874,7 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
     for _ in 0..16 {
         let outcome = fork
             .compact_metadata_unit(
+                None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
@@ -973,6 +976,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     for _ in 0..16 {
         match engine
             .compact_metadata_unit(
+                None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
@@ -1428,15 +1432,9 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .state
         .manifest()
         .manifest_no;
-    loonfs_core::control::raise_namespace_hint(
-        &store,
-        &namespace_id,
-        tombstone,
-        None,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("raise the hint");
+    loonfs_core::control::raise_namespace_hint(&store, &namespace_id, tombstone, None)
+        .await
+        .expect("raise the hint");
     let report = loonfs_core::gc_namespace(
         &store,
         None,

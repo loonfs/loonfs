@@ -1342,8 +1342,24 @@ impl NamespaceManifestPayload {
         Ok(())
     }
 
-    /// Rejects changed identity, decreasing counters, and publication after deletion.
+    /// Rejects changed identity, decreasing counters, and publication after
+    /// deletion in `successor`, and a `successor` without the next manifest
+    /// number.
     pub fn ensure_successor(&self, successor: &Self) -> Result<(), ManifestChainError> {
+        self.ensure_followed_by(successor, true)
+    }
+
+    /// Rejects the changes that [`Self::ensure_successor`] rejects in `later`,
+    /// a manifest with any higher number.
+    ///
+    /// Each rule that a successor keeps also holds between any two manifests
+    /// of the chain, so a reader that skips the manifests between two numbers
+    /// checks the two manifests that it loaded with this.
+    pub fn ensure_later(&self, later: &Self) -> Result<(), ManifestChainError> {
+        self.ensure_followed_by(later, false)
+    }
+
+    fn ensure_followed_by(&self, successor: &Self, next: bool) -> Result<(), ManifestChainError> {
         let invalid = |field: &str| {
             Err(ManifestChainError {
                 field: field.to_owned(),
@@ -1352,7 +1368,12 @@ impl NamespaceManifestPayload {
         if successor.namespace_id != self.namespace_id {
             return invalid("namespace_id");
         }
-        if self.manifest_no.successor().ok() != Some(successor.manifest_no) {
+        let numbered = if next {
+            self.manifest_no.successor().ok() == Some(successor.manifest_no)
+        } else {
+            successor.manifest_no > self.manifest_no
+        };
+        if !numbered {
             return invalid("manifest_no");
         }
         if successor.folded_wal_no < self.folded_wal_no {
@@ -1624,6 +1645,64 @@ mod tests {
         assert_eq!(
             deleted
                 .ensure_successor(&after_tombstone)
+                .expect_err("a tombstone ends its namespace")
+                .field,
+            "status"
+        );
+    }
+
+    #[test]
+    fn a_later_manifest_keeps_the_chain_rules_without_the_next_number() {
+        let initial = NamespaceManifestPayload::initial(
+            NamespaceId::parse("later").expect("namespace"),
+            1_000,
+            crate::ActorId::parse("test").expect("actor"),
+            super::NamespaceAccess::Unrestricted {},
+        );
+        let mut later = initial.clone();
+        later.manifest_no = ManifestNo(4);
+        later.head_seq = ChangeSeq(3);
+        initial
+            .ensure_later(&later)
+            .expect("a later manifest may skip numbers");
+        assert_eq!(
+            initial
+                .ensure_successor(&later)
+                .expect_err("a successor has the next number")
+                .field,
+            "manifest_no"
+        );
+        assert_eq!(
+            initial
+                .ensure_later(&initial)
+                .expect_err("a later manifest has a higher number")
+                .field,
+            "manifest_no"
+        );
+        let mut regressed = later.clone();
+        regressed.head_seq = ChangeSeq(0);
+        assert_eq!(
+            later
+                .ensure_later(&NamespaceManifestPayload {
+                    manifest_no: ManifestNo(9),
+                    ..regressed
+                })
+                .expect_err("a later manifest keeps every counter")
+                .field,
+            "head_seq"
+        );
+        let deleted = NamespaceManifestPayload {
+            status: crate::control::NamespaceStatus::Deleted {
+                deleted_at_ms: 1_500,
+            },
+            ..later.clone()
+        };
+        assert_eq!(
+            deleted
+                .ensure_later(&NamespaceManifestPayload {
+                    manifest_no: ManifestNo(7),
+                    ..later
+                })
                 .expect_err("a tombstone ends its namespace")
                 .field,
             "status"

@@ -619,11 +619,14 @@ pub enum TailSource {
 
 /// The tail a fold publishes: the head it was replayed against, the basis
 /// the manifest builds on, and the rows themselves. Cheap to take: an `Arc`
-/// clone and two small clones.
+/// clone and a few small clones.
 #[derive(Debug, Clone)]
 pub struct WalFoldInput {
     pub head: NamespaceReadState,
     pub basis: MetadataBasis,
+    /// When a store observation last confirmed `basis` current, as in
+    /// [`ReadPosition::basis_checked`].
+    pub basis_checked: Observation,
     pub tail_state: Arc<ProjectedWalTail>,
     pub wal_tail_objects: u64,
     pub wal_tail_inline_bytes: usize,
@@ -642,6 +645,20 @@ pub struct ReadPosition {
     /// When a store observation last confirmed `basis` current: the
     /// discovery that loaded it, or a HEAD that found no successor.
     pub basis_checked: Observation,
+}
+
+impl ReadPosition {
+    /// Returns the position as the input of a fold of its tail.
+    pub fn wal_fold_input(&self) -> WalFoldInput {
+        WalFoldInput {
+            head: self.head.clone(),
+            basis: self.basis.clone(),
+            basis_checked: self.basis_checked.clone(),
+            tail_state: Arc::clone(&self.tail),
+            wal_tail_objects: self.head.unfolded_wal_objects(),
+            wal_tail_inline_bytes: self.tail.inline_bytes(),
+        }
+    }
 }
 
 /// Tracks writer state for one namespace session: unacquired, acquired, or
@@ -783,13 +800,19 @@ impl NamespaceCommitEngine {
     /// The position's tail as a fold input, or `None` when the engine has no
     /// position.
     pub fn wal_fold_input(&self) -> Option<WalFoldInput> {
+        self.position().as_ref().map(ReadPosition::wal_fold_input)
+    }
+
+    /// Returns the position and its last check, whether or not the session
+    /// is fenced, or `None` when the engine has no position or no record of
+    /// the position's last check.
+    fn position(&self) -> Option<ReadPosition> {
         let position = self.publish_tail.as_ref()?;
-        Some(WalFoldInput {
+        Some(ReadPosition {
             head: position.head.clone(),
             basis: position.basis().clone(),
-            tail_state: Arc::clone(&position.tail),
-            wal_tail_objects: position.head.unfolded_wal_objects(),
-            wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
+            tail: Arc::clone(&position.tail),
+            basis_checked: self.basis_checked.clone()?,
         })
     }
 
@@ -841,13 +864,7 @@ impl NamespaceCommitEngine {
         if matches!(*self.lock_session(), WriterSessionStatus::Fenced(_)) {
             return None;
         }
-        let position = self.publish_tail.as_ref()?;
-        Some(ReadPosition {
-            head: position.head.clone(),
-            basis: position.basis().clone(),
-            tail: Arc::clone(&position.tail),
-            basis_checked: self.basis_checked.clone()?,
-        })
+        self.position()
     }
 
     /// Returns the number of the newest manifest that this engine published
@@ -906,7 +923,9 @@ impl NamespaceCommitEngine {
     /// Deletion publishes a new manifest with the same writer-session checks as
     /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
     /// and a takeover detected during manifest publication permanently fences the
-    /// session. A deletion first folds the WAL tail with `fold_policy`.
+    /// session. A deletion first folds the WAL tail with `fold_policy`. Both
+    /// publications build on the position's manifest while the position's last
+    /// check is within the revalidation bound.
     pub async fn delete_namespace<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
@@ -921,6 +940,7 @@ impl NamespaceCommitEngine {
             &self.namespace_id,
             options,
             acquired_writer,
+            self.wal_fold_input(),
             context,
             &deadline,
             fold_policy,

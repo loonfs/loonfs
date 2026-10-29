@@ -41,6 +41,7 @@ impl Rival {
                         store,
                         None,
                         namespace_id,
+                        None,
                         CompactorEpoch(0),
                         MetadataRunPolicy::default(),
                         MetadataCompactionPolicy::CompactImmediately,
@@ -437,10 +438,12 @@ async fn a_fold_that_loses_to_a_fold_of_its_tail_finishes() {
     );
 }
 
-/// Checks that a fold whose tail another process already folded finishes at
-/// its first attempt and writes nothing.
+/// Checks that a fold from a session's position whose tail another process
+/// already folded loses its manifest put, finds the other process's fold
+/// above the position's manifest, and finishes without another manifest
+/// put.
 #[tokio::test]
-async fn a_fold_whose_tail_is_already_folded_writes_nothing() {
+async fn a_fold_whose_tail_is_already_folded_loses_its_one_manifest_put() {
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let same = writer.engine.wal_fold_input().expect("tail");
@@ -456,53 +459,72 @@ async fn a_fold_whose_tail_is_already_folded_writes_nothing() {
         folded.response.manifest_no,
         basis.successor().expect("next manifest number")
     );
-    assert!(
-        operations.iter().all(|operation| matches!(
-            operation,
-            RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. }
-        )),
-        "{operations:?}"
+    // The fold builds on the position's manifest without a request first,
+    // so it writes its tail's objects before the put that loses.
+    let manifests = metadata_manifest_prefix(&writer.namespace_id);
+    let manifest_writes = operations
+        .iter()
+        .filter(|operation| {
+            operation.key().starts_with(&manifests)
+                && !matches!(
+                    operation,
+                    RecordedOperation::Head { .. }
+                        | RecordedOperation::Get { .. }
+                        | RecordedOperation::GetWithMetadata { .. }
+                )
+        })
+        .map(RecordedOperation::key)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        manifest_writes,
+        vec![metadata_manifest_object(
+            &writer.namespace_id,
+            &basis.successor().expect("next manifest number")
+        )],
+        "the one manifest write is the put that lost"
     );
     assert!(writer.wal_reads(&operations).is_empty(), "{operations:?}");
 }
 
-/// Checks that a fold's publication reads the hint only to load the current
-/// manifest, and leaves the hint for the runtime to raise.
+/// Checks that a fold from a session's position publishes on the position's
+/// manifest with its put and no request for the hint or the manifest's
+/// successor, whether the hint points to that manifest or lags below it, and
+/// leaves the hint for the runtime to raise.
 #[tokio::test]
-async fn a_fold_publication_reads_the_hint_once_per_load() {
-    let mut writer = Writer::open().await;
-    writer.commit("first", Vec::new(), &["/a"]).await;
-    // The runtime that published the session's claim raises the hint.
-    crate::test_support::raise_hint_to_current_manifest(
-        writer.store.as_ref(),
-        &writer.namespace_id,
-    )
-    .await;
-    let basis = writer
-        .engine
-        .wal_fold_input()
-        .expect("tail")
-        .basis
-        .manifest_no();
-    let next = basis.successor().expect("next manifest number");
-    writer.store.reset();
-    let folded = writer.fold().await;
-    assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    let hint = hint(&writer.namespace_id);
-    let manifest = |number| metadata_manifest_object(&writer.namespace_id, &number);
-    assert_eq!(
-        control_requests(&writer.namespace_id, &writer.store.take()),
-        vec![
-            // The session's basis, for its segments.
-            ("get", manifest(basis)),
-            // The attempt's load of the current manifest.
-            ("get", hint.clone()),
-            ("get", manifest(basis)),
-            ("get", manifest(next)),
-            ("get", hint),
-            ("put", manifest(next)),
-        ]
-    );
+async fn a_fold_from_a_fresh_position_puts_on_its_basis_and_reads_no_hint() {
+    for hint_lags in [false, true] {
+        let mut writer = Writer::open().await;
+        writer.commit("first", Vec::new(), &["/a"]).await;
+        // The runtime that published the session's claim raises the hint,
+        // or hasn't raised it yet.
+        if !hint_lags {
+            crate::test_support::raise_hint_to_current_manifest(
+                writer.store.as_ref(),
+                &writer.namespace_id,
+            )
+            .await;
+        }
+        let basis = writer
+            .engine
+            .wal_fold_input()
+            .expect("tail")
+            .basis
+            .manifest_no();
+        let next = basis.successor().expect("next manifest number");
+        writer.store.reset();
+        let folded = writer.fold().await;
+        assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
+        let manifest = |number| metadata_manifest_object(&writer.namespace_id, &number);
+        assert_eq!(
+            control_requests(&writer.namespace_id, &writer.store.take()),
+            vec![
+                // The session's basis, for its segments.
+                ("get", manifest(basis)),
+                ("put", manifest(next)),
+            ],
+            "the hint lags: {hint_lags}"
+        );
+    }
 }
 
 /// Checks that a fold keeps the tail it read through a claim at each

@@ -97,7 +97,6 @@ async fn an_idle_namespace_is_acknowledged_by_one_fence_and_then_left_alone() {
         .await
         .expect("advance the floor");
     let epoch_before = epoch(&store, &namespace_id).await;
-    maintainer.wait_for_hint_raises().await;
     store.reset();
 
     let acknowledged = maintenance
@@ -135,7 +134,6 @@ async fn an_idle_namespace_is_acknowledged_by_one_fence_and_then_left_alone() {
     assert_eq!(fence.basis_floor_seq, floor);
     assert_eq!(epoch(&store, &namespace_id).await, epoch_before + 1);
 
-    maintainer.wait_for_hint_raises().await;
     store.reset();
     let again = maintenance
         .acknowledge_retention_floor(&namespace_id)
@@ -201,7 +199,7 @@ async fn a_namespace_whose_writer_committed_after_the_advance_is_acknowledged_by
         .await
         .expect("commit after the advance");
     let epoch_before = epoch(&store, &namespace_id).await;
-    writer.wait_for_hint_raises().await;
+    writer.drain().await.expect("drain");
     store.reset();
 
     let acknowledged = maintenance

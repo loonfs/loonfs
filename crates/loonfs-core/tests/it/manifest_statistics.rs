@@ -173,11 +173,13 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         let observed = current.statistics().expect("activity");
         assert_eq!(observed.activity, expected);
         let manifest_prefix = loonfs_objectstore::keys::metadata_manifest_prefix(&ns);
+        // Discovery reads the hint and the manifests, and probes manifest
+        // numbers with HEAD requests.
         assert!(store.take().iter().all(|op| {
             matches!(op,
                 RecordedOperation::Get { key, .. } | RecordedOperation::GetWithMetadata { key, .. }
                 if key.ends_with("hint.json") || key.starts_with(&manifest_prefix)
-            )
+            ) || matches!(op, RecordedOperation::Head { key } if key.starts_with(&manifest_prefix))
         }));
         store.reset();
         assert_eq!(current.statistics().expect("loaded activity"), observed);

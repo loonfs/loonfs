@@ -32,6 +32,7 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
         store,
         None,
         namespace_id,
+        None,
         loonfs_types::CompactorEpoch(0),
         Default::default(),
         MetadataCompactionPolicy::CompactImmediately,
@@ -85,15 +86,8 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 LocalFsStore::new(directory.path()).expect("store"),
                 KeyPredicate::any(),
             );
-            let raise_hint = |manifest_no| {
-                raise_namespace_hint(
-                    &store,
-                    &namespace_id,
-                    manifest_no,
-                    None,
-                    Arc::new(StdMonotonicTimer::default()),
-                )
-            };
+            let raise_hint =
+                |manifest_no| raise_namespace_hint(&store, &namespace_id, manifest_no, None);
             let previous = seed_segments(&store, &namespace_id).await;
             // Load without shared caches and leave path reads until after GC,
             // so resolving /docs/one needs the bindings compaction drops.
@@ -264,7 +258,9 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
     )
     .await
     .expect("root an older predecessor");
-    assert_eq!(recorded.counts().heads, 1);
+    // Discovery's probe and the anchor's check each send a HEAD request for
+    // the missing manifest after the current one.
+    assert_eq!(recorded.counts().heads, 2);
     let read: BTreeSet<_> = recorded
         .take_get_keys()
         .into_iter()

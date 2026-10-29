@@ -110,10 +110,11 @@ pub(crate) fn grace_elapsed_after(committed_at_ms: u64) -> u64 {
 /// Raises the namespace's hint to its current manifest, as the runtime that
 /// published that manifest does after the publication.
 ///
-/// A publication in core leaves the hint where it was, so a test that needs
-/// garbage collection or discovery to see a raised hint calls this.
-#[cfg(test)]
-pub(crate) async fn raise_hint_to_current_manifest<S: loonfs_objectstore::ObjectStore + ?Sized>(
+/// A publication in core leaves the hint where it was, and a runtime skips a
+/// raise less than `HINT_RAISE_INTERVAL_MS` after its last one, so a test
+/// that needs garbage collection or discovery to see a current hint calls
+/// this.
+pub async fn raise_hint_to_current_manifest<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &loonfs_types::NamespaceId,
 ) {
@@ -123,15 +124,9 @@ pub(crate) async fn raise_hint_to_current_manifest<S: loonfs_objectstore::Object
         .state
         .manifest()
         .manifest_no;
-    crate::namespace::control::raise_namespace_hint(
-        store,
-        namespace_id,
-        current,
-        None,
-        std_timer(),
-    )
-    .await
-    .expect("raise the hint");
+    crate::namespace::control::raise_namespace_hint(store, namespace_id, current, None)
+        .await
+        .expect("raise the hint");
 }
 
 /// Builds the context a test mutation runs under: `writer_id` at `now_ms`.

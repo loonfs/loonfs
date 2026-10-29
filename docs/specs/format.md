@@ -328,11 +328,11 @@ The namespace's counters advance at different times:
 
 For example, manifest 5 might cover WAL objects through 8 and sequences through 40. WAL object 9 can be a fence at sequence 40, and WAL object 10 can contain commits 41 to 43. The read view is then at sequence 43. A fold can publish manifest 6, covering WAL object 10, without allocating sequence 44.
 
-A manifest publication returns once its manifest is durable, without raising the hint. The runtime that published the manifest raises the hint to the manifest's number afterward, with compare-and-swap. LoonFS starts compare-and-swap writes to one object at least one write interval apart (1 second, as described in the [provider reference](object-storage-providers.md#1-frequently-used-data-points)), so the hint can lag the newest manifest by about one write interval, or by up to two when a publication arrives while a raise waits. A runtime combines its raises of one namespace's hint into one raise to the newest manifest it published, so each runtime has at most one hint write pending for each namespace. For example, if a runtime publishes manifests 6, 7, and 8 while its raise to 5 waits for the write interval, its next raise writes 8, and the runtime writes neither 6 nor 7. If the process exits before it raises the hint, the hint lags until a runtime raises it after a later publication.
+A manifest publication returns once its manifest is durable, and the runtime that published it then raises the hint to the manifest's number with one compare-and-swap, unless the runtime started a raise of that namespace's hint less than `HINT_RAISE_INTERVAL_MS` (1 second) ago, in which case it skips the raise. A raise that fails is logged and ignored. So the hint can lag the newest manifest by the publications of the last second, and it stays behind until a later publication raises it. For example, if a runtime publishes manifests 6, 7, and 8 within one second, it raises the hint to 6, skips the raises for 7 and 8, and raises again at its next publication a second or more later. The interval exists because some providers accept about one write per second to one object (see the [provider reference](object-storage-providers.md#1-frequently-used-data-points)).
 
-Why does the hint exist, and why can it lag? A reader needs a place to start that doesn't require listing the namespace's manifests, because object-storage listings are slow, and LoonFS keeps them off every hot path. LoonFS updates the hint after it publishes a manifest, as a separate compare-and-swap. Keeping the hint and the manifest in step would need a transaction across two objects, which object storage doesn't support. So readers treat the hint as a starting point and check for newer manifests (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
+Why does the hint exist, and why can it lag? A reader needs a place to start that doesn't require listing the namespace's manifests, because object-storage listings are slow, and LoonFS keeps them off every hot path. LoonFS updates the hint after it publishes a manifest, as a separate compare-and-swap. Keeping the hint and the manifest in step would need a transaction across two objects, which object storage doesn't support. So readers treat the hint as a starting point and check for newer manifests (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). A publication that already has a manifest confirmed current less than `READ_REVALIDATION_BOUND_MS` ago starts from that manifest instead of from the hint, and checks it for a successor (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)).
 
-Why doesn't a publication wait for its hint raise? The raises that follow a namespace's manifest publications all write the same hint object, and some providers accept about one write per second to one object. If a publication waited for its raise, any publication that followed another one within a second would wait for the rest of that second. A hint that lags costs a reader a few more manifest reads, and it doesn't change what the reader finds.
+Why does a publication skip a raise instead of waiting for the interval? The raises that follow a namespace's manifest publications all write the same hint object, so a publication that waited for its turn would hold its worker for the rest of the second. A hint that lags costs a reader one more round trip, and it doesn't change what the reader finds, because discovery probes forward (see [A summary of the log protocol](#26-a-summary-of-the-log-protocol)).
 
 ### 2.5 Manifest references
 
@@ -368,7 +368,7 @@ WAL:        [7]  [8]  [9]  [10]  [11]   <- WAL tip
 
 - A manifest records the namespace's lifecycle status, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that contain its rows through `head_seq`.
 - A WAL object contains the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it and with the retention floor of the manifest that the session validated them against. A fence contains no commits.
-- The hint is mutable. It records a manifest number that never decreases, and the runtime that publishes a manifest raises the hint afterward, with compare-and-swap.
+- The hint is mutable. It records a manifest number that never decreases, and the runtime that publishes a manifest raises the hint afterward with compare-and-swap, at most once per second for each namespace.
 - Content objects store immutable ranges of file bytes, and a layout lists those ranges in chain order.
 - Pins are retained manifests (see [Pins](#8-pins)).
 
@@ -381,7 +381,7 @@ A fold doesn't need a writer epoch, and any process can run one. A fold moves th
 To discover a namespace's current state, a reader:
 
 1. Loads the hint and the manifest it points to.
-2. Probes the following manifest numbers until one is missing, and rereads the hint in case it was raised in the meantime.
+2. Sends a HEAD request for the next manifest number. If that manifest exists, probes the `MANIFEST_PROBE_WINDOW` (8) numbers after it at once, takes the highest that exists, and repeats from it while the window's last number exists. It then loads the highest manifest found, checks that it's a later manifest of the same namespace (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)), and rereads the hint in case it was raised in the meantime.
 3. Reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first missing number.
 4. Checks that the manifest still has no successor.
 
@@ -488,18 +488,18 @@ This section describes how a reader finds a namespace's current state, determine
 A cold read (a read with no cached view) starts by finding the current manifest:
 
 1. Load `hint.json`, and load the manifest at its `manifest_no`.
-2. Probe the following manifest numbers until one returns not found. The last manifest found is the current one.
+2. Send a HEAD request for the next manifest number. If it exists, probe the `MANIFEST_PROBE_WINDOW` (8) numbers after it at once, take the highest that exists, and repeat from it while the probed window's last number exists. Load the highest manifest found, which is the current one.
 3. If the probe ended after an active manifest, read the hint again. If the hint now points to a higher number than the last manifest found, start again from that number. (Garbage collection might have deleted manifests below the new hint while the probe ran.)
 
 The hint is expected to lag. It's a starting point, not a statement that later objects don't exist.
 
-Each probed manifest MUST be a valid successor of the one before it:
+Each manifest that discovery loads MUST be a valid later manifest of the one loaded before it:
 
 - Its identity fields are equal.
-- Its `folded_wal_no`, both epochs, `head_seq`, retention floor, allocators, and activity counters are the same or higher.
+- Its `folded_wal_no`, both epochs, `head_seq`, retention floor, acknowledged floor, allocators, and activity counters are the same or higher.
 - It doesn't follow a namespace tombstone (a tombstone ends the probe).
 
-A sequence of manifests that fails this check is corrupt.
+A publication's successor check applies the same rules to the next number (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)). A sequence of manifests that fails this check is corrupt.
 
 | Discovery result | Interpretation |
 | --- | --- |
@@ -514,7 +514,7 @@ Every namespace has its own manifest from the moment it's installed. A new names
 The current manifest and the unfolded WAL together make up one read view:
 
 ```text
-hint --(start)--> manifest 5 --probe--> manifest 6 --probe--> 7 is missing
+hint --(start)--> manifest 5 --HEAD 6 exists, HEAD 7..14--> manifest 6 is the newest
                                             |
                           +-----------------+-----------------+
                           |                                   |
@@ -810,7 +810,7 @@ acknowledge
 
 A confirmed precondition failure creates no object. The writer discovers the winning publication, checks whether it has been fenced, and plans again before it tries another number. It never creates a parallel branch of history.
 
-Commits don't raise the hint. The runtime that publishes a manifest raises the hint afterward (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)), and readers stay correct while the hint lags, because discovery probes forward.
+Commits don't raise the hint. The runtime that publishes a manifest raises the hint afterward, at most once per second (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)), and readers stay correct while the hint lags, because discovery probes forward.
 
 Every put is planned against an observed state, and that observation has to be recent. A writer tracks two kinds of observation:
 
@@ -828,6 +828,8 @@ A writer whose cached tip is more than `WAL_PUBLISH_BUDGET_MS` old confirms the 
 After a WAL put whose outcome is unknown, or a publication that's cancelled after its put might have been sent, the writer drops its position. The put might have succeeded, so the position might be missing the writer's own commit. The writer's next publication runs discovery, which finds that commit, and a retry with the same commit ID returns the original result from the commit's receipt (see [Commit identity and retries](#65-commit-identity-and-retries)).
 
 Why check for a manifest successor at all? The check stops a successor that garbage collection already deleted from looking absent. Any successor created after the previous confirmation is kept for at least the revalidation bound, under the grace and clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions). Another writer has to publish a claim manifest before it can write the next WAL number, and a compaction by another process also publishes a successor, so the manifest probe finds both, and the writer runs discovery. A manifest this runtime publishes itself (a fold, a compaction, a pin, or a retention advance) moves the session to it, so the probe doesn't find it as a successor.
+
+A manifest publication that builds on a manifest it already has relies on the same bound (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)). If garbage collection had deleted that manifest's successor, the publication's put at the next number would create the deleted number again, beside the newer manifests. If the publication confirmed its manifest less than the bound ago, every manifest after it was published less than a grace ago, so garbage collection still keeps each manifest from the confirmed one upward, a put that succeeds proves that the manifest had no successor, and a missing number above it is the end of the sequence. A publication whose manifest was confirmed longer ago discovers the current manifest through the hint, because garbage collection keeps every manifest at or above the hint value it observed.
 
 Why doesn't the writer also check the next WAL number? A WAL put is create-only, so the put itself checks that number. If another writer has already created the next WAL object, the put collides and creates nothing. The writer then drops its position, and the discovery that follows finds the other writer's higher epoch, so the session is fenced (see [Writer ownership](#61-writer-ownership)). Another writer creates a WAL object only after its claim manifest, so if the manifest probe found no claim, the other writer's WAL object was created after the probe. Garbage collection can't delete an object that young before the put runs (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)), so the put collides with it. A HEAD request for the next WAL number would save one failed put in this case, but it would add a round trip before every commit that follows a quiet period longer than the publication budget. The writer's own puts don't need the check either, because the writer drops its position after a put whose outcome is unknown.
 
@@ -969,7 +971,11 @@ A fold works in these steps:
 
 A fold is a publication by the namespace's "maintainer", the role that folds, compacts, advances the retention floor, and collects garbage, while the writer session commits and deletes the namespace. A fold publishes under the current compactor epoch without claiming it, and it copies the predecessor's writer and compactor epochs forward, so it doesn't need a writer epoch, and any process can run one. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
-A fold loads the current manifest before its put, and again if its put loses, and then it checks whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, retention window, runs, and next run number, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, a retention advance, and a retention window change publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
+Every manifest publication builds on a manifest it has, its "basis". A publication whose basis was confirmed current less than `READ_REVALIDATION_BOUND_MS` ago puts its manifest at the basis's number plus one with put-if-absent, with no request before the put. (A writer session's own fold, compaction, or deletion builds on the manifest of the session's [writer position](glossary.md#writer-position), a fold call builds on the manifest that its discovery found, and a compaction or a retention advance builds on the manifest it planned from.) A put that succeeds proves that the basis had no successor, because within the bound garbage collection hasn't deleted any manifest above it (see [Publication and group commit](#63-publication-and-group-commit)). If the put loses, the publication finds the manifest that won by probing above its basis, the way discovery probes above the hint (see [A summary of the log protocol](#26-a-summary-of-the-log-protocol)), without reading the hint, and the next attempt builds on the winner with the losing attempt's confirmation. The manifest that won was published after that confirmation, so it also had no successor at that time.
+
+A publication without a basis, or whose basis was confirmed `READ_REVALIDATION_BOUND_MS` ago or longer, or whose probe answers arrive that long after the confirmation, discovers the current manifest through the hint (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). Each publication attempt records the time before its first request as the confirmation of the manifest it finds. For example, a session's fold whose position is on manifest 40, confirmed a second ago, puts manifest 41 with no request first. If another process has published 41 and 42, the put loses, the fold finds 42 by probing above 40, and it builds on 42.
+
+A fold builds on its basis, finds the current manifest again if its put loses, and then checks whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, retention window, runs, and next run number, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, a retention advance, and a retention window change publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
 
 A fold that rebuilds after another writer's claim folds the new writer's log. The old writer session's [writer position](glossary.md#writer-position) doesn't move onto that fold's manifest, as described in [Replaying the visible WAL](#42-replaying-the-visible-wal), and the old session finds that it's fenced at its next commit.
 
@@ -1002,7 +1008,7 @@ A successor can set, change, or clear the [retention window](glossary.md#retenti
 
 The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until the manifest put starts. An attempt whose budget expired publishes nothing more, and its unreferenced output is deleted under the segment-age rules in [Candidate and age rules](#113-candidate-and-age-rules). Compaction has a longer bound (see [Streaming compaction](#104-streaming-compaction)).
 
-The fold doesn't raise the hint. The runtime that published the fold's manifest raises the hint afterward (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)), and a failed raise doesn't undo the publication. Garbage collection keeps every manifest number at or above the hint value it observed for its pass, so discovery can probe forward from a hint that lags. The intermediate manifests kept for discovery don't keep their own runs. A manifest whose successor is younger than the grace does keep its runs, as a root (see [Reference roots](#112-reference-roots)).
+The fold doesn't raise the hint. The runtime that published the fold's manifest raises the hint afterward, at most once per second (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)), and a failed raise doesn't undo the publication. Garbage collection keeps every manifest number at or above the hint value it observed for its pass, so discovery can probe forward from a hint that lags. The intermediate manifests kept for discovery don't keep their own runs. A manifest whose successor is younger than the grace does keep its runs, as a root (see [Reference roots](#112-reference-roots)).
 
 Forks follow the same path from manifest 1. A manifest owned by the fork doesn't mean the inherited segments were copied into the fork's prefix, and each segment keeps its owner.
 
@@ -1350,9 +1356,9 @@ Compaction MUST preserve the visible metadata at every retained sequence. It pub
 
 A compaction streams: it merges the selected runs without keeping every row in memory. It writes completed segments under the namespace's normal `segments/` prefix, with new IDs, and then it publishes references to that output in the next manifest. Readers keep using the previous manifest until the publication succeeds.
 
-A runtime claims the namespace's compactor epoch before its first compaction after it opens the namespace. Claiming publishes a manifest with `compactor_epoch + 1` and no other changes, and concurrent family groups in that runtime share the claim. Compaction publications MUST match the current epoch, so a newer claim fences older compactors. A compaction also checks the epoch of the manifest it loads before it reads a segment.
+A runtime claims the namespace's compactor epoch before its first compaction after it opens the namespace. Claiming publishes a manifest with `compactor_epoch + 1` and no other changes, and concurrent family groups in that runtime share the claim. Compaction publications MUST match the current epoch, so a newer claim fences older compactors. A compaction also checks the epoch of the manifest it plans from before it reads a segment.
 
-Before each publication attempt, a compaction checks its elapsed monotonic time and reloads the current manifest. Its selected input segments MUST still be present and unchanged. While both conditions are true, a lost numbered put can be retried against a new manifest. A changed epoch produces `fenced`, and changed inputs produce `abandoned`.
+Before each publication attempt, a compaction checks its elapsed monotonic time and finds the current manifest (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)). Its selected input segments MUST still be present and unchanged. While both conditions are true, a lost numbered put can be retried against a new manifest. A changed epoch produces `fenced`, and changed inputs produce `abandoned`.
 
 A compaction runs under two deadlines:
 
@@ -1678,6 +1684,7 @@ This section describes designs that were considered for the format and the reaso
 - **One upload session record whose status changes.** A single record could move from open to completed or aborted by compare-and-swap. But an upload would then write that record when the session starts and again when it ends, often less than a second later, and some providers allow about one write per second to one object. With two records that are each created once, completion and abort still race on one put-if-absent, and the cost is a second key for each ended session in the uploads listing (see [Upload sessions](#51-upload-sessions)).
 - **A per-namespace naming mode.** A namespace could choose at creation whether names that differ only in case are the same name. But the choice is made before anyone knows which filesystems the tree will be copied to, it can't change later, a fork inherits it, and two siblings that differ only in case can't be stored on the case-insensitive filesystems most trees end up on. One rule for every namespace avoids the choice (see [Names and paths](#14-names-and-paths)).
 - **An expire event in the writer's log.** The writer could end each deletion's recoverability with an `expire` event that it commits once the floor reaches the deletion, so that the WAL orders the expiry against every undelete and a base compaction removes a deletion's rows once its latest event is `expire`. But that costs one event for every deletion, a scan loop in the writer with its own failure handling, and one commit for each 1,000 inherited deletions before a fork's first request, and a namespace that nobody writes to reclaims nothing. With a basis floor in each WAL object, one field acknowledges every deletion that the floor passed (see [Advancing the retention floor](#101-advancing-the-retention-floor) and the [retention window](../design/retention-window.md#alternatives-considered) note).
+- **A hint raised after every publication.** Each manifest publication could raise the hint, with raises paced to the one write per second that some providers accept and a background task per namespace to keep publications from waiting. The hint would then lag by at most a second, but every publication would depend on the pacing, and a reader would still probe forward. Raising at most once per second and skipping the rest leaves the same lag, and a probe that sends a window of HEAD requests at once makes the lag cost one round trip (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)).
 - **A durable record of used WAL and manifest numbers.** Recording every number that was used would remove the provider timing assumption in [Clock and operation assumptions](#114-clock-and-operation-assumptions), because a deleted number could never be mistaken for a free one. But checking the record would add a read to every commit acknowledgement and every read of the current state, and it would remove only that one assumption.
 
 ## Appendix A. Durable records and byte encodings
@@ -2203,7 +2210,7 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | The retry budget, the final backoff, and a payload-sized final request. |
 | `GC_SAFETY_MARGIN_MS` | 180,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
 | `GC_MIN_GRACE_WINDOW_MS` | 2,490,000 | The derived minimum ordinary garbage collection grace. |
-| `READ_REVALIDATION_BOUND_MS` | 1,155,000 | The longest gap between a previous basis confirmation and the answer to the next successor check, for a cached view, a writer, or a writer position. |
+| `READ_REVALIDATION_BOUND_MS` | 1,155,000 | The longest gap between a previous basis confirmation and the answer to the next successor check, for a cached view, a writer, a writer position, or a manifest publication's basis. |
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | The default configured ordinary grace. |
 | `UNREFERENCED_SEGMENT_GRACE_WINDOW_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
 | `METADATA_COMPACTION_BUDGET_MS` | 83,910,000 | The longest time before a compaction starts its publication. |
@@ -2283,6 +2290,8 @@ These are defaults for the reference producer and runtime. A target size can be 
 | `LoonFsBuilder::manifest_revalidation_interval_ms` | 1,000 ms |
 | `LoonFsBuilder::max_staleness_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
+| `HINT_RAISE_INTERVAL_MS` (the shortest time between two raises of one namespace's hint by one runtime) | 1,000 ms |
+| `MANIFEST_PROBE_WINDOW` (manifest numbers probed at once above a manifest whose successor exists) | 8 |
 
 `manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the manifest of a cached view. `max_staleness_ms` is the default maximum staleness of an `eventual` read: how old the confirmation of a cached view's tip, or the last successor check of a writer position, can be for the read to use it without a probe. Neither setting can exceed `READ_REVALIDATION_BOUND_MS`, and a runtime build with a longer one fails.
 
@@ -2332,7 +2341,7 @@ A step writes segments first, and then it publishes the next manifest with put-i
 - If it has another payload, the publisher lost, and it reloads and plans its next step from the current state.
 - If the number is missing, the outcome stays unknown. The publisher returns `outcome_unknown`, and it keeps the backfill's user pin that the step created, because the put might still succeed and refer to it.
 
-A put that succeeds after the budget has expired also has an unknown outcome (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error, and a failed hint raise doesn't undo the publication.
+A put that succeeds after the budget has expired also has an unknown outcome (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). A successful publisher raises the hint with CAS, taking the greater number, at most once per second for each namespace. A hint read or write that returns no compare token is a store error, and a failed hint raise doesn't undo the publication.
 
 Every step that publishes a manifest MUST start that publication within `METADATA_PUBLICATION_BUDGET_MS`, measured from before it loads the grep manifest it builds on, and it writes no manifest after that bound. Grep uses bounded steps instead of core compaction's epoch claim. Conditional numbered publication and input revalidation control competing steps.
 

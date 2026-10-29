@@ -22,6 +22,7 @@ pub(crate) async fn claim_compactor<S: ObjectStore + ?Sized>(
         update_manifest(
             store,
             namespace_id,
+            None,
             &deadline,
             MAX_CONTENTION_ATTEMPTS,
             |current: LoadedManifest| async move {

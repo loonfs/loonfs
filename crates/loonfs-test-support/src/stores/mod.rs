@@ -29,7 +29,9 @@ pub use lost_create_store::LostCreateStore;
 pub use memory_store::MemoryStore;
 pub use metadata_map_store::MetadataMapStore;
 pub use namespace_overlap_store::{NamespaceOverlapInterceptor, NamespaceOverlapStore};
-pub use operation::{OperationContext, OperationKind, OperationSelector, RecordedOperation};
+pub use operation::{
+    sort_head_runs, OperationContext, OperationKind, OperationSelector, RecordedOperation,
+};
 pub use recording_store::{RecordedGet, RecordingInterceptor, RecordingStore, StoreCounts};
 
 use bytes::Bytes;

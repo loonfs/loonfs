@@ -251,10 +251,10 @@ impl Fixture {
     /// its manifest for a successor. A publisher left on a manifest that
     /// this runtime replaced finds the successor and replays its tail.
     async fn assert_write_reloads_nothing(&self, round: usize, after: &str) {
-        // The hint raises of the publications before the write run after
-        // those publications return, so the check waits for the raises
-        // before it counts the write's requests.
-        self.writer.wait_for_hint_raises().await;
+        // The hint raise of a session's publication runs after the
+        // publication returns, so the check drains the writer before it
+        // counts the write's requests.
+        self.writer.drain().await.expect("drain");
         self.clock.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
         let replays = self.tail_replays();
         self.recording.reset();
@@ -499,8 +499,8 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
 /// flight moves the position onto the snapshot's manifest once the publish
 /// releases the engine, so reads start from the snapshot's manifest.
 ///
-/// The publish's WAL put waits until the snapshot has folded the commits
-/// before it and raised the hint, so the snapshot's manifest misses the
+/// The publish's WAL put waits until the snapshot has published the manifest
+/// that folds the commits before it, so the snapshot's manifest misses the
 /// publish's own commit. The next read finds no newer manifest, and the next
 /// write replays no WAL tail.
 #[tokio::test]
@@ -515,10 +515,10 @@ async fn a_publish_in_flight_while_a_snapshot_publishes_ends_on_its_manifest() {
         fixture.recording.reset();
         let (snapshot, ()) =
             futures::join!(fixture.service.create_snapshot("during", &options), async {
-                // The snapshot's last request raises the hint, and then
-                // its move of the position waits for the publish's engine.
                 wait_for_operation(&fixture.recording, |operation| {
-                    operation.key() == hint(&fixture.namespace_id)
+                    operation
+                        .key()
+                        .starts_with(&metadata_manifest_prefix(&fixture.namespace_id))
                         && matches!(operation, RecordedOperation::Put { .. })
                 })
                 .await;

@@ -51,19 +51,6 @@ pub async fn main() -> ExitCode {
 
     // Boxing keeps the public entrypoint's future shallow for downstream binaries.
     let result = Box::pin(commands::run(cli, runtime)).await;
-    let exit_code = render_result(result, output_format);
-    // The process exits when this returns, so the command's embedded runtimes
-    // shut down first and raise the hints of the manifests it published.
-    Box::pin(backend::shut_down_embedded_runtimes()).await;
-    exit_code
-}
-
-/// Renders a command's result in `output_format` and returns its exit
-/// status.
-fn render_result(
-    result: Result<commands::CommandOutput, commands::CommandFailure>,
-    output_format: render::OutputFormat,
-) -> ExitCode {
     match result {
         Ok(output) => match render::render_success(&output, output_format) {
             // A recursive transfer renders its per-item outcomes as success

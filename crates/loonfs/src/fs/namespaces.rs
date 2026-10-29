@@ -129,7 +129,8 @@ impl LoonFs<Writable> {
         {
             self.mode
                 .publisher
-                .raise_hint(source_namespace_id, published.manifest.manifest_no);
+                .raise_hint(source_namespace_id, published.manifest.manifest_no)
+                .await;
         }
         // The runtime drops its view of the source after a fork, as it does
         // after a creation or a deletion (see the read freshness design

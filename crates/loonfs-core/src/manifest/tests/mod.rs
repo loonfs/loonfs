@@ -3,6 +3,7 @@
 mod access;
 mod active_deletions;
 mod attributes;
+mod basis_publications;
 mod bounded_pages;
 mod cache;
 mod cas_recovery;
@@ -390,6 +391,7 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
             store,
             None,
             namespace_id,
+            None,
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
@@ -466,6 +468,7 @@ async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
     finalize_metadata_compaction(
         store,
         namespace_id,
+        None,
         spec,
         &input_keys,
         merged,
@@ -957,8 +960,9 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     Ok(envelope)
 }
 
-/// The requests in `operations` to the namespace's hint and manifests, in
-/// order, as a request kind and an object key.
+/// Returns the requests for the namespace's hint and manifests in
+/// `operations`, as a request kind and a key, with each run of HEAD requests
+/// sorted by key (see `sort_head_runs`).
 pub(crate) fn control_requests(
     namespace_id: &NamespaceId,
     operations: &[loonfs_test_support::stores::RecordedOperation],
@@ -966,9 +970,14 @@ pub(crate) fn control_requests(
     use loonfs_test_support::stores::RecordedOperation;
     let manifests = metadata_manifest_prefix(namespace_id);
     let hint = hint(namespace_id);
-    operations
+    let mut operations = operations
         .iter()
         .filter(|operation| operation.key() == hint || operation.key().starts_with(&manifests))
+        .cloned()
+        .collect::<Vec<_>>();
+    loonfs_test_support::stores::sort_head_runs(&mut operations);
+    operations
+        .iter()
         .map(|operation| {
             let kind = match operation {
                 RecordedOperation::Head { .. } => "head",
@@ -1005,10 +1014,15 @@ async fn publish_once_within<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
+    let checked = deadline.observe();
     let current = crate::namespace::control::load_current_manifest(store, &namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    super::publish::publish_manifest_from(store, manifest, deadline, Some(current)).await
+    let basis = crate::namespace::PublicationBasis {
+        manifest: current,
+        checked,
+    };
+    super::publish::publish_manifest_from(store, manifest, deadline, Some(&basis)).await
 }
 
 pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(

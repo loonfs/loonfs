@@ -4,14 +4,13 @@ use crate::control_object::{
     expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
 };
 use crate::error::CoreError;
-use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
+use crate::limits::MANIFEST_PROBE_WINDOW;
 use crate::namespace::state::NamespaceReadState;
-use crate::time::{Deadline, MonotonicTimer};
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ControlObjectKind, HintPayload, ManifestRef};
-use loonfs_types::CompactorEpoch;
-use loonfs_types::NamespaceId;
+use loonfs_types::{CompactorEpoch, ManifestNo, NamespaceId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentManifest {
@@ -104,60 +103,54 @@ pub(crate) async fn load_hint<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Raises the namespace's hint to at least `manifest_no`, and returns the hint
-/// as written, or as loaded when its number was already that high.
+/// Raises the namespace's hint to at least `manifest_no` with one
+/// compare-and-swap, and returns the hint as written, or as loaded when its
+/// number was already that high.
 ///
 /// The runtime that published a manifest calls this after the publication
 /// returns (format spec, "The current manifest and WAL tip"). `known` is the
 /// hint as the caller last saw it, so a raise from a current hint needs no
-/// read, and with `None` the call loads the hint first. After a lost
-/// compare-and-swap, the call loads the hint and tries again. Once a
-/// publication budget timed from the start of the call runs out, the call
-/// returns the hint as last loaded. The number never decreases, so a raise
-/// from an old hint can't lower the number that a newer raise wrote.
+/// read, and with `None` the call loads the hint first. A compare-and-swap
+/// that loses to another raise returns `store_contention` without another
+/// attempt, because some providers accept about one write per second to one
+/// object. The number never decreases, so a raise from an old hint can't
+/// lower the number that a newer raise wrote.
 pub async fn raise_namespace_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_no: loonfs_types::ManifestNo,
+    manifest_no: ManifestNo,
     known: Option<LoadedHint>,
-    timer: std::sync::Arc<dyn MonotonicTimer>,
 ) -> crate::error::Result<LoadedHint> {
-    let deadline = Deadline::start(timer);
     let object_key = hint(namespace_id);
-    let mut current = match known {
+    let current = match known {
         Some(known) => known,
         None => load_namespace_hint(store, namespace_id).await?,
     };
-    while deadline.elapsed_ms() <= METADATA_PUBLICATION_BUDGET_MS {
-        let raised = HintPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_no: current.state.manifest_no.max(manifest_no),
-        };
-        if raised.manifest_no == current.state.manifest_no {
-            break;
-        }
-        let bytes =
-            loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &raised)
-                .expect("a namespace hint should encode");
-        match store
-            .compare_and_swap(&object_key, &current.etag, bytes::Bytes::from(bytes))
-            .await
-        {
-            Ok(metadata) => {
-                return Ok(LoadedControl {
-                    etag: loonfs_objectstore::required_etag(&object_key, metadata.etag)
-                        .map_err(|error| CoreError::store(&object_key, &error))?,
-                    object_key,
-                    state: raised,
-                })
-            }
-            Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. }) => {
-                current = load_namespace_hint(store, namespace_id).await?;
-            }
-            Err(error) => return Err(CoreError::store(&object_key, &error)),
-        }
+    if current.state.manifest_no >= manifest_no {
+        return Ok(current);
     }
-    Ok(current)
+    let raised = HintPayload {
+        namespace_id: namespace_id.clone(),
+        manifest_no,
+    };
+    let bytes =
+        loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &raised)
+            .expect("a namespace hint should encode");
+    match store
+        .compare_and_swap(&object_key, &current.etag, bytes::Bytes::from(bytes))
+        .await
+    {
+        Ok(metadata) => Ok(LoadedControl {
+            etag: loonfs_objectstore::required_etag(&object_key, metadata.etag)
+                .map_err(|error| CoreError::store(&object_key, &error))?,
+            object_key,
+            state: raised,
+        }),
+        Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. }) => {
+            Err(CoreError::contention_exhausted(&object_key))
+        }
+        Err(error) => Err(CoreError::store(&object_key, &error)),
+    }
 }
 
 pub(crate) async fn load_current_manifest<S: ObjectStore + ?Sized>(
@@ -197,6 +190,13 @@ pub(crate) async fn load_current_manifest_with_hint<S: ObjectStore + ?Sized>(
         })
 }
 
+/// Loads the current manifest through the hint (format spec, "Resolving the
+/// metadata basis"), with the hint as last read, or returns `None` when the
+/// namespace has no hint.
+///
+/// Discovery loads the hinted manifest, finds the newest manifest above it
+/// with [`find_newest_manifest_above`], and reads the hint again before it
+/// returns, unless it found a tombstone.
 async fn discover_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -206,6 +206,8 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
         Err(error) => return Err(error),
     };
+    let is_deleted =
+        |manifest: &LoadedManifest| manifest.state.envelope.payload().status.is_deleted();
     loop {
         let mut manifest_no = hint.state.manifest_no;
         if manifest_no == loonfs_types::ManifestNo(0) {
@@ -215,35 +217,23 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
             });
         }
         let mut current = load_manifest_by_no(store, namespace_id, manifest_no).await?;
-        while let Some(previous) = &current {
-            // A tombstone is the last manifest of its namespace.
-            if previous.state.envelope.payload().status.is_deleted() {
-                return Ok(current.map(|manifest| (manifest, hint)));
+        if let Some(loaded) = current.as_ref().filter(|loaded| !is_deleted(loaded)) {
+            if let Some(newest) = find_newest_manifest_above(store, namespace_id, loaded).await? {
+                manifest_no = newest.state.envelope.payload().manifest_no;
+                current = Some(newest);
             }
-            let Ok(next) = manifest_no.successor() else {
-                break;
-            };
-            let Some(manifest) = load_manifest_by_no(store, namespace_id, next).await? else {
-                break;
-            };
-            previous
-                .state
-                .envelope
-                .payload()
-                .ensure_successor(manifest.state.envelope.payload())
-                .map_err(|error| ControlObjectLoadError::Codec {
-                    object_key: manifest.object_key.clone(),
-                    message: error.to_string(),
-                })?;
-            current = Some(manifest);
-            manifest_no = next;
+        }
+        // A tombstone is the last manifest of its namespace.
+        if current.as_ref().is_some_and(is_deleted) {
+            return Ok(current.map(|manifest| (manifest, hint)));
         }
 
         // A newer hint lets GC remove an old discovery path. Recheck after a
         // missing object before treating it as either absence or the tip.
         let refreshed = load_hint(store, namespace_id).await?;
-        if refreshed.state.manifest_no > manifest_no {
-            hint = refreshed;
+        let newer = refreshed.state.manifest_no > manifest_no;
+        hint = refreshed;
+        if newer {
             continue;
         }
         if current.is_none() && manifest_no != loonfs_types::ManifestNo(1) {
@@ -254,6 +244,99 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
         }
         return Ok(current.map(|manifest| (manifest, hint)));
     }
+}
+
+const _: () = assert!(
+    0 < MANIFEST_PROBE_WINDOW && MANIFEST_PROBE_WINDOW <= crate::in_flight::STORE_READS_IN_FLIGHT
+);
+
+/// Returns the newest manifest above `previous`, checked against `previous`
+/// (format spec, "Resolving the metadata basis"), or `None` when no manifest
+/// above `previous` exists.
+///
+/// The probe sends one HEAD request for the number after `previous`, and a
+/// missing number ends it there. Otherwise it sends a HEAD request for each
+/// of the next [`MANIFEST_PROBE_WINDOW`] numbers at once and takes the
+/// highest number that exists, and when that number is the last of its
+/// window, it probes the next window above it. The call then loads the
+/// manifest at the highest number found with one GET, and checks it against
+/// `previous` without the manifests in between. The call returns `None` too
+/// if that manifest is gone by the GET, which garbage collection does only
+/// after the hint has moved past it.
+pub(crate) async fn find_newest_manifest_above<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    previous: &LoadedManifest,
+) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
+    let Ok(next) = previous.state.envelope.payload().manifest_no.successor() else {
+        return Ok(None);
+    };
+    if !manifest_exists(store, namespace_id, next).await? {
+        return Ok(None);
+    }
+    let mut newest = next;
+    // Each window that continues the probe moves it up by a whole window, so
+    // the loop runs at most once for each window of manifests above
+    // `previous`, plus once.
+    loop {
+        let window: Vec<_> = (1..)
+            .take(MANIFEST_PROBE_WINDOW)
+            .map_while(|offset| newest.0.checked_add(offset).map(ManifestNo))
+            .collect();
+        let Some(&last) = window.last() else {
+            break;
+        };
+        let found: Vec<_> = stream::iter(window)
+            .map(|manifest_no| async move {
+                Ok::<_, ControlObjectLoadError>(
+                    manifest_exists(store, namespace_id, manifest_no)
+                        .await?
+                        .then_some(manifest_no),
+                )
+            })
+            .buffered(MANIFEST_PROBE_WINDOW)
+            .try_collect()
+            .await?;
+        let Some(highest) = found.into_iter().flatten().max() else {
+            break;
+        };
+        newest = highest;
+        if highest != last {
+            break;
+        }
+    }
+    let Some(manifest) = load_manifest_by_no(store, namespace_id, newest).await? else {
+        return Ok(None);
+    };
+    previous
+        .state
+        .envelope
+        .payload()
+        .ensure_later(manifest.state.envelope.payload())
+        .map_err(|error| ControlObjectLoadError::Codec {
+            object_key: manifest.object_key.clone(),
+            message: error.to_string(),
+        })?;
+    Ok(Some(manifest))
+}
+
+/// Returns whether the manifest numbered `manifest_no` exists, with one HEAD
+/// request.
+pub(crate) async fn manifest_exists<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_no: ManifestNo,
+) -> Result<bool, ControlObjectLoadError> {
+    let object_key = loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &manifest_no);
+    Ok(store
+        .head(&object_key)
+        .await
+        .map_err(|error| ControlObjectLoadError::Store {
+            object_key: object_key.clone(),
+            message: error.public_message().into_owned(),
+            kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
+        })?
+        .is_some())
 }
 
 pub(crate) async fn load_manifest_by_no<S: ObjectStore + ?Sized>(
@@ -315,16 +398,12 @@ pub async fn load_namespace_current_manifest<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::time::StdMonotonicTimer;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::{
         FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
         RecordedOperation, RecordingStore,
     };
-    use loonfs_types::ManifestNo;
     use std::assert_matches;
-    use std::sync::Arc;
 
     async fn seed_hint(store: &LocalFsStore, namespace_id: &NamespaceId) -> LoadedHint {
         let state = HintPayload {
@@ -351,15 +430,9 @@ mod tests {
             MetadataMapStore::without_etag(store, KeyPredicate::any()),
             KeyPredicate::any(),
         );
-        let error = raise_namespace_hint(
-            &store,
-            &namespace_id,
-            ManifestNo(2),
-            Some(known),
-            Arc::new(StdMonotonicTimer::default()),
-        )
-        .await
-        .expect_err("etag required");
+        let error = raise_namespace_hint(&store, &namespace_id, ManifestNo(2), Some(known))
+            .await
+            .expect_err("etag required");
         assert_matches!(error, CoreError::Store { .. });
         assert_eq!(
             store
@@ -371,35 +444,33 @@ mod tests {
         );
     }
 
+    /// Checks that a raise whose compare-and-swap loses returns
+    /// `store_contention` without loading the hint or writing it again.
     #[tokio::test]
-    async fn a_hint_raise_that_keeps_losing_ends_with_its_budget_and_returns_the_hint_it_saw() {
+    async fn a_hint_raise_that_loses_its_write_makes_no_second_attempt() {
         let directory = tempfile::tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let namespace_id = loonfs_test_support::ids::namespace_id("contended");
         let known = seed_hint(&store, &namespace_id).await;
-        let clock = Arc::new(ManualClock::new(0));
-        let reload = Arc::clone(&clock);
-        let store = FailStore::new(
-            MetadataMapStore::new(store, KeyPredicate::hint(&namespace_id), move |metadata| {
-                reload.advance_ms(METADATA_PUBLICATION_BUDGET_MS / 2 + 1);
-                metadata
-            }),
-            KeyPredicate::hint(&namespace_id),
-            OperationSelector::CompareAndSwap,
-            InjectedError::PreconditionFailed,
+        let store = RecordingStore::new(
+            FailStore::new(
+                store,
+                KeyPredicate::hint(&namespace_id),
+                OperationSelector::CompareAndSwap,
+                InjectedError::PreconditionFailed,
+            ),
+            KeyPredicate::any(),
         );
-        store.fail_all();
-        let raised = raise_namespace_hint(
-            &store,
-            &namespace_id,
-            ManifestNo(2),
-            Some(known.clone()),
-            clock,
-        )
-        .await
-        .expect("a raise past its budget returns the hint it saw");
-        assert_eq!(raised, known);
-        assert_eq!(store.attempts(), 2);
+        store.inner().fail_all();
+        let error = raise_namespace_hint(&store, &namespace_id, ManifestNo(2), Some(known))
+            .await
+            .expect_err("a lost write fails the raise");
+        assert_matches!(error, CoreError::StoreContention { .. });
+        let counts = store.counts();
+        assert_eq!(
+            (counts.gets_with_metadata, counts.compare_and_swaps),
+            (0, 1)
+        );
     }
 
     #[tokio::test]
@@ -409,8 +480,7 @@ mod tests {
         let namespace_id = loonfs_test_support::ids::namespace_id("unknown");
         seed_hint(&store, &namespace_id).await;
         let store = RecordingStore::new(store, KeyPredicate::any());
-        let timer = || Arc::new(StdMonotonicTimer::default());
-        let raised = raise_namespace_hint(&store, &namespace_id, ManifestNo(3), None, timer())
+        let raised = raise_namespace_hint(&store, &namespace_id, ManifestNo(3), None)
             .await
             .expect("raise");
         assert_eq!(raised.state.manifest_no, ManifestNo(3));
@@ -420,15 +490,9 @@ mod tests {
             (1, 1)
         );
         store.reset();
-        let kept = raise_namespace_hint(
-            &store,
-            &namespace_id,
-            ManifestNo(2),
-            Some(raised.clone()),
-            timer(),
-        )
-        .await
-        .expect("a raise to a lower number");
+        let kept = raise_namespace_hint(&store, &namespace_id, ManifestNo(2), Some(raised.clone()))
+            .await
+            .expect("a raise to a lower number");
         assert_eq!(kept, raised);
         assert!(store.take().is_empty());
         assert_eq!(

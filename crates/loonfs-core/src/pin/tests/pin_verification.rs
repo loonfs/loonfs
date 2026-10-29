@@ -99,6 +99,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         store,
         None,
         namespace_id,
+        None,
         selected.state.compactor_epoch(),
         MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
@@ -219,6 +220,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 &namespace_id,
                 Default::default(),
                 writer,
+                None,
                 &context,
                 &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
                 MetadataRunPolicy::default(),
@@ -262,7 +264,8 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
     load_current_manifest(&store, &namespace_id)
         .await
         .expect("current manifest");
-    let expected = store.take();
+    let mut expected = store.take();
+    loonfs_test_support::stores::sort_head_runs(&mut expected);
     let mut changed_number = record.clone();
     changed_number.pin_id = PinId::generate(
         record
@@ -284,7 +287,9 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
                 .expect("verification"),
             expected_verification
         );
-        assert_eq!(store.take(), expected);
+        let mut requests = store.take();
+        loonfs_test_support::stores::sort_head_runs(&mut requests);
+        assert_eq!(requests, expected);
     }
 }
 

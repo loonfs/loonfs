@@ -206,6 +206,23 @@ async fn seed_unfolded_tail(writer: &LoonFs<Writable>, namespace_id: &NamespaceI
         .expect("write the tail");
 }
 
+/// Raises the namespace's hint to its current manifest.
+///
+/// A runtime skips a hint raise less than a second after its last raise of
+/// the same hint, so a test that counts discovery's requests raises the hint
+/// first.
+async fn raise_hint_to_current_manifest(store: &dyn ObjectStore, namespace_id: &NamespaceId) {
+    let current = loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest")
+        .state
+        .manifest()
+        .manifest_no;
+    loonfs_core::control::raise_namespace_hint(store, namespace_id, current, None)
+        .await
+        .expect("raise the hint");
+}
+
 async fn keys_under(store: &dyn ObjectStore, prefix: &str) -> Vec<String> {
     store
         .list_prefix_stream(prefix)
@@ -951,6 +968,9 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
                 .expect("fold the tail");
         }
         writer.shutdown().await.expect("stop the writer");
+        for namespace_id in &names {
+            raise_hint_to_current_manifest(base.as_ref(), namespace_id).await;
+        }
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("local store"),
             KeyPredicate::any(),

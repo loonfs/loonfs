@@ -503,6 +503,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         .into_iter()
         .enumerate()
     {
+        let input_held = input.is_some();
         store.reset();
         let folded = fold_wal_tail(
             &store,
@@ -531,10 +532,16 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                 );
             }
         } else {
-            // The first attempt loads the manifest that folded the tail, so
-            // the fold writes nothing.
             assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
-            assert_no_writes(&store);
+            // A fold that loads its tail finds the manifest that folded it,
+            // so it writes nothing. A fold of a held tail builds on the
+            // held manifest without a request, so it writes the tail's
+            // objects again and loses its put to the first fold.
+            if input_held {
+                assert_eq!(store.counts().compare_and_swaps, 0);
+            } else {
+                assert_no_writes(&store);
+            }
         }
         let manifest =
             crate::namespace::control::load_current_manifest(&store, &engine.namespace_id)
@@ -543,6 +550,11 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         assert_eq!(
             manifest.state.envelope.payload().folded_wal_no,
             folded_wal_no
+        );
+        assert_eq!(
+            manifest.state.manifest().manifest_no,
+            folded.response.manifest_no,
+            "only the first fold publishes a manifest"
         );
         assert_eq!(
             store

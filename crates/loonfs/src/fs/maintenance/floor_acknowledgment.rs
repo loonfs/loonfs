@@ -93,7 +93,7 @@ impl Maintenance {
         namespace_id: &NamespaceId,
     ) -> Result<AcknowledgeRetentionFloorResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let before = RetentionFloors::of(&self.load_live_manifest(namespace_id).await?);
+        let before = RetentionFloors::of(&self.load_live_basis(namespace_id).await?.manifest.state);
         let response = |after, outcome| AcknowledgeRetentionFloorResponse {
             namespace_id: namespace_id.clone(),
             before,
@@ -107,7 +107,7 @@ impl Maintenance {
             ));
         }
         self.run_wal_fold(namespace_id).await?;
-        let folded = RetentionFloors::of(&self.load_live_manifest(namespace_id).await?);
+        let folded = RetentionFloors::of(&self.load_live_basis(namespace_id).await?.manifest.state);
         if folded.is_acknowledged() {
             return Ok(response(folded, AcknowledgeRetentionFloorOutcome::Folded));
         }
@@ -120,7 +120,7 @@ impl Maintenance {
             .finish_namespace_mutation(namespace_id, acquired, NamespaceChange::of_report)
             .await?;
         self.run_wal_fold(namespace_id).await?;
-        let fenced = RetentionFloors::of(&self.load_live_manifest(namespace_id).await?);
+        let fenced = RetentionFloors::of(&self.load_live_basis(namespace_id).await?.manifest.state);
         Ok(response(fenced, AcknowledgeRetentionFloorOutcome::Fenced))
     }
 }

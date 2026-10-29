@@ -111,6 +111,28 @@ pub const MAX_CONTENTION_ATTEMPTS: usize = 8;
 /// manifest in between. The walk sends at most one GET more than this.
 pub const MAX_POSITION_MOVES: usize = 8;
 
+/// Manifest numbers that one window of a probe for newer manifests checks
+/// at once.
+///
+/// Discovery, and a publication whose manifest put lost, send one HEAD
+/// request for the number after the newest manifest they loaded. When that
+/// manifest exists, they send one HEAD request for each of the next this
+/// many numbers, all at once, and probe the next window only when the last
+/// number of a window exists. A current hint costs the one HEAD request, and
+/// a hint that lags by at most this many manifests costs one window more,
+/// which takes about one round trip.
+pub const MANIFEST_PROBE_WINDOW: usize = 8;
+
+/// The shortest interval between the starts of two raises of one
+/// namespace's hint by one runtime.
+///
+/// Every raise writes the same hint object with compare-and-swap, and some
+/// providers accept about one write per second to one object (see the
+/// provider reference, "Frequently used data points"). A runtime skips a
+/// raise that would start sooner, and doesn't wait, so the hint can lag the
+/// newest manifest by the publications of the last interval.
+pub const HINT_RAISE_INTERVAL_MS: u64 = 1_000;
+
 /// Longest visible WAL tail, in WAL objects, a namespace may carry unfolded.
 ///
 /// The commit engine refuses new commits at this length, so a published WAL

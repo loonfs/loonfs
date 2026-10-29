@@ -4,8 +4,11 @@ use super::*;
 use loonfs_objectstore::keys::{content_blob, metadata_segment_object_key};
 use loonfs_types::format::manifest::MetadataRowFamily;
 
+/// Checks that a pass sends HEAD requests only for discovery's probe above
+/// the hinted manifest and for the anchor's check of the current manifest's
+/// successor.
 #[tokio::test]
-async fn a_pass_heads_only_the_discovery_successor() {
+async fn a_pass_heads_only_the_discovery_probe_and_successor() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("no-heads").expect("namespace");
@@ -19,6 +22,11 @@ async fn a_pass_heads_only_the_discovery_successor() {
         .manifest_no
         .successor()
         .expect("successor");
+    let hinted = crate::namespace::control::load_hint(&store, &namespace_id)
+        .await
+        .expect("hint")
+        .state
+        .manifest_no;
     let orphan = content_blob(&namespace_id, &loonfs_types::ContentId::generate());
     store
         .put_if_absent(&orphan, Bytes::from_static(b"orphan"))
@@ -40,15 +48,24 @@ async fn a_pass_heads_only_the_discovery_successor() {
     .await
     .expect("pass");
     assert_eq!(report.deleted.content_objects, 1);
-    let heads: Vec<_> = recorded
-        .snapshot()
+    let mut operations = recorded.snapshot();
+    loonfs_test_support::stores::sort_head_runs(&mut operations);
+    let heads: Vec<_> = operations
         .into_iter()
         .filter_map(|operation| match operation {
             loonfs_test_support::stores::RecordedOperation::Head { key } => Some(key),
             _ => None,
         })
         .collect();
-    assert_eq!(heads, [metadata_manifest_object(&namespace_id, &successor)]);
+    // The hint lags, so the probe finds the manifest after the hinted one,
+    // and then probes one window above that.
+    assert!(hinted < manifest.state.manifest().manifest_no);
+    let window = u64::try_from(crate::limits::MANIFEST_PROBE_WINDOW).expect("a small window");
+    let mut expected: Vec<_> = (hinted.0 + 1..=hinted.0 + 1 + window)
+        .map(|number| metadata_manifest_object(&namespace_id, &ManifestNo(number)))
+        .collect();
+    expected.push(metadata_manifest_object(&namespace_id, &successor));
+    assert_eq!(heads, expected);
     let target = NamespaceId::parse("retired-no-heads").expect("target");
     let content_writes = Arc::new(crate::test_support::content_writes());
     fork_namespace(
@@ -89,7 +106,13 @@ async fn a_pass_heads_only_the_discovery_successor() {
     .await
     .expect("retire fork");
     assert_eq!(retired.deleted_checkpoints_by_owner.fork, 1);
-    assert_eq!(recorded.counts().heads, 0);
+    // The fork's hint lags at its first manifest, so discovery's probe finds
+    // the manifest after it and probes one window above that, and a tombstone
+    // needs no successor check.
+    assert_eq!(
+        recorded.counts().heads,
+        1 + crate::limits::MANIFEST_PROBE_WINDOW
+    );
 }
 
 #[tokio::test]
@@ -190,6 +213,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                     &store,
                     None,
                     &namespace_id,
+                    None,
                     loonfs_types::CompactorEpoch(0),
                     Default::default(),
                     MetadataCompactionPolicy::CompactImmediately,
@@ -324,6 +348,7 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
             setup_store,
             None,
             &namespace_id,
+            None,
             loonfs_types::CompactorEpoch(0),
             Default::default(),
             MetadataCompactionPolicy::CompactImmediately,
