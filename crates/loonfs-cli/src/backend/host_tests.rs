@@ -1,7 +1,8 @@
 //! Embedded requests without networking or bearer credentials.
 
+use crate::args::TransientRetry;
 use crate::config::StoreConfig;
-use crate::resolve::ResolvedTarget;
+use crate::resolve::{Backend, ResolvedTarget};
 use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_client::{NamespacePath, PayloadSource};
@@ -22,7 +23,7 @@ fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_lim
                 key_prefix: None,
             }),
             None,
-            false,
+            TransientRetry::Retry,
         )
         .await
         .expect("embedded profile without credentials");
@@ -69,7 +70,7 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
     let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
     let actor = loonfs_test_support::test_actor();
     let open = || async {
-        ResolvedTarget::embedded(&config, None, true)
+        ResolvedTarget::embedded(&config, None, TransientRetry::NoRetry)
             .await
             .expect("embedded profile")
     };
@@ -80,12 +81,7 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
             .create_namespace(&namespace_id, &actor)
             .await
             .expect("namespace");
-        let store = target
-            .maintenance
-            .as_ref()
-            .expect("embedded host")
-            .runtime
-            .object_store();
+        let store = embedded_host(&target).runtime.object_store();
         loonfs_core::test_support::NamespaceFixture::new(
             store.as_ref(),
             &namespace_id,
@@ -111,11 +107,7 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
             .expect("a write past the fold threshold");
     });
     let tail = run_command(async {
-        open()
-            .await
-            .maintenance
-            .as_ref()
-            .expect("embedded host")
+        embedded_host(&open().await)
             .maintenance
             .diagnostics(&namespace_id)
             .await
@@ -126,6 +118,13 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
         tail < FOLD_AT_WAL_OBJECTS,
         "the fold did not finish: {tail}"
     );
+}
+
+fn embedded_host(target: &ResolvedTarget) -> &crate::backend::MaintenanceHost {
+    let Backend::Embedded { host, .. } = &target.backend else {
+        panic!("an embedded profile should open an embedded backend");
+    };
+    host
 }
 
 fn run_command<T>(command: impl std::future::Future<Output = T>) -> T {
@@ -143,10 +142,10 @@ async fn an_embedded_fence_fails_the_request_and_a_later_request_starts_a_new_se
         root: directory.path().display().to_string(),
         key_prefix: None,
     });
-    let first = ResolvedTarget::embedded(&config, None, false)
+    let first = ResolvedTarget::embedded(&config, None, TransientRetry::Retry)
         .await
         .expect("first embedded host");
-    let second = ResolvedTarget::embedded(&config, None, false)
+    let second = ResolvedTarget::embedded(&config, None, TransientRetry::Retry)
         .await
         .expect("second embedded host");
     let actor = loonfs_test_support::test_actor();

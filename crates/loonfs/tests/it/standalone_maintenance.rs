@@ -146,7 +146,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
     let checkpoint = future_runtime
         .open_namespace(&namespace_id)
         .expect("open namespace")
-        .create_snapshot(
+        .create_snapshot_with_options(
             "pinned",
             &CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(1_000),

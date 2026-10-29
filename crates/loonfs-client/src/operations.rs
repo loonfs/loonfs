@@ -1,54 +1,91 @@
-//! The send policy of each server operation that the client calls.
+//! The method and send policy of each server operation that the client calls.
 //!
 //! Each constant's name is an OpenAPI operation ID in upper case. The client sends an operation once when
 //! its `x-loonfs-retry` class is `not_idempotent`, and retries every other operation. A content
 //! transfer retries without the operation deadline, because a large body can take longer than
 //! the deadline to send. A body that the client streams is sent once whatever the policy, because
-//! a stream can't be replayed.
+//! a stream can't be replayed. A streamed response is retried until its head arrives, because no
+//! byte of its body has been read before then.
 
 use crate::transport::SendPolicy;
+use http::Method;
 
-pub(crate) const GET_HEALTH: SendPolicy = SendPolicy::Retry;
-pub(crate) const GET_CAPABILITIES: SendPolicy = SendPolicy::Retry;
-pub(crate) const CREATE_NAMESPACE: SendPolicy = SendPolicy::Once;
-pub(crate) const GET_NAMESPACE: SendPolicy = SendPolicy::Retry;
-pub(crate) const GET_PATH_ENTRY: SendPolicy = SendPolicy::Retry;
-pub(crate) const GET_INODE: SendPolicy = SendPolicy::Retry;
-pub(crate) const LIST_PATH_ENTRIES: SendPolicy = SendPolicy::Retry;
-pub(crate) const LIST_INODE_CHILDREN: SendPolicy = SendPolicy::Retry;
-pub(crate) const LIST_FILE_REVISIONS: SendPolicy = SendPolicy::Retry;
-pub(crate) const LIST_FILE_REVISIONS_BY_INODE: SendPolicy = SendPolicy::Retry;
-pub(crate) const GET_FILE_CONTENT: SendPolicy = SendPolicy::RetryWithoutDeadline;
-pub(crate) const GET_FILE_CONTENT_BY_INODE: SendPolicy = SendPolicy::RetryWithoutDeadline;
-pub(crate) const GET_FILE_REVISION_CONTENT_BY_INODE: SendPolicy = SendPolicy::RetryWithoutDeadline;
-pub(crate) const CREATE_DOWNLOAD: SendPolicy = SendPolicy::Retry;
-pub(crate) const CREATE_DOWNLOAD_BY_INODE: SendPolicy = SendPolicy::Retry;
-pub(crate) const CREATE_REVISION_DOWNLOAD_BY_INODE: SendPolicy = SendPolicy::Retry;
-pub(crate) const LIST_TRASH: SendPolicy = SendPolicy::Retry;
-pub(crate) const CREATE_COMMIT: SendPolicy = SendPolicy::Retry;
-pub(crate) const CREATE_UPLOAD: SendPolicy = SendPolicy::Once;
-pub(crate) const PUT_UPLOAD_CONTENT: SendPolicy = SendPolicy::RetryWithoutDeadline;
-pub(crate) const SIGN_UPLOAD_PARTS: SendPolicy = SendPolicy::Retry;
-pub(crate) const COMPLETE_UPLOAD: SendPolicy = SendPolicy::Retry;
-pub(crate) const GET_UPLOAD: SendPolicy = SendPolicy::Retry;
-pub(crate) const ABORT_UPLOAD: SendPolicy = SendPolicy::Retry;
-pub(crate) const LIST_CHANGES: SendPolicy = SendPolicy::Retry;
-pub(crate) const CREATE_SNAPSHOT: SendPolicy = SendPolicy::Once;
-pub(crate) const LIST_SNAPSHOTS: SendPolicy = SendPolicy::Retry;
-pub(crate) const GET_SNAPSHOT: SendPolicy = SendPolicy::Retry;
-pub(crate) const EXTEND_SNAPSHOT: SendPolicy = SendPolicy::Retry;
-pub(crate) const DELETE_SNAPSHOT: SendPolicy = SendPolicy::Retry;
-pub(crate) const FORK_NAMESPACE: SendPolicy = SendPolicy::Once;
-pub(crate) const DELETE_NAMESPACE: SendPolicy = SendPolicy::Once;
-pub(crate) const GET_NAMESPACE_DIAGNOSTICS: SendPolicy = SendPolicy::Retry;
-pub(crate) const LIST_CHECKPOINTS: SendPolicy = SendPolicy::Retry;
-pub(crate) const GET_CHECKPOINT: SendPolicy = SendPolicy::Retry;
-pub(crate) const RUN_MAINTENANCE: SendPolicy = SendPolicy::Once;
-pub(crate) const PROBE_STORE: SendPolicy = SendPolicy::Once;
-pub(crate) const GREP: SendPolicy = SendPolicy::Retry;
-pub(crate) const GET_GREP_INDEX: SendPolicy = SendPolicy::Retry;
-pub(crate) const ENABLE_GREP_INDEX: SendPolicy = SendPolicy::Retry;
-pub(crate) const DISABLE_GREP_INDEX: SendPolicy = SendPolicy::Retry;
+/// The HTTP method of one server operation, and how the client sends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Operation {
+    pub(crate) method: Method,
+    pub(crate) policy: SendPolicy,
+}
+
+impl Operation {
+    /// An operation that the client sends once.
+    pub(crate) const fn once(method: Method) -> Self {
+        Self {
+            method,
+            policy: SendPolicy::Once,
+        }
+    }
+
+    /// An operation that the client retries within the operation deadline.
+    pub(crate) const fn retry(method: Method) -> Self {
+        Self {
+            method,
+            policy: SendPolicy::Retry,
+        }
+    }
+
+    /// An operation that the client retries without the operation deadline.
+    pub(crate) const fn retry_without_deadline(method: Method) -> Self {
+        Self {
+            method,
+            policy: SendPolicy::RetryWithoutDeadline,
+        }
+    }
+}
+
+pub(crate) const GET_HEALTH: Operation = Operation::retry(Method::GET);
+pub(crate) const GET_CAPABILITIES: Operation = Operation::retry(Method::GET);
+pub(crate) const CREATE_NAMESPACE: Operation = Operation::once(Method::POST);
+pub(crate) const GET_NAMESPACE: Operation = Operation::retry(Method::GET);
+pub(crate) const GET_PATH_ENTRY: Operation = Operation::retry(Method::GET);
+pub(crate) const GET_INODE: Operation = Operation::retry(Method::GET);
+pub(crate) const LIST_PATH_ENTRIES: Operation = Operation::retry(Method::GET);
+pub(crate) const LIST_INODE_CHILDREN: Operation = Operation::retry(Method::GET);
+pub(crate) const LIST_FILE_REVISIONS: Operation = Operation::retry(Method::GET);
+pub(crate) const LIST_FILE_REVISIONS_BY_INODE: Operation = Operation::retry(Method::GET);
+pub(crate) const GET_FILE_CONTENT: Operation = Operation::retry_without_deadline(Method::GET);
+pub(crate) const GET_FILE_CONTENT_BY_INODE: Operation =
+    Operation::retry_without_deadline(Method::GET);
+pub(crate) const GET_FILE_REVISION_CONTENT_BY_INODE: Operation =
+    Operation::retry_without_deadline(Method::GET);
+pub(crate) const CREATE_DOWNLOAD: Operation = Operation::retry(Method::POST);
+pub(crate) const CREATE_DOWNLOAD_BY_INODE: Operation = Operation::retry(Method::POST);
+pub(crate) const CREATE_REVISION_DOWNLOAD_BY_INODE: Operation = Operation::retry(Method::POST);
+pub(crate) const LIST_TRASH: Operation = Operation::retry(Method::GET);
+pub(crate) const CREATE_COMMIT: Operation = Operation::retry(Method::POST);
+pub(crate) const CREATE_UPLOAD: Operation = Operation::once(Method::POST);
+pub(crate) const PUT_UPLOAD_CONTENT: Operation = Operation::retry_without_deadline(Method::PUT);
+pub(crate) const SIGN_UPLOAD_PARTS: Operation = Operation::retry(Method::POST);
+pub(crate) const COMPLETE_UPLOAD: Operation = Operation::retry(Method::POST);
+pub(crate) const GET_UPLOAD: Operation = Operation::retry(Method::GET);
+pub(crate) const ABORT_UPLOAD: Operation = Operation::retry(Method::POST);
+pub(crate) const LIST_CHANGES: Operation = Operation::retry(Method::GET);
+pub(crate) const CREATE_SNAPSHOT: Operation = Operation::once(Method::POST);
+pub(crate) const LIST_SNAPSHOTS: Operation = Operation::retry(Method::GET);
+pub(crate) const GET_SNAPSHOT: Operation = Operation::retry(Method::GET);
+pub(crate) const EXTEND_SNAPSHOT: Operation = Operation::retry(Method::POST);
+pub(crate) const DELETE_SNAPSHOT: Operation = Operation::retry(Method::DELETE);
+pub(crate) const FORK_NAMESPACE: Operation = Operation::once(Method::POST);
+pub(crate) const DELETE_NAMESPACE: Operation = Operation::once(Method::DELETE);
+pub(crate) const GET_NAMESPACE_DIAGNOSTICS: Operation = Operation::retry(Method::GET);
+pub(crate) const LIST_CHECKPOINTS: Operation = Operation::retry(Method::GET);
+pub(crate) const GET_CHECKPOINT: Operation = Operation::retry(Method::GET);
+pub(crate) const RUN_MAINTENANCE: Operation = Operation::once(Method::POST);
+pub(crate) const PROBE_STORE: Operation = Operation::once(Method::POST);
+pub(crate) const GREP: Operation = Operation::retry(Method::GET);
+pub(crate) const GET_GREP_INDEX: Operation = Operation::retry(Method::GET);
+pub(crate) const ENABLE_GREP_INDEX: Operation = Operation::retry(Method::POST);
+pub(crate) const DISABLE_GREP_INDEX: Operation = Operation::retry(Method::POST);
 
 #[cfg(test)]
 mod tests {
@@ -57,7 +94,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     /// Every constant above, paired with its operation ID.
-    const OPERATIONS: &[(&str, SendPolicy)] = &[
+    const OPERATIONS: &[(&str, Operation)] = &[
         ("get_health", GET_HEALTH),
         ("get_capabilities", GET_CAPABILITIES),
         ("create_namespace", CREATE_NAMESPACE),
@@ -108,9 +145,10 @@ mod tests {
     ];
 
     /// Checks that the client sends exactly the `not_idempotent` operations of the generated
-    /// OpenAPI document once, and has a send policy for every operation it can call.
+    /// OpenAPI document once, sends each operation with its documented method, and has an
+    /// operation for every one it can call.
     #[test]
-    fn send_policies_agree_with_the_documented_retry_classes() {
+    fn operations_agree_with_the_documented_methods_and_retry_classes() {
         let document: Value = serde_json::from_str(
             &std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -125,20 +163,26 @@ mod tests {
             .expect("paths object")
             .values()
         {
-            for operation in path.as_object().expect("path item object").values() {
+            for (method, operation) in path.as_object().expect("path item object") {
                 if let Some(operation_id) = operation["operationId"].as_str() {
                     let class = operation["x-loonfs-retry"]
                         .as_str()
                         .unwrap_or_else(|| panic!("`{operation_id}` has no retry class"));
-                    classes.insert(operation_id, class);
+                    classes.insert(operation_id, (method.as_str(), class));
                 }
             }
         }
 
-        for &(operation_id, policy) in OPERATIONS {
-            let class = classes
+        for (operation_id, operation) in OPERATIONS {
+            let (method, class) = classes
                 .remove(operation_id)
                 .unwrap_or_else(|| panic!("`{operation_id}` isn't in the OpenAPI document"));
+            assert_eq!(
+                operation.method.as_str().to_ascii_lowercase(),
+                method,
+                "the client sends `{operation_id}` with the wrong method"
+            );
+            let policy = operation.policy;
             let once = match class {
                 "not_idempotent" => true,
                 "idempotent" | "replayable" => false,

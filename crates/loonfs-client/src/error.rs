@@ -1,7 +1,7 @@
 //! Defines [`ClientError`], returned by asynchronous client operations.
 
 use loonfs_types::config::ConfigFieldError;
-use loonfs_types::{ErrorCode, ErrorDetails, ErrorResponse};
+use loonfs_types::{ErrorCode, ErrorResponse};
 use thiserror::Error;
 
 /// Error returned by the asynchronous HTTP client.
@@ -27,25 +27,13 @@ pub enum ClientError {
     #[error("http error: {0}")]
     Http(String),
     /// The server returned a structured API error response.
-    #[error("server returned {status} {code}: {message}")]
+    #[error("server returned {status} {}: {}", response.code, response.message)]
     Api {
         /// HTTP status code returned by the server.
         status: u16,
-        /// Machine-readable API error code returned by the server.
-        code: String,
-        /// Capability feature key accompanying `not_supported` errors.
-        feature: Option<String>,
-        /// Error message returned by the server.
-        message: String,
-        /// Identifies the invalid input. Body fields use JSON Pointer paths;
-        /// query and path parameters use their names; CLI errors use the flag
-        /// or argument as written.
-        param: Option<String>,
-        /// Correlation ID assigned to the failed request.
-        request_id: Option<String>,
-        /// Additional structured error details, when provided by the server.
-        /// Boxed to keep the enum small.
-        details: Option<Box<ErrorDetails>>,
+        /// The error body that the server returned. Boxed to keep the enum
+        /// small.
+        response: Box<ErrorResponse>,
     },
     /// None of the server's upload methods can accept the payload.
     ///
@@ -74,15 +62,10 @@ pub enum ClientError {
 
 impl ClientError {
     /// Converts a decoded API error into a client error.
-    pub fn from_error_response(status: u16, body: ErrorResponse) -> Self {
+    pub fn from_error_response(status: u16, response: ErrorResponse) -> Self {
         Self::Api {
             status,
-            code: body.code,
-            feature: body.feature,
-            message: body.message,
-            param: body.param,
-            request_id: body.request_id,
-            details: body.details,
+            response: Box::new(response),
         }
     }
 
@@ -92,7 +75,7 @@ impl ClientError {
     /// version does not recognize.
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
-            ClientError::Api { code, .. } => ErrorCode::parse(code),
+            ClientError::Api { response, .. } => ErrorCode::parse(&response.code),
             _ => None,
         }
     }

@@ -3,6 +3,7 @@
 use super::content::ContentSweep;
 use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementStatus};
+use super::options::validate_gc_options;
 use super::session_cache::CompletedUploadSessionCache;
 use super::sweep::Sweep;
 use super::GcOptions;
@@ -31,7 +32,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         options: &GcOptions,
         clock: &OperationClock,
     ) -> Result<GcResponse> {
-        options.validate()?;
+        validate_gc_options(options)?;
         let mut report = GcResponse::empty(self.namespace_id.clone());
         let live = LiveSet::load(self, session_cache, options.grace_window_ms, clock).await?;
         report.reclaimable_at_ms = live

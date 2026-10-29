@@ -1,68 +1,66 @@
 //! `loonfs snapshot` commands: create, list, extend, and delete.
 
-use super::context::{resolve_profile_context, CommandContext};
+use super::context::{Invocation, NamespaceContext, ProfileContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
-    CommandKind, SnapshotCommand, SnapshotCreateArgs, SnapshotDeleteArgs, SnapshotExtendArgs,
-    SnapshotListArgs, SnapshotTargetArgs,
+    SnapshotCommand, SnapshotCreateArgs, SnapshotDeleteArgs, SnapshotExtendArgs, SnapshotListArgs,
+    SnapshotTargetArgs,
 };
-use std::path::Path;
+use loonfs_client::CreateSnapshotOptions;
 
+/// Resolves the context of a snapshot command, which acts as the selected
+/// subject on the namespace that the command names.
 async fn resolve_snapshot_context(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     target: &SnapshotTargetArgs,
-) -> Result<CommandContext, CommandFailure> {
-    let explicit_profile = target.profile.profile.as_deref();
-    let mut context = resolve_profile_context(
-        kind,
-        config_path,
-        explicit_profile,
-        target.request.no_retry,
-        Some(&target.subject),
-    )
-    .await?;
-    context.namespace = Some(target.namespace_id.clone());
-    Ok(context)
+) -> Result<NamespaceContext, CommandFailure> {
+    let context = ProfileContext::resolve_as_subject(invocation).await?;
+    let actor_id = context.actor(None)?;
+    Ok(context.for_namespace(target.namespace_id.clone(), actor_id))
 }
 
 pub(crate) async fn run_snapshot_command(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     command: SnapshotCommand,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        SnapshotCommand::Create(args) => run_snapshot_create(kind, config_path, args).await,
-        SnapshotCommand::List(args) => run_snapshot_list(kind, config_path, args).await,
-        SnapshotCommand::Extend(args) => run_snapshot_extend(kind, config_path, args).await,
-        SnapshotCommand::Delete(args) => run_snapshot_delete(kind, config_path, args).await,
+        SnapshotCommand::Create(args) => run_snapshot_create(invocation, args).await,
+        SnapshotCommand::List(args) => run_snapshot_list(invocation, args).await,
+        SnapshotCommand::Extend(args) => run_snapshot_extend(invocation, args).await,
+        SnapshotCommand::Delete(args) => run_snapshot_delete(invocation, args).await,
     }
 }
 
 async fn run_snapshot_create(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: SnapshotCreateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
+    let context = resolve_snapshot_context(invocation, &args.target).await?;
     let response = context
+        .profile
         .target
         .client
-        .create_snapshot(context.namespace(), &args.name, args.ttl_ms)
+        .create_snapshot_with_options(
+            context.namespace(),
+            &args.name,
+            &CreateSnapshotOptions {
+                ttl_ms: args.ttl_ms,
+            },
+        )
         .await
-        .map_err(|error| context.fail(kind, error))?;
-    Ok(context.output(kind, CommandData::SnapshotCreated(response)))
+        .map_err(|error| context.fail(error))?;
+    Ok(context.output(CommandData::SnapshotCreated(response)))
 }
 
 async fn run_snapshot_list(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: SnapshotListArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
+    let context = resolve_snapshot_context(invocation, &args.target).await?;
     let listing = collect_or_stream_pages(
         context
+            .profile
             .target
             .client
             .list_snapshots(context.namespace())
@@ -71,41 +69,39 @@ async fn run_snapshot_list(
         |_: &loonfs_types::api::v0::ListSnapshotsResponse| {},
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     let PagedListing::Collected(response) = listing else {
-        return Ok(context.output(kind, CommandData::StreamedToStdout));
+        return Ok(context.output(CommandData::StreamedToStdout));
     };
-    Ok(context.output(kind, CommandData::SnapshotsListed(response)))
+    Ok(context.output(CommandData::SnapshotsListed(response)))
 }
 
 async fn run_snapshot_extend(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: SnapshotExtendArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
-    let snapshot_id = args.snapshot_id.clone();
+    let context = resolve_snapshot_context(invocation, &args.target).await?;
     let response = context
+        .profile
         .target
         .client
-        .extend_snapshot(context.namespace(), &snapshot_id, args.ttl_ms)
+        .extend_snapshot(context.namespace(), &args.snapshot_id, args.ttl_ms)
         .await
-        .map_err(|error| context.fail(kind, error))?;
-    Ok(context.output(kind, CommandData::SnapshotExtended(response)))
+        .map_err(|error| context.fail(error))?;
+    Ok(context.output(CommandData::SnapshotExtended(response)))
 }
 
 async fn run_snapshot_delete(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: SnapshotDeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
-    let snapshot_id = args.snapshot_id.clone();
+    let context = resolve_snapshot_context(invocation, &args.target).await?;
     let response = context
+        .profile
         .target
         .client
-        .delete_snapshot(context.namespace(), &snapshot_id)
+        .delete_snapshot(context.namespace(), &args.snapshot_id)
         .await
-        .map_err(|error| context.fail(kind, error))?;
-    Ok(context.output(kind, CommandData::SnapshotDeleted(response)))
+        .map_err(|error| context.fail(error))?;
+    Ok(context.output(CommandData::SnapshotDeleted(response)))
 }

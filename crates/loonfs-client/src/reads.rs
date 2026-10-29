@@ -1,112 +1,102 @@
 //! Namespace lifecycle, path reads, revision history, trash, and change feeds.
 
-use super::*;
-use crate::operations;
+use crate::operations::{self, Operation};
+use crate::read_at_fields::ReadAtFields;
 use crate::transport::QueryBuilder;
-use loonfs_types::options::{
-    Consistency, ListChangesOptions, ListFileRevisionsOptions, ListTrashOptions, ReadAt,
-    ReadFileOptions,
+use crate::{Client, ClientError, NamespacePath, PayloadStream, Result};
+use loonfs_types::api::v0::{
+    CreateSnapshotRequest, DeleteSnapshotResponse, ExtendSnapshotRequest, ListChangesResponse,
+    ListSnapshotsResponse, Snapshot,
 };
-use loonfs_types::{headers, PageRequest};
+use loonfs_types::options::{
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, ForkNamespaceOptions,
+    ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions, ReadAt,
+    ReadConsistency, ReadFileOptions, StatOptions,
+};
+use loonfs_types::{
+    headers, ActorId, ChangeSeq, CreateNamespaceRequest, DeleteNamespaceResponse, EffectiveLimit,
+    ErrorCode, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    ListPathEntriesResponse, ListTrashResponse, NamespaceId, NamespaceMetadata, PageRequest, Pager,
+    PathEntry, PinId, RevisionNo,
+};
 use std::num::NonZeroU64;
 
-/// Options for creating a namespace.
-///
-/// `allow_existing` has no wire form, so only the runtime's
-/// `CreateNamespaceOptions` has it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateNamespaceOptions {
-    /// The access mode, fixed for the namespace's life.
-    pub access: loonfs_types::NamespaceAccess,
-    /// The namespace's retention window in milliseconds, or `None` when the
-    /// namespace has no window of its own and the server's window applies.
-    pub retention_window_ms: Option<NonZeroU64>,
-}
-
-impl Default for CreateNamespaceOptions {
-    fn default() -> Self {
-        Self {
-            access: loonfs_types::NamespaceAccess::Unrestricted {},
-            retention_window_ms: None,
-        }
-    }
-}
-
-/// Adds the query parameters that say what a read reads at: `snapshot_id`
-/// for a snapshot, and the consistency parameters of a live read that sets
-/// a consistency. A live read that sets none sends neither, so the server's
-/// default applies.
+/// Adds the query parameters that say what a read reads at.
 fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
-    match at {
-        ReadAt::Snapshot(snapshot_id) => query.push("snapshot_id", snapshot_id.as_str()),
-        ReadAt::Live(None) => {}
-        ReadAt::Live(Some(Consistency::Strong)) => query.push("consistency", "strong"),
-        ReadAt::Live(Some(Consistency::Eventual { max_staleness_ms })) => {
-            query.push("consistency", "eventual");
-            if let Some(max_staleness_ms) = max_staleness_ms {
-                query.push("max_staleness_ms", max_staleness_ms);
-            }
-        }
+    let fields = ReadAtFields::from(at);
+    if let Some(snapshot_id) = &fields.snapshot_id {
+        query.push("snapshot_id", snapshot_id.as_str());
     }
-}
-
-/// Adds `recursive` to a directory listing that sets it.
-///
-/// A listing that doesn't sends nothing, so it still works against a server
-/// that predates the parameter.
-fn push_recursive(query: &mut QueryBuilder, recursive: bool) {
-    if recursive {
-        query.push("recursive", true);
+    if let Some(consistency) = fields.consistency {
+        query.push(
+            "consistency",
+            match consistency {
+                ReadConsistency::Eventual => "eventual",
+                ReadConsistency::Strong => "strong",
+            },
+        );
+    }
+    if let Some(max_staleness_ms) = fields.max_staleness_ms {
+        query.push("max_staleness_ms", max_staleness_ms);
     }
 }
 
 /// A pager over directory entries.
-pub type PathEntriesPager = loonfs_types::Pager<ListPathEntriesResponse, ClientError>;
+pub type PathEntriesPager = Pager<ListPathEntriesResponse, ClientError>;
 /// A pager over directory children addressed by inode.
-pub type InodeChildrenPager = loonfs_types::Pager<ListInodeChildrenResponse, ClientError>;
+pub type InodeChildrenPager = Pager<ListInodeChildrenResponse, ClientError>;
 /// A pager over retained file revisions.
-pub type FileRevisionsPager = loonfs_types::Pager<ListFileRevisionsResponse, ClientError>;
+pub type FileRevisionsPager = Pager<ListFileRevisionsResponse, ClientError>;
 /// A pager over recoverable deletions.
-pub type TrashPager = loonfs_types::Pager<ListTrashResponse, ClientError>;
+pub type TrashPager = Pager<ListTrashResponse, ClientError>;
 /// A pager over committed changes.
-pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, ClientError>;
+pub type ChangesPager = Pager<ListChangesResponse, ClientError>;
 /// A pager over snapshots.
-pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, ClientError>;
+pub type SnapshotsPager = Pager<ListSnapshotsResponse, ClientError>;
 
 impl Client {
-    /// Saves the namespace's current state as a snapshot. With `ttl_ms`, the
-    /// snapshot expires that many milliseconds from the server's current
-    /// time, and without it, the snapshot doesn't expire.
+    /// Saves the namespace's current state as a snapshot that doesn't expire.
     ///
-    /// Retrying this request starts a distinct attempt.
+    /// See [`Self::create_snapshot_with_options`].
     pub async fn create_snapshot(
         &self,
         namespace_id: &NamespaceId,
         name: &str,
-        ttl_ms: Option<NonZeroU64>,
     ) -> Result<Snapshot> {
-        let url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
-        self.request_json(
-            self.post(&url),
-            Some(&CreateSnapshotRequest {
+        self.create_snapshot_with_options(namespace_id, name, &CreateSnapshotOptions::default())
+            .await
+    }
+
+    /// Saves the namespace's current state as a snapshot. With
+    /// `options.ttl_ms`, the snapshot expires that many milliseconds from the
+    /// server's current time, and without it, the snapshot doesn't expire.
+    ///
+    /// Retrying this request starts a distinct attempt.
+    pub async fn create_snapshot_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        name: &str,
+        options: &CreateSnapshotOptions,
+    ) -> Result<Snapshot> {
+        let url = self.namespace_url(namespace_id, "/snapshots");
+        self.send_json(self.request(operations::CREATE_SNAPSHOT, &url).json(
+            &CreateSnapshotRequest {
                 name: name.to_owned(),
-                ttl_ms,
-            }),
-            operations::CREATE_SNAPSHOT,
-        )
+                ttl_ms: options.ttl_ms,
+            },
+        )?)
         .await
     }
 
     /// Lists snapshots, including expired snapshots that garbage collection
     /// hasn't deleted.
     pub fn list_snapshots(&self, namespace_id: &NamespaceId) -> SnapshotsPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        loonfs_types::Pager::new(move |request| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            async move { client.snapshots_page(&namespace_id, request).await }
-        })
+        Pager::with_state(
+            (self.clone(), namespace_id.clone()),
+            |(client, namespace_id), request| async move {
+                client.snapshots_page(&namespace_id, request).await
+            },
+        )
     }
 
     async fn snapshots_page(
@@ -114,18 +104,10 @@ impl Client {
         namespace_id: &NamespaceId,
         request: PageRequest<String>,
     ) -> Result<ListSnapshotsResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/snapshots",
-            self.base_url
-        ));
+        let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/snapshots"));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
-        let url = query.build();
-        self.request_json::<(), ListSnapshotsResponse>(
-            self.get(&url),
-            None,
-            operations::LIST_SNAPSHOTS,
-        )
-        .await
+        self.send_json(self.request(operations::LIST_SNAPSHOTS, &query.build()))
+            .await
     }
 
     /// Returns one snapshot, as the listing returns it.
@@ -136,11 +118,8 @@ impl Client {
         namespace_id: &NamespaceId,
         snapshot_id: &PinId,
     ) -> Result<Snapshot> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
-            self.base_url
-        );
-        self.request_json::<(), Snapshot>(self.get(&url), None, operations::GET_SNAPSHOT)
+        let url = self.namespace_url(namespace_id, &format!("/snapshots/{snapshot_id}"));
+        self.send_json(self.request(operations::GET_SNAPSHOT, &url))
             .await
     }
 
@@ -154,14 +133,10 @@ impl Client {
         snapshot_id: &PinId,
         ttl_ms: NonZeroU64,
     ) -> Result<Snapshot> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
-            self.base_url
-        );
-        self.request_json(
-            self.post(&url),
-            Some(&ExtendSnapshotRequest { ttl_ms }),
-            operations::EXTEND_SNAPSHOT,
+        let url = self.namespace_url(namespace_id, &format!("/snapshots/{snapshot_id}/extend"));
+        self.send_json(
+            self.request(operations::EXTEND_SNAPSHOT, &url)
+                .json(&ExtendSnapshotRequest { ttl_ms })?,
         )
         .await
     }
@@ -175,16 +150,9 @@ impl Client {
         namespace_id: &NamespaceId,
         snapshot_id: &PinId,
     ) -> Result<DeleteSnapshotResponse> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
-            self.base_url
-        );
-        self.request_json::<(), DeleteSnapshotResponse>(
-            self.delete(&url),
-            None,
-            operations::DELETE_SNAPSHOT,
-        )
-        .await
+        let url = self.namespace_url(namespace_id, &format!("/snapshots/{snapshot_id}"));
+        self.send_json(self.request(operations::DELETE_SNAPSHOT, &url))
+            .await
     }
 
     /// Creates an empty unrestricted namespace with the given ID and returns
@@ -192,7 +160,7 @@ impl Client {
     pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
-        actor: &loonfs_types::ActorId,
+        actor: &ActorId,
     ) -> Result<NamespaceMetadata> {
         self.create_namespace_with_options(namespace_id, actor, &CreateNamespaceOptions::default())
             .await
@@ -200,58 +168,75 @@ impl Client {
 
     /// Creates an empty namespace with the given ID and options and returns
     /// its genesis state.
+    ///
+    /// With `options.allow_existing`, a namespace that already exists isn't
+    /// an error, and the call returns that namespace's current state.
     pub async fn create_namespace_with_options(
         &self,
         namespace_id: &NamespaceId,
-        actor: &loonfs_types::ActorId,
+        actor: &ActorId,
         options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
-        self.request_json::<_, NamespaceMetadata>(
-            self.post(&url).header(headers::ACTOR, actor.as_str()),
-            Some(&CreateNamespaceRequest {
-                access: options.access.clone(),
-                namespace_id: namespace_id.clone(),
-                retention_window_ms: options.retention_window_ms,
-            }),
-            operations::CREATE_NAMESPACE,
-        )
-        .await
+        let created = self
+            .send_json(
+                self.request(operations::CREATE_NAMESPACE, &url)
+                    .header(headers::ACTOR, actor.as_str())
+                    .json(&CreateNamespaceRequest {
+                        access: options.access.clone(),
+                        namespace_id: namespace_id.clone(),
+                        retention_window_ms: options.retention_window_ms,
+                    })?,
+            )
+            .await;
+        match created {
+            Err(error)
+                if options.allow_existing && error.code() == Some(ErrorCode::NamespaceExists) =>
+            {
+                self.get_namespace(namespace_id).await
+            }
+            created => created,
+        }
     }
 
     /// Returns the namespace's current state.
     pub async fn get_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceMetadata> {
         // Validated namespace ids are URL-safe by construction, like the
         // other parsed id segments interpolated into paths here and below.
-        let url = format!("{}/v0/namespaces/{namespace_id}", self.base_url);
-        self.request_json::<(), NamespaceMetadata>(self.get(&url), None, operations::GET_NAMESPACE)
+        let url = self.namespace_url(namespace_id, "");
+        self.send_json(self.request(operations::GET_NAMESPACE, &url))
             .await
     }
 
     /// Deletes the namespace.
     ///
-    /// Pass `expected_head_seq` to delete only if the namespace is still where
-    /// you last observed it (`stale_head` on mismatch). Deleting an
-    /// already-deleted namespace fails with `namespace_deleted`.
+    /// See [`Self::delete_namespace_with_options`].
     pub async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
-        expected_head_seq: Option<ChangeSeq>,
     ) -> Result<DeleteNamespaceResponse> {
-        let mut query =
-            QueryBuilder::new(format!("{}/v0/namespaces/{namespace_id}", self.base_url));
-        if let Some(expected) = expected_head_seq {
+        self.delete_namespace_with_options(namespace_id, &DeleteNamespaceOptions::default())
+            .await
+    }
+
+    /// Deletes the namespace.
+    ///
+    /// Set `options.expected_head_seq` to delete only if the namespace is
+    /// still where you last observed it (`stale_head` on mismatch). Deleting
+    /// an already-deleted namespace fails with `namespace_deleted`.
+    pub async fn delete_namespace_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &DeleteNamespaceOptions,
+    ) -> Result<DeleteNamespaceResponse> {
+        let mut query = QueryBuilder::new(self.namespace_url(namespace_id, ""));
+        if let Some(expected) = options.expected_head_seq {
             query.push("expected_head_seq", expected.0);
         }
-        let url = query.build();
         // The expected head is a precondition, not an idempotency key for an ambiguous delete.
-        self.request_json::<(), DeleteNamespaceResponse>(
-            self.delete(&url),
-            None,
-            operations::DELETE_NAMESPACE,
-        )
-        .await
+        self.send_json(self.request(operations::DELETE_NAMESPACE, &query.build()))
+            .await
     }
 
     /// Creates a new namespace from the source's current head and returns the
@@ -260,7 +245,7 @@ impl Client {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-        actor: &loonfs_types::ActorId,
+        actor: &ActorId,
     ) -> Result<NamespaceMetadata> {
         self.fork_namespace_with_options(
             source_namespace_id,
@@ -277,21 +262,18 @@ impl Client {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-        actor: &loonfs_types::ActorId,
+        actor: &ActorId,
         options: &ForkNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
-        let url = format!(
-            "{}/v0/namespaces/{source_namespace_id}/forks",
-            self.base_url
-        );
+        let url = self.namespace_url(source_namespace_id, "/forks");
         // Namespace forks have no durable request identity to replay after an ambiguous success.
-        self.request_json::<_, NamespaceMetadata>(
-            self.post(&url).header(headers::ACTOR, actor.as_str()),
-            Some(&ForkNamespaceRequest {
-                new_namespace_id: new_namespace_id.clone(),
-                snapshot_id: options.snapshot_id.clone(),
-            }),
-            operations::FORK_NAMESPACE,
+        self.send_json(
+            self.request(operations::FORK_NAMESPACE, &url)
+                .header(headers::ACTOR, actor.as_str())
+                .json(&ForkNamespaceRequest {
+                    new_namespace_id: new_namespace_id.clone(),
+                    snapshot_id: options.snapshot_id.clone(),
+                })?,
         )
         .await
     }
@@ -307,15 +289,12 @@ impl Client {
         spec: &NamespacePath,
         options: &ListOptions,
     ) -> PathEntriesPager {
-        let client = self.clone();
-        let spec = spec.clone();
-        let options = options.clone();
-        loonfs_types::Pager::new(move |request| {
-            let client = client.clone();
-            let spec = spec.clone();
-            let options = options.clone();
-            async move { client.path_entries_page(&spec, request, &options).await }
-        })
+        Pager::with_state(
+            (self.clone(), spec.clone(), options.clone()),
+            |(client, spec, options), request| async move {
+                client.path_entries_page(&spec, request, &options).await
+            },
+        )
     }
 
     async fn path_entries_page(
@@ -324,18 +303,14 @@ impl Client {
         request: PageRequest<String>,
         options: &ListOptions,
     ) -> Result<ListPathEntriesResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{}/filesystem/entries",
-            self.base_url,
-            spec.namespace().as_str()
-        ));
+        let mut query =
+            QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/entries"));
         query.push("path", spec.absolute_path().as_str());
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         query.push("include_attributes", options.include_attributes);
-        push_recursive(&mut query, options.recursive);
+        query.push("recursive", options.recursive);
         push_read_at(&mut query, &options.at);
-        let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, operations::LIST_PATH_ENTRIES)
+        self.send_json(self.request(operations::LIST_PATH_ENTRIES, &query.build()))
             .await
     }
 
@@ -350,16 +325,12 @@ impl Client {
         spec: &NamespacePath,
         options: &StatOptions,
     ) -> Result<PathEntry> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{}/filesystem/entry",
-            self.base_url,
-            spec.namespace().as_str()
-        ));
+        let mut query =
+            QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/entry"));
         query.push("path", spec.absolute_path().as_str());
         query.push("include_attributes", options.include_attributes);
         push_read_at(&mut query, &options.at);
-        let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, operations::GET_PATH_ENTRY)
+        self.send_json(self.request(operations::GET_PATH_ENTRY, &query.build()))
             .await
     }
 
@@ -382,14 +353,11 @@ impl Client {
         options: &StatOptions,
     ) -> Result<PathEntry> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}",
-            self.base_url
-        ));
+        let mut query =
+            QueryBuilder::new(self.namespace_url(namespace_id, &format!("/inodes/{inode_id}")));
         query.push("include_attributes", options.include_attributes);
         push_read_at(&mut query, &options.at);
-        let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, operations::GET_INODE)
+        self.send_json(self.request(operations::GET_INODE, &query.build()))
             .await
     }
 
@@ -409,19 +377,19 @@ impl Client {
         inode_id: InodeId,
         options: &ListOptions,
     ) -> InodeChildrenPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        let options = options.clone();
-        loonfs_types::Pager::new(move |request| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            let options = options.clone();
-            async move {
+        Pager::with_state(
+            (
+                self.clone(),
+                namespace_id.clone(),
+                inode_id,
+                options.clone(),
+            ),
+            |(client, namespace_id, inode_id, options), request| async move {
                 client
                     .inode_children_page(&namespace_id, inode_id, request, &options)
                     .await
-            }
-        })
+            },
+        )
     }
 
     async fn inode_children_page(
@@ -432,16 +400,14 @@ impl Client {
         options: &ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
-            self.base_url
-        ));
+        let mut query = QueryBuilder::new(
+            self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/children")),
+        );
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         query.push("include_attributes", options.include_attributes);
-        push_recursive(&mut query, options.recursive);
+        query.push("recursive", options.recursive);
         push_read_at(&mut query, &options.at);
-        let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, operations::LIST_INODE_CHILDREN)
+        self.send_json(self.request(operations::LIST_INODE_CHILDREN, &query.build()))
             .await
     }
 
@@ -456,14 +422,12 @@ impl Client {
         spec: &NamespacePath,
         options: &ListFileRevisionsOptions,
     ) -> FileRevisionsPager {
-        let client = self.clone();
-        let spec = spec.clone();
-        let options = *options;
-        loonfs_types::Pager::new(move |request| {
-            let client = client.clone();
-            let spec = spec.clone();
-            async move { client.file_revisions_page(&spec, request, &options).await }
-        })
+        Pager::with_state(
+            (self.clone(), spec.clone(), *options),
+            |(client, spec, options), request| async move {
+                client.file_revisions_page(&spec, request, &options).await
+            },
+        )
     }
 
     async fn file_revisions_page(
@@ -472,21 +436,13 @@ impl Client {
         request: PageRequest<String>,
         options: &ListFileRevisionsOptions,
     ) -> Result<ListFileRevisionsResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{}/filesystem/revisions",
-            self.base_url,
-            spec.namespace().as_str()
-        ));
+        let mut query =
+            QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/revisions"));
         query.push("path", spec.absolute_path().as_str());
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         push_read_at(&mut query, &ReadAt::Live(options.consistency));
-        let url = query.build();
-        self.request_json::<(), ListFileRevisionsResponse>(
-            self.get(&url),
-            None,
-            operations::LIST_FILE_REVISIONS,
-        )
-        .await
+        self.send_json(self.request(operations::LIST_FILE_REVISIONS, &query.build()))
+            .await
     }
 
     /// Lists the retained revisions of a file inode.
@@ -509,18 +465,14 @@ impl Client {
         inode_id: InodeId,
         options: &ListFileRevisionsOptions,
     ) -> FileRevisionsPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        let options = *options;
-        loonfs_types::Pager::new(move |request| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            async move {
+        Pager::with_state(
+            (self.clone(), namespace_id.clone(), inode_id, *options),
+            |(client, namespace_id, inode_id, options), request| async move {
                 client
                     .file_revisions_by_inode_page(&namespace_id, inode_id, request, &options)
                     .await
-            }
-        })
+            },
+        )
     }
 
     async fn file_revisions_by_inode_page(
@@ -531,19 +483,13 @@ impl Client {
         options: &ListFileRevisionsOptions,
     ) -> Result<ListFileRevisionsResponse> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
-            self.base_url
-        ));
+        let mut query = QueryBuilder::new(
+            self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/revisions")),
+        );
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         push_read_at(&mut query, &ReadAt::Live(options.consistency));
-        let url = query.build();
-        self.request_json::<(), ListFileRevisionsResponse>(
-            self.get(&url),
-            None,
-            operations::LIST_FILE_REVISIONS_BY_INODE,
-        )
-        .await
+        self.send_json(self.request(operations::LIST_FILE_REVISIONS_BY_INODE, &query.build()))
+            .await
     }
 
     /// Lists the namespace's recoverable deletions.
@@ -557,14 +503,12 @@ impl Client {
         namespace_id: &NamespaceId,
         options: &ListTrashOptions,
     ) -> TrashPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        let options = *options;
-        loonfs_types::Pager::new(move |request| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            async move { client.trash_page(&namespace_id, request, &options).await }
-        })
+        Pager::with_state(
+            (self.clone(), namespace_id.clone(), *options),
+            |(client, namespace_id, options), request| async move {
+                client.trash_page(&namespace_id, request, &options).await
+            },
+        )
     }
 
     async fn trash_page(
@@ -573,15 +517,10 @@ impl Client {
         request: PageRequest<String>,
         options: &ListTrashOptions,
     ) -> Result<ListTrashResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{}/filesystem/trash",
-            self.base_url,
-            namespace_id.as_str()
-        ));
+        let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/filesystem/trash"));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         push_read_at(&mut query, &ReadAt::Live(options.consistency));
-        let url = query.build();
-        self.request_json::<(), ListTrashResponse>(self.get(&url), None, operations::LIST_TRASH)
+        self.send_json(self.request(operations::LIST_TRASH, &query.build()))
             .await
     }
 
@@ -598,14 +537,14 @@ impl Client {
         after_seq: ChangeSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        let options = options.clone();
-        loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            let options = options.clone();
-            async move {
+        Pager::with_state(
+            (
+                self.clone(),
+                namespace_id.clone(),
+                after_seq,
+                options.clone(),
+            ),
+            |(client, namespace_id, after_seq, options), request: PageRequest<ChangeSeq>| async move {
                 client
                     .changes_page(
                         &namespace_id,
@@ -614,26 +553,22 @@ impl Client {
                         &options,
                     )
                     .await
-            }
-        })
+            },
+        )
     }
 
     async fn changes_page(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
-        limit: loonfs_types::EffectiveLimit,
+        limit: EffectiveLimit,
         options: &ListChangesOptions,
     ) -> Result<ListChangesResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/changes",
-            self.base_url
-        ));
+        let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/changes"));
         query.push("after_seq", after_seq.0);
         query.push("limit", limit.get());
         push_read_at(&mut query, &options.at);
-        let url = query.build();
-        self.request_json::<(), ListChangesResponse>(self.get(&url), None, operations::LIST_CHANGES)
+        self.send_json(self.request(operations::LIST_CHANGES, &query.build()))
             .await
     }
 
@@ -650,11 +585,11 @@ impl Client {
         spec: &NamespacePath,
         options: &ReadFileOptions,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(
-            &self.file_content_url(spec, None, options),
-            operations::GET_FILE_CONTENT,
-        )
-        .await
+        let url = self.file_content_url(spec, None, options);
+        Ok(self
+            .call(&self.request(operations::GET_FILE_CONTENT, &url))
+            .await?
+            .bytes)
     }
 
     /// Returns the bytes of one retained revision of a file.
@@ -663,11 +598,11 @@ impl Client {
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(
-            &self.file_content_url(spec, Some(revision_no), &ReadFileOptions::default()),
-            operations::GET_FILE_CONTENT,
-        )
-        .await
+        let url = self.file_content_url(spec, Some(revision_no), &ReadFileOptions::default());
+        Ok(self
+            .call(&self.request(operations::GET_FILE_CONTENT, &url))
+            .await?
+            .bytes)
     }
 
     /// Streams a file's current content through the server.
@@ -688,24 +623,41 @@ impl Client {
         spec: &NamespacePath,
         options: &ReadFileOptions,
     ) -> Result<PayloadStream> {
-        self.call_for_response_stream(&self.get(&self.file_content_url(spec, None, options)))
-            .await
+        self.read_content_stream(
+            operations::GET_FILE_CONTENT,
+            &self.file_content_url(spec, None, options),
+        )
+        .await
     }
 
     /// Streams one retained revision of a file through the server.
     ///
-    /// See [`Self::read_file_stream_with_options`] for when the bytes are
-    /// verified.
+    /// See [`Self::read_file_revision_stream_with_options`].
     pub async fn read_file_revision_stream(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<PayloadStream> {
-        self.call_for_response_stream(&self.get(&self.file_content_url(
-            spec,
-            Some(revision_no),
-            &ReadFileOptions::default(),
-        )))
+        self.read_file_revision_stream_with_options(spec, revision_no, &ReadFileOptions::default())
+            .await
+    }
+
+    /// Streams one retained revision of a file through the server, at the
+    /// consistency that `options` sets.
+    ///
+    /// See [`Self::read_file_stream_with_options`] for when the bytes are
+    /// verified. A snapshot captures one revision of each file, so options
+    /// that read a snapshot return `invalid_request`.
+    pub async fn read_file_revision_stream_with_options(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+        options: &ReadFileOptions,
+    ) -> Result<PayloadStream> {
+        self.read_content_stream(
+            operations::GET_FILE_CONTENT,
+            &self.file_content_url(spec, Some(revision_no), options),
+        )
         .await
     }
 
@@ -715,11 +667,8 @@ impl Client {
         revision_no: Option<RevisionNo>,
         options: &ReadFileOptions,
     ) -> String {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{}/filesystem/content",
-            self.base_url,
-            spec.namespace().as_str()
-        ));
+        let mut query =
+            QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/content"));
         query.push("path", spec.absolute_path().as_str());
         if let Some(revision_no) = revision_no {
             query.push("revision_no", revision_no.0);
@@ -747,11 +696,11 @@ impl Client {
         inode_id: InodeId,
         options: &ReadFileOptions,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(
-            &self.inode_content_url(namespace_id, inode_id, options),
-            operations::GET_FILE_CONTENT_BY_INODE,
-        )
-        .await
+        let url = self.inode_content_url(namespace_id, inode_id, options);
+        Ok(self
+            .call(&self.request(operations::GET_FILE_CONTENT_BY_INODE, &url))
+            .await?
+            .bytes)
     }
 
     /// Streams the current content of a visible file inode through the server,
@@ -784,11 +733,10 @@ impl Client {
         inode_id: InodeId,
         options: &ReadFileOptions,
     ) -> Result<PayloadStream> {
-        self.call_for_response_stream(&self.get(&self.inode_content_url(
-            namespace_id,
-            inode_id,
-            options,
-        )))
+        self.read_content_stream(
+            operations::GET_FILE_CONTENT_BY_INODE,
+            &self.inode_content_url(namespace_id, inode_id, options),
+        )
         .await
     }
 
@@ -799,29 +747,59 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(
-            &self.inode_revision_content_url(namespace_id, inode_id, revision_no),
-            operations::GET_FILE_REVISION_CONTENT_BY_INODE,
-        )
-        .await
+        let url = self.inode_revision_content_url(
+            namespace_id,
+            inode_id,
+            revision_no,
+            &ReadFileOptions::default(),
+        );
+        Ok(self
+            .call(&self.request(operations::GET_FILE_REVISION_CONTENT_BY_INODE, &url))
+            .await?
+            .bytes)
     }
 
     /// Streams one retained file revision by inode identity through the server.
     ///
-    /// See [`Self::read_file_stream_with_options`] for when the bytes are
-    /// verified.
+    /// See [`Self::read_file_revision_stream_by_inode_with_options`].
     pub async fn read_file_revision_stream_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<PayloadStream> {
-        self.call_for_response_stream(&self.get(&self.inode_revision_content_url(
+        self.read_file_revision_stream_by_inode_with_options(
             namespace_id,
             inode_id,
             revision_no,
-        )))
+            &ReadFileOptions::default(),
+        )
         .await
+    }
+
+    /// Streams one retained file revision by inode identity through the
+    /// server, at the consistency that `options` sets.
+    ///
+    /// See [`Self::read_file_stream_with_options`] for when the bytes are
+    /// verified. A snapshot captures one revision of each file, so options
+    /// that read a snapshot return `invalid_request`.
+    pub async fn read_file_revision_stream_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        options: &ReadFileOptions,
+    ) -> Result<PayloadStream> {
+        self.read_content_stream(
+            operations::GET_FILE_REVISION_CONTENT_BY_INODE,
+            &self.inode_revision_content_url(namespace_id, inode_id, revision_no, options),
+        )
+        .await
+    }
+
+    async fn read_content_stream(&self, operation: Operation, url: &str) -> Result<PayloadStream> {
+        self.call_for_response_stream(&self.request(operation, url))
+            .await
     }
 
     pub(crate) fn inode_content_url(
@@ -831,10 +809,9 @@ impl Client {
         options: &ReadFileOptions,
     ) -> String {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
-            self.base_url
-        ));
+        let mut query = QueryBuilder::new(
+            self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/content")),
+        );
         push_read_at(&mut query, &options.at);
         query.build()
     }
@@ -844,12 +821,15 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
+        options: &ReadFileOptions,
     ) -> String {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
-            self.base_url
-        )
+        let mut query = QueryBuilder::new(self.namespace_url(
+            namespace_id,
+            &format!("/inodes/{inode_id}/revisions/{revision_no}/content"),
+        ));
+        push_read_at(&mut query, &options.at);
+        query.build()
     }
 }
 
@@ -857,8 +837,10 @@ impl Client {
 mod tests {
     use super::*;
     use crate::scripted_transport::{self, Outcome};
+    use crate::ClientConfig;
     use loonfs_types::api::v0::FilesystemChange;
-    use loonfs_types::{ContentId, EntryInodeKind, PathEntryKind};
+    use loonfs_types::options::Consistency;
+    use loonfs_types::{ContentId, ContentRef, EntryInodeKind, PathEntryKind};
 
     fn client_for(transport: &scripted_transport::ScriptedTransport) -> Client {
         Client::with_transport(
@@ -1028,8 +1010,8 @@ mod tests {
     }
 
     /// Checks that the trash and revision listings send the consistency
-    /// parameters only when they set a consistency, so a listing that sets
-    /// none reaches a server that doesn't accept them.
+    /// parameters only when they set a consistency, so the server's default
+    /// applies to a listing that sets none.
     #[tokio::test]
     async fn listings_send_the_consistency_parameters_only_when_they_set_them() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");

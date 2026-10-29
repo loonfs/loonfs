@@ -54,7 +54,7 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
         expected_ids.push(
             harness
                 .client
-                .create_snapshot(&demo, &format!("pin-{index}"), None)
+                .create_snapshot(&demo, &format!("pin-{index}"))
                 .await
                 .expect("create checkpoint")
                 .snapshot_id,
@@ -157,7 +157,7 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
 
     harness
         .client
-        .delete_namespace(&demo, None)
+        .delete_namespace(&demo)
         .await
         .expect("delete namespace");
     let deleted_page = harness
@@ -292,9 +292,11 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
         .await
         .expect_err("directory cursor must match listed path");
     match mismatch {
-        ClientError::Api { status, code, .. } => {
+        ClientError::Api {
+            status, response, ..
+        } => {
             assert_eq!(status, 400);
-            assert_eq!(code, "invalid_request");
+            assert_eq!(response.code, "invalid_request");
         }
         other => panic!("expected cursor rejection, got {other:?}"),
     }
@@ -328,13 +330,10 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 fn error_param<T: std::fmt::Debug>(result: Result<T, ClientError>) -> Option<String> {
     match result.expect_err("request should fail") {
         ClientError::Api {
-            status,
-            code,
-            param,
-            ..
+            status, response, ..
         } => {
-            assert_eq!((status, code.as_str()), (400, "invalid_request"));
-            param
+            assert_eq!((status, response.code.as_str()), (400, "invalid_request"));
+            response.param
         }
         other => panic!("expected API error, got {other:?}"),
     }
@@ -743,7 +742,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         .expect("move path");
     assert_matches!(
         harness.client.list_file_revisions(&target).page().await,
-        Err(ClientError::Api { code, .. }) if code == "path_not_found"
+        Err(ClientError::Api { response, .. }) if response.code == "path_not_found"
     );
     // Revision history follows the inode after a move.
     let moved_revisions = harness
@@ -815,9 +814,11 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
         )
         .await
     {
-        Err(ClientError::Api { status, code, .. }) => {
+        Err(ClientError::Api {
+            status, response, ..
+        }) => {
             assert_eq!(status, 404);
-            assert_eq!(code, "revision_not_found");
+            assert_eq!(response.code, "revision_not_found");
         }
         other => panic!("expected revision_not_found, got {other:?}"),
     }

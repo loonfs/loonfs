@@ -490,6 +490,7 @@ mod tests {
                 output: crate::render::OutputFormat::Human,
                 interactive: false,
                 progress: ProgressMode::Off,
+                transient_retry: crate::args::TransientRetry::Retry,
             },
             op,
             path,

@@ -315,7 +315,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         Ok(self
             .writer
             .open_namespace(namespace_id)?
-            .create_snapshot(
+            .create_snapshot_with_options(
                 GREP_BACKFILL_CHECKPOINT_NAME,
                 &CreateSnapshotOptions {
                     ttl_ms: Some(GREP_BACKFILL_CHECKPOINT_TTL_MS),

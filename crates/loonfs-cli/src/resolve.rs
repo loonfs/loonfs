@@ -1,13 +1,13 @@
 //! Resolves the active profile and namespace from flags, config defaults,
 //! and the environment.
 
+use crate::args::{SubjectSelectors, TransientRetry};
 use crate::backend::MaintenanceHost;
 use crate::config::{
-    load_config, non_empty_env, remote_client_config, CliConfig, ProfileConfig, StoreConfig,
-    ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV, PRINCIPAL_SCOPE_ENV, SUBJECT_ID_ENV,
+    non_empty_env, remote_client_config, ProfileConfig, ProfileConnection, ProfileMode,
+    StoreConfig, ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV, PRINCIPAL_SCOPE_ENV, SUBJECT_ID_ENV,
 };
-use crate::error::CliError;
-use crate::profiles::default_namespace;
+use crate::error::{CliError, Result};
 use loonfs::engine::DecodedBlockCacheConfig;
 use loonfs::{LoonFs, SharedObjectStore, WriterId};
 use loonfs_client::Client;
@@ -20,49 +20,28 @@ use loonfs_types::{
 };
 use std::sync::Arc;
 
-pub(crate) struct LoadedConfig {
-    pub path: std::path::PathBuf,
-    pub config: CliConfig,
-}
-
-pub(crate) struct ResolvedNamespace {
-    pub namespace: NamespaceId,
-}
-
-pub(crate) fn load_cli_config(config_path: &std::path::Path) -> Result<LoadedConfig, CliError> {
-    let config = load_config(config_path)?;
-    Ok(LoadedConfig {
-        path: config_path.to_path_buf(),
-        config,
-    })
-}
-
 pub(crate) fn resolve_namespace(
     profile_name: &str,
     profile: &ProfileConfig,
     explicit_namespace: Option<&NamespaceId>,
-) -> Result<ResolvedNamespace, CliError> {
+) -> Result<NamespaceId> {
     if let Some(namespace) = explicit_namespace {
-        return Ok(ResolvedNamespace {
-            namespace: namespace.clone(),
-        });
+        return Ok(namespace.clone());
     }
     if let Some(namespace) = non_empty_env(NAMESPACE_ENV) {
-        return Ok(ResolvedNamespace {
-            namespace: parse_namespace_id(&namespace)?,
-        });
+        return parse_namespace_id(&namespace);
     }
-    let namespace =
-        default_namespace(profile).ok_or_else(|| CliError::no_default_namespace(profile_name))?;
-    Ok(ResolvedNamespace {
-        namespace: parse_namespace_id(namespace)?,
-    })
+    let namespace = profile
+        .default_namespace
+        .as_deref()
+        .ok_or_else(|| CliError::no_default_namespace(profile_name))?;
+    parse_namespace_id(namespace)
 }
 
 pub(crate) fn resolve_actor(
     profile: &ProfileConfig,
     explicit_id: Option<&ActorId>,
-) -> Result<ActorId, CliError> {
+) -> Result<ActorId> {
     if let Some(id) = explicit_id {
         return Ok(id.clone());
     }
@@ -72,7 +51,9 @@ pub(crate) fn resolve_actor(
         });
     }
     Ok(profile
-        .actor_id()
+        .identity
+        .actor_id
+        .clone()
         .unwrap_or_else(|| ActorId::parse("loonfs-cli").expect("the CLI actor id should be valid")))
 }
 
@@ -83,13 +64,13 @@ pub(crate) fn resolve_actor(
 pub(crate) fn resolve_subject(
     profile: &ProfileConfig,
     actor_id: &ActorId,
-    explicit_subject_id: Option<&SubjectId>,
-    explicit_principal_scope: Option<&str>,
-    explicit_principals: Option<&str>,
-) -> Result<Option<Subject>, CliError> {
+    selectors: &SubjectSelectors,
+) -> Result<Option<Subject>> {
     let environment_principals = non_empty_env(PRINCIPALS_ENV);
     let profile_principals = profile
-        .principals()
+        .identity
+        .principals
+        .as_ref()
         .filter(|principals| !principals.is_empty())
         .map(|principals| {
             principals
@@ -99,25 +80,27 @@ pub(crate) fn resolve_subject(
                 .join(",")
         });
     let (principals_source, principals) = first_subject_part(
-        explicit_principals,
+        selectors.principals.as_deref(),
         environment_principals.as_deref(),
         profile_principals.as_deref(),
     );
     let environment_principal_scope = non_empty_env(PRINCIPAL_SCOPE_ENV);
-    let profile_principal_scope = profile.principal_scope();
+    let profile_principal_scope = profile.identity.principal_scope.as_ref();
     let (principal_scope_source, principal_scope) = first_subject_part(
-        explicit_principal_scope,
+        selectors.principal_scope.as_deref(),
         environment_principal_scope.as_deref(),
-        profile_principal_scope.as_ref().map(PrincipalScope::as_str),
+        profile_principal_scope.map(PrincipalScope::as_str),
     );
     let environment_subject_id = non_empty_env(SUBJECT_ID_ENV);
-    let profile_subject_id_with_principals = profile.subject_id().filter(|_| principals.is_some());
+    let profile_subject_id_with_principals = profile
+        .identity
+        .subject_id
+        .as_ref()
+        .filter(|_| principals.is_some());
     let (subject_id_source, subject_id) = first_subject_part(
-        explicit_subject_id.map(SubjectId::as_str),
+        selectors.subject_id.as_ref().map(SubjectId::as_str),
         environment_subject_id.as_deref(),
-        profile_subject_id_with_principals
-            .as_ref()
-            .map(SubjectId::as_str),
+        profile_subject_id_with_principals.map(SubjectId::as_str),
     );
     let source = |part| match part {
         SubjectPart::Principals => principals_source,
@@ -209,7 +192,7 @@ fn named_cli_input_error(name: &str, message: String) -> CliError {
 
 /// Parses a namespace ID after argument parsing. Invalid IDs use the shared
 /// `invalid_request` code in both embedded and remote modes.
-pub(crate) fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
+pub(crate) fn parse_namespace_id(namespace: &str) -> Result<NamespaceId> {
     NamespaceId::parse(namespace).map_err(|error| CliError::invalid_request(error.to_string()))
 }
 
@@ -220,15 +203,27 @@ fn default_writer_id() -> String {
         .unwrap_or_else(|| "loonfs-cli".to_owned())
 }
 
+/// The client of a resolved profile, and the backend that serves it.
 pub(crate) struct ResolvedTarget {
     pub(crate) client: Client,
-    pub(crate) maintenance: Option<MaintenanceHost>,
-    journal_identity: String,
+    pub(crate) backend: Backend,
+}
+
+/// What serves a resolved profile's client.
+pub(crate) enum Backend {
+    /// The runtime this process opened over the profile's store.
+    Embedded {
+        host: Box<MaintenanceHost>,
+        /// The digest of the store config, which upload journals key on.
+        journal_identity: String,
+    },
+    /// A LoonFS server.
+    Remote { server_url: String },
 }
 
 impl ResolvedTarget {
-    pub(crate) async fn remote_connectivity(&self) -> Result<(), CliError> {
-        if self.maintenance.is_none() {
+    pub(crate) async fn remote_connectivity(&self) -> Result<()> {
+        if let Backend::Remote { .. } = self.backend {
             match self.client.get_health().await {
                 Ok(()) | Err(loonfs_client::ClientError::Api { .. }) => {}
                 Err(error) => return Err(error.into()),
@@ -237,8 +232,8 @@ impl ResolvedTarget {
         Ok(())
     }
 
-    pub(crate) async fn remote_health(&self) -> Result<(), CliError> {
-        if self.maintenance.is_none() {
+    pub(crate) async fn remote_health(&self) -> Result<()> {
+        if let Backend::Remote { .. } = self.backend {
             self.client.get_health().await?;
         }
         Ok(())
@@ -247,37 +242,40 @@ impl ResolvedTarget {
     pub(crate) async fn resolve(
         profile_name: &str,
         profile: &ProfileConfig,
-        no_retry: bool,
-    ) -> Result<Self, CliError> {
+        transient_retry: TransientRetry,
+    ) -> Result<Self> {
         profile.ensure_store_usable(profile_name)?;
-        match profile {
-            ProfileConfig::Embedded {
-                store, writer_id, ..
-            } => Self::embedded(store, writer_id.as_deref(), no_retry).await,
-            ProfileConfig::Remote {
+        match &profile.connection {
+            ProfileConnection::Embedded { store, writer_id } => {
+                Self::embedded(store, writer_id.as_deref(), transient_retry).await
+            }
+            ProfileConnection::Remote {
                 server_url,
                 auth_token,
                 ca_cert_path,
-                ..
             } => Self::remote(
                 server_url,
                 auth_token.as_ref(),
                 ca_cert_path.as_deref(),
-                no_retry,
+                transient_retry,
             ),
         }
     }
 
-    pub(crate) fn mode_str(&self) -> &'static str {
-        if self.maintenance.is_some() {
-            "embedded"
-        } else {
-            "remote"
+    pub(crate) fn mode(&self) -> ProfileMode {
+        match self.backend {
+            Backend::Embedded { .. } => ProfileMode::Embedded,
+            Backend::Remote { .. } => ProfileMode::Remote,
         }
     }
 
     pub(crate) fn journal_identity(&self) -> &str {
-        &self.journal_identity
+        match &self.backend {
+            Backend::Embedded {
+                journal_identity, ..
+            } => journal_identity,
+            Backend::Remote { server_url } => server_url,
+        }
     }
 
     pub(crate) fn scope_to_subject(&mut self, subject: &Subject) {
@@ -289,27 +287,27 @@ impl ResolvedTarget {
     pub(crate) async fn embedded(
         store_config: &StoreConfig,
         writer_id: Option<&str>,
-        no_retry: bool,
-    ) -> Result<Self, CliError> {
+        transient_retry: TransientRetry,
+    ) -> Result<Self> {
         // One command drives the runtime, its maintenance, and grep from one
         // Tokio runtime, so they deliberately share one provider client.
         let store: SharedObjectStore = store_config
             .configured_object_store()
             .map_err(|err| CliError::invalid_config(err.public_message().into_owned()))?
             .into_shared();
-        let mut target = Self::over_store(
+        let journal_identity = loonfs_types::sha256_hex(
+            &serde_json::to_vec(store_config)
+                .map_err(|error| CliError::invalid_config(error.to_string()))?,
+        );
+        Self::over_store(
             store,
             writer_id,
             store_config.kind(),
             loonfs::InlineContentPolicy::default(),
-            no_retry,
+            transient_retry,
+            journal_identity,
         )
-        .await?;
-        target.journal_identity = loonfs_types::sha256_hex(
-            &serde_json::to_vec(store_config)
-                .map_err(|error| CliError::invalid_config(error.to_string()))?,
-        );
-        Ok(target)
+        .await
     }
 
     /// Opens the runtime over a store the caller already holds.
@@ -322,8 +320,9 @@ impl ResolvedTarget {
         writer_id: Option<&str>,
         store_kind: loonfs_objectstore::ConfiguredObjectStoreKind,
         inline_content: loonfs::InlineContentPolicy,
-        no_retry: bool,
-    ) -> Result<Self, CliError> {
+        transient_retry: TransientRetry,
+        journal_identity: String,
+    ) -> Result<Self> {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(default_writer_id);
@@ -352,20 +351,22 @@ impl ResolvedTarget {
             runtime.clone(),
             GrepPassBudget::default(),
         );
-        let maintenance = MaintenanceHost {
+        let host = MaintenanceHost {
             runtime,
             maintenance,
             grep_worker,
         };
         let client = crate::backend::client(
-            &maintenance,
-            GrepService::new(grep_block_cache, maintenance.runtime.monotonic_timer()),
-            no_retry,
+            &host,
+            GrepService::new(grep_block_cache, host.runtime.monotonic_timer()),
+            transient_retry,
         )?;
         Ok(Self {
             client,
-            maintenance: Some(maintenance),
-            journal_identity: String::new(),
+            backend: Backend::Embedded {
+                host: Box::new(host),
+                journal_identity,
+            },
         })
     }
 }
@@ -375,19 +376,20 @@ impl ResolvedTarget {
         server_url: &str,
         auth_token: Option<&SecretString>,
         ca_cert_path: Option<&str>,
-        no_retry: bool,
-    ) -> Result<Self, CliError> {
+        transient_retry: TransientRetry,
+    ) -> Result<Self> {
         let client = Client::new(remote_client_config(
             server_url,
             auth_token,
             ca_cert_path,
-            no_retry,
+            transient_retry,
         ))
         .map_err(|error| CliError::invalid_config(error.to_string()))?;
         Ok(Self {
-            journal_identity: client.server_url().to_owned(),
+            backend: Backend::Remote {
+                server_url: client.server_url().to_owned(),
+            },
             client,
-            maintenance: None,
         })
     }
 }
@@ -400,9 +402,14 @@ mod tests {
     #[test]
     fn a_stored_token_is_rejected_for_non_loopback_http() {
         let stored = SecretString::from("stored-token");
-        let error = ResolvedTarget::remote("http://example.internal", Some(&stored), None, false)
-            .err()
-            .expect("a token over non-loopback plaintext HTTP should be rejected");
+        let error = ResolvedTarget::remote(
+            "http://example.internal",
+            Some(&stored),
+            None,
+            crate::args::TransientRetry::Retry,
+        )
+        .err()
+        .expect("a token over non-loopback plaintext HTTP should be rejected");
 
         assert_eq!(error.code, "invalid_config");
         assert!(

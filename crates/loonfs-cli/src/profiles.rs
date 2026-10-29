@@ -1,7 +1,7 @@
 //! Profile listing, inspection, and mutation over the loaded CLI config.
 
 use crate::config::{validate_profile_name, CliConfig, ProfileConfig};
-use crate::error::CliError;
+use crate::error::{CliError, Result};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -28,7 +28,7 @@ pub(crate) fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
         .iter()
         .map(|(name, profile)| ProfileSummary {
             name: name.clone(),
-            mode: profile.mode_str().to_owned(),
+            mode: profile.mode().as_str().to_owned(),
             store_kind: profile.store_kind_str().map(ToOwned::to_owned),
         })
         .collect()
@@ -37,7 +37,7 @@ pub(crate) fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
 pub(crate) fn show_profile(
     config: &CliConfig,
     explicit_name: Option<&str>,
-) -> Result<NamedProfile<ProfileConfig>, CliError> {
+) -> Result<NamedProfile<ProfileConfig>> {
     let resolved = resolve_profile(config, explicit_name)?;
     Ok(NamedProfile {
         name: resolved.name,
@@ -49,7 +49,7 @@ pub(crate) fn add_profile(
     config: &mut CliConfig,
     name: &str,
     profile: ProfileConfig,
-) -> Result<NamedProfile<ProfileConfig>, CliError> {
+) -> Result<NamedProfile<ProfileConfig>> {
     validate_profile_name(name)?;
     if config.profiles.contains_key(name) {
         return Err(CliError::profile_already_exists(name));
@@ -70,7 +70,7 @@ pub(crate) fn update_profile(
     config: &mut CliConfig,
     name: &str,
     profile: ProfileConfig,
-) -> Result<NamedProfile<ProfileConfig>, CliError> {
+) -> Result<NamedProfile<ProfileConfig>> {
     if !config.profiles.contains_key(name) {
         return Err(CliError::profile_not_found(name));
     }
@@ -82,10 +82,7 @@ pub(crate) fn update_profile(
     })
 }
 
-pub(crate) fn delete_profile(
-    config: &mut CliConfig,
-    name: &str,
-) -> Result<ProfileSummary, CliError> {
+pub(crate) fn delete_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSummary> {
     let removed = config
         .profiles
         .remove(name)
@@ -95,7 +92,7 @@ pub(crate) fn delete_profile(
     }
     Ok(ProfileSummary {
         name: name.to_owned(),
-        mode: removed.mode_str().to_owned(),
+        mode: removed.mode().as_str().to_owned(),
         store_kind: removed.store_kind_str().map(ToOwned::to_owned),
     })
 }
@@ -105,7 +102,7 @@ pub(crate) fn delete_profile(
 pub(crate) fn delete_profile_in_table(
     table: &mut toml::Table,
     name: &str,
-) -> Result<ProfileSummary, CliError> {
+) -> Result<ProfileSummary> {
     let removed = table
         .get_mut("profiles")
         .and_then(toml::Value::as_table_mut)
@@ -129,7 +126,7 @@ pub(crate) fn delete_profile_in_table(
     })
 }
 
-pub(crate) fn set_default_profile(config: &mut CliConfig, name: &str) -> Result<(), CliError> {
+pub(crate) fn set_default_profile(config: &mut CliConfig, name: &str) -> Result<()> {
     if !config.profiles.contains_key(name) {
         return Err(CliError::profile_not_found(name));
     }
@@ -138,10 +135,7 @@ pub(crate) fn set_default_profile(config: &mut CliConfig, name: &str) -> Result<
 }
 
 /// [`set_default_profile`] over the loose table of a degraded config.
-pub(crate) fn set_default_profile_in_table(
-    table: &mut toml::Table,
-    name: &str,
-) -> Result<(), CliError> {
+pub(crate) fn set_default_profile_in_table(table: &mut toml::Table, name: &str) -> Result<()> {
     let exists = table
         .get("profiles")
         .and_then(toml::Value::as_table)
@@ -159,7 +153,7 @@ pub(crate) fn set_default_profile_in_table(
 pub(crate) fn resolve_profile<'a>(
     config: &'a CliConfig,
     explicit_name: Option<&str>,
-) -> Result<NamedProfile<&'a ProfileConfig>, CliError> {
+) -> Result<NamedProfile<&'a ProfileConfig>> {
     let name = match explicit_name {
         Some(name) => name.to_owned(),
         None => crate::config::non_empty_env(crate::config::PROFILE_ENV)
@@ -173,35 +167,15 @@ pub(crate) fn resolve_profile<'a>(
     Ok(NamedProfile { name, profile })
 }
 
-pub(crate) fn default_namespace(profile: &ProfileConfig) -> Option<&str> {
-    match profile {
-        ProfileConfig::Embedded {
-            default_namespace, ..
-        }
-        | ProfileConfig::Remote {
-            default_namespace, ..
-        } => default_namespace.as_deref(),
-    }
-}
-
 pub(crate) fn set_default_namespace(
     config: &mut CliConfig,
     profile_name: &str,
     namespace: &str,
-) -> Result<(), CliError> {
+) -> Result<()> {
     let profile = config
         .profiles
         .get_mut(profile_name)
         .ok_or_else(|| CliError::profile_not_found(profile_name))?;
-    match profile {
-        ProfileConfig::Embedded {
-            default_namespace, ..
-        }
-        | ProfileConfig::Remote {
-            default_namespace, ..
-        } => {
-            *default_namespace = Some(namespace.to_owned());
-        }
-    }
+    profile.default_namespace = Some(namespace.to_owned());
     Ok(())
 }

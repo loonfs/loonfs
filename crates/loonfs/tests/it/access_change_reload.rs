@@ -464,7 +464,7 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
             "fold_wal" => drop(maintenance.fold_wal(namespace_id).await.expect(call)),
             "create_snapshot" => {
                 let options = CreateSnapshotOptions::default();
-                let created = fixture.admin.create_snapshot("keep", &options);
+                let created = fixture.admin.create_snapshot_with_options("keep", &options);
                 snapshot = Some(created.await.expect(call).snapshot_id);
             }
             "delete_snapshot" => {
@@ -513,8 +513,11 @@ async fn a_publish_in_flight_while_a_snapshot_publishes_ends_on_its_manifest() {
     let (_, snapshot) = futures::join!(fixture.commit("put_file", 1), async {
         gate.wait_until_blocked().await;
         fixture.recording.reset();
-        let (snapshot, ()) =
-            futures::join!(fixture.service.create_snapshot("during", &options), async {
+        let (snapshot, ()) = futures::join!(
+            fixture
+                .service
+                .create_snapshot_with_options("during", &options),
+            async {
                 wait_for_operation(&fixture.recording, |operation| {
                     operation
                         .key()
@@ -523,7 +526,8 @@ async fn a_publish_in_flight_while_a_snapshot_publishes_ends_on_its_manifest() {
                 })
                 .await;
                 gate.release();
-            });
+            }
+        );
         snapshot
     });
     let snapshot = snapshot.expect("snapshot");

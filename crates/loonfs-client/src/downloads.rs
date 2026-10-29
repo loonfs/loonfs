@@ -1,48 +1,27 @@
 //! Direct-download negotiation, grants, and verified response streams.
 
-use super::*;
-use crate::operations;
-use crate::transport::SendPolicy;
+use crate::operations::{self, Operation};
+use crate::read_at_fields::ReadAtFields;
+use crate::transport::{SendPolicy, WireRequest};
+use crate::{payload, Client, ClientError, NamespacePath, Result};
+use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::Fuse;
-use futures::FutureExt as _;
-use loonfs_types::api::v0::{CreateDownloadByInodeRequest, DownloadRange};
-use loonfs_types::options::{Consistency, DownloadOptions, ReadAt, ReadConsistency};
-use loonfs_types::ContentVerifier;
+use futures::{FutureExt as _, StreamExt as _};
+use loonfs_types::api::v0::{
+    CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
+    CreateDownloadResponse, DownloadRange, ObjectTransferAccess,
+};
+use loonfs_types::options::DownloadOptions;
+use loonfs_types::{
+    ContentRef, ContentVerifier, InodeId, NamespaceId, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
+};
 use std::collections::VecDeque;
 use std::task::{Context, Poll};
 
 /// The most range responses a download holds open at once: the one being
 /// read and the ones requested behind it, in range order.
 const RANGE_RESPONSES_IN_FLIGHT: usize = 4;
-
-/// The body fields that say what a download reads at: `snapshot_id` for a
-/// snapshot, and the consistency fields of a live read that sets a
-/// consistency. A live read that sets none sends neither, so the server's
-/// default applies.
-struct ReadAtFields {
-    snapshot_id: Option<PinId>,
-    consistency: Option<ReadConsistency>,
-    max_staleness_ms: Option<u64>,
-}
-
-impl From<&ReadAt> for ReadAtFields {
-    fn from(at: &ReadAt) -> Self {
-        let (snapshot_id, consistency, max_staleness_ms) = match at {
-            ReadAt::Snapshot(snapshot_id) => (Some(snapshot_id.clone()), None, None),
-            ReadAt::Live(None) => (None, None, None),
-            ReadAt::Live(Some(Consistency::Strong)) => (None, Some(ReadConsistency::Strong), None),
-            ReadAt::Live(Some(Consistency::Eventual { max_staleness_ms })) => {
-                (None, Some(ReadConsistency::Eventual), *max_staleness_ms)
-            }
-        };
-        Self {
-            snapshot_id,
-            consistency,
-            max_staleness_ms,
-        }
-    }
-}
 
 /// A direct download returned in verified, bounded chunks.
 ///
@@ -274,11 +253,7 @@ impl Client {
         revision_no: Option<RevisionNo>,
         options: &DownloadOptions,
     ) -> Result<CreateDownloadResponse> {
-        let url = format!(
-            "{}/v0/namespaces/{}/filesystem/downloads",
-            self.base_url,
-            spec.namespace().as_str()
-        );
+        let url = self.namespace_url(spec.namespace(), "/filesystem/downloads");
         let at = ReadAtFields::from(&options.at);
         let request = CreateDownloadRequest {
             path: spec.absolute_path().clone(),
@@ -289,10 +264,9 @@ impl Client {
             start_offset: options.start_offset,
         };
         // Repeating the request writes only the same immutable extent bytes.
-        self.request_json::<_, CreateDownloadResponse>(
-            self.post(&url),
-            Some(&request),
-            operations::CREATE_DOWNLOAD,
+        self.send_json(
+            self.request(operations::CREATE_DOWNLOAD, &url)
+                .json(&request)?,
         )
         .await
     }
@@ -323,12 +297,9 @@ impl Client {
     ) -> Result<CreateDownloadByInodeResponse> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         self.request_download_by_inode(
-            format!(
-                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
-                self.base_url
-            ),
-            options,
             operations::CREATE_DOWNLOAD_BY_INODE,
+            self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/downloads")),
+            options,
         )
         .await
     }
@@ -363,21 +334,21 @@ impl Client {
     ) -> Result<CreateDownloadByInodeResponse> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         self.request_download_by_inode(
-            format!(
-                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
-                self.base_url
+            operations::CREATE_REVISION_DOWNLOAD_BY_INODE,
+            self.namespace_url(
+                namespace_id,
+                &format!("/inodes/{inode_id}/revisions/{revision_no}/downloads"),
             ),
             options,
-            operations::CREATE_REVISION_DOWNLOAD_BY_INODE,
         )
         .await
     }
 
     async fn request_download_by_inode(
         &self,
+        operation: Operation,
         url: String,
         options: &DownloadOptions,
-        policy: SendPolicy,
     ) -> Result<CreateDownloadByInodeResponse> {
         let at = ReadAtFields::from(&options.at);
         let request = CreateDownloadByInodeRequest {
@@ -386,12 +357,8 @@ impl Client {
             max_staleness_ms: at.max_staleness_ms,
             start_offset: options.start_offset,
         };
-        self.request_json::<_, CreateDownloadByInodeResponse>(
-            self.post(&url),
-            Some(&request),
-            policy,
-        )
-        .await
+        self.send_json(self.request(operation, &url).json(&request)?)
+            .await
     }
 
     /// Opens a download grant, sending the headers it carries unchanged.
@@ -464,7 +431,9 @@ impl Client {
         let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &range.access else {
             return Err(unsupported_download_access());
         };
-        let mut request = WireRequest::presigned(http::Method::GET, url);
+        // A presigned GET reads an immutable object, so a resend is safe.
+        let mut request =
+            WireRequest::presigned(http::Method::GET, url, SendPolicy::RetryWithoutDeadline);
         for (name, value) in headers {
             request = request.header(name, value);
         }

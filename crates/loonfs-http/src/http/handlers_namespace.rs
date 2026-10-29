@@ -420,7 +420,7 @@ pub(super) async fn create_snapshot(
 ) -> Result<Json<Snapshot>, ApiResponseError> {
     let namespace = state.open_writer(&namespace_id, subject).await?;
     let snapshot = namespace
-        .create_snapshot(
+        .create_snapshot_with_options(
             &request.name,
             &loonfs::CreateSnapshotOptions {
                 ttl_ms: request.ttl_ms,

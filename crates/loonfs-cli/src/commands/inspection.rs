@@ -1,16 +1,16 @@
 //! Commands for viewing deployment capabilities and checking configuration.
 
-use super::context::resolve_profile_context;
+use super::context::{Invocation, ProfileContext};
 use super::output::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
-use crate::args::{CapabilitiesArgs, CommandKind, DoctorArgs};
+use crate::args::{CommandKind, DoctorArgs, Selectors, TransientRetry};
 use crate::config::{
-    load_config, non_empty_env, resolve_config_location, ConfigSource, ProfileConfig, StoreConfig,
-    PROFILE_ENV,
+    load_config, non_empty_env, resolve_config_location, ConfigSource, ProfileConfig,
+    ProfileConnection, ProfileMode, StoreConfig, PROFILE_ENV,
 };
-use crate::error::CliError;
+use crate::error::{CliError, Result};
 use crate::profiles::resolve_profile;
 use crate::render::{store_probe_run_outcome, store_probe_summary_line, StoreProbeRunOutcome};
-use crate::resolve::{resolve_namespace, ResolvedTarget};
+use crate::resolve::{resolve_namespace, Backend, ResolvedTarget};
 use futures::TryStreamExt;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::keys::probe_runs_prefix;
@@ -112,27 +112,17 @@ impl DoctorCheckName {
 }
 
 pub(crate) async fn run_capabilities(
-    kind: CommandKind,
-    config_path: &Path,
-    args: CapabilitiesArgs,
+    invocation: &Invocation,
 ) -> Result<CommandOutput, CommandFailure> {
-    let explicit_profile = args.profile.profile.as_deref();
-    let context = resolve_profile_context(
-        kind,
-        config_path,
-        explicit_profile,
-        args.request.no_retry,
-        None,
-    )
-    .await?;
+    let context = ProfileContext::resolve(invocation).await?;
     let document = context
         .target
         .client
         .get_capabilities()
         .await
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
 
-    Ok(context.output(kind, CommandData::Capabilities(document)))
+    Ok(context.output(CommandData::Capabilities(document)))
 }
 
 /// Runs every available check and returns all results, including failures.
@@ -140,6 +130,8 @@ pub(crate) async fn run_capabilities(
 pub(crate) async fn run_doctor(
     kind: CommandKind,
     config_flag: Option<&Path>,
+    selectors: &Selectors,
+    transient_retry: TransientRetry,
     args: &DoctorArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let mut checks = Vec::with_capacity(if args.write_check { 10 } else { 9 });
@@ -184,7 +176,7 @@ pub(crate) async fn run_doctor(
         }
     };
 
-    let explicit_profile = args.target.profile.profile.as_deref();
+    let explicit_profile = selectors.profile.as_deref();
     let (profile_name, profile) = match resolve_profile(&config, explicit_profile) {
         Ok(resolved) => {
             checks.push(ok(
@@ -213,27 +205,26 @@ pub(crate) async fn run_doctor(
             ));
         }
     };
-    let mode = profile.mode_str().to_owned();
+    let mode = profile.mode();
 
-    let mut target =
-        match provider_check(&profile_name, &profile, args.target.request.no_retry).await {
-            Ok((message, target)) => {
-                checks.push(ok(DoctorCheckName::ProviderConfig, message));
-                target
-            }
-            Err(error) => {
-                checks.push(failed(DoctorCheckName::ProviderConfig, error));
-                skip_remaining(
-                    &mut checks,
-                    DoctorCheckName::ProviderConfig,
-                    args.write_check,
-                    "provider configuration is unusable",
-                );
-                return Ok(doctor_output(kind, Some(profile_name), Some(mode), checks));
-            }
-        };
+    let mut target = match provider_check(&profile_name, &profile, transient_retry).await {
+        Ok((message, target)) => {
+            checks.push(ok(DoctorCheckName::ProviderConfig, message));
+            target
+        }
+        Err(error) => {
+            checks.push(failed(DoctorCheckName::ProviderConfig, error));
+            skip_remaining(
+                &mut checks,
+                DoctorCheckName::ProviderConfig,
+                args.write_check,
+                "provider configuration is unusable",
+            );
+            return Ok(doctor_output(kind, Some(profile_name), Some(mode), checks));
+        }
+    };
 
-    let remote = matches!(&profile, ProfileConfig::Remote { .. });
+    let remote = mode == ProfileMode::Remote;
     if remote {
         let result = target
             .as_ref()
@@ -292,8 +283,8 @@ pub(crate) async fn run_doctor(
             DoctorCheckName::Health,
             "local store root is missing; doctor did not create it",
         ));
-    } else if let ProfileConfig::Embedded { store, .. } = &profile {
-        match ResolvedTarget::resolve(&profile_name, &profile, args.target.request.no_retry).await {
+    } else if let ProfileConnection::Embedded { store, .. } = &profile.connection {
+        match ResolvedTarget::resolve(&profile_name, &profile, transient_retry).await {
             Ok(resolved) => {
                 let (check, healthy_target) = embedded_health_check(resolved, store).await;
                 checks.push(check);
@@ -316,13 +307,27 @@ pub(crate) async fn run_doctor(
             DoctorCheckName::Capabilities,
             "embedded store was not opened",
         ));
-        namespace_check(&mut checks, &profile_name, &profile, args, target.as_ref()).await;
+        namespace_check(
+            &mut checks,
+            &profile_name,
+            &profile,
+            selectors,
+            target.as_ref(),
+        )
+        .await;
         append_write_check(&mut checks, args.write_check, target.as_ref()).await;
         return Ok(doctor_output(kind, Some(profile_name), Some(mode), checks));
     };
     checks.push(capability_document_check(capability_result));
 
-    namespace_check(&mut checks, &profile_name, &profile, args, target.as_ref()).await;
+    namespace_check(
+        &mut checks,
+        &profile_name,
+        &profile,
+        selectors,
+        target.as_ref(),
+    )
+    .await;
     append_write_check(&mut checks, args.write_check, target.as_ref()).await;
 
     Ok(doctor_output(kind, Some(profile_name), Some(mode), checks))
@@ -332,17 +337,22 @@ async fn embedded_health_check(
     target: ResolvedTarget,
     store_config: &StoreConfig,
 ) -> (DoctorCheck, Option<ResolvedTarget>) {
-    let store = target
-        .maintenance
-        .as_ref()
-        .expect("embedded target should carry maintenance handles")
+    let Backend::Embedded { host, .. } = &target.backend else {
+        return (
+            failed_message(
+                DoctorCheckName::Health,
+                "the profile opened no store to list",
+            ),
+            None,
+        );
+    };
+    let listed = host
         .runtime
-        .object_store();
-    match store
+        .object_store()
         .list_prefix_stream(&probe_runs_prefix())
         .try_next()
-        .await
-    {
+        .await;
+    match listed {
         Ok(_) => {
             let key_prefix = match store_config {
                 StoreConfig::LocalFs(LocalFsStoreConfig { key_prefix, .. })
@@ -369,16 +379,16 @@ async fn embedded_health_check(
 async fn provider_check(
     profile_name: &str,
     profile: &ProfileConfig,
-    no_retry: bool,
-) -> Result<(String, Option<ResolvedTarget>), CliError> {
+    transient_retry: TransientRetry,
+) -> Result<(String, Option<ResolvedTarget>)> {
     profile.ensure_store_usable(profile_name)?;
-    match profile {
-        ProfileConfig::Embedded { store, .. } => Ok((
+    match &profile.connection {
+        ProfileConnection::Embedded { store, .. } => Ok((
             format!("{} store configuration is valid", store.kind().as_str()),
             None,
         )),
-        ProfileConfig::Remote { server_url, .. } => {
-            let target = ResolvedTarget::resolve(profile_name, profile, no_retry).await?;
+        ProfileConnection::Remote { server_url, .. } => {
+            let target = ResolvedTarget::resolve(profile_name, profile, transient_retry).await?;
             Ok((
                 format!("server URL and TLS configuration parsed for {server_url}"),
                 Some(target),
@@ -391,11 +401,11 @@ async fn namespace_check(
     checks: &mut Vec<DoctorCheck>,
     profile_name: &str,
     profile: &ProfileConfig,
-    args: &DoctorArgs,
+    selectors: &Selectors,
     target: Option<&ResolvedTarget>,
 ) {
-    let namespace = match resolve_namespace(profile_name, profile, args.target.namespace.as_ref()) {
-        Ok(resolved) => resolved.namespace,
+    let namespace = match resolve_namespace(profile_name, profile, selectors.namespace.as_ref()) {
+        Ok(namespace) => namespace,
         Err(error) if error.is_no_default_namespace() => {
             checks.push(skipped(
                 DoctorCheckName::Namespace,
@@ -448,7 +458,7 @@ async fn append_write_check(
     }
 }
 
-fn capability_document_check(result: Result<CapabilityDocument, CliError>) -> DoctorCheck {
+fn capability_document_check(result: Result<CapabilityDocument>) -> DoctorCheck {
     let document = match result {
         Ok(document) => document,
         Err(error) => return failed(DoctorCheckName::Capabilities, error),
@@ -491,8 +501,8 @@ fn store_probe_check(response: StoreProbeResponse) -> DoctorCheck {
 
 fn local_root_is_missing(profile: &ProfileConfig) -> bool {
     matches!(
-        profile,
-        ProfileConfig::Embedded {
+        &profile.connection,
+        ProfileConnection::Embedded {
             store: StoreConfig::LocalFs(LocalFsStoreConfig { root, .. }),
             ..
         } if !Path::new(root).exists()
@@ -522,7 +532,7 @@ fn profile_selection_source(explicit_profile: Option<&str>) -> &'static str {
 fn check_from_backend_result<T>(
     name: DoctorCheckName,
     success_message: impl Into<String>,
-    result: Result<T, CliError>,
+    result: Result<T>,
 ) -> DoctorCheck {
     match result {
         Ok(_) => ok(name, success_message),
@@ -554,8 +564,8 @@ fn failed(name: DoctorCheckName, error: CliError) -> DoctorCheck {
     DoctorCheck {
         name: name.as_str().to_owned(),
         status: DoctorStatus::Failed,
-        message: error.message,
-        request_id: error.request_id,
+        message: error.message.clone(),
+        request_id: error.request_id.clone(),
         store_probe: None,
     }
 }
@@ -589,7 +599,7 @@ fn skip_remaining(
 fn doctor_output(
     kind: CommandKind,
     profile: Option<String>,
-    mode: Option<String>,
+    mode: Option<ProfileMode>,
     checks: Vec<DoctorCheck>,
 ) -> CommandOutput {
     CommandOutput {
@@ -641,7 +651,8 @@ mod tests {
                 None,
                 config.kind(),
                 loonfs::InlineContentPolicy::default(),
-                false,
+                TransientRetry::Retry,
+                "doctor-test".to_owned(),
             )
             .await
             .expect("resolve embedded target");

@@ -1,11 +1,11 @@
 //! Prepares small payloads using the deployment's advertised inline limit.
 
 use super::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
-use crate::{Client, ClientError, NamespaceId, PayloadSource, Result};
+use crate::{Client, ClientError, PayloadSource, Result};
 use bytes::BytesMut;
 use futures::StreamExt;
 use loonfs_types::{
-    FEATURE_COMMIT_INLINE_CONTENT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
+    NamespaceId, FEATURE_COMMIT_INLINE_CONTENT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
 
 impl Client {

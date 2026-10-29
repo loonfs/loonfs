@@ -6,12 +6,14 @@
 
 use super::*;
 use crate::scripted_transport::{self, Outcome};
+use crate::{ClientConfig, NamespacePath};
 use futures::stream::StreamExt;
 use loonfs_test_support::ids::content_ref;
-use loonfs_types::api::v0::UploadMode;
+use loonfs_types::api::v0::{Commit, SignUploadPartsResponse};
+use loonfs_types::options::PutFileOptions;
 use loonfs_types::{
-    CapabilityDocument, CommitId, ContentId, ContentRef, ContentRefKind, API_GROUP_FILESYSTEM_V0,
-    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    ChangeSeq, CommitId, ContentId, ContentRefKind, FilesystemOperation, API_GROUP_FILESYSTEM_V0,
+    PROTOCOL_VERSION,
 };
 use std::assert_matches;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -317,23 +319,30 @@ fn commit_landed() -> Outcome {
     })
 }
 
+/// The order in which a multipart put signs and uploads `parts`, a run of
+/// consecutive part numbers, against the scripted transport, which answers
+/// every request at once: one signing request for the first window, and then,
+/// as each part finishes, the signing request for the part that takes its
+/// place.
+fn window_script(parts: &[u32]) -> Vec<Outcome> {
+    let window = DIRECT_MULTIPART_PARTS_IN_FLIGHT;
+    let first = u32::try_from(parts.len().min(window)).expect("the window should fit u32");
+    let mut script = vec![signed_parts(parts[0], first)];
+    for (index, part_number) in parts.iter().enumerate() {
+        script.push(Outcome::PartAccepted(format!("\"etag-{part_number}\"")));
+        if let Some(next) = parts.get(index + window) {
+            script.push(signed_parts(*next, 1));
+        }
+    }
+    script
+}
+
 /// The scripted conversation a direct-multipart put has: capabilities,
-/// begin, then per wave one signing request and one upload per part, then
-/// completion and the commit.
+/// begin, the signing requests and part uploads, then completion and the
+/// commit.
 fn multipart_script(parts: u32, uploaded: ContentRef) -> Vec<Outcome> {
     let mut script = vec![capabilities(true), begin_multipart()];
-    let window = u32::try_from(DIRECT_MULTIPART_PART_WAVE).expect("the window should fit u32");
-    let mut next = 1;
-    while next <= parts {
-        let wave = window.min(parts + 1 - next);
-        script.push(signed_parts(next, wave));
-        for part_number in next..next + wave {
-            script.push(Outcome::PartAccepted(format!("\"etag-{part_number}\"")));
-        }
-        next += wave;
-    }
-    // A payload that ends on a wave boundary needs one more wave to be told
-    // the source is done; this one does not.
+    script.extend(window_script(&(1..=parts).collect::<Vec<_>>()));
     script.push(completed(uploaded));
     script.push(commit_landed());
     script
@@ -415,16 +424,7 @@ impl PutFileJournal for RecordingJournal {
 /// missing.
 fn resumed_script(missing: &[u32], uploaded: ContentRef) -> Vec<Outcome> {
     let mut script = vec![capabilities(true)];
-    let window = DIRECT_MULTIPART_PART_WAVE;
-    for wave in missing.chunks(window) {
-        script.push(signed_parts(
-            wave[0],
-            u32::try_from(wave.len()).expect("a wave should fit u32"),
-        ));
-        for part_number in wave {
-            script.push(Outcome::PartAccepted(format!("\"etag-{part_number}\"")));
-        }
-    }
+    script.extend(window_script(missing));
     script.push(completed(uploaded));
     script.push(commit_landed());
     script
@@ -436,18 +436,17 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     let uploaded = content_ref(&payload);
     let journal = RecordingJournal::default();
 
-    // The first run gets through two waves and is cut off before the third
-    // is signed: the script runs out where the interruption did.
-    let window = u32::try_from(DIRECT_MULTIPART_PART_WAVE).expect("the window should fit u32");
-    let landed = window * 2;
+    // The first run lands parts 1 to 5 and is cut off when it signs part 9:
+    // the script runs out where the interruption did. After the first
+    // signing request, each landed part is followed by the signing request
+    // of the part that takes its place.
+    let landed: u32 = 5;
     let mut first = vec![capabilities(true), begin_multipart()];
-    for wave in 0..2u32 {
-        let first_part = wave * window + 1;
-        first.push(signed_parts(first_part, window));
-        for part_number in first_part..first_part + window {
-            first.push(Outcome::PartAccepted(format!("\"etag-{part_number}\"")));
-        }
-    }
+    first.extend(
+        window_script(&(1..=TEST_PAYLOAD_PARTS).collect::<Vec<_>>())
+            .into_iter()
+            .take(loonfs_types::usize_from_u64(2 * u64::from(landed))),
+    );
     // A failed signing request leaves the session open. No abort is sent.
     first.push(Outcome::TransportFailure);
     let transport = scripted_transport::script(first);
@@ -467,7 +466,7 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
             None,
         )
         .await;
-    interrupted.expect_err("the third wave never got signed");
+    interrupted.expect_err("part 9 never got signed");
     assert_eq!(
         journal.part_numbers(),
         (1..=landed).collect::<Vec<_>>(),
@@ -476,7 +475,7 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     let resume = journal.resume();
     assert_eq!(resume.part_size_bytes, TEST_PART_BYTES);
 
-    // The rerun sends only parts 9 onward.
+    // The rerun sends only parts 6 onward.
     let missing: Vec<u32> = (landed + 1..=TEST_PAYLOAD_PARTS).collect();
     let (source, retention) =
         watched_source(&payload, loonfs_types::usize_from_u64(TEST_PART_BYTES));
@@ -569,7 +568,7 @@ async fn a_direct_multipart_put_holds_only_its_window() {
         .await
         .expect("a scripted multipart put should land");
 
-    let window_bound = DIRECT_MULTIPART_PART_WAVE as u64 * TEST_PART_BYTES;
+    let window_bound = DIRECT_MULTIPART_PARTS_IN_FLIGHT as u64 * TEST_PART_BYTES;
     assert_eq!(
         retention.total_bytes(),
         TEST_PAYLOAD_BYTES as u64,
@@ -581,59 +580,10 @@ async fn a_direct_multipart_put_holds_only_its_window() {
         retention.peak_live_bytes()
     );
     assert!(
-        retention.peak_live_chunks() <= DIRECT_MULTIPART_PART_WAVE,
+        retention.peak_live_chunks() <= DIRECT_MULTIPART_PARTS_IN_FLIGHT,
         "the put held {} parts at once",
         retention.peak_live_chunks()
     );
-}
-
-/// Part 1's first upload fails in transport and waits out a retry backoff,
-/// so parts 2 and 3 fail before it does. The wave still returns part 1's
-/// error, the lowest-numbered failure, and not the first to complete.
-#[tokio::test(start_paused = true)]
-async fn a_part_wave_drains_every_part_and_returns_the_lowest_numbered_failure() {
-    let mut responses = vec![signed_parts(1, 3), Outcome::TransportFailure];
-    responses.extend(std::iter::repeat_with(|| signed_parts(1, 3)).take(15));
-    let transport = scripted_transport::script(responses);
-    let wave = (1..=3)
-        .map(|part_number| PendingPart {
-            claim: UploadPartChecksumClaim {
-                part_number,
-                checksum: Checksum::crc32c(b"part"),
-            },
-            bytes: Bytes::from_static(b"part"),
-        })
-        .collect();
-
-    let error = client(&transport)
-        .upload_wave(&namespace_id(), &upload_id(), wave)
-        .await
-        .expect_err("a part upload answered without an etag fails");
-
-    let ClientError::Protocol(message) = &error else {
-        panic!("expected a protocol error, got {error:?}");
-    };
-    assert_eq!(message, "part 1 upload returned no etag");
-    let sent = transport.sent();
-    let part_url = |part_number: u32| format!("http://provider.invalid/part/{part_number}");
-    assert_eq!(
-        sent.last().map(|request| request.url.as_str()),
-        Some(part_url(1).as_str()),
-        "part 1 failed last"
-    );
-    for (part_number, uploads) in [
-        (1, DIRECT_MULTIPART_PART_ATTEMPTS + 1),
-        (2, DIRECT_MULTIPART_PART_ATTEMPTS),
-        (3, DIRECT_MULTIPART_PART_ATTEMPTS),
-    ] {
-        let url = part_url(part_number);
-        assert_eq!(
-            sent.iter().filter(|request| request.url == url).count(),
-            uploads,
-            "part {part_number} used every attempt"
-        );
-    }
-    assert_eq!(transport.attempts(), 17);
 }
 
 #[tokio::test]
@@ -987,9 +937,7 @@ async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() 
         let mut script = vec![capabilities(true), begin_multipart()];
         if !fail_at_begin {
             script.push(signed_parts(1, 4));
-            for number in 1..=4 {
-                script.push(Outcome::PartAccepted(format!("etag-{number}")));
-            }
+            script.push(Outcome::PartAccepted("etag-1".to_owned()));
         }
         let expected_attempts = script.len();
         let transport = scripted_transport::script(script);
@@ -1011,7 +959,7 @@ async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() 
         assert_eq!(
             transport.attempts(),
             expected_attempts,
-            "no subsequent wave, completion, commit, or abort may be sent"
+            "no later part, completion, commit, or abort may be sent"
         );
     }
 }

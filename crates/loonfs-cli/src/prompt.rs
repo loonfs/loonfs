@@ -1,17 +1,17 @@
 //! Interactive terminal prompts, failing cleanly when input is
 //! non-interactive.
 
-use crate::error::CliError;
+use crate::error::{CliError, Result};
 use dialoguer::{Confirm, FuzzySelect, Input, Password, Select};
 
-pub(crate) fn prompt_line(label: &str) -> Result<String, CliError> {
+pub(crate) fn prompt_line(label: &str) -> Result<String> {
     Input::new()
         .with_prompt(label)
         .interact_text()
         .map_err(|err| CliError::io(std::io::Error::other(err)))
 }
 
-pub(crate) fn prompt_line_default(label: &str, default: &str) -> Result<String, CliError> {
+pub(crate) fn prompt_line_default(label: &str, default: &str) -> Result<String> {
     Input::new()
         .with_prompt(label)
         .default(default.to_owned())
@@ -20,14 +20,14 @@ pub(crate) fn prompt_line_default(label: &str, default: &str) -> Result<String, 
 }
 
 /// Prompts for a new secret with hidden input; empty input re-prompts.
-pub(crate) fn prompt_secret(label: &str) -> Result<String, CliError> {
+pub(crate) fn prompt_secret(label: &str) -> Result<String> {
     Password::new()
         .with_prompt(format!("{label} (hidden)"))
         .interact()
         .map_err(|err| CliError::io(std::io::Error::other(err)))
 }
 
-pub(crate) fn prompt_secret_keep_current(label: &str, current: &str) -> Result<String, CliError> {
+pub(crate) fn prompt_secret_keep_current(label: &str, current: &str) -> Result<String> {
     let value = Password::new()
         .with_prompt(format!("{label} (hidden, enter to keep current)"))
         .allow_empty_password(true)
@@ -42,10 +42,7 @@ pub(crate) fn prompt_secret_keep_current(label: &str, current: &str) -> Result<S
 
 /// Prompts for an optional secret with hidden input. Empty input keeps the
 /// current value (or stays unset); the current value is never displayed.
-pub(crate) fn prompt_secret_optional(
-    label: &str,
-    current: Option<&str>,
-) -> Result<Option<String>, CliError> {
+pub(crate) fn prompt_secret_optional(label: &str, current: Option<&str>) -> Result<Option<String>> {
     let prompt = match current {
         Some(_) => format!("{label} (hidden, enter to keep current)"),
         None => format!("{label} (optional, hidden, enter to skip)"),
@@ -62,10 +59,7 @@ pub(crate) fn prompt_secret_optional(
     }
 }
 
-pub(crate) fn prompt_optional(
-    label: &str,
-    current: Option<&str>,
-) -> Result<Option<String>, CliError> {
+pub(crate) fn prompt_optional(label: &str, current: Option<&str>) -> Result<Option<String>> {
     let prompt = match current {
         Some(val) => format!("{label} (current: {val}, enter to keep, empty to clear)"),
         None => format!("{label} (optional, enter to skip)"),
@@ -83,7 +77,7 @@ pub(crate) fn prompt_optional(
     }
 }
 
-pub(crate) fn prompt_choice(label: &str, options: &[&str]) -> Result<String, CliError> {
+pub(crate) fn prompt_choice(label: &str, options: &[&str]) -> Result<String> {
     prompt_choice_default(label, options, 0)
 }
 
@@ -91,7 +85,7 @@ pub(crate) fn prompt_choice_default(
     label: &str,
     options: &[&str],
     default: usize,
-) -> Result<String, CliError> {
+) -> Result<String> {
     let selection = Select::new()
         .with_prompt(label)
         .items(options)
@@ -101,11 +95,7 @@ pub(crate) fn prompt_choice_default(
     Ok(options[selection].to_owned())
 }
 
-pub(crate) fn prompt_fuzzy_choice(
-    label: &str,
-    options: &[&str],
-    default: usize,
-) -> Result<String, CliError> {
+pub(crate) fn prompt_fuzzy_choice(label: &str, options: &[&str], default: usize) -> Result<String> {
     let mut items: Vec<String> = options.iter().map(|option| (*option).to_owned()).collect();
     items.push("(other)".to_owned());
     let selection = FuzzySelect::new()
@@ -121,7 +111,7 @@ pub(crate) fn prompt_fuzzy_choice(
     }
 }
 
-pub(crate) fn prompt_confirm(label: &str) -> Result<bool, CliError> {
+pub(crate) fn prompt_confirm(label: &str) -> Result<bool> {
     Confirm::new()
         .with_prompt(label)
         .default(false)

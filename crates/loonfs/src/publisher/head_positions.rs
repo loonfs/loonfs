@@ -283,8 +283,9 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         ))),
         async {
             store.wait_until_blocked().await;
-            let (checkpoint, ()) =
-                futures::join!(namespace.create_snapshot("during", &options), async {
+            let (checkpoint, ()) = futures::join!(
+                namespace.create_snapshot_with_options("during", &options),
+                async {
                     // The checkpoint's manifest is durable, and its move of
                     // the position waits for the publish's engine.
                     bounded(Duration::from_secs(10), async {
@@ -306,7 +307,8 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
                         before.read_basis.basis.manifest_no()
                     );
                     store.release();
-                });
+                }
+            );
             checkpoint.expect("checkpoint")
         }
     );

@@ -5,23 +5,23 @@
 //! Transfers use bounded concurrency and report failures per file.
 
 use super::context::{
-    create_directory_tolerating_existing, render_target, CommandContext, RemoteDirectoryOutcome,
+    create_directory_tolerating_existing, render_target, NamespaceContext, RemoteDirectoryOutcome,
 };
+use super::download::FileVersion;
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadObservation, TreeTransferFailure,
 };
 use super::tree_failures::TreeTransferFailures;
-use crate::args::{CommandKind, RuntimeBehavior};
-use crate::error::CliError;
+use crate::args::RuntimeBehavior;
+use crate::error::{CliError, Result};
 use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::{write_stderr_progress, OutputFormat};
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
-use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
+use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions, ReadAt};
 use loonfs_types::AbsolutePath;
 use loonfs_types::DestinationBehavior;
 use loonfs_types::ErrorCode;
-use loonfs_types::PinId;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,10 +75,10 @@ impl TreeTally {
     fn record_file(
         &mut self,
         path: String,
-        result: Result<String, CliError>,
+        result: Result<String>,
         runtime: RuntimeBehavior,
         verb: &str,
-    ) -> Result<(), CliError> {
+    ) -> Result<()> {
         match result {
             Ok(target) => {
                 self.files += 1;
@@ -97,7 +97,7 @@ impl TreeTally {
         }
     }
 
-    fn fail(&mut self, path: impl Into<String>, error: CliError) -> Result<(), CliError> {
+    fn fail(&mut self, path: impl Into<String>, error: CliError) -> Result<()> {
         self.failures
             .push(TreeTransferFailure {
                 path: path.into(),
@@ -130,13 +130,13 @@ async fn transfer_tree<Source, Destination, S, F, FF, D, DF>(
     progress: Option<&ProgressReporter>,
     runtime: RuntimeBehavior,
     verb: &str,
-) -> Result<TreeTally, CliError>
+) -> Result<TreeTally>
 where
     S: Stream<Item = TreeEntry<Source, Destination>>,
     F: Fn(FileJob<Source, Destination>) -> FF,
-    FF: Future<Output = (String, Result<String, CliError>)>,
+    FF: Future<Output = (String, Result<String>)>,
     D: Fn(Destination) -> DF,
-    DF: Future<Output = (String, Result<DirectoryOutcome, CliError>)>,
+    DF: Future<Output = (String, Result<DirectoryOutcome>)>,
 {
     futures::pin_mut!(entries);
     let mut pending = FuturesUnordered::new();
@@ -210,11 +210,11 @@ where
 }
 
 async fn create_remote_directory(
-    context: &CommandContext,
+    context: &NamespaceContext,
     remote: AbsolutePath,
     parents: bool,
     message: Option<String>,
-) -> (String, Result<DirectoryOutcome, CliError>) {
+) -> (String, Result<DirectoryOutcome>) {
     let result = async {
         let spec = remote_spec(context, &remote, "destination_path")?;
         create_directory_tolerating_existing(
@@ -249,15 +249,14 @@ fn warn_drift(tally: &TreeTally, runtime: RuntimeBehavior) {
 /// Uploads files as they are discovered. Empty leaf directories create their
 /// ancestors; nonempty directories are created by file uploads.
 pub(crate) async fn run_put_tree(
-    kind: CommandKind,
-    context: &CommandContext,
+    context: &NamespaceContext,
     local_root: &Path,
     remote_root: &AbsolutePath,
     behavior: DestinationBehavior,
     message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let entries = local_tree(local_root, remote_root).map_err(|error| context.fail(kind, error))?;
+    let entries = local_tree(local_root, remote_root).map_err(|error| context.fail(error))?;
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Put,
@@ -317,18 +316,15 @@ pub(crate) async fn run_put_tree(
         "stored",
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
-    Ok(context.output(
-        kind,
-        CommandData::TreeTransfer {
-            source: local_root.display().to_string(),
-            destination: render_target(context.namespace(), remote_root),
-            files: tally.files,
-            directories: tally.directories,
-            head_drift: None,
-            failures: tally.failures,
-        },
-    ))
+    .map_err(|error| context.fail(error))?;
+    Ok(context.output(CommandData::TreeTransfer {
+        source: local_root.display().to_string(),
+        destination: render_target(context.namespace(), remote_root),
+        files: tally.files,
+        directories: tally.directories,
+        head_drift: None,
+        failures: tally.failures,
+    }))
 }
 
 /// Downloads files as discovered, creating each parent before entering it.
@@ -336,25 +332,24 @@ pub(crate) async fn run_put_tree(
 /// The listing returns each directory before the entries below it, so the
 /// walk creates a local directory before it writes any file into it.
 pub(crate) async fn run_get_tree(
-    kind: CommandKind,
-    context: &CommandContext,
+    context: &NamespaceContext,
     remote_root: &AbsolutePath,
     local_root: &Path,
     behavior: DestinationBehavior,
     runtime: RuntimeBehavior,
-    snapshot_id: Option<&PinId>,
+    at: &ReadAt,
 ) -> Result<CommandOutput, CommandFailure> {
     let root_outcome = create_local_directory(local_root)
-        .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;
+        .map_err(|error| context.fail(CliError::io_for_path(local_root, error)))?;
     let entries = remote_tree(
         context,
         remote_root,
         "remote_path",
-        snapshot_id,
+        at,
         local_root.to_path_buf(),
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Get,
@@ -376,8 +371,13 @@ pub(crate) async fn run_get_tree(
             let super::fs::ResumableDownload {
                 mut download,
                 partial,
-            } = match super::fs::open_resumable_download(context, &spec, None, snapshot_id, &local)
-                .await
+            } = match super::fs::open_resumable_download(
+                context,
+                &spec,
+                &FileVersion::At(at.clone()),
+                &local,
+            )
+            .await
             {
                 Ok(opened) => opened,
                 Err(error) => return (remote, Err(error)),
@@ -413,20 +413,17 @@ pub(crate) async fn run_get_tree(
         "wrote",
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     tally.record_directory(root_outcome);
     warn_drift(&tally, runtime);
-    Ok(context.output(
-        kind,
-        CommandData::TreeTransfer {
-            source: render_target(context.namespace(), remote_root),
-            destination: local_root.display().to_string(),
-            files: tally.files,
-            directories: tally.directories,
-            head_drift: tally.heads.drift(),
-            failures: tally.failures,
-        },
-    ))
+    Ok(context.output(CommandData::TreeTransfer {
+        source: render_target(context.namespace(), remote_root),
+        destination: local_root.display().to_string(),
+        files: tally.files,
+        directories: tally.directories,
+        head_drift: tally.heads.drift(),
+        failures: tally.failures,
+    }))
 }
 
 /// Copies a directory tree without downloading file contents to the CLI.
@@ -435,32 +432,32 @@ pub(crate) async fn run_get_tree(
 /// destination directory exists before anything is copied into it, and only
 /// the destination root is created with its missing parents.
 pub(crate) async fn run_copy_tree(
-    kind: CommandKind,
-    context: &CommandContext,
+    context: &NamespaceContext,
     source_root: &AbsolutePath,
     destination_root: &AbsolutePath,
     behavior: DestinationBehavior,
     message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let source = remote_spec(context, source_root, "source_path")
-        .map_err(|error| context.fail(kind, error))?;
+    let source =
+        remote_spec(context, source_root, "source_path").map_err(|error| context.fail(error))?;
     let destination = remote_spec(context, destination_root, "destination_path")
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     ensure_destination_outside_source(context, &source, &destination)
         .await
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     // Read the source before creating the destination so a missing source has
     // no remote write side effects.
+    let live = ReadAt::default();
     let entries = remote_tree(
         context,
         source_root,
         "source_path",
-        None,
+        &live,
         destination_root.clone(),
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     let entries =
         futures::stream::iter([TreeEntry::Directory(destination_root.clone())]).chain(entries);
     let transfer = |job: FileJob<AbsolutePath, AbsolutePath>| {
@@ -474,6 +471,7 @@ pub(crate) async fn run_copy_tree(
                 (Err(error), _) | (_, Err(error)) => return (source, Err(error)),
             };
             let result = context
+                .profile
                 .target
                 .client
                 .copy_path_with_options(
@@ -507,30 +505,27 @@ pub(crate) async fn run_copy_tree(
         "copied",
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     warn_drift(&tally, runtime);
-    Ok(context.output(
-        kind,
-        CommandData::TreeTransfer {
-            source: render_target(context.namespace(), source_root),
-            destination: render_target(context.namespace(), destination_root),
-            files: tally.files,
-            directories: tally.directories,
-            head_drift: tally.heads.drift(),
-            failures: tally.failures,
-        },
-    ))
+    Ok(context.output(CommandData::TreeTransfer {
+        source: render_target(context.namespace(), source_root),
+        destination: render_target(context.namespace(), destination_root),
+        files: tally.files,
+        directories: tally.directories,
+        head_drift: tally.heads.drift(),
+        failures: tally.failures,
+    }))
 }
 
 /// Rejects a copy destination at or below the source by walking the parents
 /// of the destination's deepest existing entry. The server resolves both
 /// paths, so the CLI never compares names itself.
 async fn ensure_destination_outside_source(
-    context: &CommandContext,
+    context: &NamespaceContext,
     source: &NamespacePath,
     destination: &NamespacePath,
-) -> Result<(), CliError> {
-    let client = &context.target.client;
+) -> Result<()> {
+    let client = &context.profile.target.client;
     let source_inode_id = client.stat(source).await?.inode_id;
     let mut probe = destination.absolute_path().clone();
     let mut entry = loop {
@@ -589,10 +584,10 @@ async fn ensure_destination_outside_source(
 /// Scopes a remote path to the command's namespace, refusing one past the
 /// request bounds under `param`.
 fn remote_spec(
-    context: &CommandContext,
+    context: &NamespaceContext,
     path: &AbsolutePath,
     param: &str,
-) -> Result<NamespacePath, CliError> {
+) -> Result<NamespacePath> {
     path.validate_request_bounds()
         .map_err(|error| CliError::invalid_request(error.to_string()).with_param(param))?;
     Ok(NamespacePath::new(
@@ -642,6 +637,7 @@ mod tests {
             output: OutputFormat::Json,
             interactive: false,
             progress: ProgressMode::Off,
+            transient_retry: crate::args::TransientRetry::Retry,
         }
     }
 
@@ -649,7 +645,7 @@ mod tests {
     /// handed, and the namespace to upload into.
     async fn watched_context(
         store_dir: &std::path::Path,
-    ) -> (CommandContext, Arc<BufferWatchStore<LocalFsStore>>) {
+    ) -> (NamespaceContext, Arc<BufferWatchStore<LocalFsStore>>) {
         let watched = Arc::new(BufferWatchStore::watching_content(
             LocalFsStore::new(store_dir).expect("create local-fs store"),
         ));
@@ -668,25 +664,40 @@ mod tests {
     async fn context_over(
         store: SharedObjectStore,
         inline_content: loonfs::InlineContentPolicy,
-    ) -> CommandContext {
+    ) -> NamespaceContext {
         let target = ResolvedTarget::over_store(
             store,
             Some("put-tree-test"),
             loonfs_objectstore::ConfiguredObjectStoreKind::LocalFs,
             inline_content,
-            false,
+            crate::args::TransientRetry::Retry,
+            "put-tree-test".to_owned(),
         )
         .await
         .expect("build embedded target");
         let namespace = NamespaceId::parse("demo").expect("valid namespace id");
-        let context = CommandContext {
-            profile_name: "default".to_owned(),
-            mode: "embedded".to_owned(),
-            namespace: Some(namespace.clone()),
-            actor_id: Some(loonfs_test_support::test_actor()),
-            target,
+        let profile = crate::config::ProfileConfig {
+            identity: crate::config::ProfileIdentity::default(),
+            default_namespace: None,
+            connection: crate::config::ProfileConnection::Embedded {
+                store: crate::config::StoreConfig::LocalFs(
+                    loonfs_objectstore::local_fs_store::LocalFsStoreConfig {
+                        root: "/unused".to_owned(),
+                        key_prefix: None,
+                    },
+                ),
+                writer_id: None,
+            },
         };
+        let context = super::super::context::ProfileContext {
+            kind: crate::args::CommandKind::FilesystemPut,
+            profile_name: "default".to_owned(),
+            profile,
+            target,
+        }
+        .for_namespace(namespace.clone(), loonfs_test_support::test_actor());
         context
+            .profile
             .target
             .client
             .create_namespace(&namespace, &loonfs_test_support::test_actor())
@@ -698,7 +709,7 @@ mod tests {
     /// Creates `/up` on an in-memory store, with an empty `broken` directory,
     /// `a-first`, `good/child`, and enough `z-` files that the listing of `/up`
     /// takes one full page and one more entry.
-    async fn context_with_two_page_tree() -> CommandContext {
+    async fn context_with_two_page_tree() -> NamespaceContext {
         let context = context_over(
             Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme)),
             loonfs::InlineContentPolicy::default(),
@@ -725,6 +736,7 @@ mod tests {
                 .map(file),
         );
         context
+            .profile
             .target
             .client
             .commit(
@@ -902,7 +914,8 @@ mod tests {
         // observed when the walk lists it on its own, and must not lose later
         // siblings or the remaining pages.
         let up = AbsolutePath::parse("/up").expect("remote root");
-        let entries = remote_tree(&context, &up, "remote_path", None, PathBuf::new())
+        let live = ReadAt::default();
+        let entries = remote_tree(&context, &up, "remote_path", &live, PathBuf::new())
             .await
             .expect("start discovery");
         let broken = remote_spec(
@@ -912,6 +925,7 @@ mod tests {
         )
         .expect("path");
         context
+            .profile
             .target
             .client
             .delete_path(&broken, context.actor())
@@ -964,7 +978,6 @@ mod tests {
         std::fs::write(tree.path().join("small.txt"), SMALL_FILE).expect("write small file");
 
         let output = match run_put_tree(
-            CommandKind::FilesystemPut,
             &context,
             tree.path(),
             &AbsolutePath::parse("/up").expect("remote root"),
@@ -1007,8 +1020,9 @@ mod tests {
 
         let spec = NamespacePath::parse("demo", "/up/docs/big.bin").expect("valid namespace path");
         let mut download = context
+            .profile
             .target
-            .open_file_download(&spec, None, None, 0)
+            .open_file_download(&spec, &FileVersion::At(ReadAt::default()), 0)
             .await
             .expect("open uploaded file");
         let mut read = Vec::new();

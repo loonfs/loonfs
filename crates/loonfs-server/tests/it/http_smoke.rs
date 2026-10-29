@@ -53,24 +53,27 @@ async fn delete_namespace_blocks_operations() {
     // A stale precondition refuses the delete and deletes nothing.
     let stale = harness
         .client
-        .delete_namespace(&namespace, Some(ChangeSeq(0)))
+        .delete_namespace_with_options(
+            &namespace,
+            &loonfs_client::DeleteNamespaceOptions {
+                expected_head_seq: Some(ChangeSeq(0)),
+            },
+        )
         .await
         .expect_err("stale precondition");
     match stale {
         ClientError::Api {
-            status,
-            code,
-            message,
-            details,
-            ..
+            status, response, ..
         } => {
             assert_eq!(status, 409);
-            assert_eq!(code, "stale_head");
+            assert_eq!(response.code, "stale_head");
             // The rejection reports both sequences, so a caller that still
             // means to delete knows what to retry against without parsing
             // anything: in words for a person, typed for a program.
-            assert_eq!(message, "expected head sequence 0, found 1");
-            let details = details.expect("a stale precondition carries its sequences");
+            assert_eq!(response.message, "expected head sequence 0, found 1");
+            let details = response
+                .details
+                .expect("a stale precondition carries its sequences");
             assert_eq!(details.expected_head_seq, Some(ChangeSeq(0)));
             assert_eq!(details.actual_head_seq, Some(ChangeSeq(1)));
         }
@@ -84,7 +87,7 @@ async fn delete_namespace_blocks_operations() {
 
     let response = harness
         .client
-        .delete_namespace(&namespace, None)
+        .delete_namespace(&namespace)
         .await
         .expect("delete namespace");
     assert_eq!(response.namespace_id.as_str(), "doomed");
@@ -97,9 +100,11 @@ async fn delete_namespace_blocks_operations() {
         .await
         .expect_err("deleted namespace has no status");
     match status {
-        ClientError::Api { status, code, .. } => {
+        ClientError::Api {
+            status, response, ..
+        } => {
             assert_eq!(status, 410);
-            assert_eq!(code, "namespace_deleted");
+            assert_eq!(response.code, "namespace_deleted");
         }
         other => panic!("expected namespace_deleted, got {other:?}"),
     }
@@ -109,18 +114,20 @@ async fn delete_namespace_blocks_operations() {
         .await
         .expect_err("reads observe the deleted namespace");
     match read {
-        ClientError::Api { code, .. } => assert_eq!(code, "namespace_deleted"),
+        ClientError::Api { response, .. } => assert_eq!(response.code, "namespace_deleted"),
         other => panic!("expected namespace_deleted, got {other:?}"),
     }
     let again = harness
         .client
-        .delete_namespace(&namespace, None)
+        .delete_namespace(&namespace)
         .await
         .expect_err("repeat delete");
     match again {
-        ClientError::Api { status, code, .. } => {
+        ClientError::Api {
+            status, response, ..
+        } => {
             assert_eq!(status, 410);
-            assert_eq!(code, "namespace_deleted");
+            assert_eq!(response.code, "namespace_deleted");
         }
         other => panic!("expected namespace_deleted, got {other:?}"),
     }
@@ -317,9 +324,11 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         .await
         .expect_err("missing namespace status");
     match missing {
-        ClientError::Api { status, code, .. } => {
+        ClientError::Api {
+            status, response, ..
+        } => {
             assert_eq!(status, 404);
-            assert_eq!(code, "namespace_not_found");
+            assert_eq!(response.code, "namespace_not_found");
         }
         other => panic!("expected API error for missing namespace, got {other:?}"),
     }
@@ -446,7 +455,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .page()
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
+        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "rebootstrap_required"),
         other => panic!("expected rebootstrap_required, got {other:?}"),
     }
     let clone_changes = harness
@@ -491,7 +500,13 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
         .expect("first write");
     let snapshot = harness
         .client
-        .create_snapshot(&source, "basis", std::num::NonZeroU64::new(60_000))
+        .create_snapshot_with_options(
+            &source,
+            "basis",
+            &loonfs_client::CreateSnapshotOptions {
+                ttl_ms: std::num::NonZeroU64::new(60_000),
+            },
+        )
         .await
         .expect("snapshot");
     harness

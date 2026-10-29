@@ -165,7 +165,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
 
     let begin = harness
         .client
-        .create_direct_put_upload(&namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload_target(&namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -333,7 +333,7 @@ async fn assert_wrong_direct_put_bytes_rejected(
     let mut wrong_bytes = *bytes;
     wrong_bytes[0] ^= 1;
     let begin = client
-        .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin wrong-bytes direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -375,7 +375,7 @@ async fn assert_direct_put_requires_its_signed_headers(
         ),
     ] {
         let begin = client
-            .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
+            .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
             .await
             .expect("begin meddled direct put");
         let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -412,7 +412,7 @@ async fn assert_direct_put_is_no_replace(
 ) {
     let bytes = b"duplicate direct put bytes\n";
     let begin = client
-        .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin duplicate direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -715,7 +715,7 @@ async fn gcp_gcs_append_keeps_crc32c_after_checkpoint() {
 
     harness
         .client
-        .create_snapshot(&namespace_id, "appended", None)
+        .create_snapshot(&namespace_id, "appended")
         .await
         .expect("checkpoint append");
     let folded = harness
@@ -795,7 +795,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
 ) {
     let bytes = b"gcs completion reads the object back\n";
     let begin = client
-        .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -836,7 +836,7 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
     let bytes = b"gcs prefix scoping\n";
     let begin = harness
         .client
-        .create_direct_put_upload(&namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload_target(&namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
@@ -886,7 +886,7 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
 async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"gcs expiry\n";
     let begin = client
-        .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
+        .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
@@ -1045,7 +1045,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // not have to: the claim arrives with the completion below.
     let begin = harness
         .client
-        .create_direct_multipart_upload(&namespace_id)
+        .create_direct_multipart_upload_target(&namespace_id)
         .await
         .expect("begin direct multipart");
     let upload_id = begin.upload_id.clone();

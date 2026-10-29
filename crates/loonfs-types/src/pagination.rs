@@ -73,6 +73,19 @@ impl<P: PagedResponse, E> Pager<P, E> {
         }
     }
 
+    /// Creates a pager whose `load_page` receives a clone of `state` with
+    /// each request, at the default page size and with no total limit.
+    ///
+    /// `load_page` is a function rather than a closure, so everything a page
+    /// request needs travels in `state`.
+    pub fn with_state<S, Fut>(state: S, load_page: fn(S, PageRequest<P::Cursor>) -> Fut) -> Self
+    where
+        S: Clone + Send + 'static,
+        Fut: Future<Output = Result<P, E>> + Send + 'static,
+    {
+        Self::new(move |request| load_page(state.clone(), request))
+    }
+
     /// Starts the listing at `cursor`, a position that an earlier page
     /// returned, or at the first page when it is `None`.
     pub fn cursor(mut self, cursor: Option<P::Cursor>) -> Self {

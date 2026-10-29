@@ -1,8 +1,21 @@
 //! Upload transport selection and resumable multipart state.
 
-use super::super::*;
+use crate::payload::PartReader;
+use crate::transport::{SendPolicy, WireRequest};
+use crate::{Client, ClientError, PayloadSource, PayloadStream, Result};
+use bytes::Bytes;
+use futures::stream::FuturesUnordered;
 use futures::StreamExt as _;
-use loonfs_types::api::v0::UploadMode;
+use loonfs_types::api::v0::{
+    CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransferAccess,
+    SignedUploadPart, UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSession,
+    UploadSessionStatus,
+};
+use loonfs_types::{
+    CapabilityDocument, Checksum, ChecksumAlgorithm, ChecksumDigest, CommitRequest, ContentRef,
+    NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
+};
 use std::sync::{Arc, Mutex};
 
 /// Minimum payload size for streaming and multipart uploads.
@@ -12,8 +25,9 @@ use std::sync::{Arc, Mutex};
 /// streaming path.
 pub const MIN_STREAMING_PUT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Maximum number of multipart payloads held in memory at once.
-const DIRECT_MULTIPART_PART_WAVE: usize = 4;
+/// Most multipart parts held in memory at once, which is also the most parts
+/// uploading at once.
+const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 
 /// Maximum attempts for one part, including refreshed authorization.
 const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
@@ -201,7 +215,10 @@ fn observed_direct_put_source(
 }
 
 /// Builds a presigned PUT request, for a whole object or for one part.
-pub(super) fn presigned_put_request(access: &ObjectTransferAccess) -> Result<WireRequest> {
+pub(super) fn presigned_put_request(
+    access: &ObjectTransferAccess,
+    policy: SendPolicy,
+) -> Result<WireRequest> {
     let ObjectTransferAccess::PresignedUrl {
         method,
         url,
@@ -218,7 +235,7 @@ pub(super) fn presigned_put_request(access: &ObjectTransferAccess) -> Result<Wir
             "unsupported presigned upload method `{method}`"
         )));
     }
-    let mut request = WireRequest::presigned(http::Method::PUT, url);
+    let mut request = WireRequest::presigned(http::Method::PUT, url, policy);
     for (name, value) in headers {
         request = request.header(name, value);
     }
@@ -473,7 +490,7 @@ impl Client {
         body: DirectPutBody<'_>,
     ) -> Result<PreparedContent> {
         let begin = self
-            .create_direct_put_upload(namespace_id, body.size_hint())
+            .create_direct_put_upload_target(namespace_id, body.size_hint())
             .await?;
         let staged = async {
             if begin.mode != UploadMode::DirectPut {
@@ -547,7 +564,9 @@ impl Client {
                 resume.checksum_algorithm,
             ),
             None => {
-                let begin = self.create_direct_multipart_upload(namespace_id).await?;
+                let begin = self
+                    .create_direct_multipart_upload_target(namespace_id)
+                    .await?;
                 if begin.mode != UploadMode::DirectMultipart {
                     return Err(negotiated_a_different_upload_mode());
                 }
@@ -610,9 +629,11 @@ impl Client {
     }
 
     /// Cuts the payload into parts and uploads them, holding at most
-    /// [`DIRECT_MULTIPART_PART_WAVE`] of them at a time.
+    /// [`DIRECT_MULTIPART_PARTS_IN_FLIGHT`] of them at a time.
     ///
-    /// Each in-flight part owns one buffer, which bounds memory use. A resumed
+    /// A new part starts uploading whenever one finishes, and one signing
+    /// request authorizes all the parts that fill the free places. Each
+    /// in-flight part owns one buffer, which bounds memory use. A resumed
     /// upload still reads every byte to compute the final checksum, but it
     /// skips network transfer for completed parts.
     async fn upload_every_part(
@@ -635,11 +656,14 @@ impl Client {
         let mut size_bytes = 0u64;
         let mut parts = Vec::new();
         let mut next_part_number = 1u32;
+        let mut source_ended = false;
+        let mut in_flight = FuturesUnordered::new();
 
         loop {
-            let mut wave = Vec::with_capacity(DIRECT_MULTIPART_PART_WAVE);
-            let mut source_ended = false;
-            while wave.len() < DIRECT_MULTIPART_PART_WAVE {
+            let mut unsigned = Vec::new();
+            while !source_ended
+                && in_flight.len() + unsigned.len() < DIRECT_MULTIPART_PARTS_IN_FLIGHT
+            {
                 let Some(bytes) = source.next_part().await? else {
                     source_ended = true;
                     break;
@@ -652,7 +676,7 @@ impl Client {
                     parts.push(landed.clone());
                     continue;
                 }
-                wave.push(PendingPart {
+                unsigned.push(PendingPart {
                     claim: UploadPartChecksumClaim {
                         part_number,
                         checksum: Checksum::compute(checksum_algorithm, &bytes),
@@ -660,20 +684,21 @@ impl Client {
                     bytes,
                 });
             }
-            if !wave.is_empty() {
-                let uploaded = self.upload_wave(namespace_id, upload_id, wave).await?;
-                if let Some(journal) = continuity.journal {
-                    for part in &uploaded {
-                        journal.part_completed(part).map_err(|error| {
-                            ClientError::Io(format!("recording upload `{upload_id}`: {error}"))
-                        })?;
-                    }
+            if !unsigned.is_empty() {
+                for (part, access) in self.sign_parts(namespace_id, upload_id, unsigned).await? {
+                    in_flight.push(self.upload_one_part(namespace_id, upload_id, part, access));
                 }
-                parts.extend(uploaded);
             }
-            if source_ended {
+            let Some(uploaded) = in_flight.next().await else {
                 break;
+            };
+            let uploaded = uploaded?;
+            if let Some(journal) = continuity.journal {
+                journal.part_completed(&uploaded).map_err(|error| {
+                    ClientError::Io(format!("recording upload `{upload_id}`: {error}"))
+                })?;
             }
+            parts.push(uploaded);
         }
 
         parts.sort_by_key(|part| part.part_number);
@@ -684,35 +709,25 @@ impl Client {
         })
     }
 
-    /// Authorizes and uploads one wave of parts together.
-    async fn upload_wave(
+    /// Authorizes the upload of `unsigned` with one signing request, and
+    /// returns each part with its authorization.
+    async fn sign_parts(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-        wave: Vec<PendingPart>,
-    ) -> Result<Vec<CompletedUploadPart>> {
-        let claims = wave.iter().map(|part| part.claim.clone()).collect();
+        unsigned: Vec<PendingPart>,
+    ) -> Result<Vec<(PendingPart, ObjectTransferAccess)>> {
+        let claims = unsigned.iter().map(|part| part.claim.clone()).collect();
         let signed = self
             .sign_upload_parts(namespace_id, upload_id, claims)
             .await?;
-        let authorized = wave
+        unsigned
             .into_iter()
             .map(|part| {
                 let access = signed_access(&signed.parts, part.claim.part_number)?;
                 Ok((part, access))
             })
-            .collect::<Result<Vec<_>>>()?;
-        // One signing request authorizes the whole wave's part URLs, so the
-        // next wave starts only after this one has drained.
-        let uploaded = futures::future::join_all(
-            authorized
-                .into_iter()
-                .map(|(part, access)| self.upload_one_part(namespace_id, upload_id, part, access)),
-        )
-        .await;
-        // Every part is drained before the first failure by part number
-        // surfaces, so no part upload outlives the wave that started it.
-        uploaded.into_iter().collect()
+            .collect()
     }
 
     /// Uploads one part, re-asking for its URL if the upload fails.

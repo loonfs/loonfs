@@ -14,12 +14,12 @@ use std::num::NonZeroU64;
 
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
-    Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
-    ListFileRevisionsOptions, ListOptions, ListTrashOptions, MoveOptions, PutFileOptions, ReadAt,
-    ReadConsistency, ReadFileOptions, ReadRange, StatOptions, UndeleteDestination, UndeleteOptions,
-    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
-    UpdateAttributesOptions,
+    Consistency, CopyOptions, CreateDirectoryOptions, CreateSnapshotOptions, DeleteByInodeOptions,
+    DeleteOptions, DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions,
+    ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions, MoveOptions,
+    PutFileOptions, ReadAt, ReadConsistency, ReadFileOptions, ReadRange, StatOptions,
+    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
 /// Overrides for the metadata-upkeep action.
@@ -91,14 +91,6 @@ impl AdvanceRetentionFloorOptions {
         };
         Ok(Self { target })
     }
-}
-
-/// Options for creating a snapshot.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CreateSnapshotOptions {
-    /// The snapshot's lifetime in milliseconds, counted from the runtime's
-    /// clock. Without it, the snapshot doesn't expire.
-    pub ttl_ms: Option<NonZeroU64>,
 }
 
 /// Options for a streaming file read.

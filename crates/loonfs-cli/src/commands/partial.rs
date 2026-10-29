@@ -1,7 +1,7 @@
 //! Partial files and metadata used to resume interrupted downloads.
 
 use super::download::FileDownload;
-use crate::error::CliError;
+use crate::error::{CliError, Result};
 use loonfs_types::{Checksum, ContentId, ContentRef, DestinationBehavior, RevisionNo};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::{Read, Seek, Write};
@@ -138,7 +138,7 @@ impl PartialDownload {
         &self,
         download: &mut FileDownload,
         local_error: impl Fn(std::io::Error) -> CliError,
-    ) -> Result<(), CliError> {
+    ) -> Result<()> {
         if self.resumed_from == 0 {
             return Ok(());
         }

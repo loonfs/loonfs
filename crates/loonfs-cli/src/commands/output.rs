@@ -2,7 +2,7 @@
 
 use super::tree_failures::TreeTransferFailures;
 use crate::args::CommandKind;
-use crate::config::{CliConfig, ConfigSource, ProfileConfig};
+use crate::config::{CliConfig, ConfigSource, ProfileConfig, ProfileMode};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_run_outcome, StoreProbeRunOutcome};
@@ -107,14 +107,14 @@ pub(crate) struct DoctorCheck {
 pub(crate) struct CommandOutput {
     pub kind: CommandKind,
     pub profile: Option<String>,
-    pub mode: Option<String>,
+    pub mode: Option<ProfileMode>,
     pub data: CommandData,
 }
 
 pub(crate) struct CommandFailure {
     pub kind: CommandKind,
     pub profile: Option<String>,
-    pub mode: Option<String>,
+    pub mode: Option<ProfileMode>,
     /// Boxed to keep `Result<CommandOutput, CommandFailure>` small now that
     /// [`CliError`] carries request diagnostics (clippy `result_large_err`).
     pub error: Box<CliError>,

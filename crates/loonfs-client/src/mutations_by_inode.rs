@@ -1,7 +1,15 @@
 //! Filesystem mutations addressed by inode ID.
 
-use super::*;
-use loonfs_types::{ActorId, BindingVersion, DisplayName};
+use crate::{Client, Result};
+use loonfs_types::api::v0::Commit;
+use loonfs_types::options::{
+    AccessState, AppendFileByInodeOptions, AttributeChanges, CommitOptions, CopyOptions,
+    DeleteByInodeOptions, MoveOptions, UpdateAccessByInodeOptions, UpdateAttributesByInodeOptions,
+};
+use loonfs_types::{
+    ActorId, BindingVersion, CommitRequest, DisplayName, FilesystemOperation, InodeId, NamespaceId,
+    RevisionNo,
+};
 
 impl Client {
     /// Writes file bytes to a new name under a parent directory inode,

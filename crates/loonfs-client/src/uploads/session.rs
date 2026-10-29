@@ -1,9 +1,16 @@
 //! Upload-session endpoints and presigned transfer requests.
 
-use super::super::*;
 use super::staging::presigned_put_request;
 use crate::operations;
-use crate::transport::SendPolicy;
+use crate::transport::{decode_json, SendPolicy, WireRequest};
+use crate::{Client, ClientError, PayloadSource, Result};
+use bytes::Bytes;
+use loonfs_types::api::v0::{
+    CompleteUploadBody, CompletedUploadPart, CreateUploadBody, ObjectTransferAccess,
+    SignUploadPartsRequest, SignUploadPartsResponse, UploadPartChecksumClaim, UploadSession,
+};
+use loonfs_types::options::DirectMultipartUploadOptions;
+use loonfs_types::{Checksum, NamespaceId, UploadId};
 
 impl Client {
     /// Starts an upload session using the transport selected by the request.
@@ -12,12 +19,11 @@ impl Client {
         namespace_id: &NamespaceId,
         request: &CreateUploadBody,
     ) -> Result<UploadSession> {
-        let url = format!("{}/v0/namespaces/{namespace_id}/uploads", self.base_url);
+        let url = self.namespace_url(namespace_id, "/uploads");
         // Do not retry automatically because each request creates a session.
-        self.request_json::<_, UploadSession>(
-            self.post(&url),
-            Some(request),
-            operations::CREATE_UPLOAD,
+        self.send_json(
+            self.request(operations::CREATE_UPLOAD, &url)
+                .json(request)?,
         )
         .await
     }
@@ -25,7 +31,7 @@ impl Client {
     /// Starts a direct upload of bytes the caller already has.
     ///
     /// A size hint lets the server reject an oversized PUT before signing it.
-    pub async fn create_direct_put_upload(
+    pub async fn create_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
         size_bytes: Option<u64>,
@@ -36,11 +42,11 @@ impl Client {
 
     /// Opens a direct multipart upload session with the server's default part
     /// size.
-    pub async fn create_direct_multipart_upload(
+    pub async fn create_direct_multipart_upload_target(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<UploadSession> {
-        self.create_direct_multipart_upload_with_options(
+        self.create_direct_multipart_upload_target_with_options(
             namespace_id,
             &DirectMultipartUploadOptions::default(),
         )
@@ -52,7 +58,7 @@ impl Client {
     /// The request does not need a payload length or checksum. The server
     /// returns the part size and checksum algorithm; provider details remain
     /// private and the content reference is returned at completion.
-    pub async fn create_direct_multipart_upload_with_options(
+    pub async fn create_direct_multipart_upload_target_with_options(
         &self,
         namespace_id: &NamespaceId,
         options: &DirectMultipartUploadOptions,
@@ -76,15 +82,11 @@ impl Client {
         upload_id: &UploadId,
         parts: Vec<UploadPartChecksumClaim>,
     ) -> Result<SignUploadPartsResponse> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
-            self.base_url
-        );
+        let url = self.namespace_url(namespace_id, &format!("/uploads/{upload_id}/parts"));
         // Signing does not change upload state, so this request may be retried.
-        self.request_json::<_, SignUploadPartsResponse>(
-            self.post(&url),
-            Some(&SignUploadPartsRequest { parts }),
-            operations::SIGN_UPLOAD_PARTS,
+        self.send_json(
+            self.request(operations::SIGN_UPLOAD_PARTS, &url)
+                .json(&SignUploadPartsRequest { parts })?,
         )
         .await
     }
@@ -101,13 +103,11 @@ impl Client {
         checksum: Checksum,
         bytes: Bytes,
     ) -> Result<CompletedUploadPart> {
-        let request = presigned_put_request(access)?;
         // A part upload is safe to repeat: it is not create-only, the
         // provider takes the last write, and the checksum rides the
         // signature either way.
-        let response = self
-            .call(&request, Some(&bytes), SendPolicy::RetryWithoutDeadline)
-            .await?;
+        let request = presigned_put_request(access, SendPolicy::RetryWithoutDeadline)?.body(bytes);
+        let response = self.call(&request).await?;
         let etag = response
             .get(http::header::ETAG)
             .and_then(|value| value.to_str().ok())
@@ -128,15 +128,10 @@ impl Client {
         access: &ObjectTransferAccess,
         bytes: &[u8],
     ) -> Result<()> {
-        let request = presigned_put_request(access)?;
         // A successful create-only PUT may replay as a provider precondition error, not success.
-        self.call(
-            &request,
-            Some(&Bytes::copy_from_slice(bytes)),
-            SendPolicy::Once,
-        )
-        .await
-        .map(|_| ())
+        let request =
+            presigned_put_request(access, SendPolicy::Once)?.body(Bytes::copy_from_slice(bytes));
+        self.call(&request).await.map(|_| ())
     }
 
     /// Writes one whole object to a presigned URL from a source read in
@@ -150,7 +145,7 @@ impl Client {
         access: &ObjectTransferAccess,
         source: PayloadSource,
     ) -> Result<()> {
-        let request = presigned_put_request(access)?;
+        let request = presigned_put_request(access, SendPolicy::Once)?;
         let (body, size_bytes) = source.into_stream();
         self.call_streamed_once(&request, body, size_bytes)
             .await
@@ -164,17 +159,12 @@ impl Client {
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadSession> {
-        let request = self.put_upload_content_request(namespace_id, upload_id);
         // Proxied uploads are the request most likely to hit the server's
         // concurrency cap; staging the same bytes again is idempotent.
-        let response = self
-            .call(
-                &request,
-                Some(&Bytes::copy_from_slice(bytes)),
-                operations::PUT_UPLOAD_CONTENT,
-            )
-            .await?;
-        serde_json::from_slice(&response.bytes).map_err(|err| ClientError::Json(err.to_string()))
+        let request = self
+            .put_upload_content_request(namespace_id, upload_id)
+            .body(Bytes::copy_from_slice(bytes));
+        self.send_json(request).await
     }
 
     /// Stages a payload that arrives in pieces, forwarding it to the server
@@ -197,10 +187,11 @@ impl Client {
     ) -> Result<UploadSession> {
         let request = self.put_upload_content_request(namespace_id, upload_id);
         let (stream, size_bytes) = source.into_stream();
-        let response = self
-            .call_streamed_once(&request, stream, size_bytes)
-            .await?;
-        serde_json::from_slice(&response).map_err(|err| ClientError::Json(err.to_string()))
+        decode_json(
+            &self
+                .call_streamed_once(&request, stream, size_bytes)
+                .await?,
+        )
     }
 
     fn put_upload_content_request(
@@ -208,11 +199,8 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> WireRequest {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
-            self.base_url
-        );
-        self.put(&url)
+        let url = self.namespace_url(namespace_id, &format!("/uploads/{upload_id}/content"));
+        self.request(operations::PUT_UPLOAD_CONTENT, &url)
             .header("content-type", "application/octet-stream")
     }
 
@@ -226,12 +214,9 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> Result<UploadSession> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
-            self.base_url
-        );
+        let url = self.namespace_url(namespace_id, &format!("/uploads/{upload_id}/abort"));
         // Aborting is idempotent: a repeat reports the abort that stands.
-        self.request_json::<(), UploadSession>(self.post(&url), None, operations::ABORT_UPLOAD)
+        self.send_json(self.request(operations::ABORT_UPLOAD, &url))
             .await
     }
 
@@ -245,11 +230,8 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> Result<UploadSession> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}",
-            self.base_url
-        );
-        self.request_json::<(), UploadSession>(self.get(&url), None, operations::GET_UPLOAD)
+        let url = self.namespace_url(namespace_id, &format!("/uploads/{upload_id}"));
+        self.send_json(self.request(operations::GET_UPLOAD, &url))
             .await
     }
 
@@ -262,15 +244,11 @@ impl Client {
         upload_id: &UploadId,
         request: &CompleteUploadBody,
     ) -> Result<UploadSession> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
-            self.base_url
-        );
+        let url = self.namespace_url(namespace_id, &format!("/uploads/{upload_id}/complete"));
         // The durable completed-session record replays an identical completion without new effect.
-        self.request_json::<_, UploadSession>(
-            self.post(&url),
-            Some(request),
-            operations::COMPLETE_UPLOAD,
+        self.send_json(
+            self.request(operations::COMPLETE_UPLOAD, &url)
+                .json(request)?,
         )
         .await
     }

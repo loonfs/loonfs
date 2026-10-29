@@ -82,7 +82,7 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
         .await
         .expect("fold revision 1");
     let snapshot = namespace
-        .create_snapshot("before-append", &loonfs::CreateSnapshotOptions::default())
+        .create_snapshot("before-append")
         .await
         .expect("snapshot");
     namespace
@@ -378,8 +378,8 @@ async fn the_download_limit_applies_to_the_length_of_a_range() {
             .await
             .expect_err("a range over the limit");
         assert!(
-            matches!(&error, ClientError::Api { status: 413, code, .. }
-                if code == ErrorCode::ContentTooLarge.as_str()),
+            matches!(&error, ClientError::Api { status: 413, response, .. }
+                if response.code == ErrorCode::ContentTooLarge.as_str()),
             "{error:?}"
         );
     }

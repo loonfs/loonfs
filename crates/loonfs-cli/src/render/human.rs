@@ -3,7 +3,7 @@
 use super::summaries::*;
 use super::*;
 use crate::commands::{TrashListing, TreeTransferFailures};
-use crate::config::{CliConfig, ProfileConfig};
+use crate::config::{CliConfig, ProfileConfig, ProfileConnection, ProfileMode};
 use crate::profiles::ProfileSummary;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -31,7 +31,7 @@ pub(crate) fn write_human_success(
                 writer,
                 "failed {}: {}",
                 failure.path,
-                human_error(&failure.error, output.mode.as_deref())
+                human_error(&failure.error, output.mode)
             )?;
         }
     }
@@ -43,7 +43,7 @@ pub(crate) fn write_human_success(
 fn human_success_text(output: &CommandOutput) -> String {
     match &output.data {
         CommandData::Capabilities(document) => human_capabilities(document),
-        CommandData::Doctor { checks } => human_doctor(checks, output.mode.as_deref()),
+        CommandData::Doctor { checks } => human_doctor(checks, output.mode),
         CommandData::Profile {
             profile,
             default_profile,
@@ -184,7 +184,7 @@ fn human_profile(
         return rendered;
     }
     let rendered = toml::to_string_pretty(profile)
-        .unwrap_or_else(|_| format!("mode = \"{}\"", profile.mode_str()));
+        .unwrap_or_else(|_| format!("mode = \"{}\"", profile.mode().as_str()));
     if output.kind == CommandKind::ProfileShow {
         let name = output.profile.as_deref().unwrap_or("<unknown>");
         format!("name = \"{name}\"\n{rendered}")
@@ -194,9 +194,11 @@ fn human_profile(
 }
 
 fn profile_location(profile: &ProfileConfig) -> String {
-    let store = match profile {
-        ProfileConfig::Remote { server_url, .. } => return format!("remote, server {server_url}"),
-        ProfileConfig::Embedded { store, .. } => store,
+    let store = match &profile.connection {
+        ProfileConnection::Remote { server_url, .. } => {
+            return format!("remote, server {server_url}")
+        }
+        ProfileConnection::Embedded { store, .. } => store,
     };
     let kind = store.kind().as_str();
     let (location, key_prefix) = match store {
@@ -536,7 +538,7 @@ fn capability_group(heading: &str, rows: &[String]) -> String {
     lines.join("\n")
 }
 
-fn human_doctor(checks: &[DoctorCheck], mode: Option<&str>) -> String {
+fn human_doctor(checks: &[DoctorCheck], mode: Option<ProfileMode>) -> String {
     let mut lines = Vec::new();
     for check in checks {
         if check.status == DoctorStatus::Failed {

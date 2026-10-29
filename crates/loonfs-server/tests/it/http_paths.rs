@@ -83,7 +83,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         .put_file(&source, b"conflict\n", &loonfs_test_support::test_actor())
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
+        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "path_conflict"),
         other => panic!("expected path_conflict, got {other:?}"),
     }
 
@@ -171,15 +171,13 @@ async fn http_name_collision_reports_readable_error_message() {
         .await
     {
         Err(ClientError::Api {
-            status,
-            code,
-            message,
-            ..
+            status, response, ..
         }) => {
             assert_eq!(status, 409);
-            assert_eq!(code, "path_conflict");
+            assert_eq!(response.code, "path_conflict");
             // The error body carries the human-readable Display message,
             // not Rust Debug syntax.
+            let message = &response.message;
             assert!(
                 message.contains("destination already exists at `/TAKEN.txt`")
                     && message.contains("stored as `taken.txt`"),
@@ -230,9 +228,11 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
         .await
         .expect_err("non-recursive delete rejects non-empty dir");
     match non_recursive {
-        ClientError::Api { status, code, .. } => {
+        ClientError::Api {
+            status, response, ..
+        } => {
             assert_eq!(status, 409);
-            assert_eq!(code, "directory_not_empty");
+            assert_eq!(response.code, "directory_not_empty");
         }
         other => panic!("expected directory_not_empty, got {other:?}"),
     }
@@ -250,7 +250,7 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
         .await
         .expect("recursive delete succeeds");
     match harness.client.stat(&child).await {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
+        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "path_not_found"),
         other => panic!("expected path_not_found after recursive delete, got {other:?}"),
     }
 

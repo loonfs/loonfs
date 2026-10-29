@@ -94,7 +94,7 @@ async fn pin_fold_reads(
             }
             PinCreation::Snapshot => {
                 namespace
-                    .create_snapshot("snapshot", &crate::CreateSnapshotOptions::default())
+                    .create_snapshot("snapshot")
                     .await
                     .expect("create snapshot");
             }

@@ -240,7 +240,7 @@ pub(crate) enum Command {
     /// should pass `--namespace` or set `LOONFS_NAMESPACE` instead.
     Use(NamespaceUseArgs),
     /// Show the selected profile and namespace.
-    Current(CurrentArgs),
+    Current,
     /// List a directory.
     Ls(FilesystemLsArgs),
     /// Describe one visible path or inode (kind, size, revision, content digest, attributes).
@@ -282,7 +282,7 @@ pub(crate) enum Command {
     /// List committed changes after a sequence number.
     Changes(ChangesArgs),
     /// Show the selected deployment's protocol capabilities.
-    Capabilities(CapabilitiesArgs),
+    Capabilities,
     /// Maintenance operations: metadata, the checkpoint inventory, retention, GC, indexes, and the store.
     Maintenance {
         #[command(subcommand)]
@@ -332,7 +332,7 @@ impl Command {
                     command: MaintenanceCommand::Checkpoint { .. }
                         | MaintenanceCommand::Index { .. }
                         | MaintenanceCommand::Metadata(_)
-                        | MaintenanceCommand::Fold(_)
+                        | MaintenanceCommand::Fold
                         | MaintenanceCommand::Retention { .. }
                         | MaintenanceCommand::Gc(_)
                         | MaintenanceCommand::RecoverAdministrator(_),
@@ -373,7 +373,7 @@ pub(crate) enum ProfileCommand {
     /// Add a profile to the config file.
     Create {
         #[command(subcommand)]
-        provider: Box<ProfileCreateCommand>,
+        provider: Box<ProfileProviderCommand>,
     },
     /// List configured profiles.
     List,
@@ -385,7 +385,7 @@ pub(crate) enum ProfileCommand {
     /// Update fields of an existing profile.
     Update {
         #[command(subcommand)]
-        provider: Box<ProfileUpdateCommand>,
+        provider: Box<ProfileProviderCommand>,
     },
     /// Delete a profile from the config file.
     Delete {
@@ -399,35 +399,41 @@ pub(crate) enum ProfileCommand {
     },
 }
 
+/// The provider of a profile that `profile create` creates or `profile
+/// update` updates, with the provider's own flags.
 #[derive(Debug, Subcommand)]
-pub(crate) enum ProfileCreateCommand {
-    /// Create an AWS S3-backed embedded profile.
-    S3(ProfileCreateS3Args),
-    /// Create a Cloudflare R2-backed embedded profile.
-    R2(ProfileCreateR2Args),
-    /// Create a Google Cloud Storage-backed embedded profile.
-    Gcs(ProfileCreateGcsArgs),
-    /// Create a local-filesystem-backed embedded profile.
-    Local(ProfileCreateLocalArgs),
-    /// Create a remote-server profile.
-    Remote(ProfileCreateRemoteArgs),
+pub(crate) enum ProfileProviderCommand {
+    /// An AWS S3-backed embedded profile.
+    S3(ProfileS3Args),
+    /// A Cloudflare R2-backed embedded profile.
+    R2(ProfileR2Args),
+    /// A Google Cloud Storage-backed embedded profile.
+    Gcs(ProfileGcsArgs),
+    /// A local-filesystem-backed embedded profile.
+    Local(ProfileLocalArgs),
+    /// A remote-server profile.
+    Remote(ProfileRemoteArgs),
 }
 
 #[derive(Debug, Default, Args)]
-pub(crate) struct ProfileCreateActorArgs {
-    /// Actor ID to save in the profile. Defaults to loonfs-cli when unset.
+pub(crate) struct ProfileActorArgs {
+    /// Actor ID to save in the profile. A profile without one acts as
+    /// loonfs-cli.
     #[arg(long, value_hint = ValueHint::Other)]
     pub actor_id: Option<ActorId>,
-    #[arg(from_global)]
-    pub subject_id: Option<SubjectId>,
-    #[arg(from_global)]
-    pub principal_scope: Option<String>,
-    #[arg(from_global)]
-    pub principals: Option<String>,
+}
+
+/// How an S3 client addresses a bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum BucketAddressing {
+    /// The bucket is part of the host name, as in `bucket.s3.amazonaws.com`.
+    VirtualHosted,
+    /// The bucket is the first path segment, as in `s3.amazonaws.com/bucket`.
+    Path,
 }
 
 #[derive(Debug, Clone, Default, Args)]
-pub(crate) struct ProfileS3Args {
+pub(crate) struct S3StoreArgs {
     /// S3 bucket name.
     #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
@@ -452,10 +458,35 @@ pub(crate) struct ProfileS3Args {
     /// Optional object-key prefix.
     #[arg(long, value_hint = ValueHint::Other)]
     pub key_prefix: Option<String>,
+    /// Bucket addressing style. The bare flag selects path-style addressing.
+    /// Omit it to keep the stored style, which is virtual-hosted for a new
+    /// profile.
+    #[arg(
+        long,
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "path"
+    )]
+    pub force_path_style: Option<BucketAddressing>,
+}
+
+impl S3StoreArgs {
+    pub(crate) fn has_update_flags(&self) -> bool {
+        self.bucket.is_some()
+            || self.region.is_some()
+            || self.credential_source.is_some()
+            || self.access_key_id.is_some()
+            || self.secret_access_key.is_some()
+            || self.endpoint_url.is_some()
+            || self.session_token.is_some()
+            || self.key_prefix.is_some()
+            || self.force_path_style.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default, Args)]
-pub(crate) struct ProfileR2Args {
+pub(crate) struct R2StoreArgs {
     /// R2 bucket name.
     #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
@@ -479,8 +510,20 @@ pub(crate) struct ProfileR2Args {
     pub key_prefix: Option<String>,
 }
 
+impl R2StoreArgs {
+    pub(crate) fn has_update_flags(&self) -> bool {
+        self.bucket.is_some()
+            || self.account_id.is_some()
+            || self.endpoint_url.is_some()
+            || self.credential_source.is_some()
+            || self.access_key_id.is_some()
+            || self.secret_access_key.is_some()
+            || self.key_prefix.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Default, Args)]
-pub(crate) struct ProfileGcsArgs {
+pub(crate) struct GcsStoreArgs {
     /// GCS bucket name.
     #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
@@ -492,8 +535,16 @@ pub(crate) struct ProfileGcsArgs {
     pub key_prefix: Option<String>,
 }
 
+impl GcsStoreArgs {
+    pub(crate) fn has_update_flags(&self) -> bool {
+        self.bucket.is_some()
+            || self.service_account_key_path.is_some()
+            || self.key_prefix.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Default, Args)]
-pub(crate) struct ProfileLocalArgs {
+pub(crate) struct LocalStoreArgs {
     /// Local filesystem store root.
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub root: Option<String>,
@@ -502,191 +553,81 @@ pub(crate) struct ProfileLocalArgs {
     pub key_prefix: Option<String>,
 }
 
+impl LocalStoreArgs {
+    pub(crate) fn has_update_flags(&self) -> bool {
+        self.root.is_some() || self.key_prefix.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Default, Args)]
-pub(crate) struct ProfileRemoteArgs {
+pub(crate) struct RemoteServerArgs {
     /// Remote LoonFS server URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileCreateS3Args {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub store: ProfileS3Args,
-    /// Use path-style S3 addressing.
-    #[arg(long)]
-    pub force_path_style: bool,
-    #[command(flatten)]
-    pub actor: ProfileCreateActorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileCreateR2Args {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub store: ProfileR2Args,
-    #[command(flatten)]
-    pub actor: ProfileCreateActorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileCreateGcsArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub store: ProfileGcsArgs,
-    #[command(flatten)]
-    pub actor: ProfileCreateActorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileCreateLocalArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub store: ProfileLocalArgs,
-    #[command(flatten)]
-    pub actor: ProfileCreateActorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileCreateRemoteArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub server: ProfileRemoteArgs,
-    /// Remote bearer token to store. A profile without one uses LOONFS_AUTH_TOKEN at request time.
+    /// Remote bearer token to store. An empty value clears the stored token,
+    /// and a profile without one uses LOONFS_AUTH_TOKEN at request time.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub auth_token: Option<String>,
-    /// PEM bundle of extra certificate authorities to trust.
-    #[arg(long, value_hint = ValueHint::FilePath)]
-    pub ca_cert_path: Option<String>,
-    #[command(flatten)]
-    pub actor: ProfileCreateActorArgs,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum ProfileUpdateCommand {
-    /// Update an AWS S3-backed embedded profile.
-    S3(ProfileUpdateS3Args),
-    /// Update a Cloudflare R2-backed embedded profile.
-    R2(ProfileUpdateR2Args),
-    /// Update a Google Cloud Storage-backed embedded profile.
-    Gcs(ProfileUpdateGcsArgs),
-    /// Update a local-filesystem-backed embedded profile.
-    Local(ProfileUpdateLocalArgs),
-    /// Update a remote-server profile.
-    Remote(ProfileUpdateRemoteArgs),
-}
-
-#[derive(Debug, Default, Args)]
-pub(crate) struct ProfileUpdateActorArgs {
-    /// Actor ID to save in the profile.
-    #[arg(long)]
-    pub actor_id: Option<ActorId>,
-    #[arg(from_global)]
-    pub subject_id: Option<SubjectId>,
-    #[arg(from_global)]
-    pub principal_scope: Option<String>,
-    #[arg(from_global)]
-    pub principals: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileUpdateS3Args {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub store: ProfileS3Args,
-    /// Use path-style bucket addressing. Omit to keep the stored value.
-    #[arg(long)]
-    pub force_path_style: Option<bool>,
-    #[command(flatten)]
-    pub actor: ProfileUpdateActorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileUpdateR2Args {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub store: ProfileR2Args,
-    #[command(flatten)]
-    pub actor: ProfileUpdateActorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileUpdateGcsArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub store: ProfileGcsArgs,
-    #[command(flatten)]
-    pub actor: ProfileUpdateActorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileUpdateLocalArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub store: ProfileLocalArgs,
-    #[command(flatten)]
-    pub actor: ProfileUpdateActorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileUpdateRemoteArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    #[command(flatten)]
-    pub server: ProfileRemoteArgs,
-    /// Remote bearer token to store. An empty value clears the stored token.
-    #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an
     /// https server URL, when a private CA issued the certificate.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub ca_cert_path: Option<String>,
-    #[command(flatten)]
-    pub actor: ProfileUpdateActorArgs,
 }
 
-#[derive(Debug, Args, Clone)]
-pub(crate) struct ProfileSelectorArgs {
-    #[arg(from_global)]
-    pub profile: Option<String>,
+impl RemoteServerArgs {
+    pub(crate) fn has_update_flags(&self) -> bool {
+        self.server_url.is_some() || self.auth_token.is_some() || self.ca_cert_path.is_some()
+    }
 }
 
-#[derive(Debug, Args, Clone)]
-pub(crate) struct RequestBehaviorArgs {
-    #[arg(from_global)]
-    pub no_retry: bool,
+#[derive(Debug, Args)]
+pub(crate) struct ProfileS3Args {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[command(flatten)]
+    pub store: S3StoreArgs,
+    #[command(flatten)]
+    pub actor: ProfileActorArgs,
 }
 
-#[derive(Debug, Args, Clone)]
-pub(crate) struct SubjectSelectorArgs {
-    #[arg(from_global)]
-    pub subject_id: Option<SubjectId>,
-    #[arg(from_global)]
-    pub principal_scope: Option<String>,
-    #[arg(from_global)]
-    pub principals: Option<String>,
+#[derive(Debug, Args)]
+pub(crate) struct ProfileR2Args {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[command(flatten)]
+    pub store: R2StoreArgs,
+    #[command(flatten)]
+    pub actor: ProfileActorArgs,
 }
 
-#[derive(Debug, Args, Clone)]
-pub(crate) struct TargetSelectorArgs {
+#[derive(Debug, Args)]
+pub(crate) struct ProfileGcsArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
     #[command(flatten)]
-    pub subject: SubjectSelectorArgs,
+    pub store: GcsStoreArgs,
     #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-    #[arg(from_global)]
-    pub namespace: Option<NamespaceId>,
+    pub actor: ProfileActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileLocalArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
     #[command(flatten)]
-    pub request: RequestBehaviorArgs,
+    pub store: LocalStoreArgs,
+    #[command(flatten)]
+    pub actor: ProfileActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileRemoteArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[command(flatten)]
+    pub server: RemoteServerArgs,
+    #[command(flatten)]
+    pub actor: ProfileActorArgs,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -699,32 +640,12 @@ pub(crate) struct ActorSelectorArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceUseArgs {
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-    #[command(flatten)]
-    pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: NamespaceId,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct CurrentArgs {
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CapabilitiesArgs {
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-    #[command(flatten)]
-    pub request: RequestBehaviorArgs,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct DoctorArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// Also test the object store by writing and deleting temporary objects.
     #[arg(long)]
     pub write_check: bool,
@@ -748,8 +669,6 @@ pub(crate) enum NamespaceCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceShowArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// Namespace to show. When omitted, the usual namespace selection applies.
     #[arg(value_hint = ValueHint::Other, conflicts_with = "namespace")]
     pub namespace_id: Option<NamespaceId>,
@@ -765,18 +684,11 @@ pub(crate) enum NamespaceAccessArg {
 pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-    #[command(flatten)]
-    pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: NamespaceId,
     /// Access mode. It can't be changed after the namespace is created.
     #[arg(long, value_enum, default_value_t = NamespaceAccessArg::Unrestricted)]
     pub access: NamespaceAccessArg,
-    /// Principal scope of an ACL namespace.
-    #[arg(from_global)]
-    pub principal_scope: Option<String>,
     /// A principal to grant `admin` on the root at creation. Repeat the flag
     /// for more principals.
     #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
@@ -792,12 +704,6 @@ pub(crate) struct NamespaceCreateArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceDeleteArgs {
-    #[command(flatten)]
-    pub subject: SubjectSelectorArgs,
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-    #[command(flatten)]
-    pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: NamespaceId,
     /// Delete only if the namespace head is still at this sequence.
@@ -811,13 +717,7 @@ pub(crate) struct NamespaceDeleteArgs {
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceForkArgs {
     #[command(flatten)]
-    pub subject: SubjectSelectorArgs,
-    #[command(flatten)]
     pub actor: ActorSelectorArgs,
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-    #[command(flatten)]
-    pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub source_namespace_id: NamespaceId,
     #[arg(value_hint = ValueHint::Other)]
@@ -870,8 +770,6 @@ pub(crate) struct CommitArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemLsArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: Option<String>,
     #[command(flatten)]
@@ -892,8 +790,6 @@ pub(crate) struct FilesystemLsArgs {
     )
 )]
 pub(crate) struct FilesystemStatArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// Absolute path to describe.
     #[arg(value_hint = ValueHint::Other)]
     pub path: Option<String>,
@@ -913,8 +809,6 @@ pub(crate) enum AccessCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct AccessSetArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
@@ -942,8 +836,6 @@ pub(crate) struct AccessSetArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemAnnotateArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
@@ -978,8 +870,6 @@ pub(crate) struct FilesystemAnnotateArgs {
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemRmArgs {
     #[command(flatten)]
-    pub target: TargetSelectorArgs,
-    #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
@@ -994,8 +884,6 @@ pub(crate) struct FilesystemRmArgs {
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemMkdirArgs {
     #[command(flatten)]
-    pub target: TargetSelectorArgs,
-    #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
@@ -1008,8 +896,6 @@ pub(crate) struct FilesystemMkdirArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemRevisionsArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     #[command(flatten)]
@@ -1018,8 +904,6 @@ pub(crate) struct FilesystemRevisionsArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemCatArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Print this revision instead of the current content.
@@ -1032,8 +916,6 @@ pub(crate) struct FilesystemCatArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemGrepArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// Pattern in the Rust regex dialect. `^` and `$` match at line boundaries.
     #[arg(value_hint = ValueHint::Other)]
     pub pattern: String,
@@ -1056,8 +938,6 @@ pub(crate) struct FilesystemGrepArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemGetArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub remote_path: String,
     /// Where to write the download. Defaults to the remote file or directory
@@ -1085,8 +965,6 @@ pub(crate) struct FilesystemGetArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemPutArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     /// Local file to upload, or `-` to read standard input. A large file
@@ -1119,8 +997,6 @@ pub(crate) struct FilesystemPutArgs {
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemAppendArgs {
     #[command(flatten)]
-    pub target: TargetSelectorArgs,
-    #[command(flatten)]
     pub actor: ActorSelectorArgs,
     /// Local file whose bytes to append, or `-` to read standard input. One
     /// append can add from 1 byte to 256 KiB.
@@ -1141,8 +1017,6 @@ pub(crate) struct FilesystemAppendArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemTransferArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
@@ -1174,8 +1048,6 @@ pub(crate) struct FilesystemTransferArgs {
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemRestoreArgs {
     #[command(flatten)]
-    pub target: TargetSelectorArgs,
-    #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
@@ -1187,8 +1059,6 @@ pub(crate) struct FilesystemRestoreArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemUndeleteArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     /// Destination path for the recovered file or directory. Omit it to
@@ -1213,15 +1083,11 @@ pub(crate) struct FilesystemUndeleteArgs {
 #[derive(Debug, Args)]
 pub(crate) struct TrashArgs {
     #[command(flatten)]
-    pub target: TargetSelectorArgs,
-    #[command(flatten)]
     pub pagination: PaginationArgs,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ChangesArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// Return committed changes after this sequence (defaults to 0, the
     /// start of retained history).
     #[arg(long, value_parser = parse_change_seq)]
@@ -1251,12 +1117,6 @@ pub(crate) enum SnapshotCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotTargetArgs {
-    #[command(flatten)]
-    pub subject: SubjectSelectorArgs,
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-    #[command(flatten)]
-    pub request: RequestBehaviorArgs,
     /// Namespace whose snapshots to manage.
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: NamespaceId,
@@ -1317,7 +1177,7 @@ pub(crate) enum MaintenanceCommand {
     Metadata(MaintenanceMetadataArgs),
     /// Fold the WAL tail whatever its length, and compact metadata until
     /// nothing is due.
-    Fold(MaintenanceNamespaceArgs),
+    Fold,
     /// List the checkpoint inventory: every pin, snapshots and fork pins.
     Checkpoint {
         #[command(subcommand)]
@@ -1346,8 +1206,6 @@ pub(crate) enum MaintenanceCommand {
 #[derive(Debug, Args)]
 pub(crate) struct MaintenanceRecoverAdministratorArgs {
     #[command(flatten)]
-    pub target: TargetSelectorArgs,
-    #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub principal_id: PrincipalId,
@@ -1367,9 +1225,9 @@ pub(crate) enum MaintenanceIndexCommand {
     /// sequence the namespace was at when this command started.
     Enable(MaintenanceIndexEnableArgs),
     /// Disable the gram content index.
-    Disable(MaintenanceNamespaceArgs),
+    Disable,
     /// Show whether the gram content index is disabled, backfilling, or active.
-    Status(MaintenanceNamespaceArgs),
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1393,13 +1251,11 @@ pub(crate) enum MaintenanceRetentionCommand {
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceStoreCommand {
     /// Test the object-store operations LoonFS requires.
-    Probe(MaintenanceStoreProbeArgs),
+    Probe,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct MaintenanceIndexEnableArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// Return as soon as the index is enabled, without waiting for the
     /// backfill.
     #[arg(long)]
@@ -1416,15 +1272,7 @@ pub(crate) struct MaintenanceIndexEnableArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct MaintenanceNamespaceArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct MaintenanceRetentionAdvanceArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// Advance the floor to this sequence, or to the folded manifest head
     /// when that's lower.
     #[arg(long, conflicts_with = "before", value_parser = parse_change_seq)]
@@ -1437,8 +1285,6 @@ pub(crate) struct MaintenanceRetentionAdvanceArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct MaintenanceRetentionWindowArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// The namespace's new retention window, in milliseconds.
     #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
     pub retention_window_ms: Option<NonZeroU64>,
@@ -1450,15 +1296,11 @@ pub(crate) struct MaintenanceRetentionWindowArgs {
 #[derive(Debug, Args)]
 pub(crate) struct MaintenanceCheckpointListArgs {
     #[command(flatten)]
-    pub target: TargetSelectorArgs,
-    #[command(flatten)]
     pub pagination: PaginationArgs,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct MaintenanceMetadataArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// Fold the visible WAL tail into metadata segments when it reaches this
     /// many WAL objects (server default when omitted).
     #[arg(long)]
@@ -1467,20 +1309,10 @@ pub(crate) struct MaintenanceMetadataArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct MaintenanceGcArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
     /// Objects younger than this are never deleted (server default when
     /// omitted).
     #[arg(long)]
     pub grace_window_ms: Option<u64>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct MaintenanceStoreProbeArgs {
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-    #[command(flatten)]
-    pub request: RequestBehaviorArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1491,12 +1323,54 @@ pub(crate) enum ConfigCommand {
     Show,
 }
 
+/// Whether the client retries a transient failure, which `--no-retry`
+/// turns off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransientRetry {
+    /// Retry the transient failures of a request that is safe to resend.
+    Retry,
+    /// Send every request once.
+    NoRetry,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeBehavior {
     pub output: OutputFormat,
     pub interactive: bool,
     /// How a long-running transfer reports its progress.
     pub progress: ProgressMode,
+    pub transient_retry: TransientRetry,
+}
+
+/// The selector flags of one invocation, which every command reads from the
+/// top-level command line.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Selectors {
+    pub profile: Option<String>,
+    pub namespace: Option<NamespaceId>,
+    pub subject: SubjectSelectors,
+}
+
+/// The flags that select the subject a command acts as.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SubjectSelectors {
+    pub subject_id: Option<SubjectId>,
+    pub principal_scope: Option<String>,
+    pub principals: Option<String>,
+}
+
+impl Cli {
+    pub(crate) fn selectors(&self) -> Selectors {
+        Selectors {
+            profile: self.profile.clone(),
+            namespace: self.namespace.clone(),
+            subject: SubjectSelectors {
+                subject_id: self.subject_id.clone(),
+                principal_scope: self.principal_scope.clone(),
+                principals: self.principals.clone(),
+            },
+        }
+    }
 }
 
 impl RuntimeBehavior {
@@ -1517,6 +1391,11 @@ impl RuntimeBehavior {
             // terminal to draw on, and `--no-input` says nothing about
             // whether anyone is watching.
             progress: ProgressMode::detect(cli.no_progress, cli.json),
+            transient_retry: if cli.no_retry {
+                TransientRetry::NoRetry
+            } else {
+                TransientRetry::Retry
+            },
         }
     }
 }
@@ -1640,7 +1519,7 @@ impl Command {
                 SnapshotCommand::Delete(_) => CommandKind::SnapshotDelete,
             },
             Command::Use(_) => CommandKind::NamespaceUse,
-            Command::Current(_) => CommandKind::Current,
+            Command::Current => CommandKind::Current,
             Command::Ls(_) => CommandKind::FilesystemLs,
             Command::Stat(_) => CommandKind::FilesystemStat,
             Command::Annotate(_) => CommandKind::FilesystemAnnotate,
@@ -1661,20 +1540,20 @@ impl Command {
             Command::Mv(_) => CommandKind::FilesystemMv,
             Command::Cp(_) => CommandKind::FilesystemCp,
             Command::Changes(_) => CommandKind::Changes,
-            Command::Capabilities(_) => CommandKind::Capabilities,
+            Command::Capabilities => CommandKind::Capabilities,
             Command::Maintenance { command } => match command {
                 MaintenanceCommand::RecoverAdministrator(_) => {
                     CommandKind::MaintenanceRecoverAdministrator
                 }
                 MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
-                MaintenanceCommand::Fold(_) => CommandKind::MaintenanceFold,
+                MaintenanceCommand::Fold => CommandKind::MaintenanceFold,
                 MaintenanceCommand::Checkpoint { command } => match command {
                     MaintenanceCheckpointCommand::List(_) => CommandKind::MaintenanceCheckpointList,
                 },
                 MaintenanceCommand::Index { command } => match command {
                     MaintenanceIndexCommand::Enable(_) => CommandKind::MaintenanceIndexEnable,
-                    MaintenanceIndexCommand::Disable(_) => CommandKind::MaintenanceIndexDisable,
-                    MaintenanceIndexCommand::Status(_) => CommandKind::MaintenanceIndexStatus,
+                    MaintenanceIndexCommand::Disable => CommandKind::MaintenanceIndexDisable,
+                    MaintenanceIndexCommand::Status => CommandKind::MaintenanceIndexStatus,
                 },
                 MaintenanceCommand::Retention { command } => match command {
                     MaintenanceRetentionCommand::Advance(_) => {
@@ -1686,7 +1565,7 @@ impl Command {
                 },
                 MaintenanceCommand::Gc(_) => CommandKind::MaintenanceGc,
                 MaintenanceCommand::Store { command } => match command {
-                    MaintenanceStoreCommand::Probe(_) => CommandKind::MaintenanceStoreProbe,
+                    MaintenanceStoreCommand::Probe => CommandKind::MaintenanceStoreProbe,
                 },
             },
             Command::Config { command } => match command {
@@ -1805,25 +1684,10 @@ mod tests {
     }
 
     fn assert_selected_target(cli: &Cli, profile: &str, namespace: &str) {
-        assert_eq!(cli.profile.as_deref(), Some(profile));
+        let selectors = cli.selectors();
+        assert_eq!(selectors.profile.as_deref(), Some(profile));
         assert_eq!(
-            cli.namespace.as_ref().map(NamespaceId::as_str),
-            Some(namespace)
-        );
-        let target = match &cli.command {
-            TopLevelCommand::Configured(Command::Ls(args)) => Some(&args.target),
-            TopLevelCommand::Configured(Command::Maintenance {
-                command:
-                    MaintenanceCommand::Checkpoint {
-                        command: MaintenanceCheckpointCommand::List(args),
-                    },
-            }) => Some(&args.target),
-            _ => None,
-        }
-        .expect("test command should accept profile and namespace selectors");
-        assert_eq!(target.profile.profile.as_deref(), Some(profile));
-        assert_eq!(
-            target.namespace.as_ref().map(NamespaceId::as_str),
+            selectors.namespace.as_ref().map(NamespaceId::as_str),
             Some(namespace)
         );
     }

@@ -1,16 +1,14 @@
 //! Builds provider-specific profile configurations and applies validated updates.
 
 use crate::args::{
-    ProfileCreateActorArgs, ProfileCreateCommand, ProfileGcsArgs, ProfileLocalArgs, ProfileR2Args,
-    ProfileRemoteArgs, ProfileS3Args, ProfileUpdateActorArgs, ProfileUpdateCommand,
-    RuntimeBehavior,
+    BucketAddressing, GcsStoreArgs, LocalStoreArgs, ProfileActorArgs, ProfileProviderCommand,
+    R2StoreArgs, RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
 };
 use crate::config::{
     absolute_env_path, ensure_subject_pairing, validate_remote_client_config, ProfileConfig,
-    StoreConfig,
+    ProfileConnection, ProfileIdentity, StoreConfig,
 };
-use crate::error::CliError;
-use crate::profiles::NamedProfile;
+use crate::error::{CliError, Result};
 use crate::prompt;
 use crate::resolve::subject_flag_error;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
@@ -18,7 +16,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
 use loonfs_types::config::non_blank;
-use loonfs_types::{ActorId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, SubjectId};
+use loonfs_types::{PrincipalId, PrincipalScope, PrincipalSet, SecretString};
 use std::path::{Path, PathBuf};
 
 const AWS_REGIONS: &[&str] = &[
@@ -61,138 +59,77 @@ pub(super) enum ProfileProvider {
     Remote,
 }
 
-pub(super) struct ProfileUpdateSpec {
-    pub(super) name: String,
-    provider: CreateProviderSpec,
-    actor: ProfileUpdateActorArgs,
-}
-
-impl ProfileUpdateSpec {
-    fn provider(&self) -> ProfileProvider {
-        self.provider.provider()
+impl ProfileProviderCommand {
+    /// Returns the name of the profile that the command creates or updates.
+    pub(super) fn name(&self) -> &str {
+        match self {
+            Self::S3(args) => &args.name,
+            Self::R2(args) => &args.name,
+            Self::Gcs(args) => &args.name,
+            Self::Local(args) => &args.name,
+            Self::Remote(args) => &args.name,
+        }
     }
-}
 
-pub(super) fn profile_update_spec(command: ProfileUpdateCommand) -> ProfileUpdateSpec {
-    let (name, provider, actor) = match command {
-        ProfileUpdateCommand::S3(args) => (
-            args.name,
-            CreateProviderSpec::S3 {
-                store: args.store,
-                force_path_style: args.force_path_style,
-            },
-            args.actor,
-        ),
-        ProfileUpdateCommand::R2(args) => {
-            (args.name, CreateProviderSpec::R2(args.store), args.actor)
+    fn actor(&self) -> &ProfileActorArgs {
+        match self {
+            Self::S3(args) => &args.actor,
+            Self::R2(args) => &args.actor,
+            Self::Gcs(args) => &args.actor,
+            Self::Local(args) => &args.actor,
+            Self::Remote(args) => &args.actor,
         }
-        ProfileUpdateCommand::Gcs(args) => {
-            (args.name, CreateProviderSpec::Gcs(args.store), args.actor)
-        }
-        ProfileUpdateCommand::Local(args) => {
-            (args.name, CreateProviderSpec::Local(args.store), args.actor)
-        }
-        ProfileUpdateCommand::Remote(args) => (
-            args.name,
-            CreateProviderSpec::Remote(RemoteProviderArgs {
-                server: args.server,
-                auth_token: args.auth_token,
-                ca_cert_path: args.ca_cert_path,
-            }),
-            args.actor,
-        ),
-    };
-    ProfileUpdateSpec {
-        name,
-        provider,
-        actor,
     }
-}
 
-pub(super) fn has_update_flags(spec: &ProfileUpdateSpec) -> bool {
-    spec.actor.actor_id.is_some()
-        || spec.actor.subject_id.is_some()
-        || spec.actor.principal_scope.is_some()
-        || spec.actor.principals.is_some()
-        || match &spec.provider {
-            CreateProviderSpec::S3 {
-                store,
-                force_path_style,
-            } => {
-                store.bucket.is_some()
-                    || store.region.is_some()
-                    || store.credential_source.is_some()
-                    || store.access_key_id.is_some()
-                    || store.secret_access_key.is_some()
-                    || store.endpoint_url.is_some()
-                    || store.session_token.is_some()
-                    || force_path_style.is_some()
-                    || store.key_prefix.is_some()
-            }
-            CreateProviderSpec::R2(args) => {
-                args.bucket.is_some()
-                    || args.account_id.is_some()
-                    || args.endpoint_url.is_some()
-                    || args.credential_source.is_some()
-                    || args.access_key_id.is_some()
-                    || args.secret_access_key.is_some()
-                    || args.key_prefix.is_some()
-            }
-            CreateProviderSpec::Gcs(args) => {
-                args.bucket.is_some()
-                    || args.service_account_key_path.is_some()
-                    || args.key_prefix.is_some()
-            }
-            CreateProviderSpec::Local(args) => args.root.is_some() || args.key_prefix.is_some(),
-            CreateProviderSpec::Remote(args) => {
-                args.server.server_url.is_some()
-                    || args.auth_token.is_some()
-                    || args.ca_cert_path.is_some()
-            }
-        }
-}
-
-#[derive(Debug)]
-pub(super) struct CreateProfileSpec {
-    provider: CreateProviderSpec,
-    actor: ProfileCreateActorArgs,
-}
-
-struct ProfileActor {
-    actor_id: Option<ActorId>,
-    subject_id: Option<SubjectId>,
-    principal_scope: Option<PrincipalScope>,
-    principals: Option<Vec<PrincipalId>>,
-}
-
-#[derive(Debug, Clone)]
-enum CreateProviderSpec {
-    S3 {
-        store: ProfileS3Args,
-        force_path_style: Option<bool>,
-    },
-    R2(ProfileR2Args),
-    Gcs(ProfileGcsArgs),
-    Local(ProfileLocalArgs),
-    Remote(RemoteProviderArgs),
-}
-
-#[derive(Debug, Clone, Default)]
-struct RemoteProviderArgs {
-    server: ProfileRemoteArgs,
-    auth_token: Option<String>,
-    ca_cert_path: Option<String>,
-}
-
-impl CreateProviderSpec {
     fn provider(&self) -> ProfileProvider {
         match self {
-            Self::S3 { .. } => ProfileProvider::S3,
+            Self::S3(_) => ProfileProvider::S3,
             Self::R2(_) => ProfileProvider::R2,
             Self::Gcs(_) => ProfileProvider::Gcs,
             Self::Local(_) => ProfileProvider::Local,
             Self::Remote(_) => ProfileProvider::Remote,
         }
+    }
+
+    /// Returns whether an update sets any field, with the selector flags that
+    /// an update saves in the profile. An update without one edits the
+    /// profile at prompts.
+    pub(super) fn has_update_flags(&self, subject: &SubjectSelectors) -> bool {
+        self.actor().actor_id.is_some()
+            || subject.subject_id.is_some()
+            || subject.principal_scope.is_some()
+            || subject.principals.is_some()
+            || match self {
+                Self::S3(args) => args.store.has_update_flags(),
+                Self::R2(args) => args.store.has_update_flags(),
+                Self::Gcs(args) => args.store.has_update_flags(),
+                Self::Local(args) => args.store.has_update_flags(),
+                Self::Remote(args) => args.server.has_update_flags(),
+            }
+    }
+}
+
+impl ProfileIdentity {
+    /// Returns this identity with the fields that the actor flag and the
+    /// subject selectors set, and refuses a principal scope without
+    /// principals or principals without a scope.
+    pub(super) fn merge_flags(
+        self,
+        actor: &ProfileActorArgs,
+        subject: &SubjectSelectors,
+    ) -> Result<Self> {
+        let principal_scope = parse_profile_principal_scope(subject.principal_scope.as_deref())?
+            .or(self.principal_scope);
+        let principals =
+            parse_profile_principals(subject.principals.as_deref())?.or(self.principals);
+        ensure_subject_pairing(principal_scope.as_ref(), principals.as_deref())
+            .map_err(subject_flag_error)?;
+        Ok(Self {
+            actor_id: actor.actor_id.clone().or(self.actor_id),
+            subject_id: subject.subject_id.clone().or(self.subject_id),
+            principal_scope,
+            principals,
+        })
     }
 }
 
@@ -212,61 +149,25 @@ impl FieldSource {
     }
 }
 
-pub(super) fn create_profile_spec_from_create(
-    command: ProfileCreateCommand,
-) -> NamedProfile<CreateProfileSpec> {
-    let (name, provider, actor) = match command {
-        ProfileCreateCommand::S3(args) => (
-            args.name,
-            CreateProviderSpec::S3 {
-                store: args.store,
-                force_path_style: Some(args.force_path_style),
-            },
-            args.actor,
-        ),
-        ProfileCreateCommand::R2(args) => {
-            (args.name, CreateProviderSpec::R2(args.store), args.actor)
-        }
-        ProfileCreateCommand::Gcs(args) => {
-            (args.name, CreateProviderSpec::Gcs(args.store), args.actor)
-        }
-        ProfileCreateCommand::Local(args) => {
-            (args.name, CreateProviderSpec::Local(args.store), args.actor)
-        }
-        ProfileCreateCommand::Remote(args) => (
-            args.name,
-            CreateProviderSpec::Remote(RemoteProviderArgs {
-                server: args.server,
-                auth_token: args.auth_token,
-                ca_cert_path: args.ca_cert_path,
-            }),
-            args.actor,
-        ),
-    };
-    NamedProfile {
-        name,
-        profile: CreateProfileSpec { provider, actor },
-    }
-}
-
 pub(super) fn build_profile_interactive(
     name: &str,
     runtime: RuntimeBehavior,
-) -> Result<ProfileConfig, CliError> {
+) -> Result<ProfileConfig> {
     if !runtime.interactive {
         return Err(CliError::non_interactive_input_required(
             "`loonfs init` is interactive; use `loonfs profile create <provider>` for scripted setup",
         ));
     }
-    let provider = match prompt::prompt_choice("provider", &["s3", "r2", "gcs", "local", "remote"])?
-        .as_str()
+    let source = FieldSource::from_runtime(runtime);
+    let connection = match prompt::prompt_choice(
+        "provider",
+        &["s3", "r2", "gcs", "local", "remote"],
+    )?
+    .as_str()
     {
-        "s3" => CreateProviderSpec::S3 {
-            store: ProfileS3Args::default(),
-            force_path_style: None,
-        },
-        "r2" => CreateProviderSpec::R2(ProfileR2Args::default()),
-        "gcs" => CreateProviderSpec::Gcs(ProfileGcsArgs::default()),
+        "s3" => embedded(s3_store(None, &S3StoreArgs::default(), source)?),
+        "r2" => embedded(r2_store(None, &R2StoreArgs::default(), source)?),
+        "gcs" => embedded(gcs_store(None, &GcsStoreArgs::default(), source)?),
         "local" => {
             let root = prompt::prompt_line("root")?;
             let path = match root.strip_prefix("~/") {
@@ -279,61 +180,51 @@ pub(super) fn build_profile_interactive(
                     .join(relative.trim_start_matches('/')),
                 None => PathBuf::from(root),
             };
-            CreateProviderSpec::Local(ProfileLocalArgs {
+            let args = LocalStoreArgs {
                 root: Some(absolute_local_root(&path)?),
                 key_prefix: None,
-            })
+            };
+            embedded(local_store(None, &args, source)?)
         }
-        _ => CreateProviderSpec::Remote(RemoteProviderArgs::default()),
+        _ => remote_connection(name, None, &RemoteServerArgs::default(), source)?,
     };
-    build_profile_from_create_spec(
-        name,
-        CreateProfileSpec {
-            provider,
-            actor: ProfileCreateActorArgs::default(),
-        },
-        runtime,
-    )
-}
-
-pub(super) fn build_profile_from_create_spec(
-    name: &str,
-    spec: CreateProfileSpec,
-    runtime: RuntimeBehavior,
-) -> Result<ProfileConfig, CliError> {
-    let actor = ProfileActor {
-        actor_id: spec.actor.actor_id,
-        subject_id: spec.actor.subject_id,
-        principal_scope: parse_profile_principal_scope(spec.actor.principal_scope.as_deref())?,
-        principals: parse_profile_principals(spec.actor.principals.as_deref())?,
-    };
-    ensure_subject_pairing(actor.principal_scope.as_ref(), actor.principals.as_deref())
-        .map_err(subject_flag_error)?;
-    let source = FieldSource::from_runtime(runtime);
-    match spec.provider {
-        CreateProviderSpec::Local(spec) => {
-            embedded_profile(local_store(None, &spec, source)?, actor)
-        }
-        CreateProviderSpec::S3 {
-            store,
-            force_path_style,
-        } => embedded_profile(s3_store(None, &store, force_path_style, source)?, actor),
-        CreateProviderSpec::R2(spec) => embedded_profile(r2_store(None, &spec, source)?, actor),
-        CreateProviderSpec::Gcs(spec) => embedded_profile(gcs_store(None, &spec, source)?, actor),
-        CreateProviderSpec::Remote(args) => remote_profile(name, None, &args, actor, source),
-    }
-}
-
-fn embedded_profile(store: StoreConfig, actor: ProfileActor) -> Result<ProfileConfig, CliError> {
-    Ok(ProfileConfig::Embedded {
-        store,
-        actor_id: actor.actor_id,
-        subject_id: actor.subject_id,
-        principal_scope: actor.principal_scope,
-        principals: actor.principals,
+    Ok(ProfileConfig {
+        identity: ProfileIdentity::default(),
         default_namespace: None,
-        writer_id: None,
+        connection,
     })
+}
+
+/// Builds the profile that `profile create` creates, asking for missing
+/// fields when the run is interactive.
+pub(super) fn build_profile_from_command(
+    command: &ProfileProviderCommand,
+    subject: &SubjectSelectors,
+    runtime: RuntimeBehavior,
+) -> Result<ProfileConfig> {
+    let identity = ProfileIdentity::default().merge_flags(command.actor(), subject)?;
+    let source = FieldSource::from_runtime(runtime);
+    let connection = match command {
+        ProfileProviderCommand::Local(args) => embedded(local_store(None, &args.store, source)?),
+        ProfileProviderCommand::S3(args) => embedded(s3_store(None, &args.store, source)?),
+        ProfileProviderCommand::R2(args) => embedded(r2_store(None, &args.store, source)?),
+        ProfileProviderCommand::Gcs(args) => embedded(gcs_store(None, &args.store, source)?),
+        ProfileProviderCommand::Remote(args) => {
+            remote_connection(&args.name, None, &args.server, source)?
+        }
+    };
+    Ok(ProfileConfig {
+        identity,
+        default_namespace: None,
+        connection,
+    })
+}
+
+fn embedded(store: StoreConfig) -> ProfileConnection {
+    ProfileConnection::Embedded {
+        store,
+        writer_id: None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,7 +236,7 @@ enum CredentialSource {
 fn selected_credential_source(
     source: Option<&str>,
     has_static_flags: bool,
-) -> Result<CredentialSource, CliError> {
+) -> Result<CredentialSource> {
     match source {
         Some("ambient") if has_static_flags => Err(CliError::invalid_request(
             "`--credential-source ambient` cannot be combined with static credential flags",
@@ -368,7 +259,7 @@ fn build_aws_credentials(
     secret_access_key: Option<&String>,
     session_token: Option<&String>,
     source: FieldSource,
-) -> Result<AwsS3Credentials, CliError> {
+) -> Result<AwsS3Credentials> {
     let has_static_flags =
         access_key_id.is_some() || secret_access_key.is_some() || session_token.is_some();
     match selected_credential_source(credential_source, has_static_flags)? {
@@ -391,7 +282,7 @@ fn build_r2_credentials(
     access_key_id: Option<&String>,
     secret_access_key: Option<&String>,
     source: FieldSource,
-) -> Result<CloudflareR2Credentials, CliError> {
+) -> Result<CloudflareR2Credentials> {
     let has_static_flags = access_key_id.is_some() || secret_access_key.is_some();
     match selected_credential_source(credential_source, has_static_flags)? {
         CredentialSource::Ambient => Ok(CloudflareR2Credentials::Ambient {}),
@@ -412,7 +303,7 @@ fn required_field(
     current: Option<&String>,
     field: &str,
     source: FieldSource,
-) -> Result<String, CliError> {
+) -> Result<String> {
     if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
         return Ok(value.clone());
     }
@@ -429,7 +320,7 @@ fn optional_field(
     current: Option<&String>,
     field: &str,
     source: FieldSource,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<String>> {
     if value.is_some() {
         // An explicitly-blank flag value clears the field rather than storing
         // the empty string, which would then fail profile validation.
@@ -446,7 +337,7 @@ fn required_secret(
     current: Option<&SecretString>,
     field: &str,
     source: FieldSource,
-) -> Result<SecretString, CliError> {
+) -> Result<SecretString> {
     if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
         return Ok(value.clone().into());
     }
@@ -460,7 +351,7 @@ fn required_secret(
     }
 }
 
-fn absolute_local_root(root: &Path) -> Result<String, CliError> {
+fn absolute_local_root(root: &Path) -> Result<String> {
     std::path::absolute(root)
         .map_err(CliError::io)?
         .into_os_string()
@@ -477,16 +368,15 @@ struct LocalFsFields<'a> {
 #[derive(Clone, Copy)]
 struct RemoteFields<'a> {
     server_url: &'a String,
-    default_namespace: Option<&'a String>,
     auth_token: Option<&'a SecretString>,
     ca_cert_path: Option<&'a String>,
 }
 
 fn local_store(
     current: Option<LocalFsFields<'_>>,
-    args: &ProfileLocalArgs,
+    args: &LocalStoreArgs,
     source: FieldSource,
-) -> Result<StoreConfig, CliError> {
+) -> Result<StoreConfig> {
     let root = required_field(
         args.root.as_ref(),
         current.map(|value| value.root),
@@ -512,10 +402,9 @@ fn local_store(
 
 fn s3_store(
     current: Option<&AwsS3StoreConfig>,
-    args: &ProfileS3Args,
-    force_path_style: Option<bool>,
+    args: &S3StoreArgs,
     source: FieldSource,
-) -> Result<StoreConfig, CliError> {
+) -> Result<StoreConfig> {
     let credentials = match (current.map(|value| &value.credentials), source) {
         (Some(current), FieldSource::Prompt) => prompt_aws_credentials(current.clone())?,
         (Some(current), FieldSource::Fail) => updated_aws_credentials(current.clone(), args)?,
@@ -567,17 +456,19 @@ fn s3_store(
             "key prefix",
             source,
         )?,
-        force_path_style: force_path_style
-            .or(current.map(|value| value.force_path_style))
-            .unwrap_or_default(),
+        force_path_style: match args.force_path_style {
+            Some(BucketAddressing::Path) => true,
+            Some(BucketAddressing::VirtualHosted) => false,
+            None => current.is_some_and(|value| value.force_path_style),
+        },
     }))
 }
 
 fn r2_store(
     current: Option<&CloudflareR2StoreConfig>,
-    args: &ProfileR2Args,
+    args: &R2StoreArgs,
     source: FieldSource,
-) -> Result<StoreConfig, CliError> {
+) -> Result<StoreConfig> {
     let credentials = match (current.map(|value| &value.credentials), source) {
         (Some(current), FieldSource::Prompt) => prompt_r2_credentials(current.clone())?,
         (Some(current), FieldSource::Fail) => updated_r2_credentials(current.clone(), args)?,
@@ -619,9 +510,9 @@ fn r2_store(
 
 fn gcs_store(
     current: Option<&GcpGcsStoreConfig>,
-    args: &ProfileGcsArgs,
+    args: &GcsStoreArgs,
     source: FieldSource,
-) -> Result<StoreConfig, CliError> {
+) -> Result<StoreConfig> {
     let current_key_path = current.map(|value| {
         let GcpGcsCredentials::ServiceAccountFile { path } = &value.credentials;
         path
@@ -650,15 +541,14 @@ fn gcs_store(
     }))
 }
 
-fn remote_profile(
+fn remote_connection(
     name: &str,
     current: Option<RemoteFields<'_>>,
-    args: &RemoteProviderArgs,
-    actor: ProfileActor,
+    args: &RemoteServerArgs,
     source: FieldSource,
-) -> Result<ProfileConfig, CliError> {
+) -> Result<ProfileConnection> {
     let server_url = required_field(
-        args.server.server_url.as_ref(),
+        args.server_url.as_ref(),
         current.map(|value| value.server_url),
         "server-url",
         source,
@@ -689,21 +579,14 @@ fn remote_profile(
         auth_token.as_ref(),
         ca_cert_path.as_deref(),
     )?;
-    Ok(ProfileConfig::Remote {
+    Ok(ProfileConnection::Remote {
         server_url,
-        actor_id: actor.actor_id,
-        subject_id: actor.subject_id,
-        principal_scope: actor.principal_scope,
-        principals: actor.principals,
-        default_namespace: current.and_then(|value| value.default_namespace).cloned(),
         auth_token,
         ca_cert_path,
     })
 }
 
-fn parse_profile_principal_scope(
-    principal_scope: Option<&str>,
-) -> Result<Option<PrincipalScope>, CliError> {
+fn parse_profile_principal_scope(principal_scope: Option<&str>) -> Result<Option<PrincipalScope>> {
     principal_scope
         .map(|principal_scope| {
             PrincipalScope::parse(principal_scope).map_err(|error| {
@@ -714,9 +597,7 @@ fn parse_profile_principal_scope(
         .transpose()
 }
 
-fn parse_profile_principals(
-    principals: Option<&str>,
-) -> Result<Option<Vec<PrincipalId>>, CliError> {
+fn parse_profile_principals(principals: Option<&str>) -> Result<Option<Vec<PrincipalId>>> {
     principals
         .map(|principals| {
             principals
@@ -731,24 +612,24 @@ fn parse_profile_principals(
 }
 
 fn profile_provider(profile: &ProfileConfig) -> ProfileProvider {
-    match profile {
-        ProfileConfig::Embedded {
+    match &profile.connection {
+        ProfileConnection::Embedded {
             store: StoreConfig::AwsS3 { .. },
             ..
         } => ProfileProvider::S3,
-        ProfileConfig::Embedded {
+        ProfileConnection::Embedded {
             store: StoreConfig::CloudflareR2 { .. },
             ..
         } => ProfileProvider::R2,
-        ProfileConfig::Embedded {
+        ProfileConnection::Embedded {
             store: StoreConfig::GcpGcs { .. },
             ..
         } => ProfileProvider::Gcs,
-        ProfileConfig::Embedded {
+        ProfileConnection::Embedded {
             store: StoreConfig::LocalFs(_),
             ..
         } => ProfileProvider::Local,
-        ProfileConfig::Remote { .. } => ProfileProvider::Remote,
+        ProfileConnection::Remote { .. } => ProfileProvider::Remote,
     }
 }
 
@@ -762,129 +643,83 @@ fn provider_name(provider: ProfileProvider) -> &'static str {
     }
 }
 
+/// Applies an update's flags to a stored profile, keeping every field that
+/// the update doesn't set.
 pub(super) fn apply_update_flags(
-    name: &str,
     existing: ProfileConfig,
-    spec: &ProfileUpdateSpec,
-) -> Result<ProfileConfig, CliError> {
+    command: &ProfileProviderCommand,
+    subject: &SubjectSelectors,
+) -> Result<ProfileConfig> {
+    let name = command.name();
     let stored_provider = profile_provider(&existing);
-    let requested_provider = spec.provider();
-    match (existing, &spec.provider) {
-        (
-            ProfileConfig::Embedded {
-                store,
-                actor_id: actor,
-                subject_id,
-                principal_scope,
-                principals,
-                default_namespace,
-                writer_id,
-            },
-            provider,
-        ) => {
-            let store = match (&store, provider) {
+    let mismatch = || provider_mismatch(name, stored_provider, command.provider());
+    let identity = existing.identity.merge_flags(command.actor(), subject)?;
+    let connection = match (&existing.connection, command) {
+        (ProfileConnection::Embedded { store, writer_id }, provider) => {
+            let store = match (store, provider) {
                 (
                     StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }),
-                    CreateProviderSpec::Local(args),
+                    ProfileProviderCommand::Local(args),
                 ) => local_store(
                     Some(LocalFsFields {
                         root,
                         key_prefix: key_prefix.as_ref(),
                     }),
-                    args,
+                    &args.store,
                     FieldSource::Fail,
                 )?,
-                (
-                    StoreConfig::AwsS3(current),
-                    CreateProviderSpec::S3 {
-                        store: args,
-                        force_path_style,
-                    },
-                ) => s3_store(Some(current), args, *force_path_style, FieldSource::Fail)?,
-                (StoreConfig::CloudflareR2(current), CreateProviderSpec::R2(args)) => {
-                    r2_store(Some(current), args, FieldSource::Fail)?
+                (StoreConfig::AwsS3(current), ProfileProviderCommand::S3(args)) => {
+                    s3_store(Some(current), &args.store, FieldSource::Fail)?
                 }
-                (StoreConfig::GcpGcs(current), CreateProviderSpec::Gcs(args)) => {
-                    gcs_store(Some(current), args, FieldSource::Fail)?
+                (StoreConfig::CloudflareR2(current), ProfileProviderCommand::R2(args)) => {
+                    r2_store(Some(current), &args.store, FieldSource::Fail)?
                 }
-                _ => return Err(provider_mismatch(name, stored_provider, requested_provider)),
+                (StoreConfig::GcpGcs(current), ProfileProviderCommand::Gcs(args)) => {
+                    gcs_store(Some(current), &args.store, FieldSource::Fail)?
+                }
+                _ => return Err(mismatch()),
             };
-            let updated_principal_scope =
-                parse_profile_principal_scope(spec.actor.principal_scope.as_deref())?
-                    .or(principal_scope);
-            let updated_principals =
-                parse_profile_principals(spec.actor.principals.as_deref())?.or(principals);
-            ensure_subject_pairing(
-                updated_principal_scope.as_ref(),
-                updated_principals.as_deref(),
-            )
-            .map_err(subject_flag_error)?;
-            Ok(ProfileConfig::Embedded {
+            ProfileConnection::Embedded {
                 store,
-                actor_id: spec.actor.actor_id.clone().or(actor),
-                subject_id: spec.actor.subject_id.clone().or(subject_id),
-                principal_scope: updated_principal_scope,
-                principals: updated_principals,
-                default_namespace,
-                writer_id,
-            })
+                writer_id: writer_id.clone(),
+            }
         }
         (
-            ProfileConfig::Remote {
+            ProfileConnection::Remote {
                 server_url,
-                actor_id: actor,
-                subject_id,
-                principal_scope,
-                principals,
-                default_namespace,
                 auth_token,
                 ca_cert_path,
             },
-            CreateProviderSpec::Remote(args),
-        ) => {
-            let updated_principal_scope =
-                parse_profile_principal_scope(spec.actor.principal_scope.as_deref())?
-                    .or(principal_scope);
-            let updated_principals =
-                parse_profile_principals(spec.actor.principals.as_deref())?.or(principals);
-            ensure_subject_pairing(
-                updated_principal_scope.as_ref(),
-                updated_principals.as_deref(),
-            )
-            .map_err(subject_flag_error)?;
-            remote_profile(
-                name,
-                Some(RemoteFields {
-                    server_url: &server_url,
-                    default_namespace: default_namespace.as_ref(),
-                    auth_token: auth_token.as_ref(),
-                    ca_cert_path: ca_cert_path.as_ref(),
-                }),
-                args,
-                ProfileActor {
-                    actor_id: spec.actor.actor_id.clone().or(actor),
-                    subject_id: spec.actor.subject_id.clone().or(subject_id),
-                    principal_scope: updated_principal_scope,
-                    principals: updated_principals,
-                },
-                FieldSource::Fail,
-            )
-        }
-        _ => Err(provider_mismatch(name, stored_provider, requested_provider)),
-    }
+            ProfileProviderCommand::Remote(args),
+        ) => remote_connection(
+            name,
+            Some(RemoteFields {
+                server_url,
+                auth_token: auth_token.as_ref(),
+                ca_cert_path: ca_cert_path.as_ref(),
+            }),
+            &args.server,
+            FieldSource::Fail,
+        )?,
+        _ => return Err(mismatch()),
+    };
+    Ok(ProfileConfig {
+        identity,
+        default_namespace: existing.default_namespace,
+        connection,
+    })
 }
 
 pub(super) fn validate_update_provider(
-    name: &str,
     existing: &ProfileConfig,
-    spec: &ProfileUpdateSpec,
-) -> Result<(), CliError> {
+    command: &ProfileProviderCommand,
+) -> Result<()> {
     let stored = profile_provider(existing);
-    let requested = spec.provider();
+    let requested = command.provider();
     if stored == requested {
         Ok(())
     } else {
-        Err(provider_mismatch(name, stored, requested))
+        Err(provider_mismatch(command.name(), stored, requested))
     }
 }
 
@@ -899,8 +734,8 @@ fn provider_mismatch(name: &str, stored: ProfileProvider, requested: ProfileProv
 
 fn updated_aws_credentials(
     current: AwsS3Credentials,
-    args: &ProfileS3Args,
-) -> Result<AwsS3Credentials, CliError> {
+    args: &S3StoreArgs,
+) -> Result<AwsS3Credentials> {
     let has_static_flags = args.access_key_id.is_some()
         || args.secret_access_key.is_some()
         || args.session_token.is_some();
@@ -925,8 +760,8 @@ fn updated_aws_credentials(
 
 fn updated_r2_credentials(
     current: CloudflareR2Credentials,
-    args: &ProfileR2Args,
-) -> Result<CloudflareR2Credentials, CliError> {
+    args: &R2StoreArgs,
+) -> Result<CloudflareR2Credentials> {
     let has_static_flags = args.access_key_id.is_some() || args.secret_access_key.is_some();
     if args.credential_source.is_none() && !has_static_flags {
         return Ok(current);
@@ -949,7 +784,7 @@ fn updated_r2_credentials(
 fn require_update_static_secret(
     value: Option<&String>,
     field: &'static str,
-) -> Result<SecretString, CliError> {
+) -> Result<SecretString> {
     value
         .filter(|value| !value.trim().is_empty())
         .cloned()
@@ -963,86 +798,60 @@ fn require_update_static_secret(
         })
 }
 
+/// Edits a stored profile's connection at prompts, keeping its identity and
+/// default namespace.
 pub(super) fn apply_update_interactive(
     name: &str,
     existing: ProfileConfig,
-) -> Result<ProfileConfig, CliError> {
-    match existing {
-        ProfileConfig::Embedded {
-            store,
-            actor_id: actor,
-            subject_id,
-            principal_scope,
-            principals,
-            default_namespace,
-            writer_id,
-        } => {
-            let store = match &store {
+) -> Result<ProfileConfig> {
+    let connection = match &existing.connection {
+        ProfileConnection::Embedded { store, writer_id } => {
+            let store = match store {
                 StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }) => local_store(
                     Some(LocalFsFields {
                         root,
                         key_prefix: key_prefix.as_ref(),
                     }),
-                    &ProfileLocalArgs::default(),
+                    &LocalStoreArgs::default(),
                     FieldSource::Prompt,
                 )?,
-                StoreConfig::AwsS3(current) => s3_store(
-                    Some(current),
-                    &ProfileS3Args::default(),
-                    None,
-                    FieldSource::Prompt,
-                )?,
-                StoreConfig::CloudflareR2(current) => r2_store(
-                    Some(current),
-                    &ProfileR2Args::default(),
-                    FieldSource::Prompt,
-                )?,
-                StoreConfig::GcpGcs(current) => gcs_store(
-                    Some(current),
-                    &ProfileGcsArgs::default(),
-                    FieldSource::Prompt,
-                )?,
+                StoreConfig::AwsS3(current) => {
+                    s3_store(Some(current), &S3StoreArgs::default(), FieldSource::Prompt)?
+                }
+                StoreConfig::CloudflareR2(current) => {
+                    r2_store(Some(current), &R2StoreArgs::default(), FieldSource::Prompt)?
+                }
+                StoreConfig::GcpGcs(current) => {
+                    gcs_store(Some(current), &GcsStoreArgs::default(), FieldSource::Prompt)?
+                }
             };
-            Ok(ProfileConfig::Embedded {
+            ProfileConnection::Embedded {
                 store,
-                actor_id: actor,
-                subject_id,
-                principal_scope,
-                principals,
-                default_namespace,
-                writer_id,
-            })
+                writer_id: writer_id.clone(),
+            }
         }
-        ProfileConfig::Remote {
+        ProfileConnection::Remote {
             server_url,
-            actor_id,
-            subject_id,
-            principal_scope,
-            principals,
-            default_namespace,
             auth_token,
             ca_cert_path,
-        } => remote_profile(
+        } => remote_connection(
             name,
             Some(RemoteFields {
-                server_url: &server_url,
-                default_namespace: default_namespace.as_ref(),
+                server_url,
                 auth_token: auth_token.as_ref(),
                 ca_cert_path: ca_cert_path.as_ref(),
             }),
-            &RemoteProviderArgs::default(),
-            ProfileActor {
-                actor_id,
-                subject_id,
-                principal_scope,
-                principals,
-            },
+            &RemoteServerArgs::default(),
             FieldSource::Prompt,
-        ),
-    }
+        )?,
+    };
+    Ok(ProfileConfig {
+        connection,
+        ..existing
+    })
 }
 
-fn prompt_aws_credentials(current: AwsS3Credentials) -> Result<AwsS3Credentials, CliError> {
+fn prompt_aws_credentials(current: AwsS3Credentials) -> Result<AwsS3Credentials> {
     let default = usize::from(matches!(&current, AwsS3Credentials::Static { .. }));
     match prompt::prompt_choice_default("credential source", &["ambient", "static"], default)?
         .as_str()
@@ -1080,9 +889,7 @@ fn prompt_aws_credentials(current: AwsS3Credentials) -> Result<AwsS3Credentials,
     }
 }
 
-fn prompt_r2_credentials(
-    current: CloudflareR2Credentials,
-) -> Result<CloudflareR2Credentials, CliError> {
+fn prompt_r2_credentials(current: CloudflareR2Credentials) -> Result<CloudflareR2Credentials> {
     let default = usize::from(matches!(&current, CloudflareR2Credentials::Static { .. }));
     match prompt::prompt_choice_default("credential source", &["ambient", "static"], default)?
         .as_str()
@@ -1115,15 +922,14 @@ fn prompt_r2_credentials(
 #[cfg(test)]
 mod tests {
 
-    use super::{
-        apply_update_flags, build_profile_from_create_spec, has_update_flags, profile_update_spec,
-        CreateProfileSpec, CreateProviderSpec, ProfileUpdateSpec, RemoteProviderArgs,
-    };
+    use super::{apply_update_flags, build_profile_from_command};
     use crate::args::{
-        Cli, Command, ProfileCommand, ProfileCreateActorArgs, ProfileLocalArgs, ProfileR2Args,
-        ProfileRemoteArgs, ProfileS3Args, ProfileUpdateActorArgs, RuntimeBehavior, TopLevelCommand,
+        Cli, Command, LocalStoreArgs, ProfileActorArgs, ProfileCommand, ProfileLocalArgs,
+        ProfileProviderCommand, ProfileR2Args, ProfileRemoteArgs, ProfileS3Args, R2StoreArgs,
+        RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors, TopLevelCommand,
     };
-    use crate::config::{ProfileConfig, StoreConfig};
+    use crate::config::{ProfileConfig, ProfileConnection, ProfileIdentity, StoreConfig};
+    use crate::error::Result;
     use clap::Parser;
     use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
     use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
@@ -1153,29 +959,19 @@ mod tests {
 
     #[test]
     fn create_profile_supports_cloudflare_r2() {
-        let profile = build_profile_from_create_spec(
-            "default",
-            CreateProfileSpec {
-                provider: CreateProviderSpec::R2(ProfileR2Args {
-                    bucket: Some("documents".to_owned()),
-                    account_id: Some("account".to_owned()),
-                    endpoint_url: Some("https://account.r2.cloudflarestorage.com".to_owned()),
-                    access_key_id: Some("access".to_owned()),
-                    secret_access_key: Some("secret".to_owned()),
-                    key_prefix: Some("tenant-a".to_owned()),
-                    ..ProfileR2Args::default()
-                }),
-                actor: ProfileCreateActorArgs::default(),
-            },
-            non_interactive_runtime(),
-        )
+        let profile = build(&r2(R2StoreArgs {
+            bucket: Some("documents".to_owned()),
+            account_id: Some("account".to_owned()),
+            endpoint_url: Some("https://account.r2.cloudflarestorage.com".to_owned()),
+            access_key_id: Some("access".to_owned()),
+            secret_access_key: Some("secret".to_owned()),
+            key_prefix: Some("tenant-a".to_owned()),
+            ..R2StoreArgs::default()
+        }))
         .expect("build r2 profile");
-        let ProfileConfig::Embedded { store, .. } = profile else {
-            panic!("expected embedded profile, got {profile:?}");
-        };
         assert_eq!(
-            store,
-            StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
+            store(&profile),
+            &StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
                 bucket: "documents".to_owned(),
                 account_id: "account".to_owned(),
                 endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
@@ -1190,35 +986,25 @@ mod tests {
 
     #[test]
     fn update_r2_flags_round_trip_credentials_and_preserve_unspecified_fields() {
-        let profile = build_profile_from_create_spec(
-            "default",
-            CreateProfileSpec {
-                provider: CreateProviderSpec::R2(ProfileR2Args {
-                    bucket: Some("documents".to_owned()),
-                    account_id: Some("account".to_owned()),
-                    endpoint_url: Some("https://account.r2.cloudflarestorage.com".to_owned()),
-                    ..ProfileR2Args::default()
-                }),
-                actor: ProfileCreateActorArgs::default(),
-            },
-            non_interactive_runtime(),
-        )
+        let profile = build(&r2(R2StoreArgs {
+            bucket: Some("documents".to_owned()),
+            account_id: Some("account".to_owned()),
+            endpoint_url: Some("https://account.r2.cloudflarestorage.com".to_owned()),
+            ..R2StoreArgs::default()
+        }))
         .expect("build ambient r2 profile");
-        let spec = update_spec(CreateProviderSpec::R2(ProfileR2Args {
+        let command = r2(R2StoreArgs {
             bucket: Some("archive".to_owned()),
             credential_source: Some("static".to_owned()),
             access_key_id: Some("access".to_owned()),
             secret_access_key: Some("secret".to_owned()),
             key_prefix: Some("tenant-b".to_owned()),
-            ..ProfileR2Args::default()
-        }));
-        let updated = apply_update_flags("default", profile.clone(), &spec).expect("update r2");
-        let ProfileConfig::Embedded { store, .. } = &updated else {
-            panic!("expected embedded profile, got {updated:?}");
-        };
+            ..R2StoreArgs::default()
+        });
+        let updated = update(profile.clone(), &command).expect("update r2");
         assert_eq!(
-            *store,
-            StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
+            store(&updated),
+            &StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
                 bucket: "archive".to_owned(),
                 account_id: "account".to_owned(),
                 endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
@@ -1229,42 +1015,35 @@ mod tests {
                 key_prefix: Some("tenant-b".to_owned()),
             })
         );
-        let reset = update_spec(CreateProviderSpec::R2(ProfileR2Args {
+        let reset = r2(R2StoreArgs {
             bucket: Some("documents".to_owned()),
             credential_source: Some("ambient".to_owned()),
             key_prefix: Some(String::new()),
-            ..ProfileR2Args::default()
-        }));
+            ..R2StoreArgs::default()
+        });
         assert_eq!(
-            apply_update_flags("default", updated, &reset).expect("restore r2 profile"),
+            update(updated, &reset).expect("restore r2 profile"),
             profile
         );
     }
 
+    /// Checks the bare flag, both values, and an omitted flag, which keeps
+    /// the stored addressing style.
     #[test]
     fn update_s3_flags_set_path_style_and_preserve_it_when_omitted() {
-        let mut profile = build_profile_from_create_spec(
-            "default",
-            CreateProfileSpec {
-                provider: CreateProviderSpec::S3 {
-                    store: ProfileS3Args {
-                        bucket: Some("documents".to_owned()),
-                        region: Some("us-east-1".to_owned()),
-                        ..ProfileS3Args::default()
-                    },
-                    force_path_style: None,
-                },
-                actor: ProfileCreateActorArgs::default(),
-            },
-            non_interactive_runtime(),
-        )
+        let mut profile = build(&s3(S3StoreArgs {
+            bucket: Some("documents".to_owned()),
+            region: Some("us-east-1".to_owned()),
+            ..S3StoreArgs::default()
+        }))
         .expect("build ambient s3 profile");
 
         for (flags, expected_value) in [
-            (&["--force-path-style", "true"][..], true),
+            (&["--force-path-style"][..], true),
             (&[][..], true),
-            (&["--force-path-style", "false"][..], false),
+            (&["--force-path-style=virtual-hosted"][..], false),
             (&[][..], false),
+            (&["--force-path-style=path"][..], true),
         ] {
             let cli = Cli::try_parse_from(
                 ["loonfs", "profile", "update", "s3", "default"]
@@ -1272,132 +1051,78 @@ mod tests {
                     .chain(flags.iter().copied()),
             )
             .expect("parse s3 update flags");
+            let subject = cli.selectors().subject;
             let TopLevelCommand::Configured(Command::Profile {
                 command: ProfileCommand::Update { provider },
             }) = cli.command
             else {
                 panic!("expected profile update, got {:?}", cli.command);
             };
-            let spec = profile_update_spec(*provider);
-            assert_eq!(has_update_flags(&spec), !flags.is_empty());
+            assert_eq!(provider.has_update_flags(&subject), !flags.is_empty());
 
             let mut expected = profile.clone();
-            let ProfileConfig::Embedded {
+            let ProfileConnection::Embedded {
                 store:
                     StoreConfig::AwsS3(AwsS3StoreConfig {
                         force_path_style, ..
                     }),
                 ..
-            } = &mut expected
+            } = &mut expected.connection
             else {
                 panic!("expected s3 profile, got {expected:?}");
             };
             *force_path_style = expected_value;
-            profile = apply_update_flags("default", profile, &spec).expect("update s3");
+            profile = update(profile, &provider).expect("update s3");
             assert_eq!(profile, expected);
         }
     }
 
     #[test]
     fn no_static_flags_select_ambient_without_storing_secrets() {
-        let s3 = build_profile_from_create_spec(
-            "default",
-            CreateProfileSpec {
-                provider: CreateProviderSpec::S3 {
-                    store: ProfileS3Args {
-                        bucket: Some("bucket".to_owned()),
-                        region: Some("us-east-1".to_owned()),
-                        ..ProfileS3Args::default()
-                    },
-                    force_path_style: None,
-                },
-                actor: ProfileCreateActorArgs::default(),
-            },
-            non_interactive_runtime(),
-        )
+        let s3 = build(&s3(S3StoreArgs {
+            bucket: Some("bucket".to_owned()),
+            region: Some("us-east-1".to_owned()),
+            ..S3StoreArgs::default()
+        }))
         .expect("build ambient s3 profile");
-        let ProfileConfig::Embedded {
-            store: StoreConfig::AwsS3(AwsS3StoreConfig { credentials, .. }),
-            ..
-        } = s3
-        else {
+        let StoreConfig::AwsS3(AwsS3StoreConfig { credentials, .. }) = store(&s3) else {
             panic!("expected aws-s3 profile")
         };
-        assert_eq!(credentials, AwsS3Credentials::Ambient {});
+        assert_eq!(credentials, &AwsS3Credentials::Ambient {});
     }
 
     #[test]
     fn static_flags_imply_static_and_require_the_complete_set() {
-        let incomplete = build_profile_from_create_spec(
-            "default",
-            CreateProfileSpec {
-                provider: CreateProviderSpec::S3 {
-                    store: ProfileS3Args {
-                        bucket: Some("bucket".to_owned()),
-                        region: Some("us-east-1".to_owned()),
-                        access_key_id: Some("access".to_owned()),
-                        ..ProfileS3Args::default()
-                    },
-                    force_path_style: None,
-                },
-                actor: ProfileCreateActorArgs::default(),
-            },
-            non_interactive_runtime(),
-        )
+        let incomplete = build(&s3(S3StoreArgs {
+            bucket: Some("bucket".to_owned()),
+            region: Some("us-east-1".to_owned()),
+            access_key_id: Some("access".to_owned()),
+            ..S3StoreArgs::default()
+        }))
         .expect_err("a partial static set must fail");
         assert!(incomplete.message.contains("secret-access-key"));
 
-        let complete = build_profile_from_create_spec(
-            "default",
-            CreateProfileSpec {
-                provider: CreateProviderSpec::S3 {
-                    store: ProfileS3Args {
-                        bucket: Some("bucket".to_owned()),
-                        region: Some("us-east-1".to_owned()),
-                        access_key_id: Some("access".to_owned()),
-                        secret_access_key: Some("secret".to_owned()),
-                        session_token: Some("session".to_owned()),
-                        ..ProfileS3Args::default()
-                    },
-                    force_path_style: None,
-                },
-                actor: ProfileCreateActorArgs::default(),
-            },
-            non_interactive_runtime(),
-        )
+        let complete = build(&s3(S3StoreArgs {
+            bucket: Some("bucket".to_owned()),
+            region: Some("us-east-1".to_owned()),
+            access_key_id: Some("access".to_owned()),
+            secret_access_key: Some("secret".to_owned()),
+            session_token: Some("session".to_owned()),
+            ..S3StoreArgs::default()
+        }))
         .expect("complete static credentials");
         assert_matches!(
-            complete,
-            ProfileConfig::Embedded {
-                store: StoreConfig::AwsS3(AwsS3StoreConfig {
-                    credentials: AwsS3Credentials::Static { .. },
-                    ..
-                }),
+            store(&complete),
+            StoreConfig::AwsS3(AwsS3StoreConfig {
+                credentials: AwsS3Credentials::Static { .. },
                 ..
-            }
+            })
         );
     }
 
     #[test]
     fn update_rejects_a_provider_that_does_not_match_the_profile() {
-        let local_fs = ProfileConfig::Embedded {
-            store: StoreConfig::LocalFs(LocalFsStoreConfig {
-                root: "/tmp/store".to_owned(),
-                key_prefix: None,
-            }),
-            actor_id: None,
-            subject_id: None,
-            principal_scope: None,
-            principals: None,
-            default_namespace: None,
-            writer_id: None,
-        };
-
-        let spec = update_spec(CreateProviderSpec::S3 {
-            store: ProfileS3Args::default(),
-            force_path_style: None,
-        });
-        let error = apply_update_flags("default", local_fs, &spec)
+        let error = update(local_fs_profile(), &s3(S3StoreArgs::default()))
             .expect_err("s3 must not apply to local-fs");
         assert_eq!(
             error.message,
@@ -1407,27 +1132,17 @@ mod tests {
 
     #[test]
     fn update_applies_flags_to_matching_provider() {
-        let remote = ProfileConfig::Remote {
-            server_url: "http://127.0.0.1:9400".to_owned(),
-            actor_id: None,
-            subject_id: None,
-            principal_scope: None,
-            principals: None,
-            default_namespace: None,
-            auth_token: None,
-            ca_cert_path: None,
-        };
+        let updated = update(
+            remote_profile("http://127.0.0.1:9400"),
+            &remote(RemoteServerArgs {
+                auth_token: Some("new-token".to_owned()),
+                ..RemoteServerArgs::default()
+            }),
+        )
+        .expect("update remote auth token");
 
-        let spec = update_spec(CreateProviderSpec::Remote(RemoteProviderArgs {
-            server: ProfileRemoteArgs::default(),
-            auth_token: Some("new-token".to_owned()),
-            ca_cert_path: None,
-        }));
-        let updated =
-            apply_update_flags("default", remote, &spec).expect("update remote auth token");
-
-        match updated {
-            ProfileConfig::Remote { auth_token, .. } => {
+        match updated.connection {
+            ProfileConnection::Remote { auth_token, .. } => {
                 assert_eq!(
                     auth_token.as_ref().map(|token| token.expose()),
                     Some("new-token")
@@ -1436,56 +1151,34 @@ mod tests {
             other => panic!("expected remote profile, got {other:?}"),
         }
 
-        let local_fs = ProfileConfig::Embedded {
-            store: StoreConfig::LocalFs(LocalFsStoreConfig {
-                root: "/tmp/store".to_owned(),
-                key_prefix: None,
+        let updated = update(
+            local_fs_profile(),
+            &local(LocalStoreArgs {
+                root: Some("/tmp/moved".to_owned()),
+                ..LocalStoreArgs::default()
             }),
-            actor_id: None,
-            subject_id: None,
-            principal_scope: None,
-            principals: None,
-            default_namespace: None,
-            writer_id: None,
-        };
+        )
+        .expect("update local-fs root");
 
-        let spec = update_spec(CreateProviderSpec::Local(ProfileLocalArgs {
-            root: Some("/tmp/moved".to_owned()),
-            ..ProfileLocalArgs::default()
-        }));
-        let updated = apply_update_flags("default", local_fs, &spec).expect("update local-fs root");
-
-        match updated {
-            ProfileConfig::Embedded {
-                store: StoreConfig::LocalFs(LocalFsStoreConfig { root, .. }),
-                ..
-            } => assert_eq!(root, "/tmp/moved"),
+        match store(&updated) {
+            StoreConfig::LocalFs(LocalFsStoreConfig { root, .. }) => {
+                assert_eq!(root, "/tmp/moved")
+            }
             other => panic!("expected local-fs profile, got {other:?}"),
         }
     }
 
     #[test]
     fn remote_update_rejects_a_token_over_non_loopback_plaintext_http() {
-        let remote = ProfileConfig::Remote {
-            server_url: "https://example.internal".to_owned(),
-            actor_id: None,
-            subject_id: None,
-            principal_scope: None,
-            principals: None,
-            default_namespace: None,
-            auth_token: None,
-            ca_cert_path: None,
-        };
-
-        let spec = update_spec(CreateProviderSpec::Remote(RemoteProviderArgs {
-            server: ProfileRemoteArgs {
+        let error = update(
+            remote_profile("https://example.internal"),
+            &remote(RemoteServerArgs {
                 server_url: Some("http://example.internal".to_owned()),
-            },
-            auth_token: Some("new-token".to_owned()),
-            ca_cert_path: None,
-        }));
-        let error = apply_update_flags("default", remote, &spec)
-            .expect_err("unsafe effective remote profile should be rejected");
+                auth_token: Some("new-token".to_owned()),
+                ca_cert_path: None,
+            }),
+        )
+        .expect_err("unsafe effective remote profile should be rejected");
 
         assert_eq!(error.code, "invalid_config");
         assert!(
@@ -1499,64 +1192,43 @@ mod tests {
 
     #[test]
     fn update_switches_credential_source_only_with_a_complete_static_set() {
-        let profile = ProfileConfig::Embedded {
-            store: StoreConfig::AwsS3(AwsS3StoreConfig {
-                bucket: "bucket".to_owned(),
-                region: "us-east-1".to_owned(),
-                endpoint_url: None,
-                credentials: AwsS3Credentials::Ambient {},
-                key_prefix: None,
-                force_path_style: false,
-            }),
-            actor_id: None,
-            subject_id: None,
-            principal_scope: None,
-            principals: None,
-            default_namespace: None,
-            writer_id: None,
-        };
+        let profile = embedded_profile(StoreConfig::AwsS3(AwsS3StoreConfig {
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: None,
+            credentials: AwsS3Credentials::Ambient {},
+            key_prefix: None,
+            force_path_style: false,
+        }));
 
-        let incomplete = update_spec(CreateProviderSpec::S3 {
-            store: ProfileS3Args {
-                credential_source: Some("static".to_owned()),
-                access_key_id: Some("access".to_owned()),
-                ..ProfileS3Args::default()
-            },
-            force_path_style: None,
+        let incomplete = s3(S3StoreArgs {
+            credential_source: Some("static".to_owned()),
+            access_key_id: Some("access".to_owned()),
+            ..S3StoreArgs::default()
         });
-        let error =
-            apply_update_flags("default", profile.clone(), &incomplete).expect_err("failed switch");
+        let error = update(profile.clone(), &incomplete).expect_err("failed switch");
         assert!(error.message.contains("secret-access-key"));
         assert_matches!(
-            profile,
-            ProfileConfig::Embedded {
-                store: StoreConfig::AwsS3(AwsS3StoreConfig {
-                    credentials: AwsS3Credentials::Ambient {},
-                    ..
-                }),
+            store(&profile),
+            StoreConfig::AwsS3(AwsS3StoreConfig {
+                credentials: AwsS3Credentials::Ambient {},
                 ..
-            }
+            })
         );
 
-        let complete = update_spec(CreateProviderSpec::S3 {
-            store: ProfileS3Args {
-                credential_source: Some("static".to_owned()),
-                access_key_id: Some("access".to_owned()),
-                secret_access_key: Some("secret".to_owned()),
-                ..ProfileS3Args::default()
-            },
-            force_path_style: None,
+        let complete = s3(S3StoreArgs {
+            credential_source: Some("static".to_owned()),
+            access_key_id: Some("access".to_owned()),
+            secret_access_key: Some("secret".to_owned()),
+            ..S3StoreArgs::default()
         });
-        let updated = apply_update_flags("default", profile, &complete).expect("complete switch");
+        let updated = update(profile, &complete).expect("complete switch");
         assert_matches!(
-            updated,
-            ProfileConfig::Embedded {
-                store: StoreConfig::AwsS3(AwsS3StoreConfig {
-                    credentials: AwsS3Credentials::Static { .. },
-                    ..
-                }),
+            store(&updated),
+            StoreConfig::AwsS3(AwsS3StoreConfig {
+                credentials: AwsS3Credentials::Static { .. },
                 ..
-            }
+            })
         );
     }
 
@@ -1566,18 +1238,15 @@ mod tests {
             .map(|index| format!("prn_{index}"))
             .collect::<Vec<_>>()
             .join(",");
-        let error = build_profile_from_create_spec(
-            "default",
-            CreateProfileSpec {
-                provider: CreateProviderSpec::Local(ProfileLocalArgs {
-                    root: Some("/tmp/store".to_owned()),
-                    key_prefix: None,
-                }),
-                actor: ProfileCreateActorArgs {
-                    principal_scope: Some("org".to_owned()),
-                    principals: Some(principals),
-                    ..ProfileCreateActorArgs::default()
-                },
+        let error = build_profile_from_command(
+            &local(LocalStoreArgs {
+                root: Some("/tmp/store".to_owned()),
+                key_prefix: None,
+            }),
+            &SubjectSelectors {
+                principal_scope: Some("org".to_owned()),
+                principals: Some(principals),
+                ..SubjectSelectors::default()
             },
             non_interactive_runtime(),
         )
@@ -1586,11 +1255,84 @@ mod tests {
         assert_eq!(error.param.as_deref(), Some("--principals"));
     }
 
-    fn update_spec(provider: CreateProviderSpec) -> ProfileUpdateSpec {
-        ProfileUpdateSpec {
+    fn s3(store: S3StoreArgs) -> ProfileProviderCommand {
+        ProfileProviderCommand::S3(ProfileS3Args {
             name: "default".to_owned(),
-            provider,
-            actor: ProfileUpdateActorArgs::default(),
+            store,
+            actor: ProfileActorArgs::default(),
+        })
+    }
+
+    fn r2(store: R2StoreArgs) -> ProfileProviderCommand {
+        ProfileProviderCommand::R2(ProfileR2Args {
+            name: "default".to_owned(),
+            store,
+            actor: ProfileActorArgs::default(),
+        })
+    }
+
+    fn local(store: LocalStoreArgs) -> ProfileProviderCommand {
+        ProfileProviderCommand::Local(ProfileLocalArgs {
+            name: "default".to_owned(),
+            store,
+            actor: ProfileActorArgs::default(),
+        })
+    }
+
+    fn remote(server: RemoteServerArgs) -> ProfileProviderCommand {
+        ProfileProviderCommand::Remote(ProfileRemoteArgs {
+            name: "default".to_owned(),
+            server,
+            actor: ProfileActorArgs::default(),
+        })
+    }
+
+    fn build(command: &ProfileProviderCommand) -> Result<ProfileConfig> {
+        build_profile_from_command(
+            command,
+            &SubjectSelectors::default(),
+            non_interactive_runtime(),
+        )
+    }
+
+    fn update(profile: ProfileConfig, command: &ProfileProviderCommand) -> Result<ProfileConfig> {
+        apply_update_flags(profile, command, &SubjectSelectors::default())
+    }
+
+    fn store(profile: &ProfileConfig) -> &StoreConfig {
+        let ProfileConnection::Embedded { store, .. } = &profile.connection else {
+            panic!("expected embedded profile, got {profile:?}");
+        };
+        store
+    }
+
+    fn embedded_profile(store: StoreConfig) -> ProfileConfig {
+        ProfileConfig {
+            identity: ProfileIdentity::default(),
+            default_namespace: None,
+            connection: ProfileConnection::Embedded {
+                store,
+                writer_id: None,
+            },
+        }
+    }
+
+    fn local_fs_profile() -> ProfileConfig {
+        embedded_profile(StoreConfig::LocalFs(LocalFsStoreConfig {
+            root: "/tmp/store".to_owned(),
+            key_prefix: None,
+        }))
+    }
+
+    fn remote_profile(server_url: &str) -> ProfileConfig {
+        ProfileConfig {
+            identity: ProfileIdentity::default(),
+            default_namespace: None,
+            connection: ProfileConnection::Remote {
+                server_url: server_url.to_owned(),
+                auth_token: None,
+                ca_cert_path: None,
+            },
         }
     }
 
@@ -1599,6 +1341,7 @@ mod tests {
             output: crate::render::OutputFormat::Human,
             interactive: false,
             progress: crate::progress::ProgressMode::Off,
+            transient_retry: crate::args::TransientRetry::Retry,
         }
     }
 }

@@ -3,11 +3,11 @@
 
 use super::context::{
     create_directory_tolerating_existing, default_remote_put_path, destination_path_for_get,
-    destination_user_path, directory_intent, fail, namespace_path, parse_user_path_arg,
-    render_target, resolve_command_context, resolve_mutation_context, CommandContext,
-    ProfileSource, RemoteDirectoryOutcome, RootPath, UndeleteHint,
+    destination_user_path, directory_intent, namespace_path, parse_user_path_arg, render_target,
+    shell_quote, Invocation, NamespaceContext, ProfileSource, RemoteDirectoryOutcome, RootPath,
+    UndeleteHint,
 };
-use super::download::FileDownload;
+use super::download::{FileDownload, FileVersion};
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
     TrashListing,
@@ -16,29 +16,27 @@ use super::pagination::{collect_or_stream_pages, visit_pages, PagedListing};
 use super::partial::{self, PartialDownload, PartialDownloadMetadata};
 use super::recursive;
 use crate::args::{
-    CommandKind, CommitArgs, FilesystemAnnotateArgs, FilesystemAppendArgs, FilesystemCatArgs,
-    FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs, FilesystemMkdirArgs,
-    FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs,
-    FilesystemStatArgs, FilesystemTransferArgs, FilesystemUndeleteArgs, PaginationArgs,
-    RuntimeBehavior, TrashArgs,
+    CommitArgs, FilesystemAnnotateArgs, FilesystemAppendArgs, FilesystemCatArgs, FilesystemGetArgs,
+    FilesystemGrepArgs, FilesystemLsArgs, FilesystemMkdirArgs, FilesystemPutArgs,
+    FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemStatArgs,
+    FilesystemTransferArgs, FilesystemUndeleteArgs, PaginationArgs, RuntimeBehavior, TrashArgs,
 };
-use crate::config::ConfigLocation;
-use crate::error::CliError;
+use crate::error::{CliError, Result};
 use crate::payload::{LocalPayload, STDIN_PATH};
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::OutputFormat;
-use crate::uploads::{SourceIdentity, UploadJournal};
+use crate::uploads::{SourceIdentity, UploadAttempt, UploadJournal};
 use loonfs_client::{
     AppendFileOptions, AttributeChanges, CommitOptions, CreateDirectoryOptions, DeleteOptions,
-    NamespacePath, PutFileOptions, UndeleteDestination, UndeleteOptions, UpdateAttributesOptions,
+    ListOptions, NamespacePath, PutFileOptions, ReadAt, StatOptions, UndeleteDestination,
+    UndeleteOptions, UpdateAttributesOptions,
 };
 use loonfs_types::api::v0::UploadSessionStatus;
 use loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES;
-use loonfs_types::PinId;
 use loonfs_types::{
     AbsolutePath, AttributeKey, AttributeValue, ChangeSeq, Commit, DeleteDirectoryBehavior,
-    DestinationBehavior, EntryInodeKind, GrepResponse, ListPathEntriesResponse, NamespaceId,
-    RevisionNo,
+    DestinationBehavior, EntryInodeKind, ErrorCode, GrepResponse, ListPathEntriesResponse,
+    NamespaceId,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -63,21 +61,27 @@ struct FollowedPathEntryPages {
 }
 
 async fn follow_path_entry_pages(
-    context: &CommandContext,
-    kind: CommandKind,
+    context: &NamespaceContext,
     spec: &NamespacePath,
     pagination: &PaginationArgs,
-    cursor: Option<&str>,
-    snapshot_id: Option<&PinId>,
-    mut visit: impl FnMut(Vec<loonfs_types::PathEntry>) -> Result<(), CliError>,
+    at: &ReadAt,
+    mut visit: impl FnMut(Vec<loonfs_types::PathEntry>) -> Result<()>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut heads = ListingHeadObservation::default();
     let mut followed = None;
     visit_pages(
         context
+            .profile
             .target
-            .list_at_snapshot(spec, snapshot_id)
-            .cursor(cursor.map(ToOwned::to_owned)),
+            .client
+            .list_with_options(
+                spec,
+                &ListOptions {
+                    at: at.clone(),
+                    ..ListOptions::default()
+                },
+            )
+            .cursor(pagination.cursor.clone()),
         &pagination.page_limits,
         |page: ListPathEntriesResponse| {
             heads.observe(page.head_seq);
@@ -92,17 +96,15 @@ async fn follow_path_entry_pages(
         },
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     Ok(followed.expect("a listing should observe its first page"))
 }
 
 pub(crate) async fn run_filesystem_ls(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemLsArgs,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = NamespaceContext::resolve(invocation, None).await?;
     let root = RootPath::Allowed;
     let spec = namespace_path(
         context.namespace(),
@@ -110,76 +112,60 @@ pub(crate) async fn run_filesystem_ls(
         args.path.as_deref().unwrap_or("/"),
         root,
     )
-    .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = args.snapshot_id.clone();
+    .map_err(|error| context.fail(error))?;
+    let at = ReadAt::from(args.snapshot_id.clone());
+    let output = invocation.behavior.output;
     let streams_pages = args.pagination.page_limits.jsonl
-        || (args.pagination.page_limits.all && runtime.output == OutputFormat::Human);
+        || (args.pagination.page_limits.all && output == OutputFormat::Human);
     if streams_pages {
-        let followed = follow_path_entry_pages(
-            &context,
-            kind,
-            &spec,
-            &args.pagination,
-            args.pagination.cursor.as_deref(),
-            snapshot_id.as_ref(),
-            |entries| {
-                crate::render::write_path_entries_page(&entries, args.pagination.page_limits.jsonl)
-                    .map_err(CliError::io)
-            },
-        )
+        let followed = follow_path_entry_pages(&context, &spec, &args.pagination, &at, |entries| {
+            crate::render::write_path_entries_page(&entries, args.pagination.page_limits.jsonl)
+                .map_err(CliError::io)
+        })
         .await?;
         // Write head-drift warnings to stderr so streamed stdout contains
         // only entries.
         if let Some(drift) = followed.head_drift {
             crate::render::write_listing_drift_warning(&drift);
         }
-        return Ok(context.output(kind, CommandData::StreamedToStdout));
+        return Ok(context.output(CommandData::StreamedToStdout));
     }
 
     let mut entries = Vec::new();
-    let followed = follow_path_entry_pages(
-        &context,
-        kind,
-        &spec,
-        &args.pagination,
-        args.pagination.cursor.as_deref(),
-        snapshot_id.as_ref(),
-        |page| {
-            entries.extend(page);
-            Ok(())
-        },
-    )
+    let followed = follow_path_entry_pages(&context, &spec, &args.pagination, &at, |page| {
+        entries.extend(page);
+        Ok(())
+    })
     .await?;
-    if runtime.output == OutputFormat::Human {
+    if output == OutputFormat::Human {
         if let Some(drift) = followed.head_drift.as_ref() {
             crate::render::write_listing_drift_warning(drift);
         }
     }
-    Ok(context.output(
-        kind,
-        CommandData::PathEntries {
-            namespace_id: followed.namespace_id,
-            path: followed.path,
-            head_seq: followed.head_seq,
-            head_drift: followed.head_drift,
-            entries,
-            next_cursor: followed.next_cursor,
-        },
-    ))
+    Ok(context.output(CommandData::PathEntries {
+        namespace_id: followed.namespace_id,
+        path: followed.path,
+        head_seq: followed.head_seq,
+        head_drift: followed.head_drift,
+        entries,
+        next_cursor: followed.next_cursor,
+    }))
 }
 
 pub(crate) async fn run_filesystem_stat(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemStatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let snapshot_id = args.snapshot_id.clone();
+    let context = NamespaceContext::resolve(invocation, None).await?;
+    let options = StatOptions {
+        at: ReadAt::from(args.snapshot_id.clone()),
+        ..StatOptions::default()
+    };
+    let client = &context.profile.target.client;
     let entry = match args.inode {
         Some(inode_id) => {
-            context
-                .target
-                .stat_by_inode_at_snapshot(context.namespace(), inode_id, snapshot_id.as_ref())
+            client
+                .stat_by_inode_with_options(context.namespace(), inode_id, &options)
                 .await
         }
         None => {
@@ -189,22 +175,19 @@ pub(crate) async fn run_filesystem_stat(
                 .expect("clap should require either a path or `--inode`");
             let root = RootPath::Allowed;
             let spec = namespace_path(context.namespace(), "path", path, root)
-                .map_err(|error| context.fail(kind, error))?;
-            context
-                .target
-                .stat_at_snapshot(&spec, snapshot_id.as_ref())
-                .await
+                .map_err(|error| context.fail(error))?;
+            client.stat_with_options(&spec, &options).await
         }
     }
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
 
-    Ok(context.output(kind, CommandData::PathEntry(entry)))
+    Ok(context.output(CommandData::PathEntry(entry)))
 }
 
 /// One `--set key=value` argument. The key ends at the first `=` so a value
 /// may contain more of them, and a missing `=` names the flag rather than
 /// guessing what the caller meant.
-fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, AttributeValue), CliError> {
+fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, AttributeValue)> {
     let Some((key, value)) = argument.split_once('=') else {
         return Err(CliError::invalid_request(format!(
             "invalid `--set` {argument:?}: expected `key=value`"
@@ -219,7 +202,7 @@ fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, Attribute
     ))
 }
 
-fn parse_attribute_key_arg(flag: &str, key: &str) -> Result<AttributeKey, CliError> {
+fn parse_attribute_key_arg(flag: &str, key: &str) -> Result<AttributeKey> {
     AttributeKey::parse(key).map_err(|error| {
         CliError::invalid_request(format!("invalid `{flag}` key: {error}")).with_param(flag)
     })
@@ -238,7 +221,7 @@ struct AttributeUpdateJson {
 
 fn attribute_update(
     args: &FilesystemAnnotateArgs,
-) -> Result<(AttributeChanges, UpdateAttributesOptions), CliError> {
+) -> Result<(AttributeChanges, UpdateAttributesOptions)> {
     let (set, remove) = match args.attributes_json.as_deref() {
         Some(document) => {
             let update: AttributeUpdateJson = serde_json::from_str(document).map_err(|error| {
@@ -269,47 +252,43 @@ fn attribute_update(
 }
 
 pub(crate) async fn run_filesystem_annotate(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemAnnotateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
+    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
     let root = RootPath::Allowed;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
-        .map_err(|error| context.fail(kind, error))?;
-    let (changes, options) = attribute_update(&args).map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
+    let (changes, options) = attribute_update(&args).map_err(|error| context.fail(error))?;
     let result = context
+        .profile
         .target
         .client
         .update_attributes_with_options(&spec, context.actor(), changes, &options)
         .await
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
 
-    Ok(context.output(
-        kind,
-        CommandData::FileMutation {
-            human_target: None,
-            target: render_target(context.namespace(), spec.absolute_path()),
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-            inode_id: None,
-            recovery_command: None,
-        },
-    ))
+    Ok(context.output(CommandData::FileMutation {
+        human_target: None,
+        target: render_target(context.namespace(), spec.absolute_path()),
+        committed_seq: result.committed_seq,
+        commit_id: result.commit_id,
+        inode_id: None,
+        recovery_command: None,
+    }))
 }
 
 pub(crate) async fn run_filesystem_grep(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemGrepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = NamespaceContext::resolve(invocation, None).await?;
     let path_prefix = args
         .path_prefix
         .as_deref()
         .map(|path| parse_user_path_arg("--path-prefix", path, RootPath::Allowed))
         .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let request = loonfs_types::GrepRequest {
         pattern: args.pattern.clone(),
         case_insensitive: args.ignore_case,
@@ -323,6 +302,7 @@ pub(crate) async fn run_filesystem_grep(
     let mut tail_scanned = true;
     let listing = collect_or_stream_pages(
         context
+            .profile
             .target
             .client
             .grep(context.namespace(), &request)
@@ -331,59 +311,63 @@ pub(crate) async fn run_filesystem_grep(
         |page: &GrepResponse| tail_scanned &= page.tail_scanned,
     )
     .await
-    .map_err(|error| context.fail(kind, error.with_command_hint(kind, None)))?;
+    .map_err(|error| context.fail(grep_index_hint(error)))?;
     let PagedListing::Collected(response) = listing else {
         if !tail_scanned {
             crate::render::write_stderr_warning(
                 "recent commits were not scanned (allow_stale); results may be stale",
             );
         }
-        return Ok(context.output(kind, CommandData::StreamedToStdout));
+        return Ok(context.output(CommandData::StreamedToStdout));
     };
-    Ok(context.output(
-        kind,
-        CommandData::GrepMatches {
-            pattern: args.pattern,
-            namespace_id: response.namespace_id,
-            head_seq: response.head_seq,
-            built_through_seq: response.built_through_seq,
-            matches: response.matches,
-            tail_scanned: response.tail_scanned,
-            truncated: response.next_cursor.is_some(),
-            next_cursor: response.next_cursor,
-        },
-    ))
+    Ok(context.output(CommandData::GrepMatches {
+        pattern: args.pattern,
+        namespace_id: response.namespace_id,
+        head_seq: response.head_seq,
+        built_through_seq: response.built_through_seq,
+        matches: response.matches,
+        tail_scanned: response.tail_scanned,
+        truncated: response.next_cursor.is_some(),
+        next_cursor: response.next_cursor,
+    }))
+}
+
+/// Adds how to enable the grep index to the error of a grep against a
+/// namespace without an active index.
+fn grep_index_hint(mut error: CliError) -> CliError {
+    if ErrorCode::parse(&error.code) == Some(ErrorCode::NotSupported)
+        && error.feature.as_deref() == Some("query.grep")
+    {
+        error
+            .message
+            .push_str("; enable it with `loonfs maintenance index enable`");
+    }
+    error
 }
 
 pub(crate) async fn run_filesystem_cat(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemCatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = NamespaceContext::resolve(invocation, None).await?;
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
-        .map_err(|error| context.fail(kind, error))?;
-    stream_file_to_stdout(&context, &spec, args.revision, args.snapshot_id.as_ref())
+        .map_err(|error| context.fail(error))?;
+    let version = FileVersion::from_flags(args.revision, args.snapshot_id);
+    stream_file_to_stdout(&context, &spec, &version)
         .await
-        .map_err(|error| context.fail(kind, error))?;
-    Ok(context.output(kind, CommandData::StreamedToStdout))
+        .map_err(|error| context.fail(error))?;
+    Ok(context.output(CommandData::StreamedToStdout))
 }
 
 pub(crate) async fn run_filesystem_get(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemGetArgs,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
-    if runtime.output == OutputFormat::Json && args.local_destination.as_deref() == Some("-") {
-        return Err(fail(
-            kind,
-            Some(context.profile_name),
-            Some(context.mode),
-            CliError::json_not_supported(),
-        ));
+    let context = NamespaceContext::resolve(invocation, None).await?;
+    let behavior = invocation.behavior;
+    if behavior.output == OutputFormat::Json && args.local_destination.as_deref() == Some("-") {
+        return Err(context.fail(CliError::json_not_supported()));
     }
 
     let root = if args.recursive {
@@ -392,18 +376,17 @@ pub(crate) async fn run_filesystem_get(
         RootPath::Refused
     };
     let spec = namespace_path(context.namespace(), "remote_path", &args.remote_path, root)
-        .map_err(|error| context.fail(kind, error))?;
-    let revision_no = args.revision;
+        .map_err(|error| context.fail(error))?;
     let snapshot_id = args.snapshot_id.clone();
     let entry = context
+        .profile
         .target
         .stat_without_attributes_at_snapshot(&spec, snapshot_id.as_ref())
         .await
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     if args.recursive {
         if entry.inode_kind() != EntryInodeKind::Directory {
             return Err(context.fail(
-                kind,
                 CliError::invalid_request(format!(
                     "`{}` is not a directory; drop -r to download one file",
                     spec.absolute_path()
@@ -413,7 +396,6 @@ pub(crate) async fn run_filesystem_get(
         }
         if args.revision.is_some() {
             return Err(context.fail(
-                kind,
                 CliError::invalid_request("`--revision` applies to one file, not a tree")
                     .with_param("--revision"),
             ));
@@ -421,29 +403,26 @@ pub(crate) async fn run_filesystem_get(
         let local_root = match args.local_destination.as_deref() {
             Some("-") => {
                 return Err(context.fail(
-                    kind,
                     CliError::invalid_request("`-` streams one file; a tree needs a directory")
                         .with_param("local_destination"),
                 ))
             }
             Some(destination) => PathBuf::from(destination),
             None => destination_path_for_get(spec.absolute_path(), None)
-                .map_err(|error| context.fail(kind, error))?,
+                .map_err(|error| context.fail(error))?,
         };
         return recursive::run_get_tree(
-            kind,
             &context,
             spec.absolute_path(),
             &local_root,
             destination_behavior(args.force),
-            runtime,
-            snapshot_id.as_ref(),
+            behavior,
+            &ReadAt::from(snapshot_id),
         )
         .await;
     }
     if entry.inode_kind() == EntryInodeKind::Directory {
         return Err(context.fail(
-            kind,
             CliError::invalid_request(format!(
                 "`{}` is a directory; use `loonfs get -r` to download the tree",
                 spec.absolute_path()
@@ -452,13 +431,14 @@ pub(crate) async fn run_filesystem_get(
         ));
     }
 
+    let version = FileVersion::from_flags(args.revision, snapshot_id);
     if args.local_destination.as_deref() == Some("-") {
         // No progress and no resume: standard output is carrying the file,
         // and bytes already piped onward are somewhere this CLI cannot see.
-        stream_file_to_stdout(&context, &spec, revision_no, snapshot_id.as_ref())
+        stream_file_to_stdout(&context, &spec, &version)
             .await
-            .map_err(|error| context.fail(kind, error))?;
-        return Ok(context.output(kind, CommandData::StreamedToStdout));
+            .map_err(|error| context.fail(error))?;
+        return Ok(context.output(CommandData::StreamedToStdout));
     }
 
     let name = if args.local_destination.is_none() {
@@ -468,22 +448,16 @@ pub(crate) async fn run_filesystem_get(
     };
     let destination =
         destination_path_for_get(spec.absolute_path(), args.local_destination.as_deref())
-            .map_err(|error| context.fail(kind, error))?;
+            .map_err(|error| context.fail(error))?;
     let ResumableDownload {
         mut download,
         partial,
-    } = open_resumable_download(
-        &context,
-        &spec,
-        revision_no,
-        snapshot_id.as_ref(),
-        &destination,
-    )
-    .await
-    .map_err(|error| context.fail(kind, error))?;
+    } = open_resumable_download(&context, &spec, &version, &destination)
+        .await
+        .map_err(|error| context.fail(error))?;
 
     let progress = Arc::new(ProgressReporter::new(
-        runtime,
+        behavior,
         ProgressOp::Get,
         spec.absolute_path().as_str(),
     ));
@@ -511,14 +485,14 @@ pub(crate) async fn run_filesystem_get(
         progress.file_finished(spec.absolute_path().as_str(), *bytes_written);
     }
     progress.finish();
-    let bytes_written = written.map_err(|error| context.fail(kind, error))?;
+    let bytes_written = written.map_err(|error| context.fail(error))?;
     let data = CommandData::FileTransfer {
         target: render_target(context.namespace(), spec.absolute_path()),
         destination: destination.display().to_string(),
         bytes_written,
     };
 
-    Ok(context.output(kind, data))
+    Ok(context.output(data))
 }
 
 /// A download and the partial-file metadata that a resumed run has to match.
@@ -529,39 +503,36 @@ pub(super) struct ResumableDownload {
 
 /// Opens a download at the offset recorded in a matching partial file.
 pub(super) async fn open_resumable_download(
-    context: &CommandContext,
+    context: &NamespaceContext,
     spec: &NamespacePath,
-    revision_no: Option<RevisionNo>,
-    snapshot_id: Option<&PinId>,
+    version: &FileVersion,
     destination: &Path,
-) -> Result<ResumableDownload, CliError> {
+) -> Result<ResumableDownload> {
     let mut download = context
+        .profile
         .target
-        .open_file_download(spec, revision_no, snapshot_id, 0)
+        .open_file_download(spec, version, 0)
         .await?;
     let identity = download.resume_identity();
     let resolved_revision = identity.map(|identity| identity.revision_no);
-    let meta = identity
-        .map(|identity| PartialDownloadMetadata::describe(identity.content_ref, revision_no));
+    let meta = identity.map(|identity| {
+        PartialDownloadMetadata::describe(identity.content_ref, version.revision_no())
+    });
     let start_offset = meta
         .as_ref()
         .map_or(0, |meta| partial::resumable_bytes(destination, meta));
     if start_offset > 0 {
         // Pin the content revision resolved by the first stream. A snapshot
         // already pins its revision and cannot also take a revision selector.
+        let resumed = match (version, resolved_revision) {
+            (FileVersion::At(ReadAt::Snapshot(_)), _) | (_, None) => version.clone(),
+            (_, Some(revision_no)) => FileVersion::Revision(revision_no),
+        };
         drop(download);
         download = context
+            .profile
             .target
-            .open_file_download(
-                spec,
-                if snapshot_id.is_some() {
-                    None
-                } else {
-                    resolved_revision
-                },
-                snapshot_id,
-                start_offset,
-            )
+            .open_file_download(spec, &resumed, start_offset)
             .await?;
     }
     Ok(ResumableDownload {
@@ -588,7 +559,7 @@ pub(super) async fn stream_download_to_file(
     destination: LocalDestination<'_>,
     meta: Option<&PartialDownloadMetadata>,
     progress: &ProgressReporter,
-) -> Result<u64, CliError> {
+) -> Result<u64> {
     let resumed_from = download.resumed_from();
     let mut partial = PartialDownload::open(destination.path, meta, resumed_from)
         .map_err(|error| destination.open_error(error))?;
@@ -641,14 +612,14 @@ fn destination_behavior(force: bool) -> DestinationBehavior {
 /// way — and it is why the exit status, not the output, is what says whether
 /// the content was verified.
 async fn stream_file_to_stdout(
-    context: &CommandContext,
+    context: &NamespaceContext,
     spec: &NamespacePath,
-    revision_no: Option<RevisionNo>,
-    snapshot_id: Option<&PinId>,
-) -> Result<(), CliError> {
+    version: &FileVersion,
+) -> Result<()> {
     let mut download = context
+        .profile
         .target
-        .open_file_download(spec, revision_no, snapshot_id, 0)
+        .open_file_download(spec, version, 0)
         .await?;
     while let Some(chunk) = download.next_chunk().await? {
         // Locked per chunk rather than held across the fetch: nothing else
@@ -711,13 +682,13 @@ impl LocalDestination<'_> {
 }
 
 pub(crate) async fn run_filesystem_trash(
-    kind: CommandKind,
-    location: &ConfigLocation,
+    invocation: &Invocation,
     args: TrashArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &location.path, &args.target).await?;
+    let context = NamespaceContext::resolve(invocation, None).await?;
     let listing = collect_or_stream_pages(
         context
+            .profile
             .target
             .client
             .list_trash(context.namespace())
@@ -726,40 +697,37 @@ pub(crate) async fn run_filesystem_trash(
         |_: &loonfs_types::ListTrashResponse| {},
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     let PagedListing::Collected(response) = listing else {
-        return Ok(context.output(kind, CommandData::StreamedToStdout));
+        return Ok(context.output(CommandData::StreamedToStdout));
     };
     let hint = UndeleteHint::new(
         &context,
-        location,
-        ProfileSource::from_selector(&args.target.profile),
+        &invocation.config,
+        ProfileSource::from_selectors(&invocation.selectors),
     );
     let recovery_commands = response
         .entries
         .iter()
         .map(|entry| hint.command(entry.inode_id, entry.deletion_seq))
         .collect();
-    Ok(context.output(
-        kind,
-        CommandData::Trash(TrashListing {
-            response,
-            recovery_commands,
-        }),
-    ))
+    Ok(context.output(CommandData::Trash(TrashListing {
+        response,
+        recovery_commands,
+    })))
 }
 
 pub(crate) async fn run_filesystem_revisions(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemRevisionsArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = NamespaceContext::resolve(invocation, None).await?;
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let listing = collect_or_stream_pages(
         context
+            .profile
             .target
             .client
             .list_file_revisions(&spec)
@@ -768,39 +736,33 @@ pub(crate) async fn run_filesystem_revisions(
         |_: &loonfs_types::ListFileRevisionsResponse| {},
     )
     .await
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     let PagedListing::Collected(response) = listing else {
-        return Ok(context.output(kind, CommandData::StreamedToStdout));
+        return Ok(context.output(CommandData::StreamedToStdout));
     };
 
-    Ok(context.output(
-        kind,
-        CommandData::FileRevisions {
-            target: render_target(context.namespace(), spec.absolute_path()),
-            revisions: response.revisions,
-            next_cursor: response.next_cursor,
-        },
-    ))
+    Ok(context.output(CommandData::FileRevisions {
+        target: render_target(context.namespace(), spec.absolute_path()),
+        revisions: response.revisions,
+        next_cursor: response.next_cursor,
+    }))
 }
 
 pub(crate) async fn run_filesystem_put(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemPutArgs,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
+    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
     let local_path = PathBuf::from(&args.local_path);
     if local_path == Path::new(STDIN_PATH) {
-        return run_filesystem_put_stdin(kind, args, context, runtime).await;
+        return run_filesystem_put_stdin(invocation, args, context).await;
     }
 
     let metadata = fs::metadata(&local_path)
-        .map_err(|error| context.fail(kind, CliError::io_for_path(&local_path, error)))?;
+        .map_err(|error| context.fail(CliError::io_for_path(&local_path, error)))?;
     if args.recursive {
         if !metadata.is_dir() {
             return Err(context.fail(
-                kind,
                 CliError::invalid_request(format!(
                     "`{}` is not a directory; drop -r to upload one file",
                     local_path.display()
@@ -810,7 +772,6 @@ pub(crate) async fn run_filesystem_put(
         }
         if args.commit.commit_id.is_some() {
             return Err(context.fail(
-                kind,
                 CliError::invalid_request(
                     "`--commit-id` names one commit; a recursive upload makes one commit per file",
                 )
@@ -821,21 +782,19 @@ pub(crate) async fn run_filesystem_put(
             Some(path) => parse_user_path_arg("remote_path", &path, RootPath::Allowed),
             None => default_remote_put_path(&local_path),
         }
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
         return recursive::run_put_tree(
-            kind,
             &context,
             &local_path,
             &remote_root,
             destination_behavior(args.force),
             args.commit.message.clone(),
-            runtime,
+            invocation.behavior,
         )
         .await;
     }
     if metadata.is_dir() {
         return Err(context.fail(
-            kind,
             CliError::invalid_request(format!(
                 "`{}` is a directory; use `loonfs put -r` to upload the tree",
                 local_path.display()
@@ -846,7 +805,6 @@ pub(crate) async fn run_filesystem_put(
 
     let local_leaf = local_path.file_name().ok_or_else(|| {
         context.fail(
-            kind,
             CliError::invalid_request(format!(
                 "unable to derive remote target from `{}`",
                 local_path.display()
@@ -855,7 +813,7 @@ pub(crate) async fn run_filesystem_put(
         )
     })?;
     let local_leaf =
-        super::context::utf8_local_name(local_leaf).map_err(|error| context.fail(kind, error))?;
+        super::context::utf8_local_name(local_leaf).map_err(|error| context.fail(error))?;
     let remote_path = match args.remote_path.as_deref() {
         // A trailing slash names the directory the file lands in — the
         // cp/rsync habit — while a plain path is the full destination.
@@ -868,11 +826,11 @@ pub(crate) async fn run_filesystem_put(
         ),
         None => default_remote_put_path(&local_path),
     }
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
     let payload = LocalPayload::file(&local_path, metadata.len());
-    let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
-    commit_put(kind, &context, &spec, &payload, &options, runtime).await
+    let options = put_file_options(&args).map_err(|error| context.fail(error))?;
+    commit_put(&context, &spec, &payload, &options, invocation.behavior).await
 }
 
 /// `loonfs put - <remote>`: standard input, whose length is not knowable, so
@@ -881,21 +839,18 @@ pub(crate) async fn run_filesystem_put(
 /// The remote path has to be spelled out. Every other `put` derives a
 /// default from the local file's name, and a pipe has none to derive from.
 async fn run_filesystem_put_stdin(
-    kind: CommandKind,
+    invocation: &Invocation,
     args: FilesystemPutArgs,
-    context: CommandContext,
-    runtime: RuntimeBehavior,
+    context: NamespaceContext,
 ) -> Result<CommandOutput, CommandFailure> {
     if args.recursive {
         return Err(context.fail(
-            kind,
             CliError::invalid_request("`-` streams one file; a tree needs a directory")
                 .with_param("-r"),
         ));
     }
     let Some(remote_path) = args.remote_path.as_deref() else {
         return Err(context.fail(
-            kind,
             CliError::invalid_request(
                 "reading from `-` needs an explicit remote path; there is no local name to \
                  derive one from",
@@ -904,33 +859,31 @@ async fn run_filesystem_put_stdin(
         ));
     };
     let remote_path = parse_user_path_arg("remote_path", remote_path, RootPath::Refused)
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
-    let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
+    let options = put_file_options(&args).map_err(|error| context.fail(error))?;
     // A pipe cannot say how long it is, so there is a byte count but never a
     // total, a percentage, or an estimate.
     commit_put(
-        kind,
         &context,
         &spec,
         &LocalPayload::Stdin,
         &options,
-        runtime,
+        invocation.behavior,
     )
     .await
 }
 
 /// Writes one payload and renders what the commit did.
 async fn commit_put(
-    kind: CommandKind,
-    context: &CommandContext,
+    context: &NamespaceContext,
     spec: &NamespacePath,
     payload: &LocalPayload,
     options: &PutFileOptions,
-    runtime: RuntimeBehavior,
+    behavior: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let progress = Arc::new(ProgressReporter::new(
-        runtime,
+        behavior,
         ProgressOp::Put,
         spec.absolute_path().as_str(),
     ));
@@ -943,19 +896,16 @@ async fn commit_put(
         progress.file_finished(spec.absolute_path().as_str(), moved);
     }
     progress.finish();
-    let result = result.map_err(|error| context.fail(kind, error))?;
+    let result = result.map_err(|error| context.fail(error))?;
 
-    Ok(context.output(
-        kind,
-        CommandData::FileMutation {
-            human_target: None,
-            target: render_target(context.namespace(), spec.absolute_path()),
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-            inode_id: None,
-            recovery_command: None,
-        },
-    ))
+    Ok(context.output(CommandData::FileMutation {
+        human_target: None,
+        target: render_target(context.namespace(), spec.absolute_path()),
+        committed_seq: result.committed_seq,
+        commit_id: result.commit_id,
+        inode_id: None,
+        recovery_command: None,
+    }))
 }
 
 /// Uploads one file and commits it at `spec`.
@@ -964,12 +914,12 @@ async fn commit_put(
 ///
 /// Recursive uploads share `progress` across their files.
 pub(super) async fn put_payload(
-    context: &CommandContext,
+    context: &NamespaceContext,
     spec: &NamespacePath,
     payload: &LocalPayload,
     options: &PutFileOptions,
     progress: &Arc<ProgressReporter>,
-) -> Result<Commit, CliError> {
+) -> Result<Commit> {
     let journal = payload
         .file_path()
         .map(|path| resume_journal(context, spec, path, options))
@@ -982,7 +932,12 @@ pub(super) async fn put_payload(
             if let Some(request) = journal.prepared_request() {
                 progress.phase("committing");
                 return journal
-                    .replay(&context.target.client, context.namespace(), &request, actor)
+                    .replay(
+                        &context.profile.target.client,
+                        context.namespace(),
+                        &request,
+                        actor,
+                    )
                     .await;
             }
             if let Some(committed) =
@@ -992,6 +947,7 @@ pub(super) async fn put_payload(
             }
         }
         context
+            .profile
             .target
             .put_file_stream(spec, payload, actor, options, progress, journal.as_ref())
             .await
@@ -1005,22 +961,25 @@ pub(super) async fn put_payload(
 
 /// Opens the journal for a resumable file upload.
 fn resume_journal(
-    context: &CommandContext,
+    context: &NamespaceContext,
     spec: &NamespacePath,
     local_path: &Path,
     options: &PutFileOptions,
-) -> Result<UploadJournal, CliError> {
+) -> Result<UploadJournal> {
     let source =
         SourceIdentity::of(local_path).map_err(|error| CliError::io_for_path(local_path, error))?;
+    let attempt = UploadAttempt::new(
+        source,
+        context.actor().clone(),
+        options,
+        context.profile.target.client.subject().cloned(),
+    );
     UploadJournal::for_upload(
-        &context.profile_name,
-        context.target.journal_identity(),
+        &context.profile.profile_name,
+        context.profile.target.journal_identity(),
         spec,
         local_path,
-        source,
-        context.actor(),
-        options,
-        context.target.client.subject(),
+        attempt,
     )
     .map_err(CliError::io)
 }
@@ -1035,16 +994,17 @@ fn resume_journal(
 /// lookup and completion errors remain visible. Prepared requests skip this
 /// lookup entirely.
 async fn commit_a_finished_upload(
-    context: &CommandContext,
+    context: &NamespaceContext,
     spec: &NamespacePath,
     options: &PutFileOptions,
     journal: &UploadJournal,
     progress: &ProgressReporter,
-) -> Result<Option<Commit>, CliError> {
+) -> Result<Option<Commit>> {
     let Some(resume) = journal.resume() else {
         return Ok(None);
     };
     let status = context
+        .profile
         .target
         .client
         .get_upload(context.namespace(), &resume.upload_id)
@@ -1060,6 +1020,7 @@ async fn commit_a_finished_upload(
     progress.already_done(content_ref.size_bytes);
     progress.phase("committing");
     let result = context
+        .profile
         .target
         .client
         .commit_completed_upload(
@@ -1074,7 +1035,7 @@ async fn commit_a_finished_upload(
     Ok(Some(result?))
 }
 
-fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError> {
+fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions> {
     let expected_revision_no = args.expected_revision;
     let behavior =
         if args.force || args.expected_inode_id.is_some() || expected_revision_no.is_some() {
@@ -1091,42 +1052,39 @@ fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError
 }
 
 pub(crate) async fn run_filesystem_append(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemAppendArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
+    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
     let remote_path = parse_user_path_arg("remote_path", &args.remote_path, RootPath::Refused)
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
-    let options = append_file_options(&args).map_err(|error| context.fail(kind, error))?;
+    let options = append_file_options(&args).map_err(|error| context.fail(error))?;
     let bytes = read_append_content(&args.local_path)
         .await
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let result = context
+        .profile
         .target
         .client
         .append_file_with_options(&spec, &bytes, context.actor(), &options)
         .await
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
 
-    Ok(context.output(
-        kind,
-        CommandData::FileMutation {
-            human_target: None,
-            target: render_target(context.namespace(), spec.absolute_path()),
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-            inode_id: None,
-            recovery_command: None,
-        },
-    ))
+    Ok(context.output(CommandData::FileMutation {
+        human_target: None,
+        target: render_target(context.namespace(), spec.absolute_path()),
+        committed_seq: result.committed_seq,
+        commit_id: result.commit_id,
+        inode_id: None,
+        recovery_command: None,
+    }))
 }
 
 /// Reads the bytes one append carries. The read stops one byte past what an
 /// append may carry, so an oversized source never fills memory and the
 /// server still answers it with `content_too_large`.
-async fn read_append_content(local_path: &str) -> Result<Vec<u8>, CliError> {
+async fn read_append_content(local_path: &str) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt as _;
     let limit = MAX_WAL_INLINE_CONTENT_BYTES as u64 + 1;
     let mut bytes = Vec::new();
@@ -1142,7 +1100,7 @@ async fn read_append_content(local_path: &str) -> Result<Vec<u8>, CliError> {
     Ok(bytes)
 }
 
-fn append_file_options(args: &FilesystemAppendArgs) -> Result<AppendFileOptions, CliError> {
+fn append_file_options(args: &FilesystemAppendArgs) -> Result<AppendFileOptions> {
     Ok(AppendFileOptions {
         commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
@@ -1151,24 +1109,24 @@ fn append_file_options(args: &FilesystemAppendArgs) -> Result<AppendFileOptions,
 }
 
 pub(crate) async fn run_filesystem_rm(
-    kind: CommandKind,
-    location: &ConfigLocation,
+    invocation: &Invocation,
     args: FilesystemRmArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_mutation_context(kind, &location.path, &args.target, &args.actor).await?;
+    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let commit = commit_options(&args.commit);
     // Resolve the inode before deleting: the id is half of the recovery
     // handle `loonfs undelete` needs. The delete then carries it as an
     // expectation, so a rebinding racing this command fails the delete
     // instead of removing (and mis-reporting) a different inode.
     let deleted_inode = context
+        .profile
         .target
         .stat_without_attributes(&spec)
         .await
-        .map_err(|error| context.fail(kind, error))?
+        .map_err(|error| context.fail(error))?
         .inode_id;
     let behavior = if args.recursive {
         DeleteDirectoryBehavior::Recursive
@@ -1181,16 +1139,18 @@ pub(crate) async fn run_filesystem_rm(
         commit,
     };
     let result = context
+        .profile
         .target
         .client
         .delete_path_with_options(&spec, context.actor(), &options)
         .await
         .map_err(|error| {
-            context.fail(
-                kind,
-                CliError::from(error)
-                    .with_command_hint(kind, (!args.recursive).then_some(args.path.as_str())),
-            )
+            let error = CliError::from(error);
+            context.fail(if args.recursive {
+                error
+            } else {
+                rm_not_empty_hint(error, &args.path)
+            })
         })?;
 
     // A delete resolved through a path always records its binding, so the
@@ -1199,61 +1159,66 @@ pub(crate) async fn run_filesystem_rm(
     // paste.
     let recovery_command = UndeleteHint::new(
         &context,
-        location,
-        ProfileSource::from_selector(&args.target.profile),
+        &invocation.config,
+        ProfileSource::from_selectors(&invocation.selectors),
     )
     .command(deleted_inode, result.committed_seq);
 
-    Ok(context.output(
-        kind,
-        CommandData::FileMutation {
-            human_target: None,
-            target: render_target(context.namespace(), spec.absolute_path()),
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-            inode_id: Some(deleted_inode),
-            recovery_command: Some(recovery_command),
-        },
-    ))
+    Ok(context.output(CommandData::FileMutation {
+        human_target: None,
+        target: render_target(context.namespace(), spec.absolute_path()),
+        committed_seq: result.committed_seq,
+        commit_id: result.commit_id,
+        inode_id: Some(deleted_inode),
+        recovery_command: Some(recovery_command),
+    }))
+}
+
+/// Rewrites the `directory_not_empty` error of a non-recursive `rm` to say how
+/// to delete the directory and everything under it.
+fn rm_not_empty_hint(mut error: CliError, path: &str) -> CliError {
+    if ErrorCode::parse(&error.code) == Some(ErrorCode::DirectoryNotEmpty) {
+        error.message = format!(
+            "directory `{path}` is not empty; use `loonfs rm -r {}` to delete it and everything under it",
+            shell_quote(path)
+        );
+    }
+    error
 }
 
 pub(crate) async fn run_filesystem_restore(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemRestoreArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
+    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let commit = commit_options(&args.commit);
     let revision_no = args.revision;
     let result = context
+        .profile
         .target
         .client
         .restore_revision_with_options(&spec, revision_no, context.actor(), &commit)
         .await
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
 
-    Ok(context.output(
-        kind,
-        CommandData::FileMutation {
-            human_target: None,
-            target: render_target(context.namespace(), spec.absolute_path()),
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-            inode_id: None,
-            recovery_command: None,
-        },
-    ))
+    Ok(context.output(CommandData::FileMutation {
+        human_target: None,
+        target: render_target(context.namespace(), spec.absolute_path()),
+        committed_seq: result.committed_seq,
+        commit_id: result.commit_id,
+        inode_id: None,
+        recovery_command: None,
+    }))
 }
 
 pub(crate) async fn run_filesystem_undelete(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemUndeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
+    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
     let root = RootPath::Refused;
     // An absent path restores in place; the destination is then the parent
     // and name the deletion recorded, which no path here could name better.
@@ -1262,13 +1227,14 @@ pub(crate) async fn run_filesystem_undelete(
         .as_deref()
         .map(|path| namespace_path(context.namespace(), "destination_path", path, root))
         .transpose()
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let commit = commit_options(&args.commit);
     let deletion_seq = args.deletion_seq;
     let destination = spec.as_ref().map_or(UndeleteDestination::Recorded, |spec| {
         UndeleteDestination::Path(spec.absolute_path().clone())
     });
     let result = context
+        .profile
         .target
         .client
         .undelete_with_options(
@@ -1282,36 +1248,32 @@ pub(crate) async fn run_filesystem_undelete(
             },
         )
         .await
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
 
     let target = match spec.as_ref() {
         Some(spec) => render_target(context.namespace(), spec.absolute_path()),
         None => format!("{}:(restored in place)", context.namespace()),
     };
-    Ok(context.output(
-        kind,
-        CommandData::FileMutation {
-            human_target: spec
-                .is_none()
-                .then(|| format!("in place in `{}`", context.namespace())),
-            target,
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-            inode_id: Some(args.inode),
-            recovery_command: None,
-        },
-    ))
+    Ok(context.output(CommandData::FileMutation {
+        human_target: spec
+            .is_none()
+            .then(|| format!("in place in `{}`", context.namespace())),
+        target,
+        committed_seq: result.committed_seq,
+        commit_id: result.commit_id,
+        inode_id: Some(args.inode),
+        recovery_command: None,
+    }))
 }
 
 pub(crate) async fn run_filesystem_mkdir(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemMkdirArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
+    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
     let root = RootPath::Refused;
     let spec = namespace_path(context.namespace(), "path", &args.path, root)
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let commit = commit_options(&args.commit);
     let options = CreateDirectoryOptions {
         parents: args.parents,
@@ -1321,6 +1283,7 @@ pub(crate) async fn run_filesystem_mkdir(
         create_directory_tolerating_existing(&context, &spec, &options).await
     } else {
         context
+            .profile
             .target
             .client
             .create_directory_with_options(&spec, context.actor(), &options)
@@ -1328,50 +1291,40 @@ pub(crate) async fn run_filesystem_mkdir(
             .map(RemoteDirectoryOutcome::Created)
             .map_err(CliError::from)
     }
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     let result = match outcome {
         RemoteDirectoryOutcome::Created(result) => result,
         RemoteDirectoryOutcome::AlreadyExists { inode_id, head_seq } => {
-            return Ok(context.output(
-                kind,
-                CommandData::DirectoryAlreadyExists {
-                    target: render_target(context.namespace(), spec.absolute_path()),
-                    inode_id,
-                    head_seq,
-                },
-            ));
+            return Ok(context.output(CommandData::DirectoryAlreadyExists {
+                target: render_target(context.namespace(), spec.absolute_path()),
+                inode_id,
+                head_seq,
+            }));
         }
     };
 
-    Ok(context.output(
-        kind,
-        CommandData::FileMutation {
-            human_target: None,
-            target: render_target(context.namespace(), spec.absolute_path()),
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-            inode_id: None,
-            recovery_command: None,
-        },
-    ))
+    Ok(context.output(CommandData::FileMutation {
+        human_target: None,
+        target: render_target(context.namespace(), spec.absolute_path()),
+        committed_seq: result.committed_seq,
+        commit_id: result.commit_id,
+        inode_id: None,
+        recovery_command: None,
+    }))
 }
 
 pub(crate) async fn run_filesystem_mv(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemTransferArgs,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_transfer(kind, config_path, args, TransferKind::Move, runtime).await
+    run_filesystem_transfer(invocation, args, TransferKind::Move).await
 }
 
 pub(crate) async fn run_filesystem_cp(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemTransferArgs,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_transfer(kind, config_path, args, TransferKind::Copy, runtime).await
+    run_filesystem_transfer(invocation, args, TransferKind::Copy).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1394,11 +1347,11 @@ enum TransferKind {
 /// rather than writing somewhere unexpected — the commit still names the
 /// exact path resolved here.
 async fn resolve_transfer_destination(
-    context: &CommandContext,
+    context: &NamespaceContext,
     named: NamespacePath,
     source_leaf: &str,
-) -> Result<NamespacePath, CliError> {
-    let Ok(existing) = context.target.stat_without_attributes(&named).await else {
+) -> Result<NamespacePath> {
+    let Ok(existing) = context.profile.target.stat_without_attributes(&named).await else {
         // Absent, or unreadable for a reason the transfer itself will
         // report: either way this is not a directory to land inside.
         return Ok(named);
@@ -1415,30 +1368,26 @@ async fn resolve_transfer_destination(
 }
 
 async fn run_filesystem_transfer(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     args: FilesystemTransferArgs,
     transfer_kind: TransferKind,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
+    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
     if args.recursive && transfer_kind == TransferKind::Move {
         return Err(context.fail(
-            kind,
             CliError::invalid_request("mv moves a directory in one commit; -r is not needed")
                 .with_param("-r"),
         ));
     }
     let root = RootPath::Refused;
     let from = namespace_path(context.namespace(), "source_path", &args.source_path, root)
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| context.fail(error))?;
     let source_leaf = from
         .absolute_path()
         .final_component()
         .map(|component| component.as_str().to_owned())
         .ok_or_else(|| {
             context.fail(
-                kind,
                 CliError::invalid_request("root path is not allowed for this command")
                     .with_param("source_path"),
             )
@@ -1451,7 +1400,7 @@ async fn run_filesystem_transfer(
         RootPath::Allowed,
     )
     .map(|path| NamespacePath::new(context.namespace().clone(), path))
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
     // A destination spelled with a trailing slash already named the
     // directory to land in, and the leaf is already appended; looking again
     // would append it twice.
@@ -1460,7 +1409,7 @@ async fn run_filesystem_transfer(
     } else {
         resolve_transfer_destination(&context, named_destination, &source_leaf)
             .await
-            .map_err(|error| context.fail(kind, error))?
+            .map_err(|error| context.fail(error))?
     };
 
     let commit = commit_options(&args.commit);
@@ -1475,15 +1424,14 @@ async fn run_filesystem_transfer(
     };
     let result = if transfer_kind == TransferKind::Copy {
         let entry = context
+            .profile
             .target
             .stat_without_attributes(&from)
             .await
-            .map_err(|error| context.fail(kind, error))?;
+            .map_err(|error| context.fail(error))?;
         if args.recursive {
             if entry.inode_kind() != EntryInodeKind::Directory {
-                return Err(context.fail(
-                    kind,
-                    CliError::invalid_request(format!(
+                return Err(context.fail(CliError::invalid_request(format!(
                         "`{}` is not a directory; drop -r to copy one file",
                         from.absolute_path()
                     ))
@@ -1491,29 +1439,24 @@ async fn run_filesystem_transfer(
                 ));
             }
             if args.commit.commit_id.is_some() {
-                return Err(context.fail(
-                    kind,
-                    CliError::invalid_request(
+                return Err(context.fail(CliError::invalid_request(
                         "`--commit-id` names one commit; a recursive copy makes one commit per item",
                     )
                     .with_param("--commit-id"),
                 ));
             }
             return recursive::run_copy_tree(
-                kind,
                 &context,
                 from.absolute_path(),
                 to.absolute_path(),
                 destination_behavior(args.force),
                 args.commit.message.clone(),
-                runtime,
+                invocation.behavior,
             )
             .await;
         }
         if entry.inode_kind() == EntryInodeKind::Directory {
-            return Err(context.fail(
-                kind,
-                CliError::invalid_request(format!(
+            return Err(context.fail(CliError::invalid_request(format!(
                     "`{}` is a directory; use `loonfs cp -r` to copy the tree",
                     from.absolute_path()
                 ))
@@ -1521,6 +1464,7 @@ async fn run_filesystem_transfer(
             ));
         }
         context
+            .profile
             .target
             .client
             .copy_path_with_options(
@@ -1537,6 +1481,7 @@ async fn run_filesystem_transfer(
             .await
     } else {
         context
+            .profile
             .target
             .client
             .move_path_with_options(
@@ -1552,15 +1497,12 @@ async fn run_filesystem_transfer(
             )
             .await
     }
-    .map_err(|error| context.fail(kind, error))?;
+    .map_err(|error| context.fail(error))?;
 
-    Ok(context.output(
-        kind,
-        CommandData::PathMove {
-            from: render_target(context.namespace(), from.absolute_path()),
-            to: render_target(context.namespace(), to.absolute_path()),
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-        },
-    ))
+    Ok(context.output(CommandData::PathMove {
+        from: render_target(context.namespace(), from.absolute_path()),
+        to: render_target(context.namespace(), to.absolute_path()),
+        committed_seq: result.committed_seq,
+        commit_id: result.commit_id,
+    }))
 }

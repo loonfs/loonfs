@@ -112,7 +112,10 @@ async fn snapshot_calls_after_a_fold_cost_the_same_whichever_fold_ran() {
             fixture.recording.reset();
             let name = format!("admin-{index}");
             let options = CreateSnapshotOptions::default();
-            let created = fixture.namespace.create_snapshot(&name, &options).await;
+            let created = fixture
+                .namespace
+                .create_snapshot_with_options(&name, &options)
+                .await;
             snapshots.push(created.expect("create").snapshot_id);
             fixture.namespace.wait_for_fold().await.expect("settle");
             fixture.assert_requests(&format!("{fold:?}: create {index}"), 11);
@@ -156,7 +159,10 @@ async fn a_snapshot_of_a_namespace_with_32_fork_pins_costs_11_requests() {
         fixture.namespace.wait_for_fold().await.expect("settle");
         fixture.recording.reset();
         let options = CreateSnapshotOptions::default();
-        let created = fixture.namespace.create_snapshot("forked", &options).await;
+        let created = fixture
+            .namespace
+            .create_snapshot_with_options("forked", &options)
+            .await;
         created.expect("create");
         fixture.namespace.wait_for_fold().await.expect("settle");
         fixture.assert_requests(&format!("{fold:?}: create with 32 fork pins"), 11);

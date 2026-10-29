@@ -392,7 +392,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(bytes, b"hello maintenance\n");
 
     match client.list_changes(&namespace, ChangeSeq(0)).page().await {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
+        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "rebootstrap_required"),
         other => panic!("expected rebootstrap_required, got {other:?}"),
     }
 
@@ -506,7 +506,6 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
                     max_wal_tail_objects: Some(std::num::NonZeroU64::MIN),
                 },
             ),
-            None,
         )
         .await
         .expect("forced step");
@@ -522,7 +521,6 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
             &loonfs_types::RunMaintenanceRequest::Retention(
                 loonfs_types::AdvanceRetentionRequest::default(),
             ),
-            None,
         )
         .await
         .expect("advance retention");
@@ -568,7 +566,6 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
                 &loonfs_types::RunMaintenanceRequest::Metadata(
                     loonfs_types::MetadataMaintenanceRequest::default(),
                 ),
-                None,
             )
             .await
             .expect("metadata run");
@@ -680,7 +677,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     .expect("corrupt manifest");
 
     match cold_client.stat(&target).await {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
+        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "namespace_corrupt"),
         other => panic!("expected namespace_corrupt, got {other:?}"),
     }
     client

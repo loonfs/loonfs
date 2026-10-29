@@ -90,7 +90,7 @@ async fn read_during_compaction_and_collection(
     let snapshot = if durable {
         Some(
             namespace_writer
-                .create_snapshot(
+                .create_snapshot_with_options(
                     "durable",
                     &CreateSnapshotOptions {
                         ttl_ms: std::num::NonZeroU64::new(60_000),
@@ -277,7 +277,7 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         .await
         .expect("file");
     let snapshot = namespace_writer
-        .create_snapshot(
+        .create_snapshot_with_options(
             "durable",
             &CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(60_000),
@@ -368,7 +368,7 @@ async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_pin_when
         .await
         .expect("file");
     let snapshot = namespace_writer
-        .create_snapshot(
+        .create_snapshot_with_options(
             "deleted",
             &CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(60_000),
@@ -456,7 +456,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     }
 
     let first_snapshot = namespace_writer
-        .create_snapshot(
+        .create_snapshot_with_options(
             "first",
             &CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(60_000),
@@ -495,7 +495,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .await
         .expect("change current directory");
     let second_snapshot = namespace_writer
-        .create_snapshot(
+        .create_snapshot_with_options(
             "second",
             &CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(60_000),
@@ -709,7 +709,7 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .await
         .expect("resolve captured file");
     let snapshot = namespace_writer
-        .create_snapshot(
+        .create_snapshot_with_options(
             "reader",
             &CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(60_000),
@@ -834,7 +834,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace_writer
-        .create_snapshot(
+        .create_snapshot_with_options(
             "clock",
             &CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(EXPIRES_AT_MS - 1_750_000_000_000),
@@ -890,7 +890,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
     for name in ["first", "second"] {
         snapshots.push(
             namespace_writer
-                .create_snapshot(name, &CreateSnapshotOptions::default())
+                .create_snapshot(name)
                 .await
                 .expect("create snapshot"),
         );

@@ -107,12 +107,10 @@ pub(crate) fn assert_api_code<T: std::fmt::Debug>(
 ) {
     match result.expect_err("request should fail") {
         ClientError::Api {
-            status,
-            code: actual,
-            ..
+            status, response, ..
         } => {
             assert_eq!(status, expected_status);
-            assert_eq!(actual, code.as_str());
+            assert_eq!(response.code, code.as_str());
         }
         other => panic!("expected API error, got {other:?}"),
     }

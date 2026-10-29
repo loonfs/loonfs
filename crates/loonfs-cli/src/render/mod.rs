@@ -36,7 +36,9 @@ mod tests {
     use super::{human_error, human_success, json_error, json_success, AttributeValue};
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
-    use crate::config::{ProfileConfig, StoreConfig};
+    use crate::config::{
+        ProfileConfig, ProfileConnection, ProfileIdentity, ProfileMode, StoreConfig,
+    };
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
     use loonfs_client::ClientError;
@@ -65,7 +67,7 @@ mod tests {
         let failure = CommandFailure {
             kind: CommandKind::ConfigShow,
             profile: Some("remote".to_owned()),
-            mode: Some("remote".to_owned()),
+            mode: Some(ProfileMode::Remote),
             error: Box::new(error),
         };
         serde_json::from_str(&json_error(&failure).expect("JSON error renders"))
@@ -99,10 +101,10 @@ mod tests {
         let embedded_failure = CommandFailure {
             kind: CommandKind::ConfigShow,
             profile: Some("embedded".to_owned()),
-            mode: Some("embedded".to_owned()),
+            mode: Some(ProfileMode::Embedded),
             error: Box::new(crate::error::CliError::from(poison_permission_error())),
         };
-        let embedded_human = human_error(&embedded_failure.error, embedded_failure.mode.as_deref());
+        let embedded_human = human_error(&embedded_failure.error, embedded_failure.mode);
         let embedded_json = json_error(&embedded_failure).expect("embedded JSON error renders");
         for rendered in [&embedded_human, &embedded_json] {
             assert_provider_markers_absent("rendered output", rendered);
@@ -125,10 +127,10 @@ mod tests {
         let remote_failure = CommandFailure {
             kind: CommandKind::ConfigShow,
             profile: Some("remote".to_owned()),
-            mode: Some("remote".to_owned()),
+            mode: Some(ProfileMode::Remote),
             error: Box::new(CliError::from(ClientError::from_error_response(503, body))),
         };
-        let remote_human = human_error(&remote_failure.error, remote_failure.mode.as_deref());
+        let remote_human = human_error(&remote_failure.error, remote_failure.mode);
         let remote_json = json_error(&remote_failure).expect("remote JSON error renders");
         for rendered in [&remote_human, &remote_json] {
             assert_provider_markers_absent("rendered output", rendered);
@@ -162,7 +164,7 @@ mod tests {
         let doctor = CommandOutput {
             kind: CommandKind::Doctor,
             profile: Some("embedded".to_owned()),
-            mode: Some("embedded".to_owned()),
+            mode: Some(ProfileMode::Embedded),
             data: CommandData::Doctor {
                 checks: vec![DoctorCheck {
                     name: "store_probe".to_owned(),
@@ -236,7 +238,7 @@ mod tests {
         CommandOutput {
             kind: CommandKind::FilesystemStat,
             profile: Some("default".to_owned()),
-            mode: Some("embedded".to_owned()),
+            mode: Some(ProfileMode::Embedded),
             data: CommandData::PathEntry(entry),
         }
     }
@@ -379,19 +381,18 @@ mod tests {
         let output = CommandOutput {
             kind: CommandKind::ProfileShow,
             profile: Some("default".to_owned()),
-            mode: Some("embedded".to_owned()),
+            mode: Some(ProfileMode::Embedded),
             data: CommandData::Profile {
-                profile: ProfileConfig::Embedded {
-                    store: StoreConfig::LocalFs(LocalFsStoreConfig {
-                        root: "/tmp/store".to_owned(),
-                        key_prefix: None,
-                    }),
-                    actor_id: None,
-                    subject_id: None,
-                    principal_scope: None,
-                    principals: None,
+                profile: ProfileConfig {
+                    identity: ProfileIdentity::default(),
                     default_namespace: Some("demo".to_owned()),
-                    writer_id: None,
+                    connection: ProfileConnection::Embedded {
+                        store: StoreConfig::LocalFs(LocalFsStoreConfig {
+                            root: "/tmp/store".to_owned(),
+                            key_prefix: None,
+                        }),
+                        writer_id: None,
+                    },
                 },
                 default_profile: None,
             },
@@ -440,7 +441,7 @@ mod tests {
             let output = CommandOutput {
                 kind: CommandKind::ProfileUpdate,
                 profile: Some("dev".to_owned()),
-                mode: Some("embedded".to_owned()),
+                mode: Some(ProfileMode::Embedded),
                 data: CommandData::Profile {
                     profile: serde_json::from_value(profile.clone()).expect("profile"),
                     default_profile: None,
@@ -463,7 +464,7 @@ mod tests {
         let failure = CommandFailure {
             kind: CommandKind::ConfigShow,
             profile: Some("default".to_owned()),
-            mode: Some("remote".to_owned()),
+            mode: Some(ProfileMode::Remote),
             error: Box::new(CliError::client_error("connection refused")),
         };
         assert_eq!(
@@ -602,15 +603,15 @@ mod tests {
         error.param = Some("/pattern".to_owned());
         error.request_id = Some("req_human".to_owned());
 
-        for mode in ["remote", "embedded"] {
+        for mode in [ProfileMode::Remote, ProfileMode::Embedded] {
             let failure = CommandFailure {
                 kind: CommandKind::ConfigShow,
                 profile: Some("default".to_owned()),
-                mode: Some(mode.to_owned()),
+                mode: Some(mode),
                 error: Box::new(error.clone()),
             };
-            let rendered = human_error(&failure.error, failure.mode.as_deref());
-            let suffix = if mode == "remote" {
+            let rendered = human_error(&failure.error, failure.mode);
+            let suffix = if mode == ProfileMode::Remote {
                 " (request id: req_human)"
             } else {
                 ""
@@ -622,7 +623,7 @@ mod tests {
             let json: serde_json::Value =
                 serde_json::from_str(&json_error(&failure).expect("JSON error should render"))
                     .expect("rendered error should be valid JSON");
-            assert_eq!(json["mode"], mode);
+            assert_eq!(json["mode"], mode.as_str());
             assert_eq!(json["error"]["request_id"], "req_human");
         }
     }
@@ -632,7 +633,7 @@ mod tests {
         let mut output = CommandOutput {
             kind: CommandKind::Doctor,
             profile: Some("remote".to_owned()),
-            mode: Some("remote".to_owned()),
+            mode: Some(ProfileMode::Remote),
             data: CommandData::Doctor {
                 checks: vec![DoctorCheck {
                     name: "auth".to_owned(),
@@ -644,10 +645,10 @@ mod tests {
             },
         };
 
-        for mode in ["remote", "embedded"] {
-            output.mode = Some(mode.to_owned());
+        for mode in [ProfileMode::Remote, ProfileMode::Embedded] {
+            output.mode = Some(mode);
             let rendered = human_success(&output);
-            let suffix = if mode == "remote" {
+            let suffix = if mode == ProfileMode::Remote {
                 " (request id: req_doctor)"
             } else {
                 ""
@@ -659,7 +660,7 @@ mod tests {
             let json: serde_json::Value =
                 serde_json::from_str(&json_success(&output).expect("doctor JSON should render"))
                     .expect("doctor output should be valid JSON");
-            assert_eq!(json["mode"], mode);
+            assert_eq!(json["mode"], mode.as_str());
             assert_eq!(json["data"]["checks"][0]["request_id"], "req_doctor");
         }
     }

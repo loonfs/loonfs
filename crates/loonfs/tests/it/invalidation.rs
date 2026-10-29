@@ -5,8 +5,8 @@
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    CreateSnapshotOptions, Error, LoonFs, LoonFsBuilder, MetadataCache, NamespaceId, ReadOnly,
-    SharedObjectStore, Writable, WriterFence,
+    Error, LoonFs, LoonFsBuilder, MetadataCache, NamespaceId, ReadOnly, SharedObjectStore,
+    Writable, WriterFence,
 };
 use loonfs_core::control::NamespaceReadState;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -675,7 +675,7 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
             .expect("warmup put");
     }
     let snapshot = namespace_writer
-        .create_snapshot("pinned", &CreateSnapshotOptions::default())
+        .create_snapshot("pinned")
         .await
         .expect("create snapshot");
     namespace

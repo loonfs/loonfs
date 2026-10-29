@@ -1,6 +1,7 @@
 //! Validated namespace-qualified filesystem paths.
 
-use super::*;
+use crate::{ClientError, Result};
+use loonfs_types::{AbsolutePath, NamespaceId};
 
 /// A path qualified by namespace.
 ///

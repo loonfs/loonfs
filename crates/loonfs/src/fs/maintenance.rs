@@ -868,17 +868,14 @@ impl Maintenance {
     /// deleted. This is the inventory of what keeps manifests from
     /// collection. The cursor resumes a live listing.
     pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
-        let maintenance = self.clone();
-        let namespace_id = namespace_id.clone();
-        loonfs_types::Pager::new(move |request| {
-            let maintenance = maintenance.clone();
-            let namespace_id = namespace_id.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.clone(), namespace_id.clone()),
+            |(maintenance, namespace_id), request| async move {
                 maintenance
                     .checkpoints_page(&namespace_id, super::core::decode_page_request(request)?)
                     .await
-            }
-        })
+            },
+        )
     }
 
     #[tracing::instrument(

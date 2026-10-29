@@ -6,11 +6,12 @@
 //! without the entries below it. Neither walk keeps a list of every sibling
 //! directory or every file in the tree.
 
-use super::{remote_spec, CommandContext, FileJob};
-use crate::error::CliError;
+use super::{remote_spec, FileJob, NamespaceContext};
+use crate::error::{CliError, Result};
 use crate::render::write_stderr_warning;
 use futures::Stream;
-use loonfs_types::{AbsolutePath, DisplayName, InodeId, PinId};
+use loonfs_client::{ListOptions, ReadAt};
+use loonfs_types::{AbsolutePath, DisplayName, InodeId};
 use loonfs_types::{ChangeSeq, ListPathEntriesResponse, PathEntry, PathEntryKind};
 use std::ffi::OsStr;
 use std::fs::ReadDir;
@@ -53,7 +54,7 @@ pub(super) struct LocalTree {
     stack: Vec<LocalFrame>,
 }
 
-pub(super) fn local_tree(root: &Path, remote_root: &AbsolutePath) -> Result<LocalTree, CliError> {
+pub(super) fn local_tree(root: &Path, remote_root: &AbsolutePath) -> Result<LocalTree> {
     let entries = std::fs::read_dir(root).map_err(|error| CliError::io_for_path(root, error))?;
     Ok(LocalTree {
         stack: vec![LocalFrame {
@@ -66,7 +67,7 @@ pub(super) fn local_tree(root: &Path, remote_root: &AbsolutePath) -> Result<Loca
 }
 
 /// Reads a local file name as the display name it is stored under.
-fn local_display_name(name: &OsStr) -> Result<DisplayName, CliError> {
+fn local_display_name(name: &OsStr) -> Result<DisplayName> {
     DisplayName::parse(crate::commands::context::utf8_local_name(name)?)
         .map_err(|error| CliError::invalid_request(error.to_string()).with_param("local_path"))
 }
@@ -206,9 +207,9 @@ struct ListedDirectory<Destination> {
 }
 
 struct RemoteTree<'a, Destination> {
-    context: &'a CommandContext,
+    context: &'a NamespaceContext,
     param: &'a str,
-    snapshot_id: Option<&'a PinId>,
+    at: &'a ReadAt,
     /// The root's listing, then a listing of each directory that the listing
     /// before it returned without the entries below it.
     ///
@@ -225,16 +226,16 @@ struct RemoteTree<'a, Destination> {
 /// reports an unreadable directory with the error of its own listing and costs
 /// one request for each empty directory.
 pub(super) async fn remote_tree<'a, Destination: TreePath + 'a>(
-    context: &'a CommandContext,
+    context: &'a NamespaceContext,
     root: &AbsolutePath,
     param: &'a str,
-    snapshot_id: Option<&'a PinId>,
+    at: &'a ReadAt,
     destination: Destination,
-) -> Result<impl Stream<Item = TreeEntry<AbsolutePath, Destination>> + 'a, CliError> {
+) -> Result<impl Stream<Item = TreeEntry<AbsolutePath, Destination>> + 'a> {
     let mut state = RemoteTree {
         context,
         param,
-        snapshot_id,
+        at,
         listings: Vec::new(),
         last_directory: None,
         first_head: None,
@@ -369,12 +370,21 @@ impl<Destination: TreePath> RemoteTree<'_, Destination> {
         &self,
         source: &AbsolutePath,
         cursor: Option<String>,
-    ) -> Result<ListPathEntriesResponse, CliError> {
+    ) -> Result<ListPathEntriesResponse> {
         let spec = remote_spec(self.context, source, self.param)?;
         Ok(self
             .context
+            .profile
             .target
-            .list_tree_at_snapshot(&spec, self.snapshot_id)
+            .client
+            .list_with_options(
+                &spec,
+                &ListOptions {
+                    recursive: true,
+                    at: self.at.clone(),
+                    ..ListOptions::default()
+                },
+            )
             .cursor(cursor)
             .page()
             .await?)

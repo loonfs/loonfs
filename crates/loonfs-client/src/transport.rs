@@ -1,13 +1,16 @@
 //! Builds HTTP requests, applies retry limits, and converts responses into
 //! client errors.
 
+use crate::operations::Operation;
 use crate::transport_body::{timeout_error, wait_for_timeout, RequestActivity, TimedBody};
 use crate::{Body, Client, ClientError, PayloadStream, Result, TransportError};
 use bytes::Bytes;
 use futures::StreamExt as _;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
-use loonfs_types::{headers, ErrorCode, ErrorResponse, OperationDeadline, TransportRetryOutcome};
+use loonfs_types::{
+    headers, ErrorCode, ErrorResponse, NamespaceId, OperationDeadline, TransportRetryOutcome,
+};
 pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,10 +44,23 @@ pub(crate) struct WireRequest {
     /// Whether the configured bearer token is attached. False only for
     /// presigned provider URLs, which carry their own signature.
     authenticate: bool,
+    /// Whether a failed attempt is sent again.
+    policy: SendPolicy,
+    /// The body, serialized once so that every attempt sends the same bytes.
+    body: Option<Bytes>,
 }
 
 impl Client {
-    fn with_subject_headers(&self, request: WireRequest) -> WireRequest {
+    /// Starts the request for `operation` at `url`, with the subject headers.
+    pub(crate) fn request(&self, operation: Operation, url: &str) -> WireRequest {
+        let request = WireRequest {
+            method: operation.method,
+            url: url.to_owned(),
+            headers: Vec::new(),
+            authenticate: true,
+            policy: operation.policy,
+            body: None,
+        };
         let Some(subject) = &self.subject else {
             return request;
         };
@@ -54,41 +70,24 @@ impl Client {
             .header(headers::PRINCIPALS, subject.principals.to_string())
     }
 
-    pub(crate) fn get(&self, url: &str) -> WireRequest {
-        self.with_subject_headers(WireRequest::to_server(Method::GET, url))
-    }
-
-    pub(crate) fn post(&self, url: &str) -> WireRequest {
-        self.with_subject_headers(WireRequest::to_server(Method::POST, url))
-    }
-
-    pub(crate) fn put(&self, url: &str) -> WireRequest {
-        self.with_subject_headers(WireRequest::to_server(Method::PUT, url))
-    }
-
-    pub(crate) fn delete(&self, url: &str) -> WireRequest {
-        self.with_subject_headers(WireRequest::to_server(Method::DELETE, url))
+    /// Returns the URL of `suffix` under a namespace, where `suffix` is empty
+    /// or starts with `/`.
+    pub(crate) fn namespace_url(&self, namespace_id: &NamespaceId, suffix: &str) -> String {
+        format!("{}/v0/namespaces/{namespace_id}{suffix}", self.base_url)
     }
 }
 
 impl WireRequest {
-    fn to_server(method: Method, url: &str) -> Self {
-        Self {
-            method,
-            url: url.to_owned(),
-            headers: Vec::new(),
-            authenticate: true,
-        }
-    }
-
     /// A presigned provider URL: the signature authorizes it, so the
     /// deployment's bearer token must not be attached.
-    pub(crate) fn presigned(method: Method, url: &str) -> Self {
+    pub(crate) fn presigned(method: Method, url: &str, policy: SendPolicy) -> Self {
         Self {
             method,
             url: url.to_owned(),
             headers: Vec::new(),
             authenticate: false,
+            policy,
+            body: None,
         }
     }
 
@@ -96,40 +95,33 @@ impl WireRequest {
         self.headers.push((name.into(), value.into()));
         self
     }
+
+    pub(crate) fn body(mut self, body: Bytes) -> Self {
+        self.body = Some(body);
+        self
+    }
+
+    /// Sets `body` as the JSON body.
+    pub(crate) fn json(self, body: &impl serde::Serialize) -> Result<Self> {
+        let body = serde_json::to_vec(body).map_err(|err| ClientError::Json(err.to_string()))?;
+        Ok(self
+            .header("content-type", "application/json")
+            .body(Bytes::from(body)))
+    }
+}
+
+/// Decodes a JSON response body.
+pub(crate) fn decode_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    serde_json::from_slice(bytes).map_err(|err| ClientError::Json(err.to_string()))
 }
 
 impl Client {
-    pub(crate) async fn request_json<Req, Resp>(
+    /// Sends `request` and decodes its JSON response.
+    pub(crate) async fn send_json<T: serde::de::DeserializeOwned>(
         &self,
         request: WireRequest,
-        body: Option<&Req>,
-        policy: SendPolicy,
-    ) -> Result<Resp>
-    where
-        Req: serde::Serialize,
-        Resp: serde::de::DeserializeOwned,
-    {
-        let body = match body {
-            Some(body) => {
-                // Serialized once: every retry attempt resends identical
-                // bytes when this call site permits a resend.
-                Some(Bytes::from(
-                    serde_json::to_vec(body).map_err(|err| ClientError::Json(err.to_string()))?,
-                ))
-            }
-            None => None,
-        };
-        let request = match body {
-            Some(_) => request.header("content-type", "application/json"),
-            None => request,
-        };
-        let bytes = self.call(&request, body.as_ref(), policy).await?.bytes;
-        serde_json::from_slice(&bytes).map_err(|err| ClientError::Json(err.to_string()))
-    }
-
-    pub(crate) async fn request_bytes(&self, url: &str, policy: SendPolicy) -> Result<Vec<u8>> {
-        let request = self.get(url);
-        Ok(self.call(&request, None, policy).await?.bytes)
+    ) -> Result<T> {
+        decode_json(&self.call(&request).await?.bytes)
     }
 
     /// Sends a streaming request body exactly once.
@@ -165,24 +157,45 @@ impl Client {
         Ok(self.call_for_streamed_response(request).await?.body)
     }
 
-    /// Sends a request once and returns a successful response with its body
+    /// Sends a request and returns a successful response with its body
     /// unread.
+    ///
+    /// A failed attempt is sent again as the request's policy allows, until a
+    /// successful response head arrives. No byte of the body has been read
+    /// before then, so a resend can't repeat bytes the caller already has.
     pub(crate) async fn call_for_streamed_response(
         &self,
         request: &WireRequest,
     ) -> Result<StreamedResponse> {
-        let response = self
-            .send(self.build(request, Body::empty())?, None)
-            .await
-            .map_err(|error| error.error)?;
+        self.send_by_policy(request.policy, |attempt_timeout| {
+            self.open_streamed(request, attempt_timeout)
+        })
+        .await
+    }
+
+    async fn open_streamed(
+        &self,
+        request: &WireRequest,
+        attempt_timeout: Option<Duration>,
+    ) -> std::result::Result<StreamedResponse, FailedAttempt> {
+        let built = self
+            .build(request, Body::empty())
+            .map_err(|error| FailedAttempt {
+                source: FailureSource::Network,
+                error,
+            })?;
+        let response = self.send(built, attempt_timeout).await?;
         if !response.status.is_success() {
             let bytes = response
                 .body
                 .collect()
                 .await
-                .map_err(|error| failed_attempt(&request.url, error).error)?
+                .map_err(|error| failed_attempt(&request.url, error))?
                 .to_bytes();
-            return Err(map_status_error(response.status.as_u16(), &bytes));
+            return Err(FailedAttempt {
+                source: FailureSource::Response,
+                error: map_status_error(response.status.as_u16(), &bytes),
+            });
         }
         Ok(StreamedResponse {
             status: response.status,
@@ -199,58 +212,73 @@ impl Client {
         })
     }
 
-    pub(crate) async fn call(
+    /// Sends `request` with its body and buffers the response, sending a
+    /// failed attempt again as the request's policy allows.
+    pub(crate) async fn call(&self, request: &WireRequest) -> Result<BufferedResponse> {
+        self.send_by_policy(request.policy, |attempt_timeout| {
+            self.send_buffered(request, attempt_timeout)
+        })
+        .await
+    }
+
+    /// Runs `attempt` once, or until it succeeds or fails in a way that a
+    /// retry can't fix, as `policy` allows.
+    async fn send_by_policy<T, Attempt, Fut>(
         &self,
-        request: &WireRequest,
-        body: Option<&Bytes>,
         policy: SendPolicy,
-    ) -> Result<BufferedResponse> {
+        attempt: Attempt,
+    ) -> Result<T>
+    where
+        Attempt: FnMut(Option<Duration>) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, FailedAttempt>>,
+    {
+        let mut attempt = attempt;
         match policy {
-            SendPolicy::Once => self
-                .send_buffered(request, body, None)
-                .await
-                .map_err(|attempt| attempt.error),
+            SendPolicy::Once => attempt(None).await.map_err(|failed| failed.error),
             SendPolicy::Retry => {
                 let deadline = OperationDeadline::start(
                     self.timer.as_ref(),
                     self.transport_retry.operation_deadline_ms,
                 );
-                self.send_with_retry(request, body, Some(deadline)).await
+                self.send_with_retry(Some(deadline), attempt).await
             }
-            SendPolicy::RetryWithoutDeadline => self.send_with_retry(request, body, None).await,
+            SendPolicy::RetryWithoutDeadline => self.send_with_retry(None, attempt).await,
         }
     }
 
-    async fn send_with_retry(
+    async fn send_with_retry<T, Attempt, Fut>(
         &self,
-        request: &WireRequest,
-        body: Option<&Bytes>,
         deadline: Option<OperationDeadline<'_>>,
-    ) -> Result<BufferedResponse> {
+        mut attempt: Attempt,
+    ) -> Result<T>
+    where
+        Attempt: FnMut(Option<Duration>) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, FailedAttempt>>,
+    {
         let mut retries = 0;
         let mut attempt_timeout = deadline
             .as_ref()
             .map(|deadline| Duration::from_millis(deadline.deadline_ms()));
         loop {
-            let attempt = match self.send_buffered(request, body, attempt_timeout).await {
+            let failed = match attempt(attempt_timeout).await {
                 Ok(response) => return Ok(response),
-                Err(attempt) => attempt,
+                Err(failed) => failed,
             };
-            let retryable = retryable_transport_failure(attempt.source, &attempt.error);
+            let retryable = retryable_transport_failure(failed.source, &failed.error);
             if !self.transport_retry_enabled || !retryable {
-                return Err(attempt.error);
+                return Err(failed.error);
             }
             let TransportRetryOutcome::Wait { backoff_ms } = self
                 .transport_retry
                 .next_backoff(&mut retries, deadline.as_ref())
             else {
-                return Err(attempt.error);
+                return Err(failed.error);
             };
             transport_delay(Duration::from_millis(backoff_ms)).await;
             attempt_timeout = match deadline.as_ref() {
                 Some(deadline) => match deadline.remaining_ms() {
                     Some(remaining_ms) => Some(Duration::from_millis(remaining_ms)),
-                    None => return Err(attempt.error),
+                    None => return Err(failed.error),
                 },
                 None => None,
             };
@@ -260,10 +288,13 @@ impl Client {
     async fn send_buffered(
         &self,
         request: &WireRequest,
-        body: Option<&Bytes>,
         attempt_timeout: Option<Duration>,
     ) -> std::result::Result<BufferedResponse, FailedAttempt> {
-        let body = body.cloned().map(Body::from).unwrap_or_else(Body::empty);
+        let body = request
+            .body
+            .clone()
+            .map(Body::from)
+            .unwrap_or_else(Body::empty);
         let built = self.build(request, body).map_err(|error| FailedAttempt {
             source: FailureSource::Network,
             error,

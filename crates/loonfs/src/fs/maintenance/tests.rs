@@ -240,7 +240,7 @@ async fn namespace_with_a_frozen_base(
     // Now the floor moves past that churn, so the next bottom-anchored rebuild
     // is the one that may drop it.
     namespace
-        .create_snapshot("retention", &crate::CreateSnapshotOptions::default())
+        .create_snapshot("retention")
         .await
         .expect("snapshot the namespace");
     maintenance_past_the_grace_window(writer.object_store())
@@ -726,7 +726,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     maintenance_runtime
         .open_namespace(&namespace)
         .expect("open namespace")
-        .create_snapshot("basis", &crate::CreateSnapshotOptions::default())
+        .create_snapshot("basis")
         .await
         .expect("snapshot");
     let before = current_manifest_payload(store.as_ref(), &namespace).await;
