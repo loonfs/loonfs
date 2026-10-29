@@ -60,7 +60,7 @@ Why doesn't LoonFS panic on bad bytes too? The durable state is stored in shared
 
 - **Add a `code()` method to every error that can reach the wire.** Errors from the vocabulary and storage crates don't have one, and their callers map each error to a code.
 
-- **Define one error type for each crate, and match its name to the crate**, such as `CoreError` in `loonfs-core`. Each crate exports `pub type Result<T>`.
+- **Define one error type for each crate, and match its name to the crate**, such as `CoreError` in `loonfs-core`. Each crate exports `pub type Result<T>`. A vocabulary crate whose types every other crate uses, such as `loonfs-types`, has no crate error type or `Result` alias, and it defines each error enum next to the error-generating code.
 
 - **Use `thiserror` the same way everywhere.** Use `#[from]` when an inner type maps to exactly one variant, match variant names to the wire codes, include `object_key` in store and codec errors, and start every message with a prefix instead of a bare `#[error("{0}")]`. Repeat the cause in the message when it helps, because the server doesn't print source chains.
 
@@ -132,7 +132,7 @@ LoonFS puts a limit on everything, so that the worst case is known in advance, a
 
 - **Use the injected `MonotonicTimer`, and make every timer a configured interval** instead of an ambient sleep.
 
-- **Use a closed vocabulary for time names.** An instant ends in `_at_ms`. A span ends in a span word and `_ms`, and the span word is one of `interval`, `timeout`, `deadline`, `window`, `budget`, `lease`, `ttl`, `elapsed`, `age`, `margin`, `bound`, and `after`. A `Duration` keeps the span word and drops `_ms`.
+- **Use a closed vocabulary for time names.** An instant ends in `_at_ms`, except the current instant, which is `now_ms`. A span ends in a span word and `_ms`, and the span word is one of `interval`, `timeout`, `deadline`, `window`, `budget`, `lease`, `ttl`, `elapsed`, `age`, `since`, `staleness`, `backoff`, `margin`, `bound`, and `after`. A `Duration` keeps the span word and drops `_ms`.
 
 These span words are the easiest to confuse:
 
@@ -185,7 +185,7 @@ Design and measure in round trips to object storage first, then bytes, then CPU.
 
 `docs/specs/format.md` and `docs/specs/api.md` define the durable formats and the API. These rules describe how the code expresses them.
 
-- **Reject unknown fields everywhere except in wire responses.** Wire requests, durable families, and config structs reject them. Wire responses accept them, so that an older client keeps working when the server adds a field.
+- **Reject unknown fields everywhere except in wire responses.** Wire requests, durable families, and config structs reject them. Wire responses accept them, so that an older client keeps working when the server adds a field. The one exception is a type that's both wire and durable (`ContentRef`, `Checksum`, `ContentToken`, `ContentRefKind`, `ChecksumAlgorithm`, and `AccessRight`), which rejects unknown fields and has no `Unknown` variant, because LoonFS rejects an unknown value in durable state.
 
 - **Tag enums with `kind`, or with a domain word such as `status` where that reads better, and write field names in `snake_case`.** ID fields end in `_id`, and actor fields end in `_by` and are paired with an `_at_ms` field.
 
@@ -233,7 +233,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 - **Write each method in a plain form and a `_with_options` form.** Required inputs are positional, and optional inputs go in one flat `*Options` struct with public fields and `Default`, which every form of the operation shares. Don't add a third shape, such as `foo_with_limit`.
 
-- **Follow Rust's naming for constructors and conversions.** A constructor is `new` or `with_*`, a conversion is `from_*`, and a builder setter is the bare field name.
+- **Follow Rust's naming for constructors and conversions.** A constructor is `new`, `with_*`, `parse` when it builds a value from text, or the name of the variant or input it starts from (as in `Checksum::crc32c`). A conversion is `from_*`, and a builder setter is the bare field name.
 
 - **Use each type suffix for one meaning:**
 
@@ -283,7 +283,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 - **Write a comment only when the code can't explain itself**, such as a surprising invariant, a deliberate departure from a rule, or a safety argument. Write it in full sentences, and say why, not what. Don't narrate the next line, mark a section, or record a follow-up, because those comments go stale.
 
-- **Write the first paragraph of a rustdoc as one sentence.** A function's doc starts with a verb in the third person ("Lists the children of a directory path."), and a type's doc starts with a noun phrase. Link to the spec instead of restating durable or API behavior. A `ToSchema` doc is part of `openapi.json`, so editing one is an API change.
+- **Write the first paragraph of the rustdoc on a module, type, or function as one sentence.** A function's doc starts with a verb in the third person ("Lists the children of a directory path."), and a type's doc starts with a noun phrase. A field or variant doc is one short paragraph of up to a few sentences. Link to the spec instead of restating durable or API behavior. A `ToSchema` doc is part of `openapi.json`, so editing one is an API change.
 
 - **Include a reason in every `allow` attribute.**
 
