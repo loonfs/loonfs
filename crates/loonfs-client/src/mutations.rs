@@ -1016,7 +1016,6 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let response = NamespaceMetadata {
             access: loonfs_types::NamespaceAccessMode::Unrestricted {},
-            naming: loonfs_types::NamespaceNaming::CaseInsensitive,
             created_at_ms: 1_000,
             created_by: loonfs_test_support::test_actor(),
             fork_basis: None,

@@ -760,13 +760,6 @@ pub(crate) enum NamespaceAccessArg {
     Acl,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-#[value(rename_all = "snake_case")]
-pub(crate) enum NamespaceNamingArg {
-    CaseInsensitive,
-    CaseSensitive,
-}
-
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
@@ -787,10 +780,6 @@ pub(crate) struct NamespaceCreateArgs {
     /// for more principals.
     #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
     pub administrators: Vec<PrincipalId>,
-    /// How sibling names are compared. It can't be changed after the
-    /// namespace is created.
-    #[arg(long, value_enum, default_value_t = NamespaceNamingArg::CaseInsensitive)]
-    pub naming: NamespaceNamingArg,
     /// The namespace's retention window, in milliseconds. The server's
     /// maintenance sweep keeps this many milliseconds of the namespace's
     /// history, in place of the server's `retention_window_ms`.

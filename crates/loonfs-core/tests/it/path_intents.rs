@@ -6,7 +6,7 @@ use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::time::Deadline;
-use loonfs_core::{CoreError, CreateNamespaceOptions, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
@@ -16,8 +16,8 @@ use loonfs_types::{
     api::v0::FilesystemChange,
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    EntryInodeKind, InodeId, ListPageCursor, NameKey, NamespaceId, NamespaceNaming, Page,
-    PageRequest, PathEntry, RevisionNo,
+    EntryInodeKind, InodeId, ListPageCursor, NameKey, NamespaceId, Page, PageRequest, PathEntry,
+    RevisionNo,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -1768,44 +1768,21 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     );
 }
 
+/// Creates each display name of the folding corpus and its name key as root
+/// directories: a spelling whose key is already taken is refused before any
+/// write, and both spellings resolve to the first entry created.
 #[tokio::test]
 async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
     #[derive(serde::Deserialize)]
     struct NameVector {
         display_name: loonfs_types::DisplayName,
-        case_insensitive: NameKey,
-        case_sensitive: NameKey,
+        name_key: NameKey,
     }
 
     let corpus: Vec<NameVector> = serde_json::from_str(include_str!(
         "../../../loonfs-types/tests/golden/name_folding.v1.json"
     ))
     .expect("folding corpus");
-    for naming in [
-        NamespaceNaming::CaseInsensitive,
-        NamespaceNaming::CaseSensitive,
-    ] {
-        assert_corpus_admission_and_lookup(
-            naming,
-            corpus.iter().map(|vector| {
-                let name_key = match naming {
-                    NamespaceNaming::CaseInsensitive => &vector.case_insensitive,
-                    NamespaceNaming::CaseSensitive => &vector.case_sensitive,
-                };
-                (&vector.display_name, name_key)
-            }),
-        )
-        .await;
-    }
-}
-
-/// Creates each display name and its name key as root directories of a
-/// namespace with `naming`: a spelling whose key is already taken is refused
-/// before any write, and both spellings resolve to the first entry created.
-async fn assert_corpus_admission_and_lookup<'a>(
-    naming: NamespaceNaming,
-    corpus: impl Iterator<Item = (&'a loonfs_types::DisplayName, &'a NameKey)>,
-) {
     let temp_dir = tempdir().expect("tempdir");
     let store = loonfs_test_support::stores::RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -1813,23 +1790,19 @@ async fn assert_corpus_admission_and_lookup<'a>(
     );
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace_with_options(
-        &store,
-        &namespace_id,
-        &context,
-        &CreateNamespaceOptions {
-            naming,
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
     let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(
         namespace_id.clone(),
         std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     );
     let mut entries = std::collections::BTreeMap::<NameKey, PathEntry>::new();
-    for (display_name, name_key) in corpus {
+    for NameVector {
+        display_name,
+        name_key,
+    } in &corpus
+    {
         let stored_path = format!("/{display_name}");
         let lookup_path = format!("/{name_key}");
         for path in [&stored_path, &lookup_path] {

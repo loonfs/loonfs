@@ -668,10 +668,7 @@ async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_curre
         let display_name = loonfs_types::DisplayName::parse(name).expect("display name");
         builder.push_direntry_binding(crate::metadata::DirentryBindingRecord {
             parent_inode_id,
-            name_key: loonfs_types::NameKey::for_display_name(
-                loonfs_types::NamespaceNaming::CaseInsensitive,
-                &display_name,
-            ),
+            name_key: loonfs_types::NameKey::for_display_name(&display_name),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
             child_inode_id,
             child_kind: InodeKind::Directory,

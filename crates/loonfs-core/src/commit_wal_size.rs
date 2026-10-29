@@ -6,7 +6,7 @@ use loonfs_types::format::wal::{
     cbor_map_bytes, cbor_string_bytes, WalCommitDelta, WalInlineContent,
 };
 use loonfs_types::{
-    AbsolutePath, AccessRight, ActorId, CommitId, FilesystemOperation, NamespaceNaming,
+    AbsolutePath, AccessRight, ActorId, CommitId, FilesystemOperation,
     MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ACTOR_ID_BYTES,
     MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES,
     MAX_NAME_KEY_BYTES,
@@ -299,15 +299,10 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
     }
 }
 
-/// The estimate runs before the namespace's naming mode is loaded, so it
-/// counts the longer of the two keys a component can have.
 fn create_path_bytes(path: &AbsolutePath) -> usize {
     path.components().iter().fold(0_usize, |bytes, component| {
         let display_name = component.as_str();
-        let key_bytes =
-            |naming| loonfs_types::name_key_for_display_name(naming, display_name).len();
-        let name_key_bytes = key_bytes(NamespaceNaming::CaseInsensitive)
-            .max(key_bytes(NamespaceNaming::CaseSensitive));
+        let name_key_bytes = loonfs_types::name_key_for_display_name(display_name).len();
         bytes.saturating_add(
             CREATE_INODE_BYTES
                 + BIND_BYTES

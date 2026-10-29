@@ -12,7 +12,7 @@ use crate::{
     ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
     NamespaceId, RevisionNo, RunNo,
 };
-use crate::{NamespaceNaming, PrincipalScope, WalNo, WriterEpoch};
+use crate::{PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::num::NonZeroU64;
@@ -1188,11 +1188,9 @@ pub struct NamespaceManifestPayload {
     pub created_by: ActorId,
     /// The namespace's access mode, which can't be changed.
     pub access: NamespaceAccess,
-    /// How the namespace compares sibling names. The mode can't be changed.
-    pub naming: NamespaceNaming,
     /// The namespace's retention window in milliseconds, which a scheduled
     /// retention advance uses instead of its host's setting. Unlike the
-    /// modes above, a successor can change it (see [Advancing the retention
+    /// access mode, a successor can change it (see [Advancing the retention
     /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_window_ms: Option<NonZeroU64>,
@@ -1269,14 +1267,12 @@ impl NamespaceManifestPayload {
         created_at_ms: u64,
         created_by: ActorId,
         access: NamespaceAccess,
-        naming: NamespaceNaming,
     ) -> Self {
         Self {
             namespace_id,
             created_at_ms,
             created_by,
             access,
-            naming,
             retention_window_ms: None,
             fork_basis: None,
             status: NamespaceStatus::Active {},
@@ -1392,9 +1388,6 @@ impl NamespaceManifestPayload {
         if successor.access != self.access {
             return invalid("access");
         }
-        if successor.naming != self.naming {
-            return invalid("naming");
-        }
         if successor.fork_basis != self.fork_basis {
             return invalid("fork_basis");
         }
@@ -1498,7 +1491,6 @@ mod tests {
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
-            crate::NamespaceNaming::CaseInsensitive,
         );
         assert_eq!(maximum.checked_add(Default::default()), Some(maximum));
         let mut successor = initial.clone();
@@ -1568,7 +1560,6 @@ mod tests {
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
-            crate::NamespaceNaming::CaseInsensitive,
         );
         let mut next = initial.clone();
         next.manifest_no = ManifestNo(2);
@@ -1577,7 +1568,6 @@ mod tests {
             ("created_at_ms", 1),
             ("fork_basis", 2),
             ("access", 3),
-            ("naming", 4),
         ] {
             let mut successor = next.clone();
             match change {
@@ -1597,13 +1587,12 @@ mod tests {
                         .expect("checkpoint"),
                     })
                 }
-                3 => {
+                _ => {
                     successor.access = super::NamespaceAccess::Acl {
                         principal_scope: crate::PrincipalScope::parse("org_test").expect("scope"),
                         root_grants: crate::AccessGrants::default(),
                     }
                 }
-                _ => successor.naming = crate::NamespaceNaming::CaseSensitive,
             }
             assert_eq!(
                 initial
@@ -1648,7 +1637,6 @@ mod tests {
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
-            crate::NamespaceNaming::CaseInsensitive,
         );
         let fork = NamespaceManifestPayload {
             fork_basis: Some(crate::control::ForkBasis {
@@ -1736,7 +1724,6 @@ mod tests {
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             access: super::NamespaceAccess::Unrestricted {},
-            naming: crate::NamespaceNaming::CaseInsensitive,
             retention_window_ms: None,
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
@@ -1783,7 +1770,6 @@ mod tests {
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             access: super::NamespaceAccess::Unrestricted {},
-            naming: crate::NamespaceNaming::CaseInsensitive,
             retention_window_ms: None,
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
@@ -1837,7 +1823,6 @@ mod tests {
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
-            crate::NamespaceNaming::CaseInsensitive,
         ))
         .expect("encode");
         let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");

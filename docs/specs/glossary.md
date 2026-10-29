@@ -88,15 +88,11 @@ An absolute name, like `/reports/final.txt`, that LoonFS resolves by following d
 
 ### Display name
 
-A directory entry's name, stored exactly as the caller provided it. LoonFS compares names by their name key instead, so in a `case_insensitive` namespace, Report.txt and report.txt count as the same name, but the display name keeps the capitalization the caller used.
+A directory entry's name, stored exactly as the caller provided it. LoonFS compares names by their name key instead, so Report.txt and report.txt count as the same name, but the display name keeps the capitalization the caller used.
 
 ### Name key
 
-The value LoonFS uses to compare and look up sibling names. It's derived from the display name using the namespace's naming mode: normalized, and also case-folded in a `case_insensitive` namespace. See [Names and paths](format.md#14-names-and-paths).
-
-### Naming mode
-
-A namespace setting that controls how names are compared, either `case_insensitive` (the default) or `case_sensitive`. For example, Report.txt and report.txt are the same name in a `case_insensitive` namespace and different names in a `case_sensitive` one. The mode is set when the namespace is created (a fork uses its source's mode) and can't be changed.
+The value LoonFS uses to compare and look up sibling names, the same way in every namespace. It's derived from the display name by Unicode normalization and case folding, so Report.txt and report.txt have the same key. See [Names and paths](format.md#14-names-and-paths).
 
 ### Revision
 

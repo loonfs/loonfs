@@ -9,8 +9,8 @@ use crate::path::read::load_current_metadata_view;
 use loonfs_types::format::manifest::{AccessRevisionRecord, DirentryBindingState, InodeRecord};
 use loonfs_types::{
     AccessGrants, AccessRevisionNo, AccessRight, AccessRights, ActorId, ContentId, ContentRef,
-    DisplayName, EffectiveLimit, InodeKind, NameKey, NamespaceNaming, PageRequest, PrincipalId,
-    PrincipalSet, RevisionNo,
+    DisplayName, EffectiveLimit, InodeKind, NameKey, PageRequest, PrincipalId, PrincipalSet,
+    RevisionNo,
 };
 
 const ROOT: InodeId = InodeId(1);
@@ -34,7 +34,7 @@ fn binding(parent: InodeId, child: InodeId, name: &str, seq: u64) -> DirentryBin
     let display_name = DisplayName::parse(name).expect("display name");
     DirentryBindingRecord {
         parent_inode_id: parent,
-        name_key: NameKey::for_display_name(NamespaceNaming::CaseInsensitive, &display_name),
+        name_key: NameKey::for_display_name(&display_name),
         state: DirentryBindingState::Bound { display_name },
         child_inode_id: child,
         child_kind: if matches!(child, NOTES | KEPT_FILE) {

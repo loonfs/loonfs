@@ -642,7 +642,7 @@ string_id! {
 }
 
 string_id! {
-    /// The directory entry key that the namespace's naming mode derives from a display name.
+    /// The directory entry key that LoonFS derives from a display name.
     ///
     /// Use the name key for exact name preconditions, and use the display name for the spelling
     /// that users see.
@@ -653,20 +653,13 @@ string_id! {
 }
 
 impl NameKey {
-    /// Computes the lookup key for a display name under a namespace's naming
-    /// mode.
+    /// Computes the lookup key for a display name.
     ///
     /// Every key fits [`MAX_NAME_KEY_BYTES`]: normalization and case folding
     /// expand a code point at most threefold in bytes, and a display name has
     /// at most [`crate::path::MAX_DISPLAY_NAME_BYTES`].
-    pub fn for_display_name(
-        naming: crate::NamespaceNaming,
-        display_name: &crate::DisplayName,
-    ) -> Self {
-        Self(crate::name_key_for_display_name(
-            naming,
-            display_name.as_str(),
-        ))
+    pub fn for_display_name(display_name: &crate::DisplayName) -> Self {
+        Self(crate::name_key_for_display_name(display_name.as_str()))
     }
 }
 

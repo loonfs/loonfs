@@ -24,7 +24,7 @@ use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{
     AbsolutePath, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId, InodeId,
-    InodeKind, NameKey, NamespaceNaming, RevisionNo, ROOT_INODE_ID,
+    InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
 };
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -79,7 +79,6 @@ pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
 
 pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
     visible_seq: ChangeSeq,
-    naming: NamespaceNaming,
     sources: MetadataSourceStack<'a, 'store, S>,
 }
 
@@ -140,7 +139,6 @@ impl<'a> InMemoryMetadataView<'a> {
     ) -> Self {
         Self {
             visible_seq,
-            naming: NamespaceNaming::CaseInsensitive,
             sources: MetadataSourceStack {
                 overlay,
                 batch_accepted: None,
@@ -160,7 +158,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> Self {
         Self {
             visible_seq: head.seq,
-            naming: head.naming,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -182,7 +179,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> Self {
         Self {
             visible_seq: materialized_seq,
-            naming: segments.manifest().payload().naming,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -201,7 +197,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> MetadataView<'view, 'store, S> {
         MetadataView {
             visible_seq,
-            naming: self.naming,
             sources: MetadataSourceStack {
                 overlay,
                 batch_accepted: Some(batch_accepted),
@@ -214,11 +209,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 
     pub(super) fn visible_seq(&self) -> ChangeSeq {
         self.visible_seq
-    }
-
-    /// How the namespace compares sibling names.
-    pub(crate) fn naming(&self) -> NamespaceNaming {
-        self.naming
     }
 
     /// The retention floor of the view's manifest. A view without a

@@ -502,7 +502,7 @@ impl PathError {
 #[cfg(test)]
 mod tests {
     use super::{AbsolutePath, DisplayName, PathError};
-    use crate::{NameKey, NamespaceNaming};
+    use crate::NameKey;
     use std::assert_matches;
 
     #[test]
@@ -751,17 +751,12 @@ mod tests {
     #[test]
     fn maximal_key_expansion_stays_within_the_name_key_cap() {
         // U+1D160 normalizes to three code points, twelve bytes from four:
-        // the worst byte expansion of either mode. A maximum-length name of
-        // it has a 756-byte key, inside the 768-byte key cap.
+        // the worst byte expansion. A maximum-length name of it has a
+        // 756-byte key, inside the 768-byte key cap.
         let display_name =
             DisplayName::parse("\u{1D160}".repeat(63)).expect("maximal expander parses");
-        for naming in [
-            NamespaceNaming::CaseInsensitive,
-            NamespaceNaming::CaseSensitive,
-        ] {
-            let key = NameKey::for_display_name(naming, &display_name);
-            assert_eq!(key.as_str().len(), 756);
-        }
+        let key = NameKey::for_display_name(&display_name);
+        assert_eq!(key.as_str().len(), 756);
     }
 
     #[test]

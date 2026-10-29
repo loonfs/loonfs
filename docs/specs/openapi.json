@@ -965,10 +965,6 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The durable ID of the new namespace."
           },
-          "naming": {
-            "$ref": "#/components/schemas/NamespaceNaming",
-            "description": "How the namespace compares sibling names. The mode can't be changed after the namespace is\ncreated, and it defaults to `case_insensitive`."
-          },
           "retention_window_ms": {
             "description": "The namespace's retention window, in milliseconds, which must be positive. The reference\nserver's maintenance sweep then uses this window for the namespace instead of the server's\n`retention_window_ms` setting. A `retention_window` maintenance run can change or clear the\nwindow later.",
             "format": "int64",
@@ -3164,7 +3160,7 @@
         "type": "string"
       },
       "NameKey": {
-        "description": "The directory entry key that the namespace's naming mode derives from a display name.\n\nUse the name key for exact name preconditions, and use the display name for the spelling\nthat users see.",
+        "description": "The directory entry key that LoonFS derives from a display name.\n\nUse the name key for exact name preconditions, and use the display name for the spelling\nthat users see.",
         "example": "report.txt",
         "type": "string"
       },
@@ -3394,10 +3390,6 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace ID."
           },
-          "naming": {
-            "$ref": "#/components/schemas/NamespaceNaming",
-            "description": "How the namespace compares sibling names."
-          },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "The namespace's retention floor. A change feed request can set `after_seq` to this sequence\nor any later one, and the feed returns the changes committed after it."
@@ -3411,7 +3403,6 @@
         },
         "required": [
           "access",
-          "naming",
           "namespace_id",
           "created_at_ms",
           "created_by",
@@ -3419,14 +3410,6 @@
           "retention_floor_seq"
         ],
         "type": "object"
-      },
-      "NamespaceNaming": {
-        "description": "How a namespace compares sibling names, for example whether Report.txt and report.txt are the\nsame name.\n\nThe mode is set when the namespace is created and can't be changed.",
-        "enum": [
-          "case_insensitive",
-          "case_sensitive"
-        ],
-        "type": "string"
       },
       "ObjectTransferAccess": {
         "description": "A capability that lets a client transfer bytes directly to or from object storage.",

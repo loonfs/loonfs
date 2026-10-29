@@ -99,7 +99,6 @@ pub(super) async fn plan_move<S: ObjectStore + ?Sized>(
     match &replaced {
         ReplaceDestination::Replaced(existing) => {
             ensure_expected_inode(
-                view.view.naming(),
                 existing,
                 expected_destination.map(|expected| expected.inode_id),
                 target_name,
@@ -122,7 +121,6 @@ pub(super) async fn plan_move<S: ObjectStore + ?Sized>(
         // conflict: there is nothing to rename.
         ReplaceDestination::SameInode => {
             ensure_expected_inode(
-                view.view.naming(),
                 source,
                 expected_destination.map(|expected| expected.inode_id),
                 target_name,
@@ -308,7 +306,6 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
         }
         ReplaceDestination::Replaced(existing) => {
             ensure_expected_inode(
-                view.view.naming(),
                 existing,
                 expected_destination.map(|expected| expected.inode_id),
                 target_name,

@@ -169,13 +169,10 @@ Profile management
 
 Namespace management
   loonfs namespace create <namespace> [--access acl --principal-scope <scope> --administrator <principal>...]
-                            [--naming case_sensitive] [--retention-window-ms <ms>]
-                            [--actor-id <stable-id>]
-    Create a new empty namespace. Names that differ only in case are the
-    same name unless --naming case_sensitive is given. The naming mode
-    can't be changed after the namespace is created. --retention-window-ms
-    sets how many milliseconds of the namespace's history the server's
-    maintenance sweep keeps, in place of the server's retention_window_ms
+                            [--retention-window-ms <ms>] [--actor-id <stable-id>]
+    Create a new empty namespace. --retention-window-ms sets how many
+    milliseconds of the namespace's history the server's maintenance sweep
+    keeps, in place of the server's retention_window_ms
 
   loonfs namespace show [namespace]
     Show the selected namespace's status, creator, and retention window

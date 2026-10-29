@@ -490,8 +490,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     ) -> Result<ResolvedVisiblePath> {
         self.preload_path_walk(absolute_path, preload_leaf_revision)
             .await?;
-        let naming = self.base.naming();
-        visibility::resolve_visible_path(self, naming, absolute_path).await
+        visibility::resolve_visible_path(self, absolute_path).await
     }
 
     async fn preload_path_walk(
@@ -499,11 +498,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         absolute_path: &AbsolutePath,
         preload_leaf_revision: LeafRevisionPreload,
     ) -> Result<()> {
-        let naming = self.base.naming();
         let component_name_keys: Vec<NameKey> = absolute_path
             .components()
             .iter()
-            .map(|component| NameKey::for_display_name(naming, &component.to_display_name()))
+            .map(|component| NameKey::for_display_name(&component.to_display_name()))
             .collect();
 
         let is_root_path = absolute_path.is_root();

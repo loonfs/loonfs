@@ -40,7 +40,6 @@ mod invalidation;
 mod maintenance;
 mod metrics_instruments;
 mod namespace;
-mod naming;
 mod pagination;
 mod publication;
 mod publish_discovery;

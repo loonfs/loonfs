@@ -126,6 +126,32 @@ async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
 }
 
 #[tokio::test]
+async fn a_create_request_with_a_naming_field_is_rejected_and_leaves_no_writer_handle() {
+    let (_directory, router, state) = host("naming-field-host").await;
+    let named = namespace_id("named");
+    // Every namespace compares sibling names by the same rule, so the create
+    // request has no `naming` field.
+    let body = serde_json::json!({"namespace_id": "named", "naming": "case_insensitive"});
+    let (status, body) = send(&router, Method::POST, "/v0/namespaces", body.to_string()).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error body");
+    assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+    assert!(
+        error.message.contains("unknown field `naming`"),
+        "{}",
+        error.message
+    );
+    let uri = format!("/v0/namespaces/{named}");
+    assert_eq!(
+        send(&router, Method::GET, &uri, String::new()).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let closed = state.namespaces.close(&named).await.expect("close");
+    assert!(closed.is_none(), "the host kept a handle: {closed:?}");
+}
+
+#[tokio::test]
 async fn a_request_for_a_missing_namespace_leaves_no_writer_handle_in_the_host() {
     let (_directory, router, state) = host("missing-host").await;
     let missing = namespace_id("missing");

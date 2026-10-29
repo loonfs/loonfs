@@ -110,18 +110,13 @@ LoonFS stores each display name exactly as the caller provided it. A display nam
 
 These rules avoid common cross-platform naming problems. They're LoonFS's own name grammar, not a guarantee that every external filesystem, archive tool, or sync client accepts every tree LoonFS can store.
 
-Every namespace has a "naming mode", which controls how names are compared. The mode is stored in the manifest and set when the namespace is created, and it can't be changed (a fork uses its source's mode). LoonFS derives a name key from each display name using the namespace's mode, and it compares and looks up sibling names by their keys:
+LoonFS compares and looks up sibling names by a "name key" that it derives from each display name, the same way in every namespace: NFC normalization, then full Unicode default case folding (not the Turkic variant), then NFC normalization again, with Unicode 17.0.0 data. Validating new names and looking up existing names both use the key. Name keys follow the same character rules as display names, with a 768-byte limit. Every key derived from a valid display name fits within that limit, because normalization and case folding expand a name by at most three times in bytes.
 
-- `case_insensitive` (the default): NFC normalization, then full Unicode default case folding (not the Turkic variant), then NFC normalization again.
-- `case_sensitive`: NFC normalization only.
+So two names that differ only in letter case, or only in Unicode normalization, are the same name, and the display name keeps the caller's spelling. For example, `Report.txt` and `report.txt` have the same name key, so they can't be siblings, and a rename from one to the other changes the display name of the same entry. A precomposed `é` and an `e` followed by a combining acute accent have the same key. The [name-folding fixtures][name-vectors] list the key for normalization and case-folding cases beyond ASCII.
 
-Both modes use Unicode 17.0.0 data. Validating new names and looking up existing names both use the namespace's mode. Name keys follow the same character rules as display names, with a 768-byte limit. Every key derived from a valid display name fits within that limit, because normalization and case folding expand a name by at most three times in bytes.
+The key mapping can't change once any namespace has rows, because stored slots contain keys derived with it. A change to the mapping would change the format's meaning, even if the serialized fields stayed the same. Implementations MUST preserve the Unicode behavior specified here (converting to lowercase isn't enough).
 
-For example, `Report.txt` and `report.txt` have the same name key in a `case_insensitive` namespace, so they can't be siblings there. In a `case_sensitive` namespace, their keys are different, and they can be siblings. In both modes, a precomposed `é` and an `e` followed by a combining acute accent have the same key. The display name always keeps the caller's spelling. The [name-folding fixtures][name-vectors] list each mode's key for normalization and case-folding cases beyond ASCII.
-
-The display-name rules above don't depend on the mode, so a `case_sensitive` namespace still compares reserved device names case-insensitively.
-
-A mode's mapping can't change once a namespace has rows, because the namespace's stored slots contain keys derived with that mapping. A change to either mapping would change the format's meaning, even if the serialized fields stayed the same. Implementations MUST preserve the Unicode behavior specified here (converting to lowercase isn't enough).
+Why does every namespace compare names without case? The filesystems and sync tools that trees are copied to compare names that way, so a tree with two siblings that differ only in case can't be stored on them, and a name that a person or an agent typed with the wrong case still finds the entry. A per-namespace setting would make that choice at creation, before anyone knows where the tree will go, and a fork would inherit it (see [Alternatives considered](#13-alternatives-considered)).
 
 An absolute path starts with exactly one `/`. It has no empty components, repeated separators, or trailing `/`, except for the root path `/`. A canonical path is at most 4,096 UTF-8 bytes and 128 components. LoonFS rejects noncanonical input instead of rewriting it.
 
@@ -578,7 +573,7 @@ A file's current content is its latest revision committed at or before `N`. Its 
 
 ### 4.4 Paths, listings, and revision reads
 
-A reader resolves a path from root inode `1`. It maps each component to its name key, using the namespace's naming mode, and follows the active binding. If a component isn't visible, the path doesn't exist. (The current format has no mount points to traverse.)
+A reader resolves a path from root inode `1`. It maps each component to its name key (see [Names and paths](#14-names-and-paths)) and follows the active binding. If a component isn't visible, the path doesn't exist. (The current format has no mount points to traverse.)
 
 A directory listing resolves the visible child bindings, and it uses committed revision metadata for file sizes and content-reference summaries. It MUST NOT fetch and verify every file's content object just to list a directory.
 
@@ -952,7 +947,7 @@ The first manifest of a namespace has these values:
 | --- | --- | --- |
 | Manifest number | 1 | 1 |
 | Namespace ID, creation time, `created_by` | From the request | From the request |
-| Access mode and naming mode | From the request | From the source (see [Forking a namespace](#92-forking-a-namespace)) |
+| Access mode | From the request | From the source (see [Forking a namespace](#92-forking-a-namespace)) |
 | Retention window | From the request, if the request includes `retention_window_ms` | From the pinned source manifest, if that manifest sets `retention_window_ms` |
 | Status | Active | Active |
 | Writer block | None | None |
@@ -999,7 +994,7 @@ Folds, validation (when it writes pending pieces to content objects), direct-dow
 
 Every successor manifest MUST:
 
-- keep the namespace's identity, including its access and naming modes,
+- keep the namespace's identity, including its access mode,
 - not lower the head sequence, the writer or compactor epoch, the folded WAL number, the retention floor, the acknowledged floor, the allocators, or the cumulative activity counters, and
 - keep the activity counters exactly the same, if it's at the same head.
 
@@ -1141,7 +1136,7 @@ A fork starts its own history from the source's retained metadata. To create one
 
 1. Loads the target's current manifest before it writes a source pin, and continues only if the target doesn't exist. It then creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
 2. Loads and verifies the pinned manifest.
-3. Copies the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, naming mode, and retention window. The inherited runs determine the same base sequence. The fork's retention floor and acknowledged floor are both the pinned manifest's head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
+3. Copies the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, and retention window. The inherited runs determine the same base sequence. The fork's retention floor and acknowledged floor are both the pinned manifest's head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
 4. Builds the rest of the first manifest's fields (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
 
 The fork copies no file bytes or metadata segments. Its first commit is one sequence above its initial head. The fork can itself be forked right away, because its manifest already lists its inherited runs.
@@ -1673,7 +1668,7 @@ In version 1, an inode never has more than one parent binding. A directory can n
 
 This version doesn't define mount creation or traversal, and no standard operation creates a mount.
 
-The naming mode `labels` is reserved. In a namespace with that mode, names would be labels, so siblings could share a name, and path routes would return `not_supported`. This version doesn't define it, and a manifest with that mode is invalid.
+A namespace whose names are labels rather than keys is reserved. In such a namespace, siblings could share a name, and path routes would return `not_supported`. This version doesn't define it or any field that would select it.
 
 ## 13. Alternatives considered
 
@@ -1681,6 +1676,7 @@ This section describes designs that were considered for the format and the reaso
 
 - **A writer lease.** A writer could take a lease with an expiry time instead of an epoch. A new writer would then have to wait for the old lease to expire before it could take over. With epochs and fences, a new writer can take over at any time, and correctness depends only on conditional writes (see [Writer ownership](#61-writer-ownership)).
 - **One upload session record whose status changes.** A single record could move from open to completed or aborted by compare-and-swap. But an upload would then write that record when the session starts and again when it ends, often less than a second later, and some providers allow about one write per second to one object. With two records that are each created once, completion and abort still race on one put-if-absent, and the cost is a second key for each ended session in the uploads listing (see [Upload sessions](#51-upload-sessions)).
+- **A per-namespace naming mode.** A namespace could choose at creation whether names that differ only in case are the same name. But the choice is made before anyone knows which filesystems the tree will be copied to, it can't change later, a fork inherits it, and two siblings that differ only in case can't be stored on the case-insensitive filesystems most trees end up on. One rule for every namespace avoids the choice (see [Names and paths](#14-names-and-paths)).
 - **An expire event in the writer's log.** The writer could end each deletion's recoverability with an `expire` event that it commits once the floor reaches the deletion, so that the WAL orders the expiry against every undelete and a base compaction removes a deletion's rows once its latest event is `expire`. But that costs one event for every deletion, a scan loop in the writer with its own failure handling, and one commit for each 1,000 inherited deletions before a fork's first request, and a namespace that nobody writes to reclaims nothing. With a basis floor in each WAL object, one field acknowledges every deletion that the floor passed (see [Advancing the retention floor](#101-advancing-the-retention-floor) and the [retention window](../design/retention-window.md#alternatives-considered) note).
 - **A durable record of used WAL and manifest numbers.** Recording every number that was used would remove the provider timing assumption in [Clock and operation assumptions](#114-clock-and-operation-assumptions), because a deleted number could never be mistaken for a free one. But checking the record would add a read to every commit acknowledgement and every read of the current state, and it would remove only that one assumption.
 
@@ -1801,8 +1797,7 @@ A namespace manifest contains:
 | `created_at_ms` | The namespace's creation time. |
 | `created_by` | The application-supplied actor that created or forked the namespace. |
 | `access` | The access mode, which can't change after creation: `{"kind":"unrestricted"}`, or `{"kind":"acl"}` with `principal_scope` and `root_grants`. |
-| `naming` | The naming mode, which can't change after creation: `"case_insensitive"` or `"case_sensitive"` (see [Names and paths](#14-names-and-paths)). |
-| `retention_window_ms?` | The retention window, a positive number of milliseconds (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Unlike the access and naming modes, it can change in a successor. |
+| `retention_window_ms?` | The retention window, a positive number of milliseconds (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Unlike the access mode, it can change in a successor. |
 | `fork_basis?` | The source reference and pin identity, which can't change after creation. |
 | `status` | Whether the namespace is active or deleted. |
 | `writer?` | The diagnostic writer block. |

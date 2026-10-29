@@ -10,7 +10,6 @@ use loonfs_types::format::manifest::{MetadataRowFamily, NamespaceManifestKind};
 use loonfs_types::format::wal::WalEnvelopeKind;
 use loonfs_types::{
     AccessRight, ChecksumAlgorithm, ContentRefKind, EntryInodeKind, InodeKind, MetadataFamilyGroup,
-    NamespaceNaming,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -69,12 +68,6 @@ fn every_hand_written_spelling_matches_serde() {
         NamespaceManifestKind::Manifest,
         NamespaceManifestKind::Manifest.as_str(),
     );
-    for naming in [
-        NamespaceNaming::CaseInsensitive,
-        NamespaceNaming::CaseSensitive,
-    ] {
-        assert_spelling(naming, naming.as_str());
-    }
     for kind in [InodeKind::File, InodeKind::Directory] {
         assert_spelling(kind, kind.as_str());
         assert_eq!(kind.to_string(), kind.as_str());

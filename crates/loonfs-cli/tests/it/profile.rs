@@ -1286,7 +1286,6 @@ fn external_remote_profile_executes_through_http() {
         serde_json::json!({
             "kind": "namespace_status",
             "access": {"kind": "unrestricted"},
-            "naming": "case_insensitive",
             "namespace_id": "demo",
             "created_at_ms": json_data(&create)["created_at_ms"],
             "created_by": "loonfs-cli",
@@ -1301,7 +1300,6 @@ fn external_remote_profile_executes_through_http() {
         serde_json::json!({
             "kind": "namespace_status",
             "access": {"kind": "unrestricted"},
-            "naming": "case_insensitive",
             "namespace_id": "clone",
             "created_at_ms": json_data(&fork)["created_at_ms"],
             "created_by": "loonfs-cli",

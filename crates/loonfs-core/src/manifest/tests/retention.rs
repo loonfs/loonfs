@@ -1234,7 +1234,6 @@ fn a_manifest_whose_acknowledged_floor_breaks_its_bounds_fails_to_load() {
         1_000,
         loonfs_test_support::test_actor(),
         loonfs_types::NamespaceAccess::Unrestricted {},
-        loonfs_types::NamespaceNaming::CaseInsensitive,
     );
     let fork_basis = loonfs_types::format::control::ForkBasis {
         manifest: loonfs_types::format::control::ManifestRef {
