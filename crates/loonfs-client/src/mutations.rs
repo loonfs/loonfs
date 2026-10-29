@@ -673,7 +673,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{retryable_transport_failure, DEFAULT};
+    use crate::transport::{retryable_transport_failure, FailureSource, DEFAULT};
     use loonfs_types::{ContentId, ErrorCode};
     use std::assert_matches;
     use std::fs;
@@ -785,33 +785,45 @@ mod tests {
             details: None,
         };
         assert!(retryable_transport_failure(
-            true,
+            FailureSource::Network,
             &ClientError::Http("reset".to_owned())
         ));
-        assert!(retryable_transport_failure(false, &api("server_busy")));
         assert!(retryable_transport_failure(
-            false,
+            FailureSource::Response,
+            &api("server_busy")
+        ));
+        assert!(retryable_transport_failure(
+            FailureSource::Response,
             &api("commit_queue_full")
         ));
-        assert!(retryable_transport_failure(false, &api("shutting_down")));
-        assert!(!retryable_transport_failure(false, &api("server_error")));
+        assert!(retryable_transport_failure(
+            FailureSource::Response,
+            &api("shutting_down")
+        ));
         assert!(!retryable_transport_failure(
-            false,
+            FailureSource::Response,
+            &api("server_error")
+        ));
+        assert!(!retryable_transport_failure(
+            FailureSource::Response,
             &api("checkpoint_unavailable")
         ));
         assert!(!retryable_transport_failure(
-            false,
+            FailureSource::Response,
             &api("maintenance_required")
         ));
-        assert!(!retryable_transport_failure(false, &api("index_lagging")));
+        assert!(!retryable_transport_failure(
+            FailureSource::Response,
+            &api("index_lagging")
+        ));
         // A server deadline uses 503 but is not safe to retry automatically.
         // The caller must first determine whether a mutation completed.
         assert!(!retryable_transport_failure(
-            false,
+            FailureSource::Response,
             &api("deadline_exceeded")
         ));
         assert!(!retryable_transport_failure(
-            false,
+            FailureSource::Response,
             &ClientError::Http("http status 502 with a non-envelope body".to_owned())
         ));
     }

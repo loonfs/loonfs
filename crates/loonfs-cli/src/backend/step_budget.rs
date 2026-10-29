@@ -22,7 +22,7 @@ impl ResolvedTarget {
             || async {
                 let Some(host) = &self.maintenance else {
                     rest_between_status_checks().await;
-                    return Ok(GrepWaitStepOutcome::Continue);
+                    return Ok(GrepWaitOutcome::Continue);
                 };
                 let outcome = host
                     .grep_worker
@@ -31,9 +31,9 @@ impl ResolvedTarget {
                 Ok(match outcome {
                     GrepBuildOutcome::Published { .. }
                     | GrepBuildOutcome::BackfillRestarted { .. }
-                    | GrepBuildOutcome::Superseded => GrepWaitStepOutcome::Continue,
+                    | GrepBuildOutcome::Superseded => GrepWaitOutcome::Continue,
                     GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled => {
-                        GrepWaitStepOutcome::Settled
+                        GrepWaitOutcome::Settled
                     }
                 })
             },
@@ -74,7 +74,7 @@ pub(crate) struct GrepWaitProgress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GrepWaitStepOutcome {
+pub(super) enum GrepWaitOutcome {
     Continue,
     Settled,
 }
@@ -90,7 +90,7 @@ where
     Read: Fn() -> ReadTurn,
     ReadTurn: Future<Output = Result<GrepIndexStatus, CliError>>,
     Step: Fn() -> StepTurn,
-    StepTurn: Future<Output = Result<GrepWaitStepOutcome, CliError>>,
+    StepTurn: Future<Output = Result<GrepWaitOutcome, CliError>>,
 {
     let timer = StdMonotonicTimer::default();
     let started_at_ms = timer.monotonic_now_ms();
@@ -103,7 +103,7 @@ where
         if reached || settled || lifecycle_stopped(&lifecycle) || budget.spent(steps, elapsed_ms) {
             return Ok(GrepWaitProgress { steps, reached });
         }
-        settled = step().await? == GrepWaitStepOutcome::Settled;
+        settled = step().await? == GrepWaitOutcome::Settled;
         steps += 1;
     }
 }
@@ -116,7 +116,10 @@ fn lifecycle_stopped(lifecycle: &GrepIndexStatus) -> bool {
 }
 
 /// Waits before the next remote status check.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the CLI host paces its own polling; protocol time is not affected"
+)]
 pub(super) async fn rest_between_status_checks() {
     tokio::time::sleep(std::time::Duration::from_millis(
         REMOTE_STATUS_POLL_INTERVAL_MS,
@@ -126,7 +129,7 @@ pub(super) async fn rest_between_status_checks() {
 
 #[cfg(test)]
 mod tests {
-    use super::{wait_for_grep_index, GrepWaitProgress, GrepWaitStepOutcome, StepBudget};
+    use super::{wait_for_grep_index, GrepWaitOutcome, GrepWaitProgress, StepBudget};
     use loonfs_types::api::v0::GrepIndexStatus;
     use loonfs_types::ChangeSeq;
     use std::cell::Cell;
@@ -141,7 +144,7 @@ mod tests {
             || async {
                 turns.set(turns.get() + 1);
                 assert!(turns.get() < 4, "a disabled index must end the wait");
-                Ok(GrepWaitStepOutcome::Continue)
+                Ok(GrepWaitOutcome::Continue)
             },
         )
         .await
@@ -167,7 +170,7 @@ mod tests {
                     .expect("checkpoint id"),
                 })
             },
-            || async { Ok(GrepWaitStepOutcome::Settled) },
+            || async { Ok(GrepWaitOutcome::Settled) },
         )
         .await
         .expect("wait over an index that settles short");

@@ -234,7 +234,7 @@ impl Client {
                 Ok(response) => return Ok(response),
                 Err(attempt) => attempt,
             };
-            let retryable = retryable_transport_failure(attempt.transport, &attempt.error);
+            let retryable = retryable_transport_failure(attempt.source, &attempt.error);
             if !self.transport_retry_enabled || !retryable {
                 return Err(attempt.error);
             }
@@ -263,7 +263,7 @@ impl Client {
     ) -> std::result::Result<BufferedResponse, FailedAttempt> {
         let body = body.cloned().map(Body::from).unwrap_or_else(Body::empty);
         let built = self.build(request, body).map_err(|error| FailedAttempt {
-            transport: true,
+            source: FailureSource::Network,
             error,
         })?;
         self.send(built, attempt_timeout)
@@ -362,7 +362,7 @@ impl WireResponse {
             })
         } else {
             Err(FailedAttempt {
-                transport: false,
+                source: FailureSource::Response,
                 error: map_status_error(self.status.as_u16(), &bytes),
             })
         }
@@ -383,7 +383,7 @@ impl BufferedResponse {
 
 fn failed_attempt(url: &str, error: TransportError) -> FailedAttempt {
     FailedAttempt {
-        transport: true,
+        source: FailureSource::Network,
         error: ClientError::Http(render_send_error(
             url,
             &error,
@@ -395,12 +395,21 @@ fn failed_attempt(url: &str, error: TransportError) -> FailedAttempt {
 
 /// One failed attempt, carrying whether the network layer itself reported it.
 pub(crate) struct FailedAttempt {
-    /// True when no complete response was served. Classified here, before the
+    /// Whether a complete response was served. Classified here, before the
     /// error is flattened, because the retry policy keys on it: a served
     /// status with a non-envelope body (a load balancer's HTML 502) is not a
     /// transport failure.
-    pub(crate) transport: bool,
+    pub(crate) source: FailureSource,
     pub(crate) error: ClientError,
+}
+
+/// Where a failed request attempt's error came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureSource {
+    /// No complete response was served.
+    Network,
+    /// The server served a complete response with an error status.
+    Response,
 }
 
 pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
@@ -449,15 +458,17 @@ fn render_send_error(
 /// Network failures are retryable. Server responses are retryable only when
 /// their error code identifies a temporary condition that requires no
 /// operator action.
-pub(crate) fn retryable_transport_failure(transport: bool, error: &ClientError) -> bool {
-    transport
+pub(crate) fn retryable_transport_failure(source: FailureSource, error: &ClientError) -> bool {
+    source == FailureSource::Network
         || error
             .code()
             .is_some_and(ErrorCode::retryable_without_operator_action)
 }
 
-// This transport timer bounds local I/O and retries without changing protocol time.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this transport timer bounds local I/O and retries without changing protocol time"
+)]
 pub(crate) fn transport_delay(duration: Duration) -> std::pin::Pin<Box<tokio::time::Sleep>> {
     Box::pin(tokio::time::sleep(duration))
 }

@@ -10,7 +10,7 @@ use crate::args::{
 };
 use crate::config::mutate_config;
 use crate::error::CliError;
-use crate::profiles::set_default_namespace;
+use crate::profiles::{resolve_profile, set_default_namespace, NamedProfile};
 use crate::prompt::prompt_line;
 use crate::resolve::{load_cli_config, resolve_actor, resolve_namespace};
 use loonfs_client::CreateNamespaceOptions;
@@ -275,25 +275,27 @@ pub(crate) async fn run_namespace_current(
     let explicit_profile = args.profile.profile.as_deref();
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let (profile_name, profile) =
-        crate::profiles::resolve_profile(&loaded.config, explicit_profile)
-            .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let NamedProfile {
+        name: profile_name,
+        profile,
+    } = resolve_profile(&loaded.config, explicit_profile)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = profile.mode_str().to_owned();
     // `current` is a status command, so an unset namespace is returned as
     // `null`. Environment selection still takes precedence over the profile
     // default.
-    let namespace = match resolve_namespace(profile_name, profile, None) {
+    let namespace = match resolve_namespace(&profile_name, profile, None) {
         Ok(resolved) => Some(resolved.namespace.to_string()),
         Err(error) if error.is_no_default_namespace() => None,
-        Err(error) => return Err(fail_for(kind, profile_name, &mode, error)),
+        Err(error) => return Err(fail_for(kind, &profile_name, &mode, error)),
     };
 
     Ok(CommandOutput {
         kind,
-        profile: Some(profile_name.to_owned()),
+        profile: Some(profile_name.clone()),
         mode: Some(mode),
         data: CommandData::Current {
-            profile: profile_name.to_owned(),
+            profile: profile_name,
             namespace,
         },
     })

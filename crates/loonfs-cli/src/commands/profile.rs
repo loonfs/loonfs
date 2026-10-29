@@ -17,7 +17,7 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::{
     add_profile, delete_profile, delete_profile_in_table, list_profiles, set_default_profile,
-    set_default_profile_in_table, show_profile, update_profile,
+    set_default_profile_in_table, show_profile, update_profile, NamedProfile,
 };
 use crate::prompt;
 use std::path::Path;
@@ -48,14 +48,14 @@ pub(crate) fn run_profile_command(
         ProfileCommand::Show { name } => {
             let config =
                 load_config(config_path).map_err(|error| fail(kind, name.clone(), None, error))?;
-            let (profile_name, redacted) = show_profile(&config, name.as_deref())
+            let shown = show_profile(&config, name.as_deref())
                 .map_err(|error| fail(kind, name.clone(), None, error))?;
             Ok(CommandOutput {
                 kind,
-                profile: Some(profile_name),
-                mode: Some(redacted.mode_str().to_owned()),
+                profile: Some(shown.name),
+                mode: Some(shown.profile.mode_str().to_owned()),
                 data: CommandData::Profile {
-                    profile: redacted,
+                    profile: shown.profile,
                     default_profile: None,
                 },
             })
@@ -74,7 +74,10 @@ fn run_profile_create(
     command: ProfileCreateCommand,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let (name, spec) = create_profile_spec_from_create(command);
+    let NamedProfile {
+        name,
+        profile: spec,
+    } = create_profile_spec_from_create(command);
     let (result, default_profile) = (|| {
         let profile = build_profile_from_create_spec(&name, spec, runtime)?;
         mutate_config(config_path, |config| {
@@ -86,10 +89,10 @@ fn run_profile_create(
 
     Ok(CommandOutput {
         kind,
-        profile: Some(result.0),
-        mode: Some(result.1.mode_str().to_owned()),
+        profile: Some(result.name),
+        mode: Some(result.profile.mode_str().to_owned()),
         data: CommandData::Profile {
-            profile: result.1,
+            profile: result.profile,
             default_profile,
         },
     })
@@ -103,7 +106,7 @@ fn run_profile_update(
 ) -> Result<CommandOutput, CommandFailure> {
     let spec = profile_update_spec(command);
     let name = spec.name.clone();
-    let result = (|| -> Result<(String, ProfileConfig), CliError> {
+    let result = (|| -> Result<NamedProfile<ProfileConfig>, CliError> {
         // The update is gathered before the lock: the interactive editor can
         // sit at a prompt for minutes, and holding the config lock across it
         // would block every other writer. `update_profile` re-checks the
@@ -132,10 +135,10 @@ fn run_profile_update(
 
     Ok(CommandOutput {
         kind,
-        profile: Some(result.0),
-        mode: Some(result.1.mode_str().to_owned()),
+        profile: Some(result.name),
+        mode: Some(result.profile.mode_str().to_owned()),
         data: CommandData::Profile {
-            profile: result.1,
+            profile: result.profile,
             default_profile: None,
         },
     })

@@ -12,6 +12,13 @@ pub(crate) struct ProfileSummary {
     pub store_kind: Option<String>,
 }
 
+/// A profile, or a profile spec, paired with the profile's name.
+#[derive(Debug)]
+pub(crate) struct NamedProfile<P> {
+    pub(crate) name: String,
+    pub(crate) profile: P,
+}
+
 pub(crate) fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
     let Some(config) = config else {
         return Vec::new();
@@ -30,16 +37,19 @@ pub(crate) fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
 pub(crate) fn show_profile(
     config: &CliConfig,
     explicit_name: Option<&str>,
-) -> Result<(String, ProfileConfig), CliError> {
-    let (name, profile) = resolve_profile(config, explicit_name)?;
-    Ok((name.to_owned(), profile.redacted()))
+) -> Result<NamedProfile<ProfileConfig>, CliError> {
+    let resolved = resolve_profile(config, explicit_name)?;
+    Ok(NamedProfile {
+        name: resolved.name,
+        profile: resolved.profile.redacted(),
+    })
 }
 
 pub(crate) fn add_profile(
     config: &mut CliConfig,
     name: &str,
     profile: ProfileConfig,
-) -> Result<(String, ProfileConfig), CliError> {
+) -> Result<NamedProfile<ProfileConfig>, CliError> {
     validate_profile_name(name)?;
     if config.profiles.contains_key(name) {
         return Err(CliError::profile_already_exists(name));
@@ -50,20 +60,26 @@ pub(crate) fn add_profile(
     if is_first {
         config.default_profile = Some(name.to_owned());
     }
-    Ok((name.to_owned(), redacted))
+    Ok(NamedProfile {
+        name: name.to_owned(),
+        profile: redacted,
+    })
 }
 
 pub(crate) fn update_profile(
     config: &mut CliConfig,
     name: &str,
     profile: ProfileConfig,
-) -> Result<(String, ProfileConfig), CliError> {
+) -> Result<NamedProfile<ProfileConfig>, CliError> {
     if !config.profiles.contains_key(name) {
         return Err(CliError::profile_not_found(name));
     }
     let redacted = profile.redacted();
     config.profiles.insert(name.to_owned(), profile);
-    Ok((name.to_owned(), redacted))
+    Ok(NamedProfile {
+        name: name.to_owned(),
+        profile: redacted,
+    })
 }
 
 pub(crate) fn delete_profile(
@@ -142,31 +158,19 @@ pub(crate) fn set_default_profile_in_table(
 
 pub(crate) fn resolve_profile<'a>(
     config: &'a CliConfig,
-    explicit_name: Option<&'a str>,
-) -> Result<(&'a str, &'a ProfileConfig), CliError> {
-    if let Some(name) = explicit_name {
-        let profile = config
-            .profiles
-            .get(name)
-            .ok_or_else(|| CliError::profile_not_found(name))?;
-        return Ok((name, profile));
-    }
-    if let Some(name) = crate::config::non_empty_env(crate::config::PROFILE_ENV) {
-        let (stored_name, profile) = config
-            .profiles
-            .get_key_value(&name)
-            .ok_or_else(|| CliError::profile_not_found(&name))?;
-        return Ok((stored_name, profile));
-    }
-    let name = config
-        .default_profile
-        .as_deref()
-        .ok_or_else(CliError::no_default_profile)?;
+    explicit_name: Option<&str>,
+) -> Result<NamedProfile<&'a ProfileConfig>, CliError> {
+    let name = match explicit_name {
+        Some(name) => name.to_owned(),
+        None => crate::config::non_empty_env(crate::config::PROFILE_ENV)
+            .or_else(|| config.default_profile.clone())
+            .ok_or_else(CliError::no_default_profile)?,
+    };
     let profile = config
         .profiles
-        .get(name)
-        .ok_or_else(|| CliError::profile_not_found(name))?;
-    Ok((name, profile))
+        .get(&name)
+        .ok_or_else(|| CliError::profile_not_found(&name))?;
+    Ok(NamedProfile { name, profile })
 }
 
 pub(crate) fn default_namespace(profile: &ProfileConfig) -> Option<&str> {

@@ -249,7 +249,7 @@ impl ResolvedTarget {
         profile: &ProfileConfig,
         no_retry: bool,
     ) -> Result<Self, CliError> {
-        profile.validate_store(profile_name)?;
+        profile.ensure_store_usable(profile_name)?;
         match profile {
             ProfileConfig::Embedded {
                 store, writer_id, ..

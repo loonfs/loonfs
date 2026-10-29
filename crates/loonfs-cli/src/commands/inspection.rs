@@ -185,15 +185,16 @@ pub(crate) async fn run_doctor(
 
     let explicit_profile = args.target.profile.profile.as_deref();
     let (profile_name, profile) = match resolve_profile(&config, explicit_profile) {
-        Ok((name, profile)) => {
+        Ok(resolved) => {
             checks.push(ok(
                 DoctorCheckName::Profile,
                 format!(
-                    "profile `{name}` selected via {}",
+                    "profile `{}` selected via {}",
+                    resolved.name,
                     profile_selection_source(explicit_profile)
                 ),
             ));
-            (name.to_owned(), profile.clone())
+            (resolved.name, resolved.profile.clone())
         }
         Err(error) => {
             checks.push(failed(DoctorCheckName::Profile, error));
@@ -369,7 +370,7 @@ async fn provider_check(
     profile: &ProfileConfig,
     no_retry: bool,
 ) -> Result<(String, Option<ResolvedTarget>), CliError> {
-    profile.validate_store(profile_name)?;
+    profile.ensure_store_usable(profile_name)?;
     match profile {
         ProfileConfig::Embedded { store, .. } => Ok((
             format!("{} store configuration is valid", store.kind().as_str()),

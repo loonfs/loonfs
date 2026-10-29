@@ -5,11 +5,12 @@ use super::context::{resolve_command_context, resolve_mutation_context, resolve_
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceRan};
 use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
-    ChangesArgs, CommandKind, MaintenanceCheckpointCommand, MaintenanceCheckpointListArgs,
-    MaintenanceCommand, MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
-    MaintenanceMetadataArgs, MaintenanceNamespaceArgs, MaintenanceRecoverAdministratorArgs,
-    MaintenanceRetentionAdvanceArgs, MaintenanceRetentionCommand, MaintenanceRetentionWindowArgs,
-    MaintenanceStoreCommand, MaintenanceStoreProbeArgs,
+    ActorSelectorArgs, ChangesArgs, CommandKind, MaintenanceCheckpointCommand,
+    MaintenanceCheckpointListArgs, MaintenanceCommand, MaintenanceGcArgs, MaintenanceIndexCommand,
+    MaintenanceIndexEnableArgs, MaintenanceMetadataArgs, MaintenanceNamespaceArgs,
+    MaintenanceRecoverAdministratorArgs, MaintenanceRetentionAdvanceArgs,
+    MaintenanceRetentionCommand, MaintenanceRetentionWindowArgs, MaintenanceStoreCommand,
+    MaintenanceStoreProbeArgs, TargetSelectorArgs,
 };
 use crate::backend::StepBudget;
 use loonfs_types::api::v0::GrepIndexStatus;
@@ -65,15 +66,17 @@ pub(crate) async fn run_maintenance_command(
     }
 }
 
-async fn run_maintenance_recover_administrator(
+async fn run_maintenance_job(
     kind: CommandKind,
     config_path: &Path,
-    args: MaintenanceRecoverAdministratorArgs,
+    target: &TargetSelectorArgs,
+    actor: Option<&ActorSelectorArgs>,
+    request: RunMaintenanceRequest,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let principal_id = args.principal_id.clone();
-    let request =
-        RunMaintenanceRequest::RecoverAdministrator(RecoverAdministratorRequest { principal_id });
+    let context = match actor {
+        Some(actor) => resolve_mutation_context(kind, config_path, target, actor).await?,
+        None => resolve_command_context(kind, config_path, target).await?,
+    };
     let response = context
         .target
         .client
@@ -84,6 +87,17 @@ async fn run_maintenance_recover_administrator(
         kind,
         CommandData::MaintenanceRan(MaintenanceRan::new(response)),
     ))
+}
+
+async fn run_maintenance_recover_administrator(
+    kind: CommandKind,
+    config_path: &Path,
+    args: MaintenanceRecoverAdministratorArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let request = RunMaintenanceRequest::RecoverAdministrator(RecoverAdministratorRequest {
+        principal_id: args.principal_id,
+    });
+    run_maintenance_job(kind, config_path, &args.target, Some(&args.actor), request).await
 }
 
 async fn run_maintenance_metadata(
@@ -91,21 +105,10 @@ async fn run_maintenance_metadata(
     config_path: &Path,
     args: MaintenanceMetadataArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let request = RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
         max_wal_tail_objects: args.max_wal_tail_objects,
     });
-    let response = context
-        .target
-        .client
-        .run_maintenance(context.namespace(), &request, context.actor_id.as_ref())
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-
-    Ok(context.output(
-        kind,
-        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
-    ))
+    run_maintenance_job(kind, config_path, &args.target, None, request).await
 }
 
 async fn run_maintenance_gc(
@@ -113,24 +116,10 @@ async fn run_maintenance_gc(
     config_path: &Path,
     args: MaintenanceGcArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let response = context
-        .target
-        .client
-        .run_maintenance(
-            context.namespace(),
-            &RunMaintenanceRequest::Gc(GcRequest {
-                grace_window_ms: args.grace_window_ms,
-            }),
-            context.actor_id.as_ref(),
-        )
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-
-    Ok(context.output(
-        kind,
-        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
-    ))
+    let request = RunMaintenanceRequest::Gc(GcRequest {
+        grace_window_ms: args.grace_window_ms,
+    });
+    run_maintenance_job(kind, config_path, &args.target, None, request).await
 }
 
 async fn run_maintenance_checkpoint_list(
@@ -167,24 +156,10 @@ async fn run_maintenance_fold(
     config_path: &Path,
     args: MaintenanceNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let response = context
-        .target
-        .client
-        .run_maintenance(
-            context.namespace(),
-            &RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
-                max_wal_tail_objects: Some(1),
-            }),
-            context.actor_id.as_ref(),
-        )
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-
-    Ok(context.output(
-        kind,
-        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
-    ))
+    let request = RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
+        max_wal_tail_objects: Some(1),
+    });
+    run_maintenance_job(kind, config_path, &args.target, None, request).await
 }
 
 async fn run_maintenance_retention_advance(
@@ -228,24 +203,10 @@ async fn run_maintenance_retention_window(
     config_path: &Path,
     args: MaintenanceRetentionWindowArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let response = context
-        .target
-        .client
-        .run_maintenance(
-            context.namespace(),
-            &RunMaintenanceRequest::RetentionWindow(SetRetentionWindowRequest {
-                retention_window_ms: args.retention_window_ms,
-            }),
-            context.actor_id.as_ref(),
-        )
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-
-    Ok(context.output(
-        kind,
-        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
-    ))
+    let request = RunMaintenanceRequest::RetentionWindow(SetRetentionWindowRequest {
+        retention_window_ms: args.retention_window_ms,
+    });
+    run_maintenance_job(kind, config_path, &args.target, None, request).await
 }
 
 /// Checks that the profile's object store supports the operations LoonFS

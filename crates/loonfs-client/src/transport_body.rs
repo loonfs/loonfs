@@ -123,8 +123,10 @@ impl HttpBody for TimedBody {
     }
 }
 
-// This transport clock measures how long a response waited unread without changing protocol time.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this transport clock measures how long a response waited unread without changing protocol time"
+)]
 fn transport_now() -> Instant {
     Instant::now()
 }
