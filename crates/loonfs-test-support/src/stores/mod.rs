@@ -20,7 +20,9 @@ mod replace;
 pub use crate::delegate_object_store;
 pub use blocking_store::{BlockingInterceptor, BlockingStore};
 pub use buffer_watch_store::{BufferPeaks, BufferWatchStore};
-pub use concurrency_watch_store::{ConcurrencyWatchStore, StoreConcurrency};
+pub use concurrency_watch_store::{
+    ConcurrencyWatchInterceptor, ConcurrencyWatchStore, InFlightGuard, StoreConcurrency,
+};
 pub use fail_store::{FailInterceptor, FailStore, FailureMode, InjectedError};
 pub use fake_multipart_store::{FakeMultipartStore, MultipartChecksumEnforcement};
 pub use intercept_store::{Intercept, InterceptStore, Interceptor, Outcome};
@@ -29,7 +31,9 @@ pub use latency_store::{LatencyInterceptor, LatencyStore};
 pub use lost_create_store::LostCreateStore;
 pub use memory_store::MemoryStore;
 pub use metadata_map_store::MetadataMapStore;
-pub use namespace_overlap_store::{NamespaceOverlapInterceptor, NamespaceOverlapStore};
+pub use namespace_overlap_store::{
+    NamespaceInFlightGuard, NamespaceOverlapInterceptor, NamespaceOverlapStore,
+};
 pub use operation::{
     sort_head_runs, OperationContext, OperationKind, OperationSelector, RecordedOperation,
 };

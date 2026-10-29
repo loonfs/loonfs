@@ -2437,11 +2437,10 @@ struct FoldDuringFinalization {
 
 #[async_trait]
 impl Interceptor for FoldDuringFinalization {
-    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
-        let kind = context.kind();
-        let writes =
-            OperationSelector::Put.matches(kind) || OperationSelector::CompareAndSwap.matches(kind);
-        if writes
+    type Guard = ();
+
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
+        if OperationSelector::Put.matches(context.kind())
             && loonfs_objectstore::layout::manifest_no_of(context.key()).is_some()
             && self.folded.fetch_add(1, Ordering::SeqCst) == 0
         {
@@ -2449,7 +2448,7 @@ impl Interceptor for FoldDuringFinalization {
                 .await
                 .expect("the competing fold must publish");
         }
-        Intercept::Continue
+        (Intercept::Continue, ())
     }
 }
 
@@ -2595,13 +2594,15 @@ struct RivalDuringPublication {
 
 #[async_trait]
 impl Interceptor for RivalDuringPublication {
-    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
+    type Guard = ();
+
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
         let writes = OperationSelector::Put.matches(context.kind());
         if !writes
             || loonfs_objectstore::layout::manifest_no_of(context.key()).is_none()
             || self.published.fetch_add(1, Ordering::SeqCst) != 0
         {
-            return Intercept::Continue;
+            return (Intercept::Continue, ());
         }
         let (rival, namespace_id) = (&self.rival, &self.namespace_id);
         match self.publication {
@@ -2644,7 +2645,7 @@ impl Interceptor for RivalDuringPublication {
                 .await;
             }
         }
-        Intercept::Continue
+        (Intercept::Continue, ())
     }
 }
 

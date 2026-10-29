@@ -2,6 +2,7 @@
 
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
+use loonfs::test_support::fresh_reader;
 use loonfs::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, Error,
     ErrorCode, InodeId, PutFileOptions, RevisionNo,

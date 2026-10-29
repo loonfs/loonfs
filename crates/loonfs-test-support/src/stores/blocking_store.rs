@@ -131,11 +131,13 @@ impl<S> InterceptStore<S, BlockingInterceptor> {
 
 #[async_trait]
 impl Interceptor for BlockingInterceptor {
-    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
+    type Guard = ();
+
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
         if (self.predicate)(context) {
             self.gate.park().await;
         }
-        Intercept::Continue
+        (Intercept::Continue, ())
     }
 }
 

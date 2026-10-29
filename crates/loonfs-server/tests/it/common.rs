@@ -9,6 +9,7 @@
     reason = "test helpers preserve the client's structured error type"
 )]
 
+use loonfs::SharedObjectStore;
 use loonfs_client::{Client, ClientConfig, ClientError, ListOptions, NamespacePath};
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_server::{
@@ -121,43 +122,12 @@ pub(crate) struct TestServer {
     pub(crate) namespaces: std::sync::Arc<loonfs_http::Namespaces>,
     pub(crate) client: Client,
     pub(crate) server_url: String,
+    /// The object store the server reads and writes, for a test that opens
+    /// its own handles beside the server.
+    pub(crate) store: SharedObjectStore,
     pub(crate) store_root: Option<PathBuf>,
     pub(crate) store_key_prefix: Option<String>,
     pub(crate) server: tokio::task::JoinHandle<()>,
-}
-
-/// Advances `namespace`'s retention floor to the head through a maintenance
-/// handle on the server's local store whose wall clock is one default grace
-/// window ahead of the system clock.
-///
-/// The server stamps commits on its own clock, which a test can't move, so a
-/// floor can pass commits that a test just made through the server only
-/// through a handle whose clock is ahead of the server's.
-pub(crate) async fn advance_retention_past_the_grace_window(
-    server: &TestServer,
-    namespace: &NamespaceId,
-) -> loonfs_types::AdvanceRetentionResponse {
-    let clock = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::at_system_time());
-    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
-    let writer_id = loonfs_test_support::ids::writer_id("retention-maintenance");
-    loonfs::LoonFs::builder(loonfs::StoreConfig::LocalFs(LocalFsStoreConfig {
-        root: server
-            .store_root
-            .as_ref()
-            .expect("the server uses a local store")
-            .display()
-            .to_string(),
-        key_prefix: server.store_key_prefix.clone(),
-    }))
-    .writer_id(writer_id.clone())
-    .wall_clock(clock)
-    .build()
-    .await
-    .expect("build the retention maintenance handle")
-    .maintenance(writer_id)
-    .advance_retention_floor(namespace)
-    .await
-    .expect("advance the retention floor")
 }
 
 // The server runs as a task on the test's own runtime, and the tests call it
@@ -179,7 +149,18 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = app(config, AppConfig::default()).await.expect("build app");
+    let configured = config.object_store().expect("build the configured store");
+    let direct_transfers = configured.direct_transfers();
+    let store = configured.into_shared();
+    let (router, state) = app(
+        config,
+        AppConfig {
+            store: Some(store.clone()),
+            direct_transfers,
+        },
+    )
+    .await
+    .expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -189,6 +170,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         namespaces: state.binding.namespaces.clone(),
         client: client(&server_url, auth_token, None),
         server_url,
+        store,
         store_root,
         store_key_prefix,
         server,

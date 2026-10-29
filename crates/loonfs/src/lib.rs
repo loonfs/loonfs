@@ -66,6 +66,10 @@ mod metadata_cache;
 pub mod metrics;
 mod options;
 mod publisher;
+/// Runtime handles that test targets build the same way, available through
+/// the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod trace;
 
 pub use loonfs_core::limits::{

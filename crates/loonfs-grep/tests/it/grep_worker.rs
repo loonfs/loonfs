@@ -1,6 +1,8 @@
 //! GrepWorker lifecycle, rebootstrap, query contracts, and GC boundaries.
 
-use crate::common::{control, grep_with, page_request, GrepHost};
+use crate::common::{
+    collector_at, control, default_block_cache, grep_with, page_request, GrepHost,
+};
 use bytes::Bytes;
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
@@ -51,6 +53,15 @@ fn request(pattern: &str) -> GrepRequest {
 
 async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
     GrepHost::new(store, "grep-worker-tests").await.worker
+}
+
+/// Returns a clock past both collection grace windows from the system
+/// clock's reading, so a pass at it finds every object written before the
+/// call aged.
+fn clock_past_every_grace_window() -> Arc<ManualClock> {
+    let clock = Arc::new(ManualClock::at_system_time());
+    clock.advance_ms(loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1);
+    clock
 }
 
 /// Sums the listed sizes of the objects under each prefix.
@@ -112,7 +123,7 @@ async fn new_query_page(
         .await
         .expect("new query reader");
     grep_with(
-        &GrepService::default(),
+        &GrepService::new(default_block_cache(), reader.monotonic_timer()),
         &reader,
         store,
         namespace_id,
@@ -140,16 +151,8 @@ async fn fold_wal_and_advance_retention(
         )
         .await
         .expect("fold wal");
-    let clock = Arc::new(ManualClock::at_system_time());
-    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
-    let writer_id = loonfs_test_support::ids::writer_id("retention-maintenance");
-    LoonFs::builder_with_store(store.clone())
-        .writer_id(writer_id.clone())
-        .wall_clock(clock)
-        .build()
+    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
         .await
-        .expect("retention maintenance")
-        .maintenance(writer_id)
         .advance_retention_floor(namespace_id)
         .await
         .expect("advance retention")
@@ -369,8 +372,9 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         worker.disable(&namespace_id).await.expect("disable"),
         loonfs_grep::GrepDisableOutcome::Disabled
     );
-    worker
-        .gc_namespace(&namespace_id, u64::MAX)
+    collector_at(&store, clock_past_every_grace_window())
+        .await
+        .gc_namespace(&namespace_id)
         .await
         .expect("collect disabled segments");
     assert!(
@@ -2546,7 +2550,8 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
             .expect("manifest");
     }
     write_hint(&*store, &namespace_id, ManifestNo(2)).await;
-    let collector = worker(&store).await;
+    let clock = Arc::new(ManualClock::new(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS));
+    let collector = collector_at(&store, clock.clone()).await;
     // A pass over a live namespace lists the manifests and the segments, but
     // not the hint.
     let swept_bytes = listed_bytes(
@@ -2559,7 +2564,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     .await;
     recording.reset();
     let young = collector
-        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS)
+        .gc_namespace(&namespace_id)
         .await
         .expect("young pass");
     assert_eq!(
@@ -2573,8 +2578,9 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .await
         .expect("head")
         .is_none());
+    clock.advance_ms(1);
     let aged = collector
-        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1)
+        .gc_namespace(&namespace_id)
         .await
         .expect("aged pass");
     assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 0));
@@ -2602,7 +2608,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     assert_matches!(
         worker(&failing_store)
             .await
-            .gc_namespace(&namespace_id, u64::MAX)
+            .gc_namespace(&namespace_id)
             .await,
         Err(GrepError::StoreUnavailable { .. })
     );
@@ -2621,7 +2627,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     .expect("corrupt hint");
     recording.reset();
     assert_matches!(
-        collector.gc_namespace(&namespace_id, u64::MAX).await,
+        collector.gc_namespace(&namespace_id).await,
         Err(GrepError::IndexCorrupt { .. })
     );
     assert_eq!(recording.counts().deletes, 0);
@@ -2635,7 +2641,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .collect();
     let reaped_bytes = listed_bytes(&store, &[grep_prefix(&namespace_id)]).await;
     let reaped = collector
-        .gc_namespace(&namespace_id, u64::MAX)
+        .gc_namespace(&namespace_id)
         .await
         .expect("reap tombstone");
     assert!(reaped.namespace_reaped);
@@ -2661,9 +2667,9 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .await
         .expect("absent extension");
     assert!(
-        worker(&store)
+        collector_at(&store, clock_past_every_grace_window())
             .await
-            .gc_namespace(&absent, u64::MAX)
+            .gc_namespace(&absent)
             .await
             .expect("reap absent")
             .namespace_reaped
@@ -2735,13 +2741,14 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
             .expect("manifest");
     }
     write_hint(&*store, &namespace_id, ManifestNo(2)).await;
-    let collector = worker(&store).await;
+    let clock = Arc::new(ManualClock::new(now_ms));
+    let collector = collector_at(&store, clock.clone()).await;
     let superseded_keys = [
         manifest_key(&namespace_id, &ManifestNo(1)),
         segment_key(&namespace_id, &superseded.segment_id),
     ];
     let young = collector
-        .gc_namespace(&namespace_id, now_ms)
+        .gc_namespace(&namespace_id)
         .await
         .expect("young successor pass");
     assert_eq!(
@@ -2751,8 +2758,9 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
     for key in &superseded_keys {
         assert!(store.head(key).await.expect("head").is_some(), "{key}");
     }
+    clock.advance_ms(1);
     let aged = collector
-        .gc_namespace(&namespace_id, now_ms + 1)
+        .gc_namespace(&namespace_id)
         .await
         .expect("aged successor pass");
     assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 1));

@@ -1,6 +1,7 @@
 //! Shared fixtures for the crate's integration tests.
 
 use loonfs::publish::{CommitCandidate, CommitIntent};
+use loonfs::test_support::maintenance_past_the_grace_window;
 use loonfs::{
     ActorId, AdvanceRetentionFloorOptions, AdvanceRetentionResponse, ChangeSeq, Commit,
     CompleteUploadBody, ContentRef, DeleteOptions, DirectoryPageCursor, Error, ErrorCode,
@@ -11,7 +12,6 @@ use loonfs::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 pub(crate) use loonfs_test_support::block_on::block_on;
-use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
@@ -120,15 +120,6 @@ pub(crate) fn store(root: &Path) -> SharedObjectStore {
     Arc::new(LocalFsStore::new(root).expect("create local-fs store"))
 }
 
-pub(crate) async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store)
-        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
-        .min_publish_interval_ms(0)
-        .build()
-        .await
-        .expect("build writer")
-}
-
 pub(crate) async fn writer_epoch(store: &SharedObjectStore, namespace_id: &NamespaceId) -> u64 {
     loonfs::control::load_namespace_read_state(
         store,
@@ -203,31 +194,6 @@ pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: 
         }
     }
     panic!("compaction did not finish within 32 steps");
-}
-
-/// Builds a maintenance handle on `store` whose wall clock is one default
-/// grace window ahead of the system clock, so a retention advance through it
-/// can pass every commit made before the call.
-pub(crate) async fn maintenance_past_the_grace_window(store: SharedObjectStore) -> Maintenance {
-    let clock = Arc::new(ManualClock::at_system_time());
-    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
-    let writer_id = loonfs_test_support::ids::writer_id("retention-maintenance");
-    LoonFs::builder_with_store(store)
-        .writer_id(writer_id.clone())
-        .wall_clock(clock)
-        .build()
-        .await
-        .expect("build the retention maintenance handle")
-        .maintenance(writer_id)
-}
-
-/// A reader with nothing cached, so its first read loads the current manifest.
-pub(crate) async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {
-    LoonFs::builder_with_store(store)
-        .read_only()
-        .build()
-        .await
-        .expect("build a fresh reader")
 }
 
 /// One handle set per test fixture: a writer, its derived reader, and an

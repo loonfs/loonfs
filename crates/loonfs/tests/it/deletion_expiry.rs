@@ -3,6 +3,7 @@
 
 use crate::common::*;
 use loonfs::publish::{CommitIntent, FilesystemOperation};
+use loonfs::test_support::writer;
 use loonfs::{ChangeSeq, CommitId, DeleteDirectoryBehavior, ErrorCode, InodeId, LoonFs};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};

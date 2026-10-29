@@ -65,8 +65,12 @@ impl Intercept {
 /// Observes or changes the disposition of object-store operations.
 #[async_trait]
 pub trait Interceptor: Send + Sync + Debug {
+    /// A value that the store keeps until the wrapped operation finishes or
+    /// its caller drops the operation.
+    type Guard: Send;
+
     /// Runs before the wrapped operation.
-    async fn before(&self, context: &OperationContext<'_>) -> Intercept;
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, Self::Guard);
 
     /// Runs after the wrapped operation.
     fn after(&self, _context: &OperationContext<'_>, _outcome: &Outcome) {}
@@ -98,14 +102,17 @@ impl<S, I: Interceptor> InterceptStore<S, I> {
         &self.interceptor
     }
 
-    /// Runs `call` between the interceptor's `before` and `after` hooks.
+    /// Runs `call` between the interceptor's `before` and `after` hooks,
+    /// and keeps the interceptor's guard until `call` finishes or the caller
+    /// drops this future.
     async fn intercepted<T>(
         &self,
         context: &OperationContext<'_>,
         call: impl Future<Output = Result<T, ObjectStoreError>>,
         outcome: fn(&Result<T, ObjectStoreError>) -> Outcome,
     ) -> Result<T, ObjectStoreError> {
-        let intercept = match self.interceptor.before(context).await {
+        let (intercept, _guard) = self.interceptor.before(context).await;
+        let intercept = match intercept {
             Intercept::FailBefore(error) => return Err(error),
             intercept => intercept,
         };
@@ -298,7 +305,7 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         Box::pin(
             stream::once(async move {
                 let context = OperationContext::new(&prefix, OperationKind::List);
-                let intercept = interceptor.before(&context).await;
+                let (intercept, _guard) = interceptor.before(&context).await;
                 let calls_after = intercept.calls_after();
                 match intercept {
                     Intercept::FailBefore(error) | Intercept::FailAfter(error) => Err(error),

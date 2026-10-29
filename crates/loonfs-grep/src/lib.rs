@@ -22,13 +22,13 @@ pub mod keyspace;
 pub mod manifest;
 mod query;
 mod reads;
+mod segments;
 mod service;
 mod step_budget;
 mod worker;
 
 pub use cache::{
-    new_grep_block_cache, DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey,
-    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 pub use config::{GrepWorkerConfig, GrepWorkerConfigError};
 pub use error::{GrepError, Result};

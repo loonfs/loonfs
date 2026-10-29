@@ -9,6 +9,11 @@
 //! and answers, making this crate the readable statement of what the
 //! metadata protocol means. Never share code with core: divergence detection
 //! is this crate's entire value.
+//!
+//! Both sides use the vocabulary types of `loonfs-types`, and one rule in that
+//! crate is shared: [`NameKey::for_display_name`](loonfs_types::NameKey::for_display_name)
+//! folds a display name into the key that bindings compare, so the
+//! differential suite can't detect a bug in that rule.
 
 mod bindings;
 mod error;

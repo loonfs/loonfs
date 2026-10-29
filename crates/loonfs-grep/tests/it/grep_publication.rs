@@ -1,11 +1,12 @@
 //! Publication recovery must not clean up resources a manifest may name.
 
-use crate::common::{control, GrepHost};
+use crate::common::{collector_at, control, GrepHost};
 use loonfs::{LoonFs, SharedObjectStore};
 use loonfs_grep::keyspace::manifest_key;
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GREP_GC_GRACE_WINDOW_MS};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
@@ -91,10 +92,10 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
             .expect("successor exists")
             .last_modified_at_ms
             .expect("timestamp");
-        // Advance GC's explicit clock past manifest retention without sleeping.
-        successor
-            .worker
-            .gc_namespace(&namespace_id, modified + GREP_GC_GRACE_WINDOW_MS + 1)
+        let clock = Arc::new(ManualClock::new(modified + GREP_GC_GRACE_WINDOW_MS + 1));
+        collector_at(&base, clock)
+            .await
+            .gc_namespace(&namespace_id)
             .await
             .expect("collect the old manifest");
         assert!(base.get(&first_key, None).await.expect("first").is_none());

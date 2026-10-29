@@ -1,6 +1,5 @@
 //! Public grep failures and their wire-code classification.
 
-use crate::manifest::GrepManifestError;
 use loonfs::CoreError;
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::ObjectStoreErrorKind;
@@ -10,8 +9,7 @@ use thiserror::Error;
 /// Failure returned by grep queries or maintenance.
 ///
 /// The variants preserve only distinctions that change caller or operator
-/// action. Detailed manifest loading and publication failures remain available
-/// internally as [`GrepManifestError`].
+/// action.
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum GrepError {
@@ -148,27 +146,6 @@ impl GrepError {
                 std::borrow::Cow::Borrowed("grep index publication conflict; retry")
             }
             _ => std::borrow::Cow::Owned(self.to_string()),
-        }
-    }
-}
-
-impl From<GrepManifestError> for GrepError {
-    fn from(error: GrepManifestError) -> Self {
-        match error {
-            GrepManifestError::Store {
-                object_key,
-                message,
-                kind,
-            } => Self::StoreUnavailable {
-                object_key,
-                message,
-                kind,
-            },
-            GrepManifestError::Conflict { object_key } => Self::PublicationConflict { object_key },
-            error @ (GrepManifestError::Corrupt { .. }
-            | GrepManifestError::IdentityMismatch { .. }) => Self::IndexCorrupt {
-                message: error.to_string(),
-            },
         }
     }
 }

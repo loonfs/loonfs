@@ -2,9 +2,7 @@
 
 use crate::codec::IndexRow;
 use crate::manifest::GrepManifestState;
-use loonfs::engine::{
-    DecodedBlockCache, DecodedBlockCacheConfig, DecodedSegmentBlock, SegmentCacheKey,
-};
+use loonfs::engine::{DecodedBlockCache, DecodedSegmentBlock, SegmentCacheKey};
 use loonfs_types::format::segment_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use std::sync::Arc;
 
@@ -17,11 +15,6 @@ pub type GrepBlockCache = DecodedBlockCache<SegmentCacheKey, DecodedGrepBlock>;
 /// A decoded grep block.
 pub type DecodedGrepBlock = DecodedSegmentBlock<IndexRow, Arc<GrepManifestState>>;
 pub type GrepBlockCacheKey = SegmentCacheKey;
-
-/// Creates a grep block cache with a budget of `max_decoded_bytes`.
-pub fn new_grep_block_cache(max_decoded_bytes: usize) -> GrepBlockCache {
-    GrepBlockCache::new(DecodedBlockCacheConfig::new(max_decoded_bytes))
-}
 
 #[cfg(test)]
 mod tests {

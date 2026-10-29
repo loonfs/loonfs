@@ -9,6 +9,7 @@
 //! path.
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
+use crate::test_support::maintenance_past_the_grace_window;
 use crate::{
     LoonFs, MaintainMetadataOptions, Maintenance, MetadataCompactionOutcome,
     MetadataCompactionPolicy, NamespaceId, SharedObjectStore, Writable,
@@ -71,22 +72,6 @@ async fn manual_deployment(
     let scheduled =
         writer.maintenance(loonfs_test_support::ids::writer_id("scheduled-maintenance"));
     (writer, standalone, scheduled, recorder)
-}
-
-/// Builds a maintenance handle on `store` whose wall clock is one default
-/// grace window ahead of the system clock, so a retention advance through it
-/// can pass every commit made before the call.
-async fn maintenance_past_the_grace_window(store: SharedObjectStore) -> Maintenance {
-    let clock = Arc::new(ManualClock::at_system_time());
-    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
-    let writer_id = loonfs_test_support::ids::writer_id("retention-maintenance");
-    LoonFs::builder_with_store(store)
-        .writer_id(writer_id.clone())
-        .wall_clock(clock)
-        .build()
-        .await
-        .expect("build the retention maintenance handle")
-        .maintenance(writer_id)
 }
 
 fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u64 {
@@ -821,12 +806,11 @@ struct RivalFold {
 
 #[async_trait::async_trait]
 impl Interceptor for RivalFold {
-    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
+    type Guard = ();
+
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
         use std::sync::atomic::Ordering::SeqCst;
-        let kind = context.kind();
-        let writes =
-            OperationSelector::Put.matches(kind) || OperationSelector::CompareAndSwap.matches(kind);
-        if writes
+        if OperationSelector::Put.matches(context.kind())
             && loonfs_objectstore::layout::manifest_no_of(context.key()).is_some()
             && self
                 .races_left
@@ -859,7 +843,7 @@ impl Interceptor for RivalFold {
             .await
             .expect("the rival folds");
         }
-        Intercept::Continue
+        (Intercept::Continue, ())
     }
 }
 

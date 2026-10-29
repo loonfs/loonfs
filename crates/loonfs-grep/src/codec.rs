@@ -14,6 +14,26 @@ pub(crate) const GRAM_LEN: usize = 3;
 /// Largest content the version-1 eligibility rule admits, in bytes.
 pub const MAX_INDEX_GRAMS_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
+/// True when content participates in the gram index: within the size cap
+/// and text by the grep-family sniff (no NUL byte and valid UTF-8 in the
+/// leading sample; a sample that ends inside a multi-byte character still
+/// counts as valid).
+pub(crate) fn is_indexable_text_content(content: &[u8]) -> bool {
+    const ELIGIBILITY_SAMPLE_BYTES: usize = 8 * 1024;
+
+    if content.len() as u64 > MAX_INDEX_GRAMS_FILE_BYTES {
+        return false;
+    }
+    let sample = &content[..content.len().min(ELIGIBILITY_SAMPLE_BYTES)];
+    if sample.contains(&0) {
+        return false;
+    }
+    match std::str::from_utf8(sample) {
+        Ok(_) => true,
+        Err(error) => error.error_len().is_none() && error.valid_up_to() > 0,
+    }
+}
+
 /// One tokenizer gram: three content bytes, ASCII-case-folded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Gram(pub [u8; GRAM_LEN]);

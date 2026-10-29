@@ -3,8 +3,9 @@
 //! with the embedded runtime.
 
 use crate::common::http_split_support::*;
-use crate::common::{advance_retention_past_the_grace_window, start_server};
+use crate::common::start_server;
 use loonfs::publish::CommitIntent;
+use loonfs::test_support::maintenance_past_the_grace_window;
 use loonfs::{LoonFs, StoreConfig};
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -363,7 +364,11 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         .create_snapshot(&namespace, "retired", None)
         .await
         .expect("create checkpoint");
-    let advanced = advance_retention_past_the_grace_window(&harness, &namespace).await;
+    let advanced = maintenance_past_the_grace_window(harness.store.clone())
+        .await
+        .advance_retention_floor(&namespace)
+        .await
+        .expect("advance the retention floor");
     assert!(
         advanced.retention_floor_seq >= committed.committed_seq,
         "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",

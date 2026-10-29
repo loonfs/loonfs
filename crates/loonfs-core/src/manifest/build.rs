@@ -351,6 +351,7 @@ mod tests {
     use loonfs_types::format::manifest::InodeRecord;
     use loonfs_types::format::segment_blocks::decode_index_block;
     use loonfs_types::{ActorId, CommitId, InodeId, InodeKind};
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn descriptor(namespace_id: &NamespaceId) -> MetadataSegmentRef {
@@ -376,13 +377,13 @@ mod tests {
         ] {
             let directory = tempdir().expect("tempdir");
             let namespace_id = NamespaceId::parse("segment-byte-budget").expect("namespace id");
-            let blocked = BlockingStore::new(
+            let blocked = Arc::new(BlockingStore::new(
                 LocalFsStore::new(directory.path()).expect("store"),
                 KeyPredicate::metadata_segment(),
                 OperationSelector::Put,
-            );
+            ));
             let concurrency =
-                ConcurrencyWatchStore::new(&blocked, KeyPredicate::metadata_segment());
+                ConcurrencyWatchStore::new(Arc::clone(&blocked), KeyPredicate::metadata_segment());
             let store = BufferWatchStore::new(&concurrency, KeyPredicate::metadata_segment());
             let mut puts = MetadataSegmentPuts::new(&store, None, SegmentWriter::Fold);
             blocked.arm();

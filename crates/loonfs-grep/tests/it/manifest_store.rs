@@ -6,7 +6,7 @@ use loonfs_grep::keyspace::{grep_prefix, hint_key, manifest_key, manifests_prefi
 use loonfs_grep::manifest::{
     encode_grep_hint, encode_grep_manifest, load_current_grep_manifest, load_grep_manifest,
     publish_grep_manifest, raise_grep_hint, GrepHint, GrepIndexState, GrepIndexStatus,
-    GrepManifestError, GrepManifestState,
+    GrepManifestState,
 };
 use loonfs_grep::GrepError;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -157,7 +157,7 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
     write_hint(&store, &namespace_id, ManifestNo(4)).await;
     assert_matches!(
         load_current_grep_manifest(&store, &namespace_id, crate::common::observation()).await,
-        Err(GrepManifestError::Corrupt { .. })
+        Err(GrepError::IndexCorrupt { .. })
     );
     let wrong = state(namespace_id.clone(), ManifestNo(5), RunNo(0));
     store
@@ -169,7 +169,7 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
         .expect("misnamed manifest");
     assert_matches!(
         load_grep_manifest(&store, &namespace_id, ManifestNo(4)).await,
-        Err(GrepManifestError::Corrupt { .. })
+        Err(GrepError::IndexCorrupt { .. })
     );
 }
 
@@ -332,7 +332,7 @@ async fn missing_hint_etags_fail_without_repeated_store_attempts() {
         .is_none());
     assert_matches!(
         load_current_grep_manifest(&store, &namespace_id, crate::common::observation()).await,
-        Err(GrepManifestError::Store { .. })
+        Err(GrepError::StoreUnavailable { .. })
     );
     let published = publish_grep_manifest(&raw, None, &first, &deadline)
         .await
@@ -347,7 +347,7 @@ async fn missing_hint_etags_fail_without_repeated_store_attempts() {
             &deadline
         )
         .await,
-        Err(GrepManifestError::Store { .. })
+        Err(GrepError::StoreUnavailable { .. })
     );
     assert_eq!(
         store
@@ -464,14 +464,14 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
             .expect("corrupt chain");
         assert_matches!(
             load_current_grep_manifest(&store, &namespace_id, crate::common::observation()).await,
-            Err(GrepManifestError::Corrupt { .. })
+            Err(GrepError::IndexCorrupt { .. })
         );
     }
 }
 
 #[tokio::test]
 async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
-    use crate::common::GrepHost;
+    use crate::common::collector_at;
     use loonfs::{CoreError, LoonFs, SharedObjectStore};
     use loonfs_test_support::stores::{BlockingStore, MetadataMapStore};
 
@@ -490,7 +490,6 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
-    let host = GrepHost::new(&store, "collector").await;
     let deadline = Deadline::start(Arc::new(ManualClock::new(0)));
     let first = publish_grep_manifest(
         &store,
@@ -535,9 +534,9 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             .await
             .expect("third manifest");
             timer.advance_ms(loonfs_grep::GREP_GC_GRACE_WINDOW_MS + 1);
-            let report = host
-                .worker
-                .gc_namespace(&namespace_id, timer.now_ms())
+            let report = collector_at(&store, timer.clone())
+                .await
+                .gc_namespace(&namespace_id)
                 .await
                 .expect("collect old manifests");
             assert_eq!(report.deleted_other_objects, 2);
