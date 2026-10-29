@@ -145,7 +145,7 @@ fn subject_parts_error(
     }
 }
 
-/// Where one part of the subject came from, which decides the name an
+/// Where one part of the subject came from, which determines the name an
 /// error gives it.
 #[derive(Debug, Clone, Copy)]
 enum SubjectSource {
@@ -310,7 +310,7 @@ impl ResolvedTarget {
         .await
     }
 
-    /// Opens the runtime over a store the caller already holds.
+    /// Opens the runtime over a store the caller already has.
     ///
     /// [`Self::embedded`] opens the profile's configured store and passes it here.
     /// Callers that need to observe store operations may provide a wrapped
@@ -332,7 +332,7 @@ impl ResolvedTarget {
             .writer_id(writer)
             .config(loonfs::RuntimeConfig {
                 inline_content: inline_content.clone(),
-                // A CLI invocation is one solo mutation: holding the commit
+                // A CLI invocation is one solo mutation: keeping the commit
                 // window open would only add its full delay to every command.
                 min_publish_interval_ms: 0,
                 ..loonfs::RuntimeConfig::default()

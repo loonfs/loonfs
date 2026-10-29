@@ -48,7 +48,7 @@ impl NamespacePublisher {
             // tombstone. Handles to this session fail fast on `Deleted`.
             // A session stays in the table while its compaction runs (the
             // drain finds running compactions through the table), so the
-            // delete waits for the cancelled compaction before it forgets
+            // delete waits for the cancelled compaction before it removes
             // the session.
             if let Err(error) = self.wait_for_compaction().await {
                 phase_event!(

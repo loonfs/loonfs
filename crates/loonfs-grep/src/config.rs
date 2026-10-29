@@ -1,4 +1,4 @@
-//! Grep worker step budgets, and how many steps hold file content at once.
+//! Grep worker step budgets, and how many steps keep file content in memory at once.
 
 use crate::{GramIndexBuildPolicy, DEFAULT_MAX_CONCURRENT_GREP_STEPS};
 use loonfs_types::MAX_PAGE_LIMIT;
@@ -19,7 +19,7 @@ pub struct GrepWorkerConfig {
     pub max_files_per_step: usize,
     /// Content bytes read per build step.
     pub max_content_bytes_per_step: u64,
-    /// Build and reorganize steps that hold file content or index segments
+    /// Build and reorganize steps that keep file content or index segments in memory
     /// at once. A host builds one `GrepPassBudget` from it and passes that
     /// budget to every worker it runs.
     pub max_concurrent_steps: usize,

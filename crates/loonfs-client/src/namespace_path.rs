@@ -45,3 +45,20 @@ impl NamespacePath {
         &self.absolute_path
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::assert_matches;
+
+    #[test]
+    fn namespace_path_parse_rejects_invalid_namespace_id() {
+        for namespace in ["bad/name", "Demo", "..", "demo?"] {
+            assert_matches!(
+                NamespacePath::parse(namespace, "/notes.txt"),
+                Err(ClientError::InvalidNamespacePath(_)),
+                "expected invalid namespace path for id {namespace:?}"
+            );
+        }
+    }
+}

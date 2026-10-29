@@ -318,7 +318,7 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
             &OperationClock::start(0, clock),
             crate::limits::MAX_CONTENTION_ATTEMPTS,
             |current: crate::namespace::control::LoadedManifest| async move {
-                Ok(crate::manifest::publish::ManifestChange::Next(
+                Ok(super::super::publish::ManifestChange::Next(
                     Box::new(current.payload().clone()),
                     (),
                 ))

@@ -24,7 +24,7 @@ pub(super) enum Decision {
         counter: DeletedCounter,
     },
     /// Deletes an ended upload session's records, in the order that
-    /// [`crate::upload_records::delete_upload_session_records`] requires.
+    /// [`crate::upload::records::delete_upload_session_records`] requires.
     DeleteUploadSession {
         upload_id: UploadId,
     },
@@ -84,7 +84,7 @@ impl<S: ObjectStore> Sweep<'_, S> {
         Ok(Decision::Delete { key, counter })
     }
 
-    /// Decides what to do with one upload session's records.
+    /// Determines what to do with one upload session's records.
     pub(super) async fn upload(&self, listed: ListedUpload) -> Result<Decision> {
         self.add_listed_bytes(listed.size_bytes);
         match listed.kind {

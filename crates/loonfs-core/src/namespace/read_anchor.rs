@@ -3,11 +3,12 @@
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
 use crate::limits::MAX_POSITION_MOVES;
-use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache, PublishedManifest};
+use crate::manifest::{metadata_basis_from_manifest, PublishedManifest};
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::control::{LoadedHint, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
+use crate::segment::MetadataSegmentCache;
 use crate::wal::{
     discover_tail, replay_discovered_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
 };

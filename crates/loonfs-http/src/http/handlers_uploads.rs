@@ -23,13 +23,11 @@ use loonfs_types::ErrorCode;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    api::v0::{
-        CompleteUploadBody, CreateUploadBody, SignUploadPartsRequest, SignUploadPartsResponse,
-        SignedUploadPart, UploadSession, UploadSessionStatus,
-    },
-    options::DirectMultipartUploadOptions,
-    ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    options::DirectMultipartUploadOptions, CompleteUploadBody, ContentId, ContentRef,
+    CreateUploadBody, NamespaceId, SignUploadPartsRequest, SignUploadPartsResponse,
+    SignedUploadPart, UploadId, UploadSession, UploadSessionStatus,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
 };
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -142,7 +140,7 @@ pub(super) async fn create_upload(
     AppJson(request): AppJson<CreateUploadBody, MAX_UPLOAD_CONTROL_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let namespace = state.open_writer(&namespace_id, subject).await?;
-    // Decoding the body settled which transport this is and that it carries
+    // Decoding the body settled which transport this is and that it includes
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
     match request {
@@ -378,7 +376,7 @@ pub(super) fn presign_time() -> SystemTime {
 /// ref; tokens covering a ref no operation puts are ignored.
 ///
 /// A rejected token is reported whether or not a sibling token verified.
-/// Coverage is still decided per ref — a put whose ref no proof admits is
+/// Coverage is still determined per ref — a put whose ref no proof admits is
 /// refused by the commit engine — but a token this deployment did not mint,
 /// or minted for another namespace, is worth saying out
 /// loud even when the request it arrived in went on to publish.
@@ -675,8 +673,8 @@ mod completion_body_tests {
     use super::*;
     use loonfs::LoonFs;
     use loonfs_types::{
-        api::v0::{CompletedUploadPart, UploadContentClaim, UploadPartChecksumClaim},
-        Checksum, ChecksumAlgorithm,
+        Checksum, ChecksumAlgorithm, CompletedUploadPart, UploadContentClaim,
+        UploadPartChecksumClaim,
     };
 
     const CONTENT: &str =

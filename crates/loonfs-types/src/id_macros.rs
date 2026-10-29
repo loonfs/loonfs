@@ -51,7 +51,7 @@ macro_rules! validation_error {
 /// enabled.
 ///
 /// Type-specific constructors that the macro cannot express (for example
-/// `CommitId::generate` or `NameKey::for_display_name`) live in a separate
+/// `CommitId::generate` or `NameKey::for_display_name`) are in a separate
 /// `impl` block next to the invocation.
 macro_rules! string_id {
     (

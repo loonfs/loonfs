@@ -18,7 +18,7 @@ use tokio::sync::oneshot;
 /// The per-namespace usage stays in the runtime because a namespace id names
 /// a namespace only within one store, and runtimes over other stores may
 /// share the budget. Lock order: this runtime's usage, then the budget's
-/// totals. Neither lock is held across an await.
+/// totals. Neither lock stays locked across an await.
 pub(super) struct PublicationAdmission {
     limits: PublicationPolicy,
     namespaces: Mutex<HashMap<NamespaceId, RequestWeight>>,
@@ -100,7 +100,7 @@ impl PublicationAdmission {
         estimated_request_bytes: usize,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
         // Include the channel, ID copies, fingerprint and queue bookkeeping.
-        // Deletes carry only fixed-size options. Candidate bytes include any
+        // Deletes include only fixed-size options. Candidate bytes include any
         // proof or rejection data retained while waiting to publish.
         let estimated_bytes = estimated_request_bytes
             .saturating_add(512)
@@ -214,7 +214,7 @@ impl Drop for AdmissionPermit {
 }
 
 /// The worker retains admission until delivery, even if the receiver is gone.
-/// A contending caller also holds this permit while retaining its candidate;
+/// A contending caller also keeps this permit while retaining its candidate;
 /// retries share it instead of competing for a second admission slot.
 pub(super) struct AdmittedWaiter<T> {
     sender: oneshot::Sender<T>,

@@ -1,6 +1,6 @@
 //! Namespace installation, numbered publication, and fork ownership contracts.
 
-use crate::commit_engine::NamespaceCommitEngine;
+use crate::commit::engine::NamespaceCommitEngine;
 use crate::manifest::tests::control_requests;
 use crate::test_support::WriterAt;
 use crate::wal::tests::publish;
@@ -13,8 +13,20 @@ use loonfs_objectstore::{
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
-use loonfs_types::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId};
+use loonfs_types::options::AttributeInclusion;
+use loonfs_types::{ErrorCode, ManifestNo, NamespaceId};
 use tempfile::tempdir;
+
+impl<S: ObjectStore> crate::namespace::store::NamespaceStore<S> {
+    /// Acquires the namespace's writer epoch for `writer_id`, as a test that
+    /// needs a fence without a writer session does.
+    pub(crate) async fn acquire_writer_epoch(
+        &self,
+        writer_id: &loonfs_types::WriterId,
+    ) -> crate::error::Result<crate::namespace::writer_epoch::AcquiredWriter> {
+        Ok(self.acquire_writer(writer_id).await?.writer)
+    }
+}
 
 fn context() -> WriterAt {
     crate::test_support::writer_at("writer", 1_000)

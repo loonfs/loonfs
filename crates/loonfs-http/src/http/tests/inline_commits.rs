@@ -3,7 +3,7 @@
 use super::*;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
-use loonfs_types::api::v0::FilesystemChange;
+use loonfs_types::FilesystemChange;
 use loonfs_types::{
     Commit, ContentRef, FEATURE_COMMIT_INLINE_CONTENT,
     LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
@@ -232,9 +232,9 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    let completed: loonfs_types::api::v0::UploadSession =
+    let completed: loonfs_types::UploadSession =
         serde_json::from_slice(&completed).expect("completion");
-    let loonfs_types::api::v0::UploadSessionStatus::Completed {
+    let loonfs_types::UploadSessionStatus::Completed {
         content_ref,
         content_token,
         ..

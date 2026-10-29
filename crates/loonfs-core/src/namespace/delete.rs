@@ -1,5 +1,6 @@
 //! Namespace deletion status published as successive manifests.
 
+use crate::commit::publish_view::WriterPosition;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::publish::ManifestChange;
@@ -10,7 +11,6 @@ use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
-use crate::protocol::WriterPosition;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;

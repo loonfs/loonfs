@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 /// Owns the Tokio runtime that drives one configured store's HTTP IO.
 ///
-/// The provider connector holds only a runtime `Handle`; this type keeps the
+/// The provider connector keeps only a runtime `Handle`; this type keeps the
 /// runtime itself alive for as long as the provider client lives. Clones
 /// share one runtime. Dropping the last clone shuts the runtime down in the
 /// background, so a store dropped inside an async context never blocks or

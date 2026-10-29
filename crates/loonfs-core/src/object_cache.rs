@@ -10,10 +10,10 @@
 //! checking the caller's access to the path or inode. So a caller reaches an
 //! entry that another caller added only after passing the same check.
 
+use crate::block_cache::ObjectStoreScope;
 use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
 };
-use crate::manifest::ObjectStoreScope;
 use bytes::Bytes;
 use std::sync::Arc;
 

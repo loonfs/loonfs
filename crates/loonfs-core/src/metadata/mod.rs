@@ -6,6 +6,7 @@
 
 pub(crate) mod access;
 mod apply;
+mod children_page;
 mod durable_cache;
 mod indexes;
 pub(crate) mod manifest_index;
@@ -16,6 +17,8 @@ mod rows;
 #[cfg(test)]
 mod tests;
 mod view;
+mod view_bindings;
+mod view_revisions;
 mod view_session;
 mod visibility;
 
@@ -26,6 +29,7 @@ pub use loonfs_types::format::manifest::{
     DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 
+pub(crate) use self::children_page::VisibleChildEntry;
 pub(crate) use self::durable_cache::DurableVisibilityCache;
 /// Newest-event-wins tombstone selection used by differential tests.
 #[cfg(test)]
@@ -36,8 +40,7 @@ pub(crate) use self::rows::{
 };
 pub(crate) use self::view::MetadataView;
 pub(crate) use self::view_session::{
-    LeafRevisionPreload, MetadataViewSession, VisibleChildEntry,
-    METADATA_VIEW_SESSION_COUNTER_FIELDS,
+    LeafRevisionPreload, MetadataViewSession, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 pub(crate) use loonfs_types::format::manifest::ActiveDeletionRecord;
 

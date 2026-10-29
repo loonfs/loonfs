@@ -19,7 +19,7 @@ use loonfs_types::{
 use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
 
-/// One admission cap answered in-envelope: 503 `server_busy`, distinct from
+/// One admission cap returned in-envelope: 503 `server_busy`, distinct from
 /// `shutting_down` (drain) and `commit_queue_full` (publisher backpressure).
 pub(super) fn server_busy_error(what: &str) -> ApiResponseError {
     ApiResponseError::new(
@@ -282,7 +282,7 @@ where
         }
     })?;
     // One value is the whole body: `end` rejects trailing data, which no
-    // single field can be blamed for, so this arm carries no param.
+    // single field can be blamed for, so this arm has no param.
     deserializer.end().map_err(|error| {
         ApiResponseError::new(
             ErrorCode::InvalidRequest,
@@ -514,7 +514,7 @@ fn record_abort(
     loonfs::ObjectStoreError::transport("upload body", message)
 }
 
-/// Holds the transfer permit for as long as the write runs, and remembers
+/// Keeps the transfer permit for as long as the write runs, and records
 /// why the body stopped when it did.
 pub(super) struct UploadStreamOutcome {
     abort: Arc<Mutex<Option<UploadStreamAbort>>>,

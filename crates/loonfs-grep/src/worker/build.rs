@@ -34,7 +34,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     ///
     /// The step first reads the checkpoint listing or the change feed to
     /// learn what content it needs. Only then does it wait for a step permit,
-    /// which it holds while it reads that content and until it publishes. A
+    /// which it keeps while it reads that content and until it publishes. A
     /// step that finds the index up to date, or that restarts the backfill,
     /// takes no permit.
     pub async fn build_step(
@@ -285,9 +285,9 @@ enum CollectedProgress {
 /// Plans one backfill step from the files the checkpoint pins. Reads no file
 /// content.
 ///
-/// The enumeration answers the checkpointed state directly — one current
+/// The enumeration returns the checkpointed state directly — one current
 /// revision per retained file, deleted or not, in ascending inode order — so
-/// a step reads pages until one of its budgets is met and remembers the last
+/// a step reads pages until one of its budgets is met and records the last
 /// inode it consumed. The budgets are the ones the step always had: at most
 /// `max_files_per_step` files examined, and content planning stops once
 /// `max_content_bytes_per_step` is reached (the file that crosses it is

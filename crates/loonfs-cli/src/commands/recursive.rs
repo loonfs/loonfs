@@ -163,7 +163,7 @@ where
                         let directory = create_directory(destination);
                         futures::pin_mut!(directory);
                         loop {
-                            // A file may hold the embedded writer's lock while
+                            // A file may keep the embedded writer's lock while
                             // mkdir waits for it. Keep polling transfers here.
                             tokio::select! {
                                 biased;

@@ -16,7 +16,7 @@ use loonfs_test_support::ids::{first_page, nonzero_usize};
 use loonfs_test_support::stores::{
     ConcurrencyWatchStore, KeyPredicate, OperationSelector, RecordingStore,
 };
-use loonfs_types::api::v0::GrepIndexStatus;
+use loonfs_types::GrepIndexStatus;
 use loonfs_types::{
     decode_cursor, AbsolutePath, GrepCursorPosition, GrepPageCursor, GrepRequest, GrepScope,
 };

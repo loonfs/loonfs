@@ -123,9 +123,9 @@ impl Observation {
         self.timer.monotonic_now_ms().saturating_sub(self.at_ms)
     }
 
-    /// Returns whether an answer arriving now is still inside the revalidation bound of this check.
+    /// Returns whether a response arriving now is still inside the revalidation bound of this check.
     ///
-    /// An absent manifest successor confirms a view only if the answer arrives less than
+    /// An absent manifest successor confirms a view only if the response arrives less than
     /// [`READ_REVALIDATION_BOUND_MS`] after the view's previous check (format section 4.2).
     pub fn is_within_revalidation_bound(&self) -> bool {
         self.age_ms() < READ_REVALIDATION_BOUND_MS
@@ -149,7 +149,7 @@ impl Eq for Observation {}
 /// Reads the wall clock as unix milliseconds.
 ///
 /// Every timestamp that reaches durable state — commit, checkpoint, upload
-/// session, maintenance schedule — is stamped here and then carried as a
+/// session, maintenance schedule — is stamped here and then passed on as a
 /// value, so replay below this boundary stays deterministic.
 pub fn current_time_ms() -> u64 {
     SystemWallClock.now_ms()

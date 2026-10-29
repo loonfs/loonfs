@@ -15,7 +15,7 @@ pub(crate) enum StoreProbeRunOutcome {
 }
 
 pub(crate) fn store_probe_run_outcome(
-    response: &loonfs_types::api::v0::StoreProbeResponse,
+    response: &loonfs_types::StoreProbeResponse,
 ) -> StoreProbeRunOutcome {
     let unsupported = response
         .checks
@@ -39,9 +39,7 @@ pub(crate) fn store_probe_run_outcome(
     }
 }
 
-pub(crate) fn store_probe_summary_line(
-    response: &loonfs_types::api::v0::StoreProbeResponse,
-) -> String {
+pub(crate) fn store_probe_summary_line(response: &loonfs_types::StoreProbeResponse) -> String {
     let run_id = &response.run_id;
     let total = response.checks.len();
     match store_probe_run_outcome(response) {
@@ -55,9 +53,7 @@ pub(crate) fn store_probe_summary_line(
     }
 }
 
-pub(super) fn store_probe_report_lines(
-    response: &loonfs_types::api::v0::StoreProbeResponse,
-) -> Vec<String> {
+pub(super) fn store_probe_report_lines(response: &loonfs_types::StoreProbeResponse) -> Vec<String> {
     let mut lines: Vec<String> = response
         .checks
         .iter()
@@ -69,7 +65,7 @@ pub(super) fn store_probe_report_lines(
 
 /// Groups failed probe checks by the one-line message shown by `doctor`.
 pub(super) fn store_probe_failure_group_lines(
-    response: &loonfs_types::api::v0::StoreProbeResponse,
+    response: &loonfs_types::StoreProbeResponse,
 ) -> Vec<String> {
     let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
     for check in &response.checks {
@@ -221,8 +217,8 @@ pub(super) fn format_utc_ms(unix_ms: u64) -> String {
 }
 
 /// Formats one change-feed event for human-readable output.
-pub(super) fn event_descriptor(event: &loonfs_types::api::v0::FilesystemChange) -> String {
-    use loonfs_types::api::v0::FilesystemChange;
+pub(super) fn event_descriptor(event: &loonfs_types::FilesystemChange) -> String {
+    use loonfs_types::FilesystemChange;
     match event {
         FilesystemChange::DirectoryCreated { display_name, .. }
         | FilesystemChange::FileCreated { display_name, .. } => {
@@ -270,7 +266,7 @@ pub(super) fn event_descriptor(event: &loonfs_types::api::v0::FilesystemChange) 
     }
 }
 
-pub(super) fn event_summary(events: &[loonfs_types::api::v0::FilesystemChange]) -> String {
+pub(super) fn event_summary(events: &[loonfs_types::FilesystemChange]) -> String {
     const SHOWN: usize = 3;
     if events.is_empty() {
         return "-".to_owned();

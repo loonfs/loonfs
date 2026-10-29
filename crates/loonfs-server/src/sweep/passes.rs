@@ -1,6 +1,8 @@
 //! The first due step for each held session and the two host intervals.
 
-use super::{index_pending, lock, GarbageCollection, Overlap, RunningSweep, Sweep, SweepCall};
+use super::retries::SweepCall;
+use super::visit::Overlap;
+use super::{index_pending, lock, GarbageCollection, RunningSweep, Sweep};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, NamespaceId};
 use loonfs_http::panic_message;

@@ -11,7 +11,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{app, AppConfig, GarbageCollection, JobMode, ServerConfig, StoreConfig};
-use loonfs_types::api::v0::{self, GrepIndex};
+use loonfs_types::GrepIndex;
 use loonfs_types::{
     CapabilityDocument, ChangeSeq, ErrorResponse, GrepResponse, NamespaceId,
     RunMaintenanceResponse, API_GROUP_QUERY_V0, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
@@ -224,7 +224,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     // than inventing a namespace-not-found.
     assert_eq!(
         index_status(&router, &namespace_id).await.status,
-        v0::GrepIndexStatus::Disabled
+        loonfs_types::GrepIndexStatus::Disabled
     );
 
     let enabled: GrepIndex = response_json(
@@ -241,7 +241,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     // checkpoint captured — not a watermark it has not reached.
     assert_matches!(
         &enabled.status,
-        v0::GrepIndexStatus::Backfilling {
+        loonfs_types::GrepIndexStatus::Backfilling {
             captured_seq: ChangeSeq(0),
             cursor_inode_id: None,
             ..
@@ -254,7 +254,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     let active = index_status(&router, &namespace_id).await;
     assert_eq!(
         active.status,
-        v0::GrepIndexStatus::Active {
+        loonfs_types::GrepIndexStatus::Active {
             built_through_seq: ChangeSeq(0),
             next_event_index: 0,
         }
@@ -315,7 +315,10 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
 
     // Disabling is one durable compare-and-swap; the sweep reads it.
     let disabled_response = disable_grep(&router, &namespace_id).await;
-    assert_eq!(disabled_response.status, v0::GrepIndexStatus::Disabled);
+    assert_eq!(
+        disabled_response.status,
+        loonfs_types::GrepIndexStatus::Disabled
+    );
     assert!(!disabled_response.reorganize_pending);
     let disabled = load_current_grep_manifest(&*store, &namespace_id, observation())
         .await
@@ -741,7 +744,7 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     assert_matches!(
         index_status(&router, &namespace_id).await.status,
-        v0::GrepIndexStatus::Backfilling { .. },
+        loonfs_types::GrepIndexStatus::Backfilling { .. },
         "the enable published a backfill this deployment left for someone else"
     );
 

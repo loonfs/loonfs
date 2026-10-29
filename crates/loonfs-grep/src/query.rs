@@ -165,7 +165,7 @@ fn analyze(hir: &Hir) -> Analysis {
                 return inner;
             }
             // The subexpression occurs at least once, so its constraints
-            // hold; its bytes are not a fixed run at this position.
+            // contain; its bytes are not a fixed run at this position.
             let mut sets = inner.sets;
             if let Some(run) = inner.run {
                 push_run_grams(&mut sets, &run);

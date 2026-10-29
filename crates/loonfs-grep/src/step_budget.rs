@@ -1,4 +1,4 @@
-//! The limit on grep steps that hold file content or index segments, which
+//! The limit on grep steps that keep file content or index segments, which
 //! a host shares across its grep workers.
 
 use std::num::NonZeroUsize;
@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
-/// Default for how many grep build and reorganize steps hold file content or
+/// Default for how many grep build and reorganize steps keep file content or
 /// index segments at once.
 pub const DEFAULT_MAX_CONCURRENT_GREP_STEPS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
-/// How many grep build and reorganize steps hold file content or index
+/// How many grep build and reorganize steps keep file content or index
 /// segments at once.
 ///
 /// Clones share one set of permits. A host that passes clones of one budget
@@ -28,18 +28,18 @@ struct GrepPassBudgetInner {
     waiting: AtomicUsize,
 }
 
-/// Steps that hold a permit of a [`GrepPassBudget`], and steps that wait for
+/// Steps that have a permit of a [`GrepPassBudget`], and steps that wait for
 /// one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GrepPassBudgetStats {
-    /// Steps that hold a permit.
+    /// Steps that have a permit.
     pub running: usize,
     /// Steps that found work and wait for a permit.
     pub waiting: usize,
 }
 
 impl GrepPassBudget {
-    /// Creates a budget that lets `max_concurrent_steps` steps hold file
+    /// Creates a budget that lets `max_concurrent_steps` steps keep file
     /// content or index segments at once.
     pub fn new(max_concurrent_steps: NonZeroUsize) -> Self {
         let max_concurrent_steps = max_concurrent_steps.get().min(Semaphore::MAX_PERMITS);
@@ -60,7 +60,7 @@ impl GrepPassBudget {
         }
     }
 
-    /// Waits for a permit to hold file content or index segments. Dropping
+    /// Waits for a permit to keep file content or index segments. Dropping
     /// the wait or the permit returns it.
     pub(crate) async fn permit(&self) -> SemaphorePermit<'_> {
         let _waiting = WaitingStep::new(&self.inner.waiting);

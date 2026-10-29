@@ -70,7 +70,7 @@ async fn write_delta_runs(store: SharedObjectStore, namespaces: &[&NamespaceId])
             .await
             .expect("create namespace");
         let namespace = writer.open_namespace(namespace_id).expect("open namespace");
-        for index in 0..DEFAULT_MAX_DELTA_RUNS + 2 {
+        for index in 0..DEFAULT_MAX_DELTA_RUNS.get() + 2 {
             namespace
                 .put_file(&format!("/file-{index}"), b"body", &actor)
                 .await

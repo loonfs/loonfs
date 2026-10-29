@@ -4,7 +4,7 @@
 //! or a public audience. LoonFS stores principal ids as opaque strings and
 //! never resolves them.
 
-use crate::api::v0::headers;
+use crate::headers;
 use crate::id_macros::{numeric_id, string_id, validation_error};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,7 +15,7 @@ use thiserror::Error;
 const MAX_PRINCIPAL_ID_BYTES: usize = 256;
 /// Most principals one access row may name.
 pub const MAX_ACCESS_GRANT_ENTRIES: usize = 1_000;
-/// Most bytes of principal ids one access row may hold, summed over its entries.
+/// Most bytes of principal ids one access row may contain, summed over its entries.
 pub const MAX_ACCESS_GRANTS_PRINCIPAL_BYTES: usize = 65_536;
 
 validation_error!(
@@ -142,7 +142,7 @@ impl SubjectPart {
         }
     }
 
-    /// Returns the name of the HTTP request header that carries the part.
+    /// Returns the name of the HTTP request header that includes the part.
     pub const fn header_name(self) -> &'static str {
         match self {
             Self::Principals => headers::PRINCIPALS,
@@ -369,10 +369,10 @@ impl AccessRights {
 
     /// Every right.
     pub const ALL: Self = Self(u8::MAX >> (8 - AccessRight::ALL.len()));
-    /// The set holding only `admin`.
+    /// The set that contains only `admin`.
     pub const ADMIN: Self = Self(AccessRight::Admin.bit());
 
-    /// Reports whether the set holds `right`.
+    /// Reports whether the set contains `right`.
     pub fn contains(self, right: AccessRight) -> bool {
         self.0 & right.bit() != 0
     }
@@ -397,7 +397,7 @@ impl AccessRights {
         self.0 & !other.0 == 0
     }
 
-    /// Reports whether the set holds no rights.
+    /// Reports whether the set contains no rights.
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
@@ -588,7 +588,7 @@ pub enum AccessGrantsError {
     /// More principal id bytes than [`MAX_ACCESS_GRANTS_PRINCIPAL_BYTES`].
     #[error("access grants hold {principal_bytes} bytes of principal ids, which exceeds the maximum of {MAX_ACCESS_GRANTS_PRINCIPAL_BYTES} bytes")]
     TooManyPrincipalBytes {
-        /// Bytes of principal ids the map held.
+        /// Bytes of principal ids the map contained.
         principal_bytes: usize,
     },
     /// An entry granted nothing.
@@ -683,7 +683,7 @@ pub enum PrincipalSetError {
     /// More identities than one request may act as.
     #[error("principal set names {principals} principals, which exceeds the maximum of {MAX_SUBJECT_PRINCIPALS}")]
     TooManyPrincipals {
-        /// Number of identities the rejected set held.
+        /// Number of identities the rejected set contained.
         principals: usize,
     },
     /// One of the ids is not a valid principal id.

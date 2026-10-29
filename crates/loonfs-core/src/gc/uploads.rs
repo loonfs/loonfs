@@ -6,9 +6,9 @@ use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::CONTENT_RECLAMATION_GRACE_WINDOW_MS;
 use crate::namespace::store::NamespaceStore;
-use crate::protocol::AbandonedUpload;
 use crate::time::OperationClock;
-use crate::upload_records::{OutcomeCreation, UploadSessionState};
+use crate::upload::abort::AbandonedUpload;
+use crate::upload::records::{OutcomeCreation, UploadSessionState};
 use futures::{future, Stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::upload_session_prefix;
 use loonfs_objectstore::layout::{upload_id_of, upload_outcome_id_of};
@@ -189,7 +189,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }))
     }
 
-    /// Reads the records of a listed session that the pass doesn't already know
+    /// Reads the records of a listed session that the pass hasn't already read
     /// to be completed, or returns `None` if the session record is gone.
     ///
     /// A session listed without an outcome is read as open, without reading the
@@ -347,14 +347,14 @@ pub(super) fn sweep_completed_session(
     }
 }
 
-/// A session held over for a wait that ends at `at_ms`.
+/// A session kept for a wait that ends at `at_ms`.
 fn retain_until(at_ms: u64) -> UploadSessionSweep {
     UploadSessionSweep::Retain {
         reclaimable_at_ms: Some(at_ms),
     }
 }
 
-/// A session held over for a reason no clock resolves.
+/// A session kept for a reason no clock resolves.
 fn retain_undated() -> UploadSessionSweep {
     UploadSessionSweep::Retain {
         reclaimable_at_ms: None,

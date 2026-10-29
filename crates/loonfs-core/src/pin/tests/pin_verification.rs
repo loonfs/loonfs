@@ -104,9 +104,9 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        crate::manifest::CompactionAdmission::AnySize,
+        crate::compaction::CompactionAdmission::AnySize,
         selected.compactor_epoch(),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("compact");

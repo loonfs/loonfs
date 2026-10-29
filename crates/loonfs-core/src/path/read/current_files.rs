@@ -3,7 +3,7 @@
 //! Missing or unreadable inodes return [`CurrentFile::Hidden`], with no path or
 //! revision.
 
-use super::materialized_view::LoadedMetadataView;
+use super::loaded_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CURRENT_FILES_PER_STAT;

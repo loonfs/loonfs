@@ -37,8 +37,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
-    // Parse the arguments first. `--version` and `--help` then answer even
-    // when `LOONFS_TRACE` holds a value this build rejects.
+    // Parse the arguments first. `--version` and `--help` then respond even
+    // when `LOONFS_TRACE` has a value this build rejects.
     let args = Args::parse();
     loonfs_server::init_tracing_from_env()?;
     let config = match args.config {
@@ -58,9 +58,8 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
             writeln!(std::io::stdout(), "{}", config.check_summary())?;
         }
         if args.probe_store {
-            let report = loonfs_types::api::v0::StoreProbeResponse::from(
-                loonfs_server::probe_store(&config).await?,
-            );
+            let report =
+                loonfs_types::StoreProbeResponse::from(loonfs_server::probe_store(&config).await?);
             let mut stdout = std::io::stdout().lock();
             for check in &report.checks {
                 writeln!(stdout, "{}", check.check_line())?;

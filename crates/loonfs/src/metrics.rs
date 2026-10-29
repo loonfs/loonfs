@@ -32,7 +32,7 @@ pub const RESULT_OK: &str = "ok";
 pub const RESULT_ERROR: &str = "error";
 /// `result` label for a lookup served from the cache.
 pub const RESULT_HIT: &str = "hit";
-/// `result` label for a lookup the cache did not hold.
+/// `result` label for a lookup the cache did not have.
 pub const RESULT_MISS: &str = "miss";
 
 /// Bucket upper bounds for a latency histogram, in seconds.
@@ -394,7 +394,7 @@ impl GaugeHandle for GaugeValue {
 ///
 /// The sum accumulates as a fixed-point integer stepping by one millionth
 /// rather than as a float: every value this runtime files is a duration in
-/// seconds or a small count, both of which that step holds exactly at the
+/// seconds or a small count, both of which that step has exactly at the
 /// scales involved, and integer addition needs no compare-and-swap loop the
 /// way a float sum would. A negative observation cannot arise from any
 /// instrument here and contributes nothing to the sum if one ever does.
@@ -487,7 +487,7 @@ pub struct MetricEntry {
     pub value: MetricValue,
 }
 
-/// Every instrument a [`DefaultMetricsRecorder`] holds, read at one moment.
+/// Every instrument a [`DefaultMetricsRecorder`] keeps, read at one moment.
 ///
 /// Entries are ordered by name and then by labels, so a host that renders a
 /// snapshot renders it deterministically without sorting again.

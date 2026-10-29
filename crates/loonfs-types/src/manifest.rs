@@ -38,7 +38,7 @@ pub const MAX_NAMESPACE_MANIFEST_BYTES: usize = 512 * 1024 * 1024;
 /// Version 1 uses the [block layout](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a7-block-segment-encoding).
 pub const METADATA_SEGMENT_ENCODING: u32 = 1;
 
-/// Identifies the durable payload family carried by a namespace-manifest envelope.
+/// Identifies the durable payload family in a namespace-manifest envelope.
 ///
 /// See [durable object families](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a8-object-keys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,13 +57,13 @@ impl NamespaceManifestKind {
     }
 }
 
-/// Identifies the compaction tier that holds a metadata run.
+/// Identifies the compaction tier that contains a metadata run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunTier {
-    /// Holds rows that no compaction has dropped.
+    /// Contains rows that no compaction has dropped.
     Delta,
-    /// Holds rows produced by a compaction over the oldest run.
+    /// Contains rows produced by a compaction over the oldest run.
     Base,
 }
 
@@ -141,7 +141,7 @@ impl NamespaceAccess {
         Self::Unrestricted {}
     }
 
-    /// Reports whether every caller holding the deployment credential may do
+    /// Reports whether every caller with the deployment credential may do
     /// everything.
     pub const fn is_unrestricted(&self) -> bool {
         matches!(self, Self::Unrestricted {})
@@ -206,7 +206,7 @@ impl ManifestActivity {
     }
 }
 
-/// Carries one complete namespace file-set description inside a manifest envelope.
+/// Contains one complete namespace file-set description inside a manifest envelope.
 ///
 /// See [manifest publication](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#72-publishing-a-materialized-file-set).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,7 +441,7 @@ impl NamespaceManifestPayload {
     /// Rejects the changes that [`Self::ensure_successor`] rejects in `later`,
     /// a manifest with any higher number.
     ///
-    /// Each rule that a successor keeps also holds between any two manifests
+    /// Each rule that a successor keeps is also true between any two manifests
     /// of the chain, so a reader that skips the manifests between two numbers
     /// checks the two manifests that it loaded with this.
     pub fn ensure_later(&self, later: &Self) -> Result<(), ManifestChainError> {

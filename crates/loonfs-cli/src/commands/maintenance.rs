@@ -13,9 +13,9 @@ use crate::args::{
 use crate::backend::StepBudget;
 use crate::error::Result;
 use loonfs_client::{GcOptions, ListChangesOptions, ReadAt};
-use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{
-    AdvanceRetentionRequest, ChangeSeq, MetadataMaintenanceRequest, RunMaintenanceResponse,
+    AdvanceRetentionRequest, ChangeSeq, GrepIndexStatus, MetadataMaintenanceRequest,
+    RunMaintenanceResponse,
 };
 
 pub(crate) async fn run_maintenance_command(
@@ -231,7 +231,7 @@ async fn run_maintenance_store_probe(
     let response = context
         .target
         .client
-        .probe_store(&loonfs_types::api::v0::StoreProbeRequest {})
+        .probe_store(&loonfs_types::StoreProbeRequest {})
         .await
         .map_err(|error| context.fail(error))?;
 
@@ -253,7 +253,7 @@ pub(crate) async fn run_changes(
             },
         ),
         &args.pagination.page_limits,
-        |_: &loonfs_types::api::v0::ListChangesResponse| {},
+        |_: &loonfs_types::ListChangesResponse| {},
     )
     .await
     .map_err(|error| context.fail(error))?;
@@ -268,7 +268,7 @@ pub(crate) async fn run_changes(
 /// sequence.
 ///
 /// The sequence is captured before any waiting starts and never re-read:
-/// writes that land afterwards are not waited for, so a namespace that is
+/// writes that are committed afterwards are not waited for, so a namespace that is
 /// being written to cannot keep this command running.
 async fn run_maintenance_index_enable(
     invocation: &Invocation,

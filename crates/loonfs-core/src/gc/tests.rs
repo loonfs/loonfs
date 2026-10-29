@@ -1,7 +1,8 @@
 //! Behavior tests for namespace GC.
 
 use super::options::GcOptions;
-use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
+use crate::commit::engine::{CommitCandidate, NamespaceCommitEngine};
+use crate::compaction::MetadataCompactionPolicy;
 use crate::error::CoreError;
 use crate::in_flight::{STORE_READS_IN_FLIGHT, STORE_WRITES_IN_FLIGHT};
 use crate::limits::{
@@ -12,11 +13,10 @@ use crate::limits::{
 use crate::manifest::tests::{
     compact_a_family_group, create_checkpoint, write_test_file, writer_at,
 };
-use crate::manifest::MetadataCompactionPolicy;
 use crate::manifest::RetentionTarget;
 use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::test_support::WriterAt;
-use crate::upload_records::UploadSessionState;
+use crate::upload::records::UploadSessionState;
 use futures::StreamExt;
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
@@ -24,11 +24,11 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_types::api::v0::GcResponse;
 use loonfs_types::format::control::{
     decode_control_object, ControlObjectKind, PinOwner, PinPayload, UploadOutcome,
     UploadOutcomePayload,
 };
+use loonfs_types::GcResponse;
 use loonfs_types::{ContentRef, ManifestNo, NamespaceId, PinId, UploadId};
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -42,7 +42,7 @@ use loonfs_test_support::stores::{
     replace_object, BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate,
     MetadataMapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
 };
-use loonfs_types::AttributeInclusion;
+use loonfs_types::options::AttributeInclusion;
 use std::assert_matches;
 use tempfile::tempdir;
 
@@ -757,7 +757,7 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
                 .await
                 .expect("load the catalog"),
             upload_id,
-            loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
+            loonfs_types::CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("complete upload");
@@ -822,7 +822,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
                     .await
                     .expect("load the catalog"),
                 &upload_id,
-                loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
+                loonfs_types::CompleteUploadBody::ServiceProxied {},
             )
             .await;
         store.release();
@@ -869,7 +869,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let completion = engine.complete_upload(
         &catalog,
         &upload_id,
-        loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
+        loonfs_types::CompleteUploadBody::ServiceProxied {},
     );
     let abort = async {
         store.wait_until_blocked().await;
@@ -951,7 +951,7 @@ async fn put_file_content_with_id<S: ObjectStore>(
         .load_catalog_entry()
         .await
         .expect("catalog");
-    let stored = crate::storage::content::stage_bytes_under_content_id(
+    let stored = crate::storage::content_staging::stage_bytes_under_content_id(
         store,
         namespace_id.clone(),
         content_id,
@@ -1068,13 +1068,13 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
-            crate::manifest::CompactionAdmission::AnySize,
+            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
-            &crate::manifest::MetadataCompactionCancellation::default(),
+            &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await
         .expect("compact a family group");
-        if matches!(outcome, crate::manifest::CompactionUnitOutcome::NotNeeded) {
+        if matches!(outcome, crate::compaction::CompactionUnitOutcome::NotNeeded) {
             return;
         }
     }
@@ -1869,7 +1869,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
 
     // Compaction merges the delta runs into fresh base segments; the
     // superseded run segments then age out on the next pass.
-    let merge_policy = crate::manifest::MetadataRunPolicy {
+    let merge_policy = crate::segment::MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
@@ -1887,13 +1887,13 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::default(),
-            crate::manifest::CompactionAdmission::AnySize,
+            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
-            &crate::manifest::MetadataCompactionCancellation::default(),
+            &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await
         .expect("compact step");
-        if matches!(report, crate::manifest::CompactionUnitOutcome::NotNeeded) {
+        if matches!(report, crate::compaction::CompactionUnitOutcome::NotNeeded) {
             break;
         }
     }

@@ -1,6 +1,7 @@
 //! Daily listing, session ticks, and their store request costs.
 
-use super::{GarbageCollection, GrepIndexing, Sweep, SweepCall, SweepRetry, SweepState};
+use super::retries::SweepCall;
+use super::{GarbageCollection, GrepIndexing, Sweep, SweepRetry, SweepState};
 use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
@@ -840,7 +841,9 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
     );
 
     let attempts = || server.retry(&namespace_id, SweepCall::Metadata).attempts;
-    while super::backoff_ms(config.tick_interval_ms, attempts()) < super::MAX_SWEEP_BACKOFF_MS {
+    while super::retries::backoff_ms(config.tick_interval_ms, attempts())
+        < super::MAX_SWEEP_BACKOFF_MS
+    {
         let failures = server.visit_failures(SweepCall::Metadata);
         server.tick_after(super::MAX_SWEEP_BACKOFF_MS).await;
         assert_eq!(

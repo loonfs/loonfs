@@ -94,10 +94,6 @@ pub use loonfs_core::{
     MetadataViewError, RetentionTarget, SnapshotPageCursor, StreamRange, WriterFence,
     CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
-pub use loonfs_types::api::v0::{
-    Commit, CompleteUploadBody, CreateUploadBody, FilesystemChange, ListChangesResponse,
-    ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
-};
 pub use loonfs_types::{
     AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
     AttributesProjection, AttributesRevisionNo, BindingVersion, CapabilityDocument, ChangeSeq,
@@ -113,6 +109,10 @@ pub use loonfs_types::{
     SetRetentionWindowResponse, Snapshot, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0,
     API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+};
+pub use loonfs_types::{
+    Commit, CompleteUploadBody, CreateUploadBody, FilesystemChange, ListChangesResponse,
+    ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
@@ -163,7 +163,7 @@ pub mod content_tokens {
     pub use loonfs_core::content::{
         mint_content_token, CompletedUpload, CompletedUploadEvidence, ContentTokenError,
     };
-    pub use loonfs_types::api::v0::ContentToken;
+    pub use loonfs_types::ContentToken;
 }
 
 /// Direct-upload target types used by servers to create presigned URLs.
@@ -254,7 +254,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// An error surfaced by the underlying `loonfs-core` engine.
+    /// An error reported by the underlying `loonfs-core` engine.
     #[error(transparent)]
     Core(#[from] CoreError),
     /// A newer manifest replaced a captured view whose segment is missing.
@@ -306,7 +306,7 @@ impl Error {
 
     /// Returns the structured context the code's consumers report beside it.
     ///
-    /// The embedded surface carries the same details a server puts in its
+    /// The embedded surface includes the same details a server puts in its
     /// error envelope for the same condition, so both backends serve one
     /// contract. Only the engine attaches any; runtime-local failures have
     /// no structured half.

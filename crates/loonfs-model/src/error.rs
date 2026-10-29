@@ -1,4 +1,4 @@
-//! Rule violations the model reports instead of an answer.
+//! Rule violations the model reports instead of a result.
 
 use crate::metadata::DeltaPosition;
 use loonfs_types::{ChangeSeq, InodeId, NameKey};

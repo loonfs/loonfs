@@ -13,12 +13,9 @@ use loonfs_objectstore::{
 use loonfs_server::{ServerConfig, StoreConfig};
 use loonfs_test_support::http::raw_agent;
 use loonfs_types::{
-    api::v0::{
-        CompleteUploadBody, ObjectTransferAccess, UploadContentClaim, UploadMode,
-        UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
-    },
-    ChangeSeq, Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, DestinationBehavior,
-    FilesystemOperation, NamespaceId,
+    ChangeSeq, Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, CompleteUploadBody,
+    DestinationBehavior, FilesystemOperation, NamespaceId, ObjectTransferAccess,
+    UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };
 use std::fmt;
 use std::io::Read as _;

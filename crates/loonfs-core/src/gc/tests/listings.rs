@@ -142,7 +142,7 @@ fn layout_segments(manifest: &crate::namespace::control::LoadedManifest) -> BTre
 
 #[tokio::test]
 async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments() {
-    use crate::manifest::CompactionUnitOutcome;
+    use crate::compaction::CompactionUnitOutcome;
 
     for own_runs in [false, true] {
         let directory = tempdir().expect("directory");
@@ -184,9 +184,9 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                 .compact_metadata_unit(
                     None,
                     MetadataCompactionPolicy::CompactImmediately,
-                    crate::manifest::CompactionAdmission::AnySize,
+                    crate::compaction::CompactionAdmission::AnySize,
                     loonfs_types::CompactorEpoch(0),
-                    &crate::manifest::MetadataCompactionCancellation::default(),
+                    &crate::compaction::MetadataCompactionCancellation::default(),
                 )
                 .await
                 .expect("compact");
@@ -259,7 +259,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
 /// more than one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
 #[tokio::test]
 async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_it() {
-    use crate::manifest::CompactionUnitOutcome;
+    use crate::compaction::CompactionUnitOutcome;
 
     const DELTA_RUNS: usize = 8;
     let directory = tempdir().expect("directory");
@@ -312,9 +312,9 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
-            crate::manifest::CompactionAdmission::AnySize,
+            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
-            &crate::manifest::MetadataCompactionCancellation::default()
+            &crate::compaction::MetadataCompactionCancellation::default()
         )
         .await
         .expect("compact"),

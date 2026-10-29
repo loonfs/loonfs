@@ -43,7 +43,7 @@ pub(crate) const S3_CHECKSUM_MODE_HEADER: &str = "x-amz-checksum-mode";
 /// object has to be uploaded in parts.
 ///
 /// Amazon S3 user guide, "Uploading objects": the largest object that can be
-/// uploaded in a single PUT is 5 GB, and the provider answers
+/// uploaded in a single PUT is 5 GB, and the provider returns
 /// `EntityTooLarge` above it.
 pub const AWS_S3_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
@@ -155,7 +155,7 @@ impl S3CompatiblePresigner {
     /// Signs a `HeadObject` that asks the provider to report the object's
     /// stored full-object checksum.
     ///
-    /// `GetObjectAttributes` would answer the same question on AWS S3 and
+    /// `GetObjectAttributes` would return the same result on AWS S3 and
     /// return 501 on Cloudflare R2, so the head is the only portable surface
     /// and the only one this crate signs.
     pub(crate) async fn presign_head(
@@ -281,7 +281,7 @@ impl S3CompatiblePresigner {
         .await
     }
 
-    /// Signs a create-only `CompleteMultipartUpload` carrying the
+    /// Signs a create-only `CompleteMultipartUpload` that includes the
     /// whole-object checksum when given.
     ///
     /// AWS S3 treats that checksum as a precondition and refuses to assemble

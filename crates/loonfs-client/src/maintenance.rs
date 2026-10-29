@@ -4,7 +4,6 @@
 use crate::operations;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, Result};
-use loonfs_types::api::v0::{GrepIndex, StoreProbeRequest, StoreProbeResponse};
 use loonfs_types::options::GcOptions;
 use loonfs_types::{
     headers, ActorId, AdvanceRetentionRequest, AdvanceRetentionResponse, Checkpoint, GcRequest,
@@ -13,6 +12,7 @@ use loonfs_types::{
     RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceRequest,
     RunMaintenanceResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
 };
+use loonfs_types::{GrepIndex, StoreProbeRequest, StoreProbeResponse};
 use std::num::NonZeroU64;
 
 /// A pager over existing checkpoints.
@@ -269,9 +269,9 @@ impl Client {
     /// LoonFS depends on (maintenance API group).
     ///
     /// The probe writes and deletes objects under a scratch prefix, so it
-    /// runs only when asked. A store that fails a check answers with that
+    /// runs only when asked. A store that fails a check reports that
     /// check reported failed rather than with an error: the probe ran, and
-    /// the answer is that the store is wrong.
+    /// the result is that the store is wrong.
     /// Retrying this request starts a distinct attempt.
     pub async fn probe_store(&self, request: &StoreProbeRequest) -> Result<StoreProbeResponse> {
         let url = format!("{}/v0/maintenance/store/probe", self.base_url);

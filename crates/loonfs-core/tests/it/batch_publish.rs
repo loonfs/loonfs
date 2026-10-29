@@ -18,10 +18,9 @@ use loonfs_test_support::stores::{
     replace_object, FailStore, InjectedError, OperationContext, OperationKind,
 };
 use loonfs_types::{
-    api::v0::FilesystemChange,
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
     AbsolutePath, ActorId, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    InodeId, NamespaceId,
+    FilesystemChange, InodeId, NamespaceId,
 };
 use std::assert_matches;
 use std::path::Path;
@@ -1001,7 +1000,7 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
         error,
         CoreError::CommitIdReuseConflict {
             commit_id,
-            committed: Some(loonfs_types::api::v0::CommittedReceipt {
+            committed: Some(loonfs_types::CommittedReceipt {
                 committed_seq,
                 committed_fingerprint: fingerprint,
             }),
@@ -1133,7 +1132,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         conflict,
         CoreError::CommitIdReuseConflict {
             commit_id,
-            committed: Some(loonfs_types::api::v0::CommittedReceipt {
+            committed: Some(loonfs_types::CommittedReceipt {
                 committed_seq,
                 committed_fingerprint: fingerprint,
             }),

@@ -9,9 +9,10 @@ use loonfs::{
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
+use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AccessGrants, AccessRight, AttributeInclusion, NamespaceAccess, NamespaceId, PrincipalId,
-    PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope,
+    PrincipalSet, Subject, SubjectId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

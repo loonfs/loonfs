@@ -23,7 +23,7 @@ impl PlannedPieces {
     }
 
     /// A content this layer has not seen starts from `below`, the newest
-    /// pieces the layers under it hold for it.
+    /// pieces the layers under it keep for it.
     pub(super) fn insert_piece(
         &mut self,
         below: Option<&ProjectedContent>,

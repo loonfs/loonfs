@@ -63,7 +63,7 @@ fn transport_error(error: reqwest::Error) -> TransportError {
 /// The client names each of these itself, so its TLS stays the same whichever
 /// reqwest features the rest of a build turns on.
 ///
-/// An operating system store often holds old certificates that rustls refuses
+/// An operating system store often contains old certificates that rustls refuses
 /// as trust anchors, so those are skipped and counted, and construction fails
 /// only when the store yields certificates and none of them is usable. Every
 /// certificate in the `ca_cert_path` bundle must load.
@@ -113,7 +113,7 @@ fn tls_config(config: &ClientConfig) -> Result<rustls::ClientConfig> {
     Ok(tls)
 }
 
-/// Reads the PEM certificates at `path`, and refuses a file that holds none.
+/// Reads the PEM certificates at `path`, and refuses a file that contains none.
 fn ca_bundle(path: &str) -> Result<Vec<CertificateDer<'static>>> {
     let pem = fs::read(path)
         .map_err(|err| invalid("ca_cert_path", format!("failed to read `{path}`: {err}")))?;

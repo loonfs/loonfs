@@ -1,6 +1,5 @@
 //! Public facade over the durable content storage helpers.
 
-pub use crate::protocol::CompletedUpload;
 pub use crate::storage::content::DurableContentValidationError;
 #[cfg(any(test, feature = "test-support"))]
 pub use crate::storage::content::{
@@ -11,3 +10,4 @@ pub use crate::storage::content_admission::{
     PreparedContent,
 };
 pub use crate::storage::content_location::ContentLocation;
+pub use crate::upload::complete::CompletedUpload;

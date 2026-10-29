@@ -16,10 +16,8 @@ use loonfs_objectstore::ByteRange;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    api::v0::{
-        CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
-        CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, DownloadRange,
-    },
+    CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
+    CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, DownloadRange,
     FEATURE_DOWNLOADS_DIRECT_GET,
 };
 use std::sync::Arc;

@@ -15,7 +15,7 @@ use thiserror::Error;
 pub enum GrepError {
     // Both messages name the capability key clients gate on (`query.grep`),
     // the same one capability discovery advertises and the `feature` field
-    // of a `not_supported` response carries.
+    // of a `not_supported` response includes.
     /// The namespace has no active grep manifest.
     #[error("feature `query.grep` is not enabled on this namespace")]
     NotEnabled,

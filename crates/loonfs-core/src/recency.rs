@@ -11,7 +11,7 @@ const MIN_COMPACTION_POSITIONS: usize = 16;
 ///
 /// A hit appends the key with a fresh stamp in constant time and leaves its
 /// old position behind as a ghost. The caller stores the returned stamp on
-/// its own entry and answers `is_live` from it, so this holds no second copy
+/// its own entry and returns `is_live` from it, so this keeps no second copy
 /// of the entry table.
 /// Eviction skips ghosts as it pops them, and ghosts are dropped in bulk
 /// once they outnumber the live entries they shadow — amortized constant,
@@ -33,10 +33,10 @@ impl<K> Default for Recency<K> {
 
 impl<K> Recency<K> {
     /// Records an access and returns the stamp the caller must store on its
-    /// entry before calling anything else here: until the entry carries it,
+    /// entry before calling anything else here: until the entry has the stamp,
     /// the position just appended reads as a ghost.
     ///
-    /// Stamps start at 1, so an entry that has never been touched can carry
+    /// Stamps start at 1, so an entry that has never been touched can have
     /// 0 and read as a ghost.
     pub fn touch(&mut self, key: K) -> u64 {
         self.counter = self.counter.saturating_add(1);
@@ -46,7 +46,7 @@ impl<K> Recency<K> {
 
     /// Removes and returns the least recently used live key.
     ///
-    /// `None` means the queue holds no live position at all, so an eviction
+    /// `None` means the queue contains no live position at all, so an eviction
     /// loop must stop: popping again cannot make progress.
     pub fn pop_oldest(&mut self, mut is_live: impl FnMut(&K, u64) -> bool) -> Option<K> {
         while let Some((key, stamp)) = self.order.pop_front() {
@@ -67,7 +67,7 @@ impl<K> Recency<K> {
         self.order.retain(|(key, stamp)| is_live(key, *stamp));
     }
 
-    /// Queue positions held, live and ghost alike.
+    /// Queue positions kept, live and ghost alike.
     pub fn positions(&self) -> usize {
         self.order.len()
     }

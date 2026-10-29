@@ -1,4 +1,4 @@
-//! Inline placement and permit-held fallback staging.
+//! Inline placement and fallback staging under a permit.
 
 use super::admission::AdmissionPermit;
 use super::queue::PreparedCandidate;

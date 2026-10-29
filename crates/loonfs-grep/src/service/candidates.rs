@@ -90,7 +90,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                 }
             }
             // This union is the query's largest temporary allocation. In the worst
-            // case it holds one `(inode, revision)` pair per indexed revision. A
+            // case it contains one `(inode, revision)` pair per indexed revision. A
             // streaming intersection would reduce memory but add probe-ordering
             // complexity.
             let mut set_postings = BTreeSet::new();
@@ -110,7 +110,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
             if intersection.as_ref().is_some_and(BTreeSet::is_empty) {
                 break;
             }
-            // The budget stop: the intersection holds (inode, revision) pairs,
+            // The budget stop: the intersection contains (inode, revision) pairs,
             // an upper bound on the files a page could ever verify from it, so
             // once it fits the per-page verification budget the remaining AND
             // sets are constraints the page cannot use.
@@ -129,7 +129,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     }
 
     /// One gram's postings from one segment: bloom filter first (the inline
-    /// copy when the descriptor carries one — no fetch at all — otherwise the
+    /// copy when the descriptor has one — no fetch at all — otherwise the
     /// cached filter block), then only the data blocks the segment index
     /// names for the gram's key range, loaded with at most
     /// [`GREP_READS_IN_FLIGHT`] in flight. Every fetched section resolves
@@ -277,7 +277,7 @@ pub(super) enum TailScan {
     /// Every file whose content changed after the index watermark.
     Within(BTreeSet<InodeId>),
     /// More files changed after the watermark than the tail budget allows;
-    /// enumeration stopped there, so no set is carried.
+    /// enumeration stopped there, so no set is returned.
     OverBudget,
 }
 

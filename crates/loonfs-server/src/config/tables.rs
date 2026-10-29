@@ -91,7 +91,7 @@ impl MetadataCacheSsdConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepConfig {
-    /// Whether this server answers grep queries, and whether it serves the
+    /// Whether this server serves grep queries, and whether it serves the
     /// index-maintenance endpoints and its sweep builds and collects the
     /// index.
     pub mode: JobMode,

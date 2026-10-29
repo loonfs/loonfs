@@ -428,7 +428,7 @@ async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
-    let bytes = vec![b'x'; loonfs_types::usize_from_u64(CONTENT_READ_CHUNK_BYTES) + 17];
+    let bytes = vec![b'x'; loonfs_types::usize_from_u64(CONTENT_READ_CHUNK_BYTES.get()) + 17];
     let content_ref = harness.stage_content(&bytes).await;
     harness.recording.reset();
 

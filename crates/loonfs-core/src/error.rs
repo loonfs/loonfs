@@ -5,8 +5,8 @@
 //! of as `#[source]` chains. The server and CLI use source chains where this
 //! constraint does not apply.
 
+use crate::commit::engine::ContentPreparationError;
 use crate::commit::CommitValidationError;
-use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
 use crate::manifest::ManifestLoadError;
 use crate::metadata::VisiblePathError;
@@ -14,8 +14,8 @@ use crate::storage::content::DurableContentValidationError;
 use crate::wal::WalPublishError;
 use crate::wal::{WalObjectError, WalTailLoadError};
 use loonfs_objectstore::ObjectStoreError;
-use loonfs_types::api::v0::{ActiveWriter, CommittedReceipt};
 use loonfs_types::format::control::WriterBlock;
+use loonfs_types::{ActiveWriter, CommittedReceipt};
 use loonfs_types::{
     BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, PathError,
     PrincipalScope, RevisionNo, UploadId, WriterEpoch,
@@ -258,7 +258,7 @@ pub enum CoreError {
     ///
     /// Unlike [`WalPublishError::NumberTaken`], this error reports a failed
     /// explicit precondition. It includes both sequence numbers so the caller can
-    /// decide whether to retry. Both errors use the `stale_head` code.
+    /// choose whether to retry. Both errors use the `stale_head` code.
     #[error("expected head sequence {expected}, found {actual}")]
     StaleHeadPrecondition {
         expected: ChangeSeq,
@@ -462,7 +462,7 @@ impl CoreError {
             | CoreError::MetadataPublicationBudgetExceeded { .. } => {
                 ErrorCode::CheckpointUnavailable
             }
-            // The deployment's read memory cannot hold this namespace's
+            // The deployment's read memory cannot fit this namespace's
             // collection live set; an operator raises the limit.
             CoreError::LiveSetExceedsReadMemory { .. } => ErrorCode::ServerError,
             // The namespace's segment descriptors don't fit in one manifest
@@ -587,7 +587,7 @@ impl CoreError {
         }
     }
 
-    /// Structured wire details for this error, when the variant carries
+    /// Structured wire details for this error, when the variant has
     /// machine-usable identity (API spec, "Standard error contract"). The
     /// server serializes this beside [`CoreError::code`]; embedded callers
     /// can match the typed variants directly instead.
@@ -692,7 +692,7 @@ fn control_object_store_message(
 /// multiple processes, so the acquisition timestamp helps distinguish them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterFence {
-    /// Epoch the fenced session held.
+    /// Epoch of the fenced session.
     pub fenced_epoch: WriterEpoch,
     /// Epoch that owns the namespace now.
     pub active_epoch: WriterEpoch,
@@ -737,7 +737,7 @@ mod tests {
         ManifestLoadError, MetadataProjectionLoadError, MetadataViewError, ObjectStoreErrorKind,
         WriterBlock, WriterFence,
     };
-    use crate::commit_engine::ContentPreparationError;
+    use crate::commit::engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
     use crate::storage::content_admission::ContentTokenError;
     use loonfs_objectstore::ObjectStoreError;

@@ -82,7 +82,7 @@ macro_rules! error_codes {
             }
 
             /// Parses a registered code string, returning `None` for codes this
-            /// build does not know (clients must tolerate those).
+            /// build does not define (clients must tolerate those).
             pub fn parse(value: &str) -> Option<ErrorCode> {
                 match value {
                     $($wire => Some(ErrorCode::$variant),)+
@@ -98,7 +98,7 @@ macro_rules! error_codes {
         }
 
         impl<'de> serde::Deserialize<'de> for ErrorCode {
-            // Strict: unknown codes fail to deserialize. Wire structs carry
+            // Strict: unknown codes fail to deserialize. Wire structs include
             // codes as plain strings (`ErrorResponse::code`) precisely so unknown
             // codes stay tolerated; deserialize into `ErrorCode` only where
             // strictness is intended.
@@ -206,7 +206,7 @@ impl ErrorCode {
             ErrorCode::CommitOutcomeUnknown | ErrorCode::OutcomeUnknown => ErrorKind::OutcomeUnknown,
             ErrorCode::IndexCorrupt | ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
             ErrorCode::ServerError => ErrorKind::Internal,
-            // The spec deliberately surfaces precondition failures
+            // The spec deliberately reports precondition failures
             // (`stale_revision`, `stale_head`, `commit_id_reuse_conflict`) as
             // 409 resource-state conflicts, not 412 (api.md, "Standard error
             // contract").
@@ -215,13 +215,13 @@ impl ErrorCode {
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::StaleHead
             | ErrorCode::StaleRevision
-            // An attribute update was decided against a different attribute
+            // An attribute update was planned against a different attribute
             // revision than the one it wrote from, whether the caller stated
             // that revision or the update's own precondition observed it.
             | ErrorCode::StaleAttributes
-            // An access update was decided against a different access revision than the one it wrote from.
+            // An access update was planned against a different access revision than the one it wrote from.
             | ErrorCode::StaleAccess
-            // The namespace's access mode is unrestricted, so it holds no access rows.
+            // The namespace's access mode is unrestricted, so it has no access rows.
             | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingVersionMismatch
             // Undelete's target is not the root of a live deletion: a

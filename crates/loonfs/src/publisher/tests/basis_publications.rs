@@ -233,7 +233,7 @@ async fn write_until_compaction_waits<'a>(
     let budget = fixture.writer.execution_budget();
     let publisher = fixture.namespace.session().publisher.clone();
     let mut permits = Vec::new();
-    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS {
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS.get() {
         permits.push(budget.compaction_permit().await);
     }
     for _ in 0..32 {

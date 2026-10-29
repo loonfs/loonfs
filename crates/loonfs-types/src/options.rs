@@ -559,7 +559,7 @@ pub struct CreateSnapshotOptions {
 
 /// Default layout rows one content shard of a garbage collection pass covers.
 /// A pass picks the shard width that splits its layout rows into shards of
-/// about this many, so it holds the extent keys of about 65,536 rows at once.
+/// about this many, so it keeps the extent keys of about 65,536 rows at once.
 const GC_CONTENT_SHARD_ROWS: usize = 65_536;
 
 /// Options for one garbage collection pass over a namespace.

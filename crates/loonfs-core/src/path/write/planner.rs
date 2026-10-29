@@ -288,13 +288,13 @@ fn prepared_reference(content: &FileContent) -> Result<&loonfs_types::ContentRef
 mod tests {
     use super::*;
     use crate::authorize::Authorizer;
+    use crate::commit::engine::CommitCandidate;
     use crate::commit::CommitPlan;
-    use crate::commit_engine::CommitCandidate;
     use crate::path::write::PublishPlanningSession;
     use crate::test_support::WriterAt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_types::api::v0::FilesystemChange;
     use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
+    use loonfs_types::FilesystemChange;
     use loonfs_types::{
         AbsolutePath, AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue,
         CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
@@ -942,7 +942,7 @@ mod tests {
             let planned = try_plan_against_current_state(&store, namespace_id, &commit_request)
                 .await
                 .expect(label);
-            let events = crate::protocol::events_from_wal_deltas(
+            let events = crate::changes::events_from_wal_deltas(
                 namespace_id,
                 planned.assigned_seq,
                 &planned.deltas,

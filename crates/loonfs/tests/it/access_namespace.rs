@@ -4,7 +4,7 @@ use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{CreateNamespaceOptions, CreateSnapshotOptions, LoonFs, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::api::v0::FilesystemChange;
+use loonfs_types::FilesystemChange;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, ChangeSeq, CommitId,
     ErrorCode, NamespaceAccess, NamespaceAccessMode, NamespaceId, PrincipalId, PrincipalScope,

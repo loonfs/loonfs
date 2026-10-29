@@ -2,7 +2,8 @@
 
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{CommandKind, RuntimeBehavior, Selectors};
-use crate::config::{load_config, ConfigLocation, ConfigSource, ProfileConfig, ProfileMode};
+use crate::config::{ProfileConfig, ProfileMode};
+use crate::config_file::{load_config, ConfigLocation, ConfigSource};
 use crate::error::{CliError, Result};
 use crate::profiles::{resolve_profile, NamedProfile};
 use crate::resolve::{resolve_actor, resolve_namespace, resolve_subject, ResolvedTarget};
@@ -341,7 +342,7 @@ pub(crate) fn destination_path_for_get(
     };
     match explicit_destination {
         // The cp habit: a trailing separator or an existing directory means
-        // the file lands inside it under its remote name, never as a file
+        // the file is written inside it under its remote name, never as a file
         // named like the directory.
         Some(path) if path.ends_with('/') || Path::new(path).is_dir() => {
             Ok(Path::new(path).join(remote_leaf()?))
@@ -382,7 +383,7 @@ pub(crate) enum ProfileSource {
 }
 
 impl ProfileSource {
-    /// Returns `Flag` when the selectors hold a `--profile` value.
+    /// Returns `Flag` when the selectors have a `--profile` value.
     pub(crate) fn from_selectors(selectors: &Selectors) -> Self {
         if selectors.profile.is_some() {
             Self::Flag
@@ -437,10 +438,10 @@ impl UndeleteHint {
 /// Quotes an argument for a POSIX shell, leaving it alone when it needs no
 /// quoting.
 ///
-/// Names may hold spaces and quotes (they are display strings, not
+/// Names may contain spaces and quotes (they are display strings, not
 /// identifiers), and so may profile names and config paths, so a printed
 /// command that is meant to be pasted has to survive them. Single quotes take
-/// everything literally, which is why the one character they cannot hold — a
+/// everything literally, which is why the one character they cannot contain — a
 /// single quote — is spliced in as an escaped one outside them.
 pub(crate) fn shell_quote(argument: &str) -> String {
     const SAFE: &str = "@%+=:,./-_";

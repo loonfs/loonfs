@@ -18,7 +18,7 @@ pub(super) struct MetadataIndexes {
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
     commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
     content_layout_by_id: HashMap<loonfs_types::ContentId, ContentLayoutRecord>,
-    /// What the indexed keys and records own, since each index holds its
+    /// What the indexed keys and records own, since each index keeps its
     /// own copy of a row.
     owned_heap_bytes: usize,
 }
@@ -192,7 +192,7 @@ impl MetadataIndexes {
 
     /// Revisions contribute only the seq watermark: no read consults an
     /// in-memory revision index — revision lookups scan the rows, which stay
-    /// tail-sized in memory (the manifest segments answer the bulk).
+    /// tail-sized in memory (the manifest segments serve the bulk).
     pub(super) fn record_revision(&mut self, record: &RevisionRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
     }
@@ -239,14 +239,14 @@ impl MetadataIndexes {
 
     /// Attribute revisions contribute only the seq watermark, like revisions:
     /// attribute lookups scan the rows, which stay tail-sized in memory
-    /// because the manifest segments answer the bulk.
+    /// because the manifest segments serve the bulk.
     pub(super) fn record_attributes_revision(&mut self, record: &AttributesRevisionRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
     }
 
     /// Access revisions contribute only the seq watermark, like revisions:
     /// access lookups scan the rows, which stay tail-sized in memory
-    /// because the manifest segments answer the bulk.
+    /// because the manifest segments serve the bulk.
     pub(super) fn record_access_revision(&mut self, record: &AccessRevisionRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
     }

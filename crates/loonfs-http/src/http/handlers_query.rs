@@ -11,9 +11,9 @@ use loonfs::SharedObjectStore;
 use loonfs_grep::{
     GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepService, GrepWorker, NamespaceReads,
 };
-use loonfs_types::api::v0::GrepIndex;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
+use loonfs_types::GrepIndex;
 use loonfs_types::{
     GrepRequest, GrepResponse, GrepScope, NamespaceId, PageRequest, FEATURE_MAINTENANCE_GREP_INDEX,
     FEATURE_QUERY_GREP,
@@ -147,7 +147,7 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
     })
 }
 
-/// Absent-capability response where this deployment answers no searches.
+/// Absent-capability response where this deployment serves no searches.
 pub(super) async fn grep_queries_not_served() -> ApiResponseError {
     ApiResponseError::not_supported(
         FEATURE_QUERY_GREP,

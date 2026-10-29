@@ -642,11 +642,11 @@ mod tests {
             "inode_id": trash_json["inode_id"].clone(),
             "deletion_seq": trash_json["deletion_seq"].clone()
         });
-        let operation: crate::api::v0::FilesystemOperation =
+        let operation: crate::FilesystemOperation =
             serde_json::from_value(operation_json).expect("decode copied trash handle");
         assert_matches!(
             operation,
-            crate::api::v0::FilesystemOperation::Undelete {
+            crate::FilesystemOperation::Undelete {
                 inode_id: InodeId(42),
                 deletion_seq: ChangeSeq(417),
                 destination_path: None,

@@ -7,8 +7,8 @@ use loonfs::test_support::writer;
 use loonfs::{ChangeSeq, CommitId, DeleteDirectoryBehavior, ErrorCode, InodeId, LoonFs};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_types::api::v0::{Commit, FilesystemChange};
 use loonfs_types::AbsolutePath;
+use loonfs_types::{Commit, FilesystemChange};
 use std::sync::Arc;
 use tempfile::tempdir;
 

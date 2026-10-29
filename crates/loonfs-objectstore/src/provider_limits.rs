@@ -66,7 +66,7 @@ pub const PROVIDER_MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// largest object a multipart write can produce.
 pub const PROVIDER_MAX_MULTIPART_PARTS: u32 = 10_000;
 
-/// Request-phase timeout for one HTTP attempt that carries a payload.
+/// Request-phase timeout for one HTTP attempt that sends a payload.
 ///
 /// Upload progress is not observable while a request body is being sent, so
 /// this fixed timeout treats an excessively slow part as stalled. Multipart
@@ -78,7 +78,7 @@ pub const PROVIDER_TRANSFER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120)
 /// The provider client checks its retry deadline before backoff, so a
 /// resent request may finish one backoff and one payload attempt after that
 /// deadline. A conditional WAL or manifest put is one attempt, even with a
-/// payload-sized body, so the bound still holds for it. This does not bound
+/// payload-sized body, so the bound still applies to it. This does not bound
 /// response-body consumption or prove that a timed-out request cannot take
 /// effect remotely.
 pub const PROVIDER_PUBLICATION_REQUEST_BOUND: Duration = PROVIDER_OPERATION_DEADLINE

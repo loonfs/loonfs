@@ -35,7 +35,7 @@ fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec<LineMatch>
     let mut line_number = 1u64;
     let mut emitted_line_start = usize::MAX;
     for found in pattern.find_iter(content) {
-        // Advance the line window forward to the one holding this match.
+        // Advance the line window forward to the one that contains this match.
         while let Some(newline) = content[line_start..found.start()]
             .iter()
             .position(|byte| *byte == b'\n')
@@ -157,7 +157,7 @@ enum PageProgress {
 }
 
 /// One grep candidate that survived the current-state checks and awaits its
-/// content read, carrying everything match emission needs so its content is
+/// content read, with everything match emission needs so its content is
 /// recorded without further metadata lookups.
 struct GrepContentCandidate {
     inode_id: InodeId,
@@ -175,7 +175,7 @@ enum CandidateContent {
     /// read was issued: the file could never pass the post-read text check,
     /// and the walk counts it as fully scanned.
     Oversized,
-    /// The content read's result, surfaced at this candidate's position in
+    /// The content read's result, reported at this candidate's position in
     /// the ordered walk rather than where the fan-out produced it.
     Fetched(Result<Vec<u8>>),
 }

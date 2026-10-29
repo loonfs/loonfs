@@ -18,6 +18,7 @@ mod maintenance;
 mod mutations;
 mod mutations_by_inode;
 mod namespace_path;
+mod namespaces;
 mod operations;
 mod payload;
 mod query;
@@ -31,6 +32,7 @@ mod transport_error;
 
 #[cfg(test)]
 mod scripted_transport;
+mod snapshots;
 mod uploads;
 
 use loonfs_types::{CapabilityDocument, SecretString};
@@ -47,9 +49,9 @@ pub use payload::{PayloadSource, PayloadStream};
 pub use query::GrepPager;
 pub use ranged_reads::FileRangeStream;
 pub use reads::{
-    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, SnapshotsPager,
-    TrashPager,
+    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, TrashPager,
 };
+pub use snapshots::SnapshotsPager;
 pub use transport_error::TransportError;
 
 /// Per-operation options, defined once in `loonfs-types` and shared with the
@@ -102,7 +104,7 @@ pub struct Client {
 
 impl Client {
     /// Returns the subject sent with every request, or `None` when requests
-    /// carry no subject headers.
+    /// include no subject headers.
     pub fn subject(&self) -> Option<&loonfs_types::Subject> {
         self.subject.as_ref()
     }

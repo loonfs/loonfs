@@ -320,9 +320,9 @@ impl ReadView {
     }
 
     /// Refuses a reader with no subject on an ACL namespace, for callers
-    /// that could otherwise answer before any per-subject read.
+    /// that could otherwise return before any per-subject read.
     ///
-    /// This is a hook for an extension that answers from its own state
+    /// This is a hook for an extension that serves reads from its own state
     /// before it reads through this view, such as `loonfs-grep`.
     pub fn ensure_subject(&self) -> Result<()> {
         Ok(self.pinned.engine.ensure_subject(&self.pinned.context)?)

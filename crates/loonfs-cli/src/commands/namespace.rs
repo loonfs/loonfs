@@ -6,7 +6,7 @@ use crate::args::{
     NamespaceAccessArg, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
     NamespaceForkArgs, NamespaceShowArgs, NamespaceUseArgs,
 };
-use crate::config::{load_config, mutate_config};
+use crate::config_file::{load_config, mutate_config};
 use crate::error::{CliError, Result};
 use crate::profiles::{resolve_profile, set_default_namespace, NamedProfile};
 use crate::prompt::prompt_line;
@@ -115,7 +115,7 @@ async fn run_namespace_delete(
 
     if !args.yes {
         // Without a terminal (or under --no-input / --json) there is no
-        // prompt to answer; say what is required instead of surfacing the
+        // prompt to answer; say what is required instead of reporting the
         // prompt machinery's i/o error.
         if !invocation.behavior.interactive {
             return Err(context.fail(CliError::non_interactive_input_required(

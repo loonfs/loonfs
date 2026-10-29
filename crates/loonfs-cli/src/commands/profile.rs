@@ -2,14 +2,15 @@
 
 use super::context::Invocation;
 use super::output::{CommandData, CommandFailure, CommandOutput};
-use super::profile_config::{
-    apply_update_flags, apply_update_interactive, build_profile_from_command,
-    validate_update_provider,
+use super::profile_config::build_profile_from_command;
+use super::profile_update::{
+    apply_update_flags, apply_update_interactive, validate_update_provider,
 };
 use crate::args::{ProfileCommand, ProfileProviderCommand};
-use crate::config::{
+use crate::config::{ProfileConfig, ProfileMode};
+use crate::config_file::{
     load_config, load_config_for_repair, load_config_if_exists, mutate_config, save_config_table,
-    ConfigLoad, ProfileConfig, ProfileMode,
+    ConfigLoad,
 };
 use crate::error::{CliError, Result};
 use crate::profiles::{
@@ -87,7 +88,7 @@ fn run_profile_update(
     let config_path = invocation.config.path.as_path();
     let result = (|| -> Result<NamedProfile<ProfileConfig>> {
         // The update is gathered before the lock: the interactive editor can
-        // sit at a prompt for minutes, and holding the config lock across it
+        // sit at a prompt for minutes, and keeping the config lock locked across it
         // would block every other writer. `update_profile` re-checks the
         // profile against the fresh config under the lock, so a profile
         // deleted meanwhile still fails cleanly.

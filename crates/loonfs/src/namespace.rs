@@ -12,8 +12,12 @@ use loonfs_types::Subject;
 use std::fmt;
 use std::sync::Arc;
 
+mod checkpoints;
+mod content_preparation;
 mod lifecycle;
 mod reads;
+mod reads_by_inode;
+mod revisions;
 mod snapshots;
 mod uploads;
 mod writes;
@@ -39,8 +43,8 @@ mod writes_by_inode;
 /// client, caches, admission limits, execution budget, compactor claim, and
 /// shutdown.
 ///
-/// The host that holds a writable handle owns the session. Clones share it,
-/// and the session lives while any clone is held. [`Namespace::close`] ends
+/// The host that keeps a writable handle owns the session. Clones share it,
+/// and the session stays open while any clone exists. [`Namespace::close`] ends
 /// it and waits for the work it admitted. Dropping the last clone also ends
 /// it: work already admitted still publishes, and opening the namespace
 /// again before that work finishes returns the same session. Once a session
@@ -49,7 +53,7 @@ mod writes_by_inode;
 /// session by itself and never closes one to make room for another.
 /// A fenced session stays dead through every clone. Opening again returns
 /// `writer_session_closed` while its work ends, then starts a new session
-/// even if clones of the dead session are still held.
+/// even if clones of the dead session still exist.
 #[derive(Clone)]
 pub struct Namespace<M: Mode> {
     pub(crate) core: RuntimeCore,
@@ -94,10 +98,10 @@ impl<M: Mode> Namespace<M> {
         }
     }
 
-    /// Returns a handle on the same namespace, for the same subject, that holds
+    /// Returns a handle on the same namespace, for the same subject, that has
     /// no writer session.
     ///
-    /// Holding it does not keep a session open.
+    /// Keeping it does not keep a session open.
     pub fn read_only(&self) -> Namespace<ReadOnly> {
         Namespace::new(self.core.clone(), self.namespace_id.clone())
     }
@@ -183,7 +187,7 @@ impl Namespace<Writable> {
             .record_metadata_maintenance(expected_seq, outcome);
     }
 
-    /// Returns whether this is the only handle holding its writer session.
+    /// Returns whether this is the only handle on its writer session.
     ///
     /// Hosts must prevent concurrent opens while using this check to close it.
     pub fn is_exclusively_held(&self) -> bool {

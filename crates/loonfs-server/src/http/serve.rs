@@ -141,7 +141,7 @@ pub struct AppConfig {
 
 /// Builds the router and returns its state.
 ///
-/// The state holds the maintenance sweep when the config maintains, and
+/// The state contains the maintenance sweep when the config maintains, and
 /// this does not start it. [`serve`] starts it. After an embedded listener
 /// drains, the host must shut down the binding's runtime, which [`serve`]
 /// does automatically.
@@ -344,7 +344,7 @@ fn object_store_metrics_recorder(
 }
 
 /// Builds the rustls configuration this deployment terminates with, or
-/// answers `None` where TLS terminates in front of the process.
+/// returns `None` where TLS terminates in front of the process.
 ///
 /// The one place the identity is loaded, so [`check_config`] reads the files
 /// a start reads and reports what a start reports.
@@ -399,7 +399,7 @@ pub async fn serve_with_shutdown(
 ) -> Result<()> {
     let bind = config.bind;
     // The identity is loaded before the bind, so a deployment with an
-    // unreadable certificate fails without ever having held the port.
+    // unreadable certificate fails without ever having bound the port.
     let tls = tls_server_config(&config.config)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -407,7 +407,7 @@ pub async fn serve_with_shutdown(
     // The first line a deployment sees. An idle server logs nothing until
     // a request arrives, so without this line a container that started
     // correctly and a container that is stuck look the same. This one says
-    // the config loaded and the process holds the port.
+    // the config loaded and the process has bound the port.
     tracing::info!(
         bind = %bind,
         store = config.config.store.kind().as_str(),
@@ -460,7 +460,7 @@ pub(super) struct Settlement {
 /// what this process owns, in the order it has to be settled in.
 ///
 /// Kept apart from [`serve_on`] so the settling order is a thing a test can
-/// drive with handles it holds.
+/// drive with handles it keeps.
 #[expect(
     clippy::disallowed_methods,
     reason = "monotonic time is used only to limit graceful shutdown"

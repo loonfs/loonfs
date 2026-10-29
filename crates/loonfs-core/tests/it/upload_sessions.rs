@@ -12,8 +12,8 @@ use loonfs_test_support::ids::commit_id;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
-use loonfs_types::api::v0::CompleteUploadBody;
 use loonfs_types::Checksum;
+use loonfs_types::CompleteUploadBody;
 use loonfs_types::{
     format::control::{
         decode_control_object, ControlObjectKind, UploadOutcome, UploadOutcomePayload,
@@ -61,7 +61,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &WriterAt,
-) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
+) -> Result<loonfs_types::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
         .begin_upload()
         .await
@@ -83,7 +83,7 @@ async fn upload_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     bytes: &[u8],
     context: &WriterAt,
-) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
+) -> Result<loonfs_types::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
         .upload_content(upload_id, bytes)
         .await
@@ -94,7 +94,7 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     context: &WriterAt,
-) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
+) -> Result<loonfs_types::UploadSession, CoreError> {
     let catalog = namespace_store(store, namespace_id)
         .load_catalog_entry()
         .await?;
@@ -131,7 +131,7 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
             let begin = engine.begin_upload().await.expect("begin");
             assert_matches!(
                 begin.status,
-                loonfs_types::api::v0::UploadSessionStatus::Open {
+                loonfs_types::UploadSessionStatus::Open {
                     checksum_algorithm: algorithm,
                     ..
                 } if algorithm == store.checksum_algorithm()
@@ -391,7 +391,7 @@ mod streamed_content {
     }
 
     async fn staging_cleanup_schedule(forget_before_resume: bool) {
-        use loonfs_types::api::v0::UploadSessionStatus;
+        use loonfs_types::UploadSessionStatus;
 
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -594,7 +594,7 @@ mod streamed_content {
         upload_id: &UploadId,
         bytes: &[u8],
         context: &WriterAt,
-    ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
+    ) -> Result<loonfs_types::UploadSession, CoreError> {
         namespace_engine(store, namespace_id, context)
             .upload_content_stream(upload_id, body(bytes))
             .await
@@ -819,8 +819,8 @@ mod direct_multipart {
     use loonfs_core::GcOptions;
     use loonfs_objectstore::keys::content_blob;
     use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
-    use loonfs_types::api::v0::{CompletedUploadPart, UploadContentClaim};
     use loonfs_types::options::DirectMultipartUploadOptions;
+    use loonfs_types::{CompletedUploadPart, UploadContentClaim};
     use std::assert_matches;
     use std::sync::Arc;
 
@@ -934,7 +934,7 @@ mod direct_multipart {
         upload_id: &UploadId,
         request: &CompleteUploadBody,
         context: &WriterAt,
-    ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
+    ) -> Result<loonfs_types::UploadSession, CoreError> {
         let catalog = namespace_store(store, namespace_id)
             .load_catalog_entry()
             .await?;

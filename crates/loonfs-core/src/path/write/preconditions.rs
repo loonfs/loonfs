@@ -17,7 +17,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
     /// Checks the request's preconditions in order against the view, which
     /// is the state at `head_seq` before the commit.
     ///
-    /// A precondition that doesn't hold fails with its index. A failure to
+    /// A precondition that isn't met fails with its index. A failure to
     /// evaluate one, such as a missing right, fails without the index.
     pub(super) async fn evaluate_preconditions(
         &self,

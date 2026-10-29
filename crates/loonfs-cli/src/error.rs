@@ -1,4 +1,4 @@
-//! [`CliError`]: the structured failure every command surfaces.
+//! [`CliError`]: the structured failure every command reports.
 
 use crate::config::NAMESPACE_ENV;
 use loonfs_client::ClientError;
@@ -52,7 +52,7 @@ cli_error_codes! {
     ClientError => "client_error",
 }
 
-/// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
+/// Structured failure reported by every CLI command (`--json` renders it verbatim).
 ///
 /// The failure is the wire error body, so its `code` is either a shared API
 /// error code or a code local to the backend or CLI.

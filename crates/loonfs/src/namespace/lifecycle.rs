@@ -81,7 +81,7 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "recover_administrator", self.namespace_id),
             async {
-                use loonfs_types::api::v0::FilesystemChange;
+                use loonfs_types::FilesystemChange;
                 use loonfs_types::{AccessGrants, AccessRight};
 
                 let crate::pinned_read::PinnedRead { engine, context } = self

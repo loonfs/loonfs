@@ -881,7 +881,7 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create the namespace");
-    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS + 2 {
+    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() + 2 {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance
@@ -983,7 +983,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     // One unit merges at most eight runs of one family group, and each
     // folded write adds a run to several groups, so 32 folded writes need at
     // least four units in each of those groups.
-    for index in 0..4 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..4 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance
@@ -1725,7 +1725,7 @@ async fn a_session_compaction_step_reads_the_position_before_the_manifest() {
     // With the fold permits held, the next write waits unfolded in the
     // session's position.
     let mut fold_permits = Vec::new();
-    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS {
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS.get() {
         fold_permits.push(writer.execution_budget().fold_permit().await);
     }
     namespace

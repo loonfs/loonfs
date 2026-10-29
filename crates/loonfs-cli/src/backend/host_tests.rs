@@ -90,7 +90,7 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
                 now_ms: 1_000,
             },
         )
-        .append_wal_objects(FOLD_AT_WAL_OBJECTS)
+        .append_wal_objects(FOLD_AT_WAL_OBJECTS.get())
         .await
         .expect("seed a tail at the fold threshold");
     });
@@ -115,7 +115,7 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
             .wal_tail_objects
     });
     assert!(
-        tail < FOLD_AT_WAL_OBJECTS,
+        tail < FOLD_AT_WAL_OBJECTS.get(),
         "the fold did not finish: {tail}"
     );
 }

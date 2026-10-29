@@ -13,8 +13,8 @@ use loonfs_core::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
-use loonfs_types::api::v0::Commit;
 use loonfs_types::options::StatOptions;
+use loonfs_types::Commit;
 use loonfs_types::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     NamespaceId, PageRequest, RevisionNo,

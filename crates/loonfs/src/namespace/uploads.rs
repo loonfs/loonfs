@@ -9,10 +9,10 @@ use crate::ByteStream;
 use crate::Result;
 use crate::{CompleteUploadBody, UploadSession};
 use crate::{Namespace, Writable};
-use loonfs_types::api::v0::UploadPartChecksumClaim;
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::u64_from_usize;
 use loonfs_types::UploadId;
+use loonfs_types::UploadPartChecksumClaim;
 
 impl Namespace<Writable> {
     /// Starts a durable upload session for a namespace.
@@ -111,10 +111,10 @@ impl Namespace<Writable> {
     /// Uploads content that arrives as a stream into an upload session.
     ///
     /// The payload is hashed as it is forwarded to object storage rather
-    /// than held, so memory follows the transfer's part size instead of the
+    /// than kept in memory, so memory follows the transfer's part size instead of the
     /// object's length. Everything after this point — the reference it
     /// produces, completion, publication — is identical to the buffered
-    /// path's; callers that already hold their bytes should stay on
+    /// path's; callers that already have their bytes should stay on
     /// [`Self::put_upload_content`].
     pub async fn put_upload_content_stream(
         &self,

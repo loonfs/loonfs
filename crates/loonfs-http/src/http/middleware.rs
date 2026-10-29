@@ -17,7 +17,7 @@ use loonfs_types::ErrorKind;
 use std::any::Any;
 use std::sync::Arc;
 
-/// Response header carrying the request's correlation id.
+/// Response header that includes the request's correlation id.
 pub(super) const REQUEST_ID_HEADER: &str = "x-request-id";
 
 tokio::task_local! {
@@ -48,7 +48,7 @@ pub(super) enum RequestLogSeverity {
     Debug,
 }
 
-/// Assigns each request a correlation id: every response carries it as the
+/// Assigns each request a correlation id: every response includes it as the
 /// `x-request-id` header, and error bodies repeat it as
 /// `ErrorResponse.request_id` so a caller's log line and the server's trace can
 /// be joined without header plumbing.
@@ -147,7 +147,7 @@ async fn catch_handler_panic(mut request: Request, next: Next) -> Response {
     }
 }
 
-/// Returns the message that a panic carried, or a fixed description when
+/// Returns the message that a panic included, or a fixed description when
 /// the payload isn't a string.
 pub fn panic_message(payload: &(dyn Any + Send)) -> &str {
     payload

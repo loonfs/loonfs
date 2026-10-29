@@ -10,7 +10,7 @@ mod host;
 /// Builds the static OpenAPI document for the v0 HTTP API.
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
     let mut document = <LoonfsOpenApi as utoipa::OpenApi>::openapi();
-    loonfs_types::api::v0::openapi::register(
+    loonfs_types::openapi::register(
         &mut document
             .components
             .as_mut()
@@ -37,11 +37,11 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         crate::http::handlers_namespace::get_namespace_diagnostics,
         crate::http::handlers_namespace::delete_namespace,
         crate::http::handlers_namespace::fork_namespace,
-        crate::http::handlers_namespace::create_snapshot,
-        crate::http::handlers_namespace::list_snapshots,
-        crate::http::handlers_namespace::get_snapshot,
-        crate::http::handlers_namespace::extend_snapshot,
-        crate::http::handlers_namespace::delete_snapshot,
+        crate::http::handlers_snapshots::create_snapshot,
+        crate::http::handlers_snapshots::list_snapshots,
+        crate::http::handlers_snapshots::get_snapshot,
+        crate::http::handlers_snapshots::extend_snapshot,
+        crate::http::handlers_snapshots::delete_snapshot,
         crate::http::handlers_filesystem::list_path_entries,
         crate::http::handlers_filesystem::get_path_entry,
         crate::http::handlers_filesystem::get_file_content,
@@ -63,9 +63,9 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         crate::http::handlers_uploads::abort_upload,
         crate::http::handlers_uploads::get_upload,
         crate::http::handlers_filesystem::list_changes,
-        crate::http::handlers_namespace::list_checkpoints,
-        crate::http::handlers_namespace::get_checkpoint,
-        crate::http::handlers_namespace::run_maintenance,
+        crate::http::handlers_snapshots::list_checkpoints,
+        crate::http::handlers_snapshots::get_checkpoint,
+        crate::http::handlers_maintenance::run_maintenance,
         crate::http::handlers_query::grep,
         crate::http::handlers_query::get_grep_index,
         crate::http::handlers_query::enable_grep_index,
@@ -77,7 +77,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     ),
     // Applies to every operation that does not override it. `/health` and
     // `/readiness` do, with `security(())`: they are the probe surface and
-    // answer unauthenticated by design.
+    // respond unauthenticated by design.
     security(("bearer_auth" = [])),
     modifiers(&BearerAuth),
     tags(

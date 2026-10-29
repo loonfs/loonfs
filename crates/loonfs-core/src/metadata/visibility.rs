@@ -269,7 +269,7 @@ impl AncestorWalk {
 /// current ancestors (following current parent bindings upward). A
 /// recoverable deletion and an expired one both hide their subtree, so the
 /// rule doesn't read the retention floor. A parent-binding cycle is corrupt
-/// stored metadata: answering "not covered" could show a deleted subtree.
+/// stored metadata: returning "not covered" could show a deleted subtree.
 pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,

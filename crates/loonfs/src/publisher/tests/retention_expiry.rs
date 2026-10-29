@@ -3,7 +3,7 @@
 //! manifest before the advance.
 
 use super::*;
-use loonfs_types::api::v0::FilesystemChange;
+use loonfs_types::FilesystemChange;
 use loonfs_types::{DeleteDirectoryBehavior, InodeId};
 
 /// The inode rows that the current manifest's segments store.

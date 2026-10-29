@@ -1,6 +1,7 @@
-//! The CLI config file: profiles, defaults, and strict TOML loading.
+//! The CLI config file's contents: profiles, defaults, and their validation.
 
 use crate::args::TransientRetry;
+use crate::config_file::{profile_field, validate_profile_name};
 use crate::error::{CliError, Result};
 use loonfs_client::ClientConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -12,8 +13,6 @@ use loonfs_types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub(crate) use loonfs_objectstore::StoreConfig;
@@ -30,7 +29,7 @@ pub(crate) const SUBJECT_ID_ENV: &str = "LOONFS_SUBJECT_ID";
 pub(crate) const PRINCIPAL_SCOPE_ENV: &str = "LOONFS_PRINCIPAL_SCOPE";
 pub(crate) const PRINCIPALS_ENV: &str = "LOONFS_PRINCIPALS";
 
-/// A blank environment value carries no usable setting, so treat it as unset
+/// A blank environment value has no usable setting, so treat it as unset
 /// rather than passing it on to validation.
 pub(crate) fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name)
@@ -43,25 +42,13 @@ pub(crate) fn absolute_env_path(name: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-const CONFIG_FILE_NAME: &str = "config.toml";
-/// Directory under `$XDG_CONFIG_HOME`.
-const XDG_CONFIG_SUBDIR: &str = "loonfs";
-
-/// Recovery instructions appended to config-load errors.
-///
-/// Strict decoding is safe only when users can select or create another
-/// config file, including when the default file is unreadable.
-const CONFIG_REMEDY: &str = "fix that file, or run against a different one with `--config <path>` \
-     or `LOONFS_CONFIG=<path>`; `loonfs config path` prints the file in use, and \
-     `loonfs init --config <path>` writes a fresh one";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CliConfig {
     pub config_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
-    /// Profiles live in their own `[profiles.<name>]` tables so profile
+    /// Profiles are in their own `[profiles.<name>]` tables so profile
     /// names can never collide with top-level settings.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, ProfileConfig>,
@@ -425,315 +412,6 @@ fn profile_field_error(profile_name: &str, error: &ConfigFieldError) -> CliError
         }
         error => CliError::invalid_config(format!("invalid `{field}`: {error}")),
     }
-}
-
-/// How [`resolve_config_location`] chose the file, so `config path` answers
-/// both "which file" and "why that one". The serialized spellings are the
-/// `--json` surface: `flag`, `env`, `xdg`, `default`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ConfigSource {
-    /// The `--config` flag.
-    Flag,
-    /// The `LOONFS_CONFIG` environment variable.
-    Env,
-    /// `$XDG_CONFIG_HOME/loonfs/config.toml`.
-    Xdg,
-    /// `$HOME/.config/loonfs/config.toml`.
-    Default,
-}
-
-/// The one config file this invocation reads and writes.
-pub(crate) struct ConfigLocation {
-    pub path: PathBuf,
-    pub source: ConfigSource,
-}
-
-impl ConfigLocation {
-    fn at(path: PathBuf, source: ConfigSource) -> Self {
-        Self { path, source }
-    }
-}
-
-/// Resolves the config path in this order: `--config`,
-/// `LOONFS_CONFIG`, then the default location.
-///
-/// An explicit path is selected even when the file does not exist, allowing
-/// commands such as `loonfs init --config <path>` to create a replacement
-/// for an invalid default config.
-pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocation> {
-    if let Some(path) = flag {
-        return Ok(ConfigLocation::at(path.to_path_buf(), ConfigSource::Flag));
-    }
-    if let Some(path) = non_empty_env(CONFIG_PATH_ENV).map(PathBuf::from) {
-        return Ok(ConfigLocation::at(path, ConfigSource::Env));
-    }
-    default_config_location()
-}
-
-/// Selects `$XDG_CONFIG_HOME/loonfs/config.toml` when the variable is
-/// absolute, otherwise `$HOME/.config/loonfs/config.toml`. File existence
-/// never changes which location is selected.
-fn default_config_location() -> Result<ConfigLocation> {
-    let (directory, source) = match absolute_env_path("XDG_CONFIG_HOME") {
-        Some(directory) => (directory, ConfigSource::Xdg),
-        None => {
-            let home = absolute_env_path("HOME").ok_or_else(|| {
-                CliError::invalid_config(format!(
-                    "unable to determine the home directory; name the config file with \
-                     `--config <path>` or `{CONFIG_PATH_ENV}=<path>`"
-                ))
-            })?;
-            (home.join(".config"), ConfigSource::Default)
-        }
-    };
-    Ok(ConfigLocation::at(
-        directory.join(XDG_CONFIG_SUBDIR).join(CONFIG_FILE_NAME),
-        source,
-    ))
-}
-
-pub(crate) fn validate_profile_name(name: &str) -> Result<()> {
-    Ok(validate_non_empty("profile name", name)?)
-}
-
-fn profile_field(name: &str, field: &str) -> String {
-    format!("{name}.{field}")
-}
-
-pub(crate) fn load_config(path: &Path) -> Result<CliConfig> {
-    let source = load_config_source(path)?;
-    decode_config_source(path, &source.text)
-}
-
-/// Config result used by repair commands.
-///
-/// When strict decoding fails, repair commands receive the raw TOML table so
-/// they can edit the invalid file.
-pub(crate) enum ConfigLoad {
-    Valid(CliConfig),
-    Degraded {
-        table: toml::Table,
-        /// The strict-decode failure, reported alongside the degraded output.
-        error: Box<CliError>,
-    },
-}
-
-pub(crate) fn load_config_for_repair(path: &Path) -> Result<ConfigLoad> {
-    let source = load_config_source(path)?;
-    match decode_config_source(path, &source.text) {
-        Ok(config) => Ok(ConfigLoad::Valid(config)),
-        Err(error) => Ok(ConfigLoad::Degraded {
-            table: source.table,
-            error: Box::new(error),
-        }),
-    }
-}
-
-/// A config file that got as far as being TOML of this version.
-struct ConfigDocument {
-    /// The file's own text, which the strict decode reads so its errors can
-    /// point at a line and column in it.
-    text: String,
-    /// The same file as a loose table, for the version probe and for the
-    /// repair commands.
-    table: toml::Table,
-}
-
-/// Stage one of loading: bytes to text and a loose TOML table, plus the
-/// version probe. Unknown fields and per-profile shape problems survive
-/// this stage; unreadable files, TOML syntax errors, and other config
-/// versions do not.
-fn load_config_source(path: &Path) -> Result<ConfigDocument> {
-    let bytes = fs::read(path).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
-            CliError::invalid_config(format!(
-                "config file does not exist: {}; run `loonfs init` to create it",
-                path.display()
-            ))
-        } else {
-            unusable_config(format!("failed to read config {}: {err}", path.display()))
-        }
-    })?;
-    let text = String::from_utf8(bytes).map_err(|err| {
-        unusable_config(format!("failed to decode config {}: {err}", path.display()))
-    })?;
-    let table: toml::Table = toml::from_str(&text).map_err(|err| {
-        unusable_config(format!("failed to decode config {}: {err}", path.display()))
-    })?;
-    // Version before shape: a config written for another version should say
-    // so directly, not surface as unknown-field noise from the strict decode.
-    match table.get("config_version") {
-        None => {
-            return Err(unusable_config(format!(
-                "config {} is missing `config_version`",
-                path.display()
-            )));
-        }
-        Some(value) => match value.as_integer() {
-            Some(version) if version == i64::from(CONFIG_VERSION) => {}
-            Some(version) => {
-                return Err(unusable_config(format!(
-                    "config {} declares `config_version = {version}`; this build supports \
-                     `{CONFIG_VERSION}`",
-                    path.display()
-                )));
-            }
-            None => {
-                return Err(unusable_config(format!(
-                    "config {}: `config_version` must be an integer",
-                    path.display()
-                )));
-            }
-        },
-    }
-    Ok(ConfigDocument { text, table })
-}
-
-/// Stage two of loading: the strict typed decode (`deny_unknown_fields`)
-/// plus semantic validation.
-///
-/// The decode reads the file's own text rather than the table stage one
-/// already built. That costs a second parse of a small file and buys the
-/// line, column, and quoted source line a TOML error carries only when it
-/// knows where in the text it is.
-fn decode_config_source(path: &Path, text: &str) -> Result<CliConfig> {
-    let config: CliConfig = toml::from_str(text).map_err(|err| {
-        unusable_config(format!("failed to decode config {}: {err}", path.display()))
-    })?;
-    // Validation messages are field-rooted (`<profile>.store.<field>`), so
-    // the file they belong to is named here rather than in every check.
-    config.validate().map_err(|error| {
-        unusable_config(format!(
-            "invalid config {}: {}",
-            path.display(),
-            error.message
-        ))
-    })?;
-    Ok(config)
-}
-
-/// Marks a config file this build will not read, so the failure carries the
-/// way past it. Every load failure but "no file yet" goes through here.
-fn unusable_config(problem: String) -> CliError {
-    CliError::invalid_config(format!("{problem}\n{CONFIG_REMEDY}"))
-}
-
-pub(crate) fn load_config_if_exists(path: &Path) -> Result<Option<CliConfig>> {
-    // A broken symlink is a file the user put there, not an absent config.
-    match fs::symlink_metadata(path) {
-        Ok(_) => load_config(path).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(unusable_config(format!(
-            "failed to read config metadata {}: {error}",
-            path.display()
-        ))),
-    }
-}
-
-pub(crate) fn load_or_default_config(path: &Path) -> Result<CliConfig> {
-    Ok(load_config_if_exists(path)?.unwrap_or_default())
-}
-
-fn write_config_locked(path: &Path, config: &CliConfig) -> Result<()> {
-    // The caller already holds the config lock, which is not reentrant.
-    config.validate()?;
-    let contents = toml::to_string_pretty(config)
-        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
-    persist_config_contents(path, &contents)
-}
-
-/// Persists a loose config table as-is (atomic, owner-only), for the repair
-/// commands when the file no longer strict-decodes: round-tripping through
-/// [`CliConfig`] would drop the content the user still needs to fix.
-pub(crate) fn save_config_table(path: &Path, table: &toml::Table) -> Result<()> {
-    let _lock = lock_config(path)?;
-    let contents = toml::to_string_pretty(table)
-        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
-    persist_config_contents(path, &contents)
-}
-
-/// Applies one edit to the latest config under the exclusive lock, so
-/// concurrent writers cannot lose each other's updates. The closure's value
-/// comes back to the caller once the file is durably replaced.
-pub(crate) fn mutate_config<T>(
-    path: &Path,
-    mutate: impl FnOnce(&mut CliConfig) -> Result<T>,
-) -> Result<T> {
-    let _lock = lock_config(path)?;
-    let mut config = load_or_default_config(path)?;
-    let value = mutate(&mut config)?;
-    write_config_locked(path, &config)?;
-    Ok(value)
-}
-
-fn lock_config(path: &Path) -> Result<File> {
-    let parent = path.parent().ok_or_else(|| {
-        CliError::invalid_config(format!(
-            "config path has no parent directory: {}",
-            path.display()
-        ))
-    })?;
-    fs::create_dir_all(parent).map_err(|err| {
-        CliError::invalid_config(format!("failed to create config directory: {err}"))
-    })?;
-    let lock_path = path.with_extension("lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|err| {
-            CliError::invalid_config(format!(
-                "failed to open the lock file `{}`: {err}",
-                lock_path.display()
-            ))
-        })?;
-    fs4::fs_std::FileExt::lock_exclusive(&file).map_err(|err| {
-        CliError::invalid_config(format!("failed to lock `{}`: {err}", lock_path.display()))
-    })?;
-    Ok(file)
-}
-
-fn persist_config_contents(path: &Path, contents: &str) -> Result<()> {
-    // The caller's config lock already proved that this parent directory exists.
-    let parent = path
-        .parent()
-        .expect("a locked config path should have a parent directory");
-    let mut temp_file = tempfile::Builder::new()
-        .prefix(".loonfs-config-")
-        .suffix(".tmp")
-        .tempfile_in(parent)
-        .map_err(|err| {
-            CliError::invalid_config(format!(
-                "failed to create temporary config file in {}: {err}",
-                parent.display()
-            ))
-        })?;
-    temp_file
-        .write_all(contents.as_bytes())
-        .map_err(|err| CliError::invalid_config(format!("failed to write config: {err}")))?;
-    temp_file
-        .flush()
-        .map_err(|err| CliError::invalid_config(format!("failed to flush config: {err}")))?;
-    temp_file
-        .as_file()
-        .sync_all()
-        .map_err(|err| CliError::invalid_config(format!("failed to sync config: {err}")))?;
-    temp_file.persist(path).map_err(|err| {
-        CliError::invalid_config(format!(
-            "failed to persist config {}: {}",
-            path.display(),
-            err.error
-        ))
-    })?;
-    // Rename durability is best-effort because some filesystems cannot sync
-    // directories, and the rename itself has already succeeded.
-    if let Ok(directory) = File::open(parent) {
-        let _ = directory.sync_all();
-    }
-    Ok(())
 }
 
 /// Secret fields that are always redacted, even when the config cannot be
@@ -1115,7 +793,7 @@ secret_access_key = "secret"
 
         let access_key = EnvGuard::set("AWS_ACCESS_KEY_ID", "parity-access");
         let secret_key = EnvGuard::set("AWS_SECRET_ACCESS_KEY", "parity-secret");
-        let cli = super::load_config(&cli_path).expect("load cli config");
+        let cli = crate::config_file::load_config(&cli_path).expect("load cli config");
         drop((access_key, secret_key));
         let ProfileConnection::Embedded {
             store: cli_store, ..
@@ -1137,17 +815,17 @@ secret_access_key = "secret"
         let write = |contents: &str| std::fs::write(&path, contents).expect("write config");
         let shown_path = path.display().to_string();
 
-        let missing = super::load_config(&path).expect_err("missing file");
+        let missing = crate::config_file::load_config(&path).expect_err("missing file");
         assert!(missing.message.contains(&shown_path), "{}", missing.message);
 
         write("config_version = ");
-        let syntax = super::load_config(&path).expect_err("syntax error");
+        let syntax = crate::config_file::load_config(&path).expect_err("syntax error");
         assert!(syntax.message.contains(&shown_path), "{}", syntax.message);
 
         // The version verdict beats unknown-field noise: a config written
         // for another version says so directly.
         write("config_version = 2\nfuture_setting = true\n");
-        let version = super::load_config(&path).expect_err("future version");
+        let version = crate::config_file::load_config(&path).expect_err("future version");
         assert!(
             version.message.contains("`config_version = 2`"),
             "{}",
@@ -1160,7 +838,7 @@ secret_access_key = "secret"
         );
 
         write("default_profile = \"x\"\n");
-        let unversioned = super::load_config(&path).expect_err("missing version");
+        let unversioned = crate::config_file::load_config(&path).expect_err("missing version");
         assert!(
             unversioned.message.contains("missing `config_version`"),
             "{}",
@@ -1168,7 +846,7 @@ secret_access_key = "secret"
         );
 
         write("config_version = 1\ndefault_profil = \"typo\"\n");
-        let unknown = super::load_config(&path).expect_err("unknown field");
+        let unknown = crate::config_file::load_config(&path).expect_err("unknown field");
         assert!(unknown.message.contains(&shown_path), "{}", unknown.message);
         assert!(
             unknown.message.contains("default_profil"),
@@ -1192,7 +870,7 @@ secret_access_key = "secret"
             "config_version = 1\ndefault_profile = \"missing\"\n",
         ] {
             write(contents);
-            let error = super::load_config(&path).expect_err("unreadable config");
+            let error = crate::config_file::load_config(&path).expect_err("unreadable config");
             assert!(error.message.contains("--config"), "{}", error.message);
             assert!(
                 error.message.contains(super::CONFIG_PATH_ENV),
@@ -1221,7 +899,7 @@ secret_access_key = "secret"
                     barrier.wait();
                     for mutation_index in 0..MUTATIONS_PER_THREAD {
                         let namespace = format!("namespace-{thread_index}-{mutation_index}");
-                        super::mutate_config(path, |config| {
+                        crate::config_file::mutate_config(path, |config| {
                             config.profiles.insert(
                                 profile_name.clone(),
                                 ProfileConfig {
@@ -1293,7 +971,7 @@ secret_access_key = "secret"
             .permissions();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o000))
             .expect("make parent unreadable");
-        let result = super::load_or_default_config(&path);
+        let result = crate::config_file::load_or_default_config(&path);
         std::fs::set_permissions(directory.path(), permissions).expect("restore permissions");
 
         let error = result.expect_err("unreadable parent must fail");
@@ -1313,7 +991,7 @@ secret_access_key = "secret"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("config.toml");
 
-        super::mutate_config(&path, |_| Ok(())).expect("create config");
+        crate::config_file::mutate_config(&path, |_| Ok(())).expect("create config");
 
         assert!(path.is_file());
         #[cfg(unix)]
@@ -1337,13 +1015,13 @@ secret_access_key = "secret"
         std::os::unix::fs::symlink(dir.path().join("missing.toml"), &path).expect("symlink");
 
         assert_eq!(
-            super::load_config_if_exists(&path)
+            crate::config_file::load_config_if_exists(&path)
                 .expect_err("a broken config symlink should not read as an absent config")
                 .code,
             crate::error::CliErrorCode::InvalidConfig.as_str()
         );
         assert_eq!(
-            super::mutate_config(&path, |_| Ok(()))
+            crate::config_file::mutate_config(&path, |_| Ok(()))
                 .expect_err("a broken config symlink should not be replaced")
                 .code,
             crate::error::CliErrorCode::InvalidConfig.as_str()
@@ -1386,8 +1064,8 @@ root = "/tmp/store"
         )
         .expect("write config");
 
-        let super::ConfigLoad::Degraded { mut table, error } =
-            super::load_config_for_repair(&path).expect("stage one holds")
+        let crate::config_file::ConfigLoad::Degraded { mut table, error } =
+            crate::config_file::load_config_for_repair(&path).expect("stage one holds")
         else {
             panic!("unknown_knob must fail the strict decode");
         };
@@ -1416,14 +1094,14 @@ root = "/tmp/store"
                 .code,
             crate::error::CliErrorCode::ProfileNotFound.as_str()
         );
-        super::save_config_table(&path, &table).expect("save repaired table");
+        crate::config_file::save_config_table(&path, &table).expect("save repaired table");
 
-        match super::load_config_for_repair(&path).expect("reload") {
-            super::ConfigLoad::Valid(config) => {
+        match crate::config_file::load_config_for_repair(&path).expect("reload") {
+            crate::config_file::ConfigLoad::Valid(config) => {
                 assert_eq!(config.default_profile.as_deref(), Some("ok"));
                 assert!(!config.profiles.contains_key("broken"));
             }
-            super::ConfigLoad::Degraded { error, .. } => {
+            crate::config_file::ConfigLoad::Degraded { error, .. } => {
                 panic!("repaired config must strict-decode: {}", error.message)
             }
         }

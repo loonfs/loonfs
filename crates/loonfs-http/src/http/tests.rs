@@ -390,14 +390,14 @@ fn error_detail_fields_match_the_api_spec_table() {
         namespace_id: Some(NamespaceId::parse("deleted").expect("namespace id")),
         precondition_index: Some(0),
         commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
-        committed: Some(loonfs_types::api::v0::CommittedReceipt {
+        committed: Some(loonfs_types::CommittedReceipt {
             committed_seq: ChangeSeq::from(1),
             committed_fingerprint: loonfs_test_support::ids::commit_fingerprint("fingerprint"),
         }),
         operation_index: Some(0),
         fenced_writer_epoch: Some(WriterEpoch::from(1)),
         active_writer_epoch: Some(WriterEpoch::from(2)),
-        active_writer: Some(loonfs_types::api::v0::ActiveWriter {
+        active_writer: Some(loonfs_types::ActiveWriter {
             active_writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             active_acquired_at_ms: 1,
         }),
@@ -1933,7 +1933,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let session = client
         .create_upload(
             &namespace,
-            &loonfs_types::api::v0::CreateUploadBody::ServiceProxied {},
+            &loonfs_types::CreateUploadBody::ServiceProxied {},
         )
         .await
         .expect("begin a proxied upload session");
@@ -2873,10 +2873,10 @@ mod direct_download {
     };
     use loonfs_objectstore::ByteRange;
     use loonfs_objectstore::ObjectStoreExtension;
-    use loonfs_types::api::v0::ObjectTransferAccess;
+    use loonfs_types::ObjectTransferAccess;
     use loonfs_types::{
-        api::v0::UploadContentClaim, Checksum, ChecksumAlgorithm, RevisionNo,
-        FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+        Checksum, ChecksumAlgorithm, RevisionNo, UploadContentClaim, FEATURE_DOWNLOADS_DIRECT_GET,
+        FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
         LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
         LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     };
@@ -3014,9 +3014,9 @@ mod direct_download {
                 assert_eq!(ranges.len(), 1);
                 assert_eq!(ranges[0]["start_offset"], 0);
                 assert_eq!(ranges[0]["length"], value.len());
-                let access: loonfs_types::api::v0::ObjectTransferAccess =
+                let access: loonfs_types::ObjectTransferAccess =
                     serde_json::from_value(ranges[0]["access"].clone()).expect("access");
-                let loonfs_types::api::v0::ObjectTransferAccess::PresignedUrl {
+                let loonfs_types::ObjectTransferAccess::PresignedUrl {
                     method,
                     url,
                     headers,
@@ -4054,10 +4054,9 @@ mod direct_download {
                 .get_upload(&namespace_id, &begin.upload_id)
                 .await
                 .expect("read open direct_put session");
-            assert_eq!(session.mode, loonfs_types::api::v0::UploadMode::DirectPut);
-            let loonfs_types::api::v0::UploadSessionStatus::Open {
-                access:
-                    Some(loonfs_types::api::v0::ObjectTransferAccess::PresignedUrl { method, .. }),
+            assert_eq!(session.mode, loonfs_types::UploadMode::DirectPut);
+            let loonfs_types::UploadSessionStatus::Open {
+                access: Some(loonfs_types::ObjectTransferAccess::PresignedUrl { method, .. }),
                 ..
             } = session.status
             else {
@@ -4070,7 +4069,7 @@ mod direct_download {
             .complete_upload(
                 &namespace_id,
                 &begin.upload_id,
-                &loonfs_types::api::v0::CompleteUploadBody::DirectMultipart {
+                &loonfs_types::CompleteUploadBody::DirectMultipart {
                     content: UploadContentClaim {
                         size_bytes: 5,
                         checksum: Checksum::crc64nvme(b"hello"),
@@ -4280,7 +4279,8 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
     let plain = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let ns = namespace_id("demo");
     let seed_writer = bootstrap_namespace(&plain, "runtime-writer", &ns).await;
-    let payload = vec![42; loonfs_types::usize_from_u64(loonfs::CONTENT_READ_CHUNK_BYTES) * 3 + 17];
+    let payload =
+        vec![42; loonfs_types::usize_from_u64(loonfs::CONTENT_READ_CHUNK_BYTES.get()) * 3 + 17];
     write_file_bytes(
         &seed_writer,
         &ns,
@@ -4330,7 +4330,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
             .await
             .expect("first chunk")
             .expect("valid chunk");
-        assert!(first.len() as u64 <= loonfs::CONTENT_READ_CHUNK_BYTES);
+        assert!(first.len() as u64 <= loonfs::CONTENT_READ_CHUNK_BYTES.get());
         drop(first);
         if corrupt {
             let reader = loonfs::LoonFs::builder_with_store(plain.clone())
@@ -4346,7 +4346,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
                 &entry.content_ref().expect("file").content_id,
             );
             let mut changed = payload.clone();
-            changed[loonfs_types::usize_from_u64(loonfs::CONTENT_READ_CHUNK_BYTES)] ^= 1;
+            changed[loonfs_types::usize_from_u64(loonfs::CONTENT_READ_CHUNK_BYTES.get())] ^= 1;
             replace_object(&plain, &key, changed.into())
                 .await
                 .expect("corrupt unread bytes");
@@ -4364,7 +4364,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
             state.download_permits().available_permits(),
             state.options.max_concurrent_downloads
         );
-        assert!(watched.peaks().peak_live_bytes <= loonfs::CONTENT_READ_CHUNK_BYTES);
+        assert!(watched.peaks().peak_live_bytes <= loonfs::CONTENT_READ_CHUNK_BYTES.get());
     }
 }
 

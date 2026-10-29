@@ -173,7 +173,7 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
         }
     }
 
-    /// Whether the subject holds `read` on `inode_id` (always for an
+    /// Whether the subject has `read` on `inode_id` (always for an
     /// unrestricted namespace). For a snapshot read, the subject also needs
     /// administrator rights when the inode's ancestry at the head refuses the
     /// read, as [`Self::require`] describes.

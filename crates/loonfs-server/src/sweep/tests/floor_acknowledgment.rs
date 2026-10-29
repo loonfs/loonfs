@@ -3,7 +3,7 @@
 
 use super::retention::{retention_config, START_MS, WINDOW_MS};
 use super::{local_store, SweepServer};
-use crate::sweep::SweepCall;
+use crate::sweep::retries::SweepCall;
 use loonfs::{ChangeSeq, ErrorCode, NamespaceId};
 use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::layout::DurableObjectFamily;

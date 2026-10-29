@@ -1,9 +1,11 @@
 //! Checkpoint metadata cache, scan sharing, filters, and lookup behavior.
 
-use super::super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
-use super::super::segment_block_cache::{SegmentBlockCache, SegmentBlockLoad};
 use super::*;
 use crate::block_cache::DecodedBlockCacheStats;
+use crate::segment::block_memo::SessionBlockMemo;
+use crate::segment::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
+use crate::segment::index_block_load::load_segment_filter;
+use crate::segment::segment_block_cache::{SegmentBlockCache, SegmentBlockLoad};
 use loonfs_test_support::stores::{replace_object, ConcurrencyWatchStore, MemoryStore};
 use std::assert_matches;
 use std::sync::Mutex;
@@ -346,7 +348,7 @@ async fn manifests_and_blocks_are_charged_to_budgets_of_their_own() {
                 max_manifest_bytes,
             )),
             ObjectStoreScope::new(0),
-            crate::manifest::cache::unshared_read_working_memory(),
+            crate::segment::cache::unshared_read_working_memory(),
             crate::limits::READAHEAD_WINDOW_BYTES,
         )
     };
@@ -830,18 +832,13 @@ async fn corrupt_inline_filter_fails_the_lookup() {
     inline.push(flipped);
     tampered.filter_inline = Some(inline);
 
-    let memo = super::load::SessionBlockMemo::default();
-    super::load::load_segment_filter(&store, None, &memo, &descriptor)
+    let memo = SessionBlockMemo::default();
+    load_segment_filter(&store, None, &memo, &descriptor)
         .await
         .expect("intact inline filter decodes");
-    let error = super::load::load_segment_filter(
-        &store,
-        None,
-        &super::load::SessionBlockMemo::default(),
-        &tampered,
-    )
-    .await
-    .expect_err("tampered inline filter must fail");
+    let error = load_segment_filter(&store, None, &SessionBlockMemo::default(), &tampered)
+        .await
+        .expect_err("tampered inline filter must fail");
     assert_matches!(
         error,
         ManifestLoadError::SegmentCodec { .. },
@@ -898,10 +895,10 @@ async fn checkpointed_direntry_segment() -> (
 async fn a_cold_filter_load_fetches_the_index_in_the_same_read() {
     let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
-    let memo = load::SessionBlockMemo::default();
+    let memo = SessionBlockMemo::default();
 
     store.reset();
-    load::load_segment_filter(&store, Some(&cache), &memo, &descriptor)
+    load_segment_filter(&store, Some(&cache), &memo, &descriptor)
         .await
         .expect("load filter");
     assert_eq!(
@@ -1002,7 +999,7 @@ async fn multi_block_direntry_segment() -> (
     let index = index_block_load::load_segment_index(
         &store,
         None,
-        &load::SessionBlockMemo::default(),
+        &SessionBlockMemo::default(),
         &descriptor,
     )
     .await
@@ -1021,7 +1018,7 @@ async fn segment_rows(
     store: &RecordingStore<LocalFsStore>,
     descriptor: &MetadataSegmentRef,
 ) -> Vec<MetadataRow> {
-    let memo = load::SessionBlockMemo::default();
+    let memo = SessionBlockMemo::default();
     let index = index_block_load::load_segment_index(store, None, &memo, descriptor)
         .await
         .expect("segment index");
@@ -1082,7 +1079,7 @@ async fn wide_read(
     descriptor: &MetadataSegmentRef,
     index: &[SegmentIndexEntry],
 ) -> (Vec<Arc<DecodedDataBlock>>, usize) {
-    let memo = load::SessionBlockMemo::default();
+    let memo = SessionBlockMemo::default();
     store.reset();
     let blocks =
         data_block_load::load_segment_data_block_span(store, cache, Some(&memo), descriptor, index)
@@ -1096,7 +1093,7 @@ async fn a_warm_span_remembers_shared_hits_in_its_bounded_memo() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
     let (expected, _) = wide_read(&store, Some(&cache), &descriptor, &index).await;
-    let memo = load::SessionBlockMemo::default();
+    let memo = SessionBlockMemo::default();
     store.reset();
     let before = cache.stats();
 
@@ -1232,7 +1229,7 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
         blocks.clone(),
         Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
         ObjectStoreScope::new(0),
-        crate::manifest::cache::unshared_read_working_memory(),
+        crate::segment::cache::unshared_read_working_memory(),
         crate::limits::READAHEAD_WINDOW_BYTES,
     );
 
@@ -1275,7 +1272,7 @@ async fn a_read_ahead_window_stays_in_the_memo_when_the_block_cache_keeps_nothin
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
     let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
     let cache = MetadataSegmentCache::unshared(0);
-    let memo = load::SessionBlockMemo::default();
+    let memo = SessionBlockMemo::default();
     store.reset();
 
     for position in 0..index.len() {
@@ -1511,9 +1508,9 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        crate::manifest::CompactionAdmission::AnySize,
+        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("run a compaction unit");

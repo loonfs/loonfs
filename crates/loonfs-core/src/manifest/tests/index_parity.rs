@@ -51,7 +51,7 @@ pub(super) async fn rewrite_manifest_segment(
     // a filter must inline the one it actually has: manifest load compares the
     // two. Derived exactly as `write_manifest_segment` derives it.
     descriptor.filter_inline = (built.filter.stored_bytes
-        <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
+        <= crate::segment::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
         .then(|| {
             let start = loonfs_types::usize_from_u64(built.filter.offset);
             loonfs_types::format::hex::hex_encode_bytes(
@@ -72,7 +72,7 @@ fn assert_child_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
 }
 
 fn default_target_block_bytes() -> NonZeroUsize {
-    NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).expect("the default target is positive")
+    DEFAULT_TARGET_BLOCK_BYTES
 }
 
 pub(super) async fn overwrite_manifest(
@@ -678,7 +678,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     descriptor.max_row_key = built.max_row_key;
     descriptor.index_block = built.index;
     descriptor.filter_inline = (built.filter.stored_bytes
-        <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
+        <= crate::segment::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
         .then(|| {
             let start = loonfs_types::usize_from_u64(built.filter.offset);
             loonfs_types::format::hex::hex_encode_bytes(

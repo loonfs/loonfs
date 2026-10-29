@@ -1,6 +1,8 @@
 //! Writes WAL pieces as immutable extents and merges the chain's own extents.
 
-use super::content::{content_object_key_for_ref, DurableContentValidationError};
+use super::content::{
+    content_object_key_for_ref, describe_checksum, DurableContentValidationError,
+};
 use super::content_location::{extent_object_key, ContentLocation, LayoutLookup, LocatedExtent};
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_LAYOUT_EXTENTS;
@@ -44,12 +46,8 @@ pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Vec<By
         if actual != newest.checksum {
             return Err(DurableContentValidationError::ContentChecksumMismatch {
                 object_key,
-                expected: format!(
-                    "{}:{}",
-                    newest.checksum.algorithm(),
-                    newest.checksum.value()
-                ),
-                actual: format!("{}:{}", actual.algorithm(), actual.value()),
+                expected: describe_checksum(&newest.checksum),
+                actual: describe_checksum(&actual),
             }
             .into());
         }
@@ -57,7 +55,7 @@ pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Vec<By
     Ok(pieces)
 }
 
-/// Where content writes go: the store that holds the content objects, and
+/// Where content writes go: the store that contains the content objects, and
 /// the permits that bound how many writes run at once.
 pub(crate) struct ContentWrites<'a, S: ?Sized> {
     pub(crate) store: &'a S,
@@ -243,7 +241,7 @@ async fn tail_extent_plan<L: LayoutLookup>(
             })
             .collect();
     }
-    // The whole key can already hold the first reference after a failed fold.
+    // The whole key can already contain the first reference after a failed fold.
     let whole = location.extents.is_empty() && !lookup.content_has_other_size(newest);
     let extents = location.extents;
     let tail_length = candidate.iter().map(|piece| piece.len() as u64).sum();

@@ -2,7 +2,7 @@
 
 use crate::error::{CoreError, Result};
 use loonfs_objectstore::ObjectStoreErrorKind;
-use loonfs_types::api::v0::Commit;
+use loonfs_types::Commit;
 use loonfs_types::ErrorCode;
 use thiserror::Error;
 

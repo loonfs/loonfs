@@ -16,6 +16,7 @@ use loonfs_objectstore::{
     PROVIDER_MIN_MULTIPART_PART_BYTES, PROVIDER_OPERATION_DEADLINE,
     PROVIDER_PUBLICATION_REQUEST_BOUND,
 };
+use std::num::NonZeroU64;
 
 /// Maximum run fan-in for either compaction execution path. Larger groups are
 /// merged in several publications, keeping decoded input blocks independent of
@@ -27,7 +28,7 @@ pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
 
 /// Most levels of the walk that builds a base compaction's kept inode filter.
 ///
-/// The walk's stack holds at most this many directories, counting the one
+/// The walk's stack contains at most this many directories, counting the one
 /// the walk starts at. Each level of the stack keeps a directory's
 /// inode ID and the row key where the walk resumes that directory, which is
 /// at most about 1.6 KiB for a name key of `MAX_NAME_KEY_BYTES`, so the stack
@@ -84,7 +85,7 @@ pub const CHANGE_FEED_PAGE_BYTES: usize = 4 * 1024 * 1024;
 /// Bounds the admission work for one commit.
 pub const MAX_COMMIT_PRECONDITIONS: usize = 1024;
 
-/// Maximum content-token or prepared-proof entries carried by one explicit
+/// Maximum content-token or prepared-proof entries included in one explicit
 /// commit, bounding preparation work for a new primary.
 ///
 /// An oversized candidate may occupy a publisher queue slot until candidate
@@ -135,7 +136,7 @@ pub const MANIFEST_PROBE_WINDOW: usize = 8;
 /// newest manifest by the publications of the last interval.
 pub const HINT_RAISE_INTERVAL_MS: u64 = 1_000;
 
-/// Longest visible WAL tail, in WAL objects, a namespace may carry unfolded.
+/// Longest visible WAL tail, in WAL objects, a namespace may have unfolded.
 ///
 /// The commit engine refuses new commits at this length, so a published WAL
 /// object never leaves more than this behind. A writer session keeps those
@@ -145,9 +146,9 @@ pub const HINT_RAISE_INTERVAL_MS: u64 = 1_000;
 pub const MAX_UNFOLDED_WAL_OBJECTS: u64 = 128;
 
 /// Visible WAL-tail length, in WAL objects, that starts an automatic WAL fold.
-pub const FOLD_AT_WAL_OBJECTS: u64 = 32;
+pub const FOLD_AT_WAL_OBJECTS: NonZeroU64 = NonZeroU64::new(32).unwrap();
 
-const _: () = assert!(0 < FOLD_AT_WAL_OBJECTS && FOLD_AT_WAL_OBJECTS < MAX_UNFOLDED_WAL_OBJECTS);
+const _: () = assert!(FOLD_AT_WAL_OBJECTS.get() < MAX_UNFOLDED_WAL_OBJECTS);
 
 /// Provider retry-admission deadline, in milliseconds. This alone does not
 /// bound a final retry's backoff and request phase.
@@ -242,7 +243,7 @@ const _: () = assert!(
 );
 
 /// A writer checks its basis once the last confirmation is more than a WAL
-/// publication budget old, and it trusts the answer only within the
+/// publication budget old, and the writer uses the result only within the
 /// revalidation bound of that confirmation. A writer whose commits are less
 /// than a budget apart sends that check when the basis is up to two budgets
 /// old. If two budgets were longer than the bound, a writer whose commits
@@ -287,7 +288,7 @@ pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 ///
 /// The tombstone put starts within the publication budget, and the provider
 /// applies it within its request bound. Outstanding reads and direct
-/// capabilities run from that landing, and the minimum grace window covers
+/// capabilities run from that write, and the minimum grace window covers
 /// them.
 pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
     METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_MIN_GRACE_WINDOW_MS;
@@ -298,7 +299,7 @@ const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 
 /// Most parts one direct multipart upload may cut into. This is the
 /// S3-compatible ceiling, so with the session's part size it fixes the
-/// largest object that session can carry: `part_size_bytes × 10_000`.
+/// largest object that session can upload: `part_size_bytes × 10_000`.
 pub const MAX_MULTIPART_PARTS: u32 = PROVIDER_MAX_MULTIPART_PARTS;
 
 /// Smallest part size a `direct_multipart` session may be opened with.
@@ -346,7 +347,7 @@ pub(crate) const MAX_LAYOUT_EXTENTS: usize = 32;
 /// trip.
 ///
 /// A directory page, a tree listing, and the kept inode walk of a base
-/// compaction each hold at most this many manifest rows of a scan at once, or
+/// compaction each keep at most this many manifest rows of a scan at once, or
 /// the page's limit when that is larger.
 pub(crate) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
@@ -360,8 +361,8 @@ const _: () = assert!(MAX_CURRENT_FILES_PER_STAT as u64 == loonfs_types::MAX_PAG
 
 /// Bytes fetched by each ranged content read.
 ///
-/// A content stream holds at most one chunk of a file's bytes at a time.
-pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+/// A content stream keeps at most one chunk of a file's bytes at a time.
+pub const CONTENT_READ_CHUNK_BYTES: NonZeroU64 = NonZeroU64::new(8 * 1024 * 1024).unwrap();
 
 #[cfg(test)]
 mod tests {

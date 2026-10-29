@@ -3,7 +3,8 @@
 
 use super::{local_store, seed_writer, sweep_config, SweepServer, DAY_MS};
 use crate::config::ServerConfig;
-use crate::sweep::{lock, GarbageCollection, SweepCall};
+use crate::sweep::retries::SweepCall;
+use crate::sweep::{lock, GarbageCollection};
 use loonfs::{
     AdvanceRetentionFloorOptions, ChangeSeq, CreateNamespaceOptions, NamespaceDiagnostics,
     NamespaceId, RetentionTarget, SharedObjectStore,

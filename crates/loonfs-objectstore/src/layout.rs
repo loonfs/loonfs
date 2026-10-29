@@ -20,9 +20,9 @@ const CONTENT_ID_BYTES: usize = "con_".len() + loonfs_types::GENERATED_ID_BODY_B
 /// offset, twice.
 const CONTENT_SPAN_NAME_BYTES: usize = CONTENT_ID_BYTES + 2 * 21;
 
-/// Most namespace ids one [`list_namespace_ids`] page holds: the most keys
+/// Most namespace ids one [`list_namespace_ids`] page contains: the most keys
 /// S3 and Google Cloud Storage return for one list request.
-pub const MAX_NAMESPACE_IDS_PER_PAGE: u32 = 1_000;
+pub const MAX_NAMESPACE_IDS_PER_PAGE: NonZeroU32 = NonZeroU32::new(1_000).unwrap();
 
 /// One family in the [durable object key grammar].
 ///
@@ -68,7 +68,7 @@ impl<'a> ParsedObjectKey<'a> {
         self.owner_namespace_id
     }
 
-    /// Returns the family-specific identifier when the key carries one.
+    /// Returns the family-specific identifier when the key has one.
     pub fn identifier(&self) -> Option<&'a str> {
         self.identifier
     }
@@ -177,7 +177,7 @@ fn parse_wal_no(number: &str) -> Option<loonfs_types::WalNo> {
     (number.0 > 0).then_some(number)
 }
 
-/// Parses the twenty-digit decimal number that WAL and manifest keys carry.
+/// Parses the twenty-digit decimal number that WAL and manifest keys contain.
 fn parse_fixed_width_no(text: &str) -> Option<u64> {
     if text.len() != 20 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -245,9 +245,9 @@ impl NamespacePageCursor {
 
 /// Lists one page of the namespace ids in `store`, in ascending key order.
 ///
-/// The page starts after `start_after` and holds at most `limit` ids, or
+/// The page starts after `start_after` and contains at most `limit` ids, or
 /// [`MAX_NAMESPACE_IDS_PER_PAGE`] when `limit` is larger. One page costs
-/// one store list request, however many objects each namespace holds; see
+/// one store list request, however many objects each namespace has; see
 /// [`ObjectStore::list_child_prefixes`]. A child of `namespaces/` whose name
 /// is not a namespace id is skipped and counted in `skipped_entries`. A
 /// deleted namespace is still listed: its tombstone manifest stays after
@@ -258,8 +258,7 @@ pub async fn list_namespace_ids<S: ObjectStore + ?Sized>(
     start_after: Option<&NamespacePageCursor>,
     limit: EffectiveLimit,
 ) -> Result<NamespaceIdPage> {
-    let max_limit =
-        EffectiveLimit::new(const { NonZeroU32::new(MAX_NAMESPACE_IDS_PER_PAGE).unwrap() });
+    let max_limit = EffectiveLimit::new(MAX_NAMESPACE_IDS_PER_PAGE);
     let page = store
         .list_child_prefixes(
             NAMESPACES_PREFIX,

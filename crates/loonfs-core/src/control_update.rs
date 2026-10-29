@@ -7,7 +7,7 @@ use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
 
-/// An attempt whose write may have landed reads it back before it answers.
+/// An attempt whose write may have taken effect reads it back before it returns.
 #[derive(Debug)]
 pub(crate) enum CasOutcome<T, R> {
     Settled(T),
@@ -37,10 +37,10 @@ where
 /// Creates a control object under a freshly generated id.
 ///
 /// The id is the object's identity: an object under it is this creation's
-/// own put, whatever its bytes hold now, because another caller can change
+/// own put, whatever its bytes contain now, because another caller can change
 /// a mutable record (such as a user pin) as soon as it's written. A
 /// precondition failure is read back like
-/// a transport failure: an earlier attempt's put can land after its own
+/// a transport failure: an earlier attempt's put can take effect after its own
 /// read-back found nothing.
 pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?Sized>(
     store: &S,

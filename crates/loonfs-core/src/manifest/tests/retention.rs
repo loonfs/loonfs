@@ -1,7 +1,8 @@
 //! Checkpoint retention, compaction, and publication budgets.
 
+use super::super::{FoldWalOutcome, PublicationReport};
 use super::*;
-use crate::manifest::{FoldWalOutcome, PublicationReport};
+use crate::segment::block_memo::SessionBlockMemo;
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -488,14 +489,10 @@ async fn commit_segment_with_index<S: ObjectStore + ?Sized>(
         .filter(|segment| segment.family == ApiMetadataRowFamily::Commits);
     let segment = segments.next().expect("a segment of commit rows").clone();
     assert!(segments.next().is_none(), "one segment of commit rows");
-    let index = index_block_load::load_segment_index(
-        store,
-        None,
-        &load::SessionBlockMemo::default(),
-        &segment,
-    )
-    .await
-    .expect("load the index");
+    let index =
+        index_block_load::load_segment_index(store, None, &SessionBlockMemo::default(), &segment)
+            .await
+            .expect("load the index");
     (segment, index)
 }
 
@@ -590,7 +587,7 @@ fn cache_reading_one_block_at_a_time() -> MetadataSegmentCache {
     MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(64 * 1024 * 1024, 64 * 1024 * 1024)),
         ObjectStoreScope::new(0),
-        crate::manifest::cache::unshared_read_working_memory(),
+        crate::segment::cache::unshared_read_working_memory(),
         1,
     )
 }
@@ -1105,7 +1102,7 @@ async fn tail_basis_floors<S: ObjectStore + ?Sized>(
 async fn advance_to_folded_head<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> PublicationReport<loonfs_types::api::v0::AdvanceRetentionResponse> {
+) -> PublicationReport<loonfs_types::AdvanceRetentionResponse> {
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
@@ -1893,7 +1890,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
         .await
         .expect("bootstrap");
 
-    let rounds = DEFAULT_MAX_DELTA_RUNS + 2;
+    let rounds = DEFAULT_MAX_DELTA_RUNS.get() + 2;
     for index in 1..=u64::try_from(rounds).expect("round count fits") {
         write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
@@ -1906,7 +1903,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     .await
     .expect("load appended manifest");
     assert_eq!(delta_runs(&appended.manifest).len(), rounds);
-    assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_DELTA_RUNS);
+    assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_DELTA_RUNS.get());
     assert_eq!(appended.manifest.payload().base_seq(), ChangeSeq(0));
 
     // Compaction merges one family group per unit, each publishing its
@@ -1927,9 +1924,9 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::default(),
-            crate::manifest::CompactionAdmission::AnySize,
+            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
-            &crate::manifest::MetadataCompactionCancellation::default(),
+            &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await
         .expect("compaction step");
@@ -2017,9 +2014,9 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::manifest::CompactionAdmission::WithinRowBudget,
+        crate::compaction::CompactionAdmission::WithinRowBudget,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("budgeted unit");
@@ -2061,9 +2058,9 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::manifest::CompactionAdmission::WithinRowBudget,
+        crate::compaction::CompactionAdmission::WithinRowBudget,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("admitted unit");
@@ -2144,9 +2141,9 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::manifest::CompactionAdmission::AnySize,
+        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("first compaction unit");
@@ -2231,9 +2228,9 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::manifest::CompactionAdmission::AnySize,
+        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("below-trigger step");
@@ -2447,9 +2444,9 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::manifest::CompactionAdmission::AnySize,
+        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("first unit");
@@ -2480,9 +2477,9 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::default(),
-            crate::manifest::CompactionAdmission::AnySize,
+            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
-            &crate::manifest::MetadataCompactionCancellation::default(),
+            &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await
         .expect("resumed unit");
@@ -2665,9 +2662,9 @@ async fn over_budget_compaction_aborts_without_publishing() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::manifest::CompactionAdmission::AnySize,
+        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect_err("over-budget compaction must abort");
@@ -2696,9 +2693,9 @@ async fn over_budget_compaction_aborts_without_publishing() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::manifest::CompactionAdmission::AnySize,
+        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("in-budget retry merges the unit");
@@ -2719,7 +2716,7 @@ async fn plan_window<S: ObjectStore + ?Sized>(
             .await
             .expect("load manifest segments");
     let group = requested_group.unwrap_or_else(|| {
-        super::compaction_step::select_family_group(
+        super::plan::select_family_group(
             segments.scan_runs.as_ref(),
             segments.manifest().payload(),
             MetadataCompactionPolicy::default(),
@@ -2727,7 +2724,7 @@ async fn plan_window<S: ObjectStore + ?Sized>(
         )
         .expect("a family group with delta rows to merge")
     });
-    let spec = super::compaction_step::plan_group(
+    let spec = super::plan::plan_group(
         segments.manifest().payload(),
         segments.scan_runs.as_ref(),
         group,
@@ -2743,7 +2740,7 @@ async fn compact_with<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     policy: MetadataRunPolicy,
-    admission: crate::manifest::CompactionAdmission,
+    admission: crate::compaction::CompactionAdmission,
 ) -> super::CompactionUnitOutcome {
     {
         let mut fixture = crate::test_support::NamespaceFixture::new(
@@ -2760,7 +2757,7 @@ async fn compact_with<S: ObjectStore + ?Sized>(
         MetadataCompactionPolicy::default(),
         admission,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("run a compaction unit")
@@ -2856,7 +2853,7 @@ async fn a_base_over_the_row_budget_is_rebuilt_whole_by_a_unit_of_any_size() {
             &store,
             &namespace_id,
             policy,
-            crate::manifest::CompactionAdmission::WithinRowBudget
+            crate::compaction::CompactionAdmission::WithinRowBudget
         )
         .await,
         super::CompactionUnitOutcome::TooLarge { group }
@@ -2866,7 +2863,7 @@ async fn a_base_over_the_row_budget_is_rebuilt_whole_by_a_unit_of_any_size() {
             &store,
             &namespace_id,
             policy,
-            crate::manifest::CompactionAdmission::AnySize
+            crate::compaction::CompactionAdmission::AnySize
         )
         .await,
         super::CompactionUnitOutcome::Published { group: merged, .. } if merged == group
@@ -3013,7 +3010,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         .expect("the window holds runs");
     assert_eq!(
         spec.placement(),
-        super::compaction_step::MergePlacement::Delta {
+        super::plan::MergePlacement::Delta {
             output_seq: newest_input
         },
         "a merge above the base writes a delta run at its newest input's sequence"
@@ -3133,7 +3130,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 &store,
                 &namespace_id,
                 policy,
-                crate::manifest::CompactionAdmission::WithinRowBudget,
+                crate::compaction::CompactionAdmission::WithinRowBudget,
             )
             .await;
             let current = load_manifest_materialization_for_inspection(
@@ -3168,7 +3165,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                             &store,
                             &namespace_id,
                             policy,
-                            crate::manifest::CompactionAdmission::AnySize,
+                            crate::compaction::CompactionAdmission::AnySize,
                         )
                         .await,
                         super::CompactionUnitOutcome::Published { .. }

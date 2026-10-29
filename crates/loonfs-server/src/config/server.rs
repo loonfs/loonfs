@@ -134,7 +134,7 @@ pub struct ServerConfig {
     /// Largest request body accepted for service-proxied upload content
     /// requests (`PUT .../uploads/{upload_id}/content`). Enforced
     /// incrementally while the body streams to the store, so it bounds the
-    /// accepted transfer size, not per-request memory (streamed writes hold
+    /// accepted transfer size, not per-request memory (streamed writes keep
     /// at most one internal part). Clients may use `direct_put` or direct
     /// multipart for larger transfers when the capability is advertised.
     /// Advertised as the `upload.service_proxied.max_content_bytes` capability limit.
@@ -143,20 +143,20 @@ pub struct ServerConfig {
     /// Largest file content a service-proxied read (`GET .../filesystem/
     /// content` and inode revision content) will stream and return. Checked
     /// against resolved metadata before fetching content bytes; over-limit reads
-    /// answer `content_too_large`. Advertised to clients as the
+    /// return `content_too_large`. Advertised to clients as the
     /// `download.service_proxied.max_content_bytes` capability limit.
     /// Defaults to the runtime's
     /// [`DEFAULT_MAX_READ_CONTENT_BYTES`](loonfs::DEFAULT_MAX_READ_CONTENT_BYTES),
     /// 256 MiB.
     pub max_download_bytes: Option<u64>,
     /// How many proxied upload bodies the server will stream at once;
-    /// requests past the cap answer `server_busy` before any transfer.
+    /// requests past the cap return `server_busy` before any transfer.
     /// Worst-case upload memory is this times one streamed part, since
     /// bodies forward to the store incrementally instead of buffering.
     #[serde(default = "default_max_concurrent_uploads")]
     pub max_concurrent_uploads: NonZeroUsize,
     /// How many proxied content streams the server will serve at once;
-    /// requests past the cap answer `server_busy` before any fetch.
+    /// requests past the cap return `server_busy` before any fetch.
     /// Content memory follows this count times the internal read chunk size,
     /// independent of `max_download_bytes`. Admission lasts until the body
     /// finishes or is dropped.
@@ -194,7 +194,7 @@ pub struct ServerConfig {
     pub idle_session_close_after_ms: u64,
     /// Decoded metadata bytes one maintenance step may merge. A step merges
     /// inline only the runs that fit; a larger window runs as a streaming
-    /// compaction that holds at most this much at once. Derived when sized.
+    /// compaction that keeps at most this much at once. Derived when sized.
     pub max_merge_input_bytes: Option<usize>,
     /// Minimum interval between checks for a successor to a cached manifest,
     /// in milliseconds. Zero checks on every read. Unset keeps the runtime
@@ -219,9 +219,9 @@ pub struct ServerConfig {
     /// [`DEFAULT_IDLE_FOLD_AFTER_MS`](loonfs::DEFAULT_IDLE_FOLD_AFTER_MS), 15
     /// minutes.
     pub idle_fold_after_ms: Option<u64>,
-    /// How the server's listener carries requests. Without a `[transport]`
+    /// How the server's listener receives requests. Without a `[transport]`
     /// table, the server serves plaintext HTTP, which validation accepts
-    /// only on a loopback bind, because the wire carries the bearer token
+    /// only on a loopback bind, because the requests include the bearer token
     /// and the presigned object-store URLs that the upload routes return.
     #[serde(default)]
     pub transport: Option<TransportConfig>,
@@ -244,7 +244,7 @@ pub enum AuthConfig {
     Open,
 }
 
-/// The server's `[transport]` table: how the server's listener carries
+/// The server's `[transport]` table: how the server's listener receives
 /// requests.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -314,11 +314,11 @@ fn default_max_connections() -> NonZeroUsize {
 }
 
 fn default_max_concurrent_uploads() -> NonZeroUsize {
-    const { NonZeroUsize::new(loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS).unwrap() }
+    loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS
 }
 
 fn default_max_concurrent_downloads() -> NonZeroUsize {
-    const { NonZeroUsize::new(loonfs_http::DEFAULT_MAX_CONCURRENT_DOWNLOADS).unwrap() }
+    loonfs_http::DEFAULT_MAX_CONCURRENT_DOWNLOADS
 }
 
 fn default_max_concurrent_maintenance() -> NonZeroUsize {

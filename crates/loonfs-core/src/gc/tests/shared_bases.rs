@@ -7,9 +7,9 @@ use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::manifest::tests::{
     build_namespace_manifest_from_metadata_state, write_namespace_manifest, ManifestMetadataSource,
 };
-use crate::manifest::MetadataRunPolicy;
 use crate::metadata::MetadataStateBuilder;
 use crate::namespace::state::NamespaceReadState;
+use crate::segment::MetadataRunPolicy;
 use crate::storage::content_location::extent_object_key;
 use loonfs_objectstore::keys::{content_blob, content_prefix, temporary_object};
 use loonfs_test_support::stores::RecordedOperation;

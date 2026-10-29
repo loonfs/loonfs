@@ -2,18 +2,16 @@
 
 use super::tree_failures::TreeTransferFailures;
 use crate::args::CommandKind;
-use crate::config::{CliConfig, ConfigSource, ProfileConfig, ProfileMode};
+use crate::config::{CliConfig, ProfileConfig, ProfileMode};
+use crate::config_file::ConfigSource;
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_run_outcome, StoreProbeRunOutcome};
-use loonfs_types::api::v0::{
-    DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, Snapshot,
-    StoreProbeResponse,
-};
 use loonfs_types::{
-    AbsolutePath, CapabilityDocument, ChangeSeq, CommitId, DeleteNamespaceResponse, FileRevision,
-    GrepMatch, InodeId, ListCheckpointsResponse, NamespaceId, NamespaceMetadata, PathEntry,
-    RunMaintenanceResponse,
+    AbsolutePath, CapabilityDocument, ChangeSeq, CommitId, DeleteNamespaceResponse,
+    DeleteSnapshotResponse, FileRevision, GrepIndex, GrepMatch, InodeId, ListChangesResponse,
+    ListCheckpointsResponse, ListSnapshotsResponse, NamespaceId, NamespaceMetadata, PathEntry,
+    RunMaintenanceResponse, Snapshot, StoreProbeResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +54,7 @@ pub(crate) struct TreeTransferFailure {
 
 /// A trash page plus the recovery command printed beside each entry.
 ///
-/// The commands are rendered rather than carried as parts because the JSON
+/// The commands are rendered rather than passed as parts because the JSON
 /// envelope already publishes every field a script would build its own
 /// command from; a ready-to-paste line is a convenience for the human table,
 /// so it is skipped on the wire and the response shape stays the API's.
@@ -116,7 +114,7 @@ pub(crate) struct CommandFailure {
     pub profile: Option<String>,
     pub mode: Option<ProfileMode>,
     /// Boxed to keep `Result<CommandOutput, CommandFailure>` small now that
-    /// [`CliError`] carries request diagnostics (clippy `result_large_err`).
+    /// [`CliError`] includes request diagnostics (clippy `result_large_err`).
     pub error: Box<CliError>,
 }
 
@@ -253,7 +251,7 @@ pub(crate) enum CommandData {
         bytes_written: u64,
     },
     /// A recursive transfer's summary: per-item successes are counted, not
-    /// listed (a tree can hold tens of thousands of entries), and every
+    /// listed (a tree can contain tens of thousands of entries), and every
     /// failure is listed with its own error.
     TreeTransfer {
         source: String,
@@ -322,7 +320,7 @@ pub(crate) enum CommandData {
     /// The payload already went to standard output as it arrived, so there is
     /// nothing left to render. `get -` reports this: a download that is
     /// written chunk by chunk cannot also be handed to the renderer at the
-    /// end without holding all of it.
+    /// end without keeping all of it in memory.
     StreamedToStdout,
     #[serde(untagged)]
     MaintenanceRan(MaintenanceRan),

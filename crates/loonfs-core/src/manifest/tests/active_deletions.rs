@@ -10,12 +10,13 @@ use crate::metadata::{
     hiding_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use crate::{NamespaceEngine, RuntimeReadContext};
-use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::format::manifest::{
     ActiveDeletionRowAction, DeletedBinding, DeltaPosition, InodeRecord,
 };
-use loonfs_types::{AttributeInclusion, EntryInodeKind, InodeKind};
+use loonfs_types::options::AttributeInclusion;
+use loonfs_types::DirectoryBinding;
 use loonfs_types::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
+use loonfs_types::{EntryInodeKind, InodeKind};
 use std::assert_matches;
 
 fn position(seq: u64) -> DeltaPosition {
@@ -176,7 +177,7 @@ fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
         ],
         "the removal repeats the deletion's own position"
     );
-    let delta_rows = super::super::row::manifest_rows_for_family_after_seq(
+    let delta_rows = crate::segment::row::manifest_rows_for_family_after_seq(
         &state,
         ApiMetadataRowFamily::ActiveDeletions,
         ChangeSeq(5),
@@ -770,7 +771,7 @@ async fn stored_active_deletions<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    crate::manifest::metadata_basis_from_manifest(store, None, &current)
+    super::super::metadata_basis_from_manifest(store, None, &current)
         .segments
         .scan_prefix(ApiMetadataRowFamily::ActiveDeletions, "")
         .await

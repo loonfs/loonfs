@@ -9,7 +9,7 @@ use std::num::NonZeroU32;
 use std::pin::Pin;
 use thiserror::Error;
 
-/// A response that carries items and a continuation position.
+/// A response that contains items and a continuation position.
 pub trait PagedResponse: Send + 'static {
     /// One item in the response.
     type Item: Send + 'static;
@@ -121,7 +121,7 @@ impl<P: PagedResponse, E> Pager<P, E> {
             PagerState::More(cursor) => Some(cursor.clone()),
             PagerState::Done => return None,
         };
-        // A total too large for `u32` leaves more items than any page holds.
+        // A total too large for `u32` leaves more items than any page contains.
         let unloaded_items = u32::try_from(self.unloaded_items).unwrap_or(u32::MAX);
         let limit = NonZeroU32::new(unloaded_items.min(self.page_limit.get()))?;
         let page = (self.load_page)(PageRequest {
@@ -231,14 +231,10 @@ string_cursor_response!(
     crate::Checkpoint,
     checkpoints
 );
-string_cursor_response!(
-    crate::api::v0::ListSnapshotsResponse,
-    crate::api::v0::Snapshot,
-    snapshots
-);
+string_cursor_response!(crate::ListSnapshotsResponse, crate::Snapshot, snapshots);
 
-impl PagedResponse for crate::api::v0::GrepResponse {
-    type Item = crate::api::v0::GrepMatch;
+impl PagedResponse for crate::GrepResponse {
+    type Item = crate::GrepMatch;
     type Cursor = String;
 
     fn items_mut(&mut self) -> &mut Vec<Self::Item> {
@@ -262,8 +258,8 @@ impl PagedResponse for crate::api::v0::GrepResponse {
     }
 }
 
-impl PagedResponse for crate::api::v0::ListChangesResponse {
-    type Item = crate::api::v0::Commit;
+impl PagedResponse for crate::ListChangesResponse {
+    type Item = crate::Commit;
     type Cursor = ChangeSeq;
 
     fn items_mut(&mut self) -> &mut Vec<Self::Item> {

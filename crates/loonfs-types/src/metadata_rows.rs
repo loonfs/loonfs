@@ -32,7 +32,7 @@ pub enum MetadataRowFamily {
     CommitReceipts,
     /// Stores each retained commit's record in sequence order.
     Commits,
-    /// Names the objects that hold each chain.
+    /// Lists the objects that store each chain.
     ContentLayouts,
     /// Stores inode attribute revisions newest-first.
     ///
@@ -96,7 +96,7 @@ pub enum MetadataFamilyGroup {
     ActiveDeletions,
     /// Commit records and their idempotency receipts, one row each per commit.
     Commits,
-    /// Names the objects that hold each chain.
+    /// Lists the objects that store each chain.
     ContentLayouts,
     /// Attributes.
     Attributes,
@@ -175,12 +175,12 @@ pub enum MetadataRow {
     /// each revoke. This lets trash listing use an ordered range scan
     /// instead of replaying all historical deletion events.
     ActiveDeletion(ActiveDeletionRecord),
-    /// Preserves the evidence needed to answer a retried logical commit.
+    /// Preserves the evidence needed to respond to a retried logical commit.
     CommitReceipt(CommitReceiptRecord),
-    /// One committed logical commit as its WAL record carries it, without inline bytes.
+    /// One committed logical commit as its WAL record describes it, without inline bytes.
     /// The change feed and commit replay read this row.
     Commit(WalCommitPayload),
-    /// Names the objects that hold one chain as of a fold or commit.
+    /// Lists the objects that store one chain as of a fold or commit.
     ContentLayout(ContentLayoutRecord),
     /// Publishes one inode's complete attribute map at one revision.
     ///
@@ -339,13 +339,13 @@ pub struct ActiveDeletionRecord {
     pub action: ActiveDeletionRowAction,
 }
 
-/// The objects that hold a chain as of one fold or commit.
+/// The objects that store a chain as of one fold or commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContentLayoutRecord {
     /// Namespace that owns the chain.
     pub owner_namespace_id: NamespaceId,
-    /// Chain whose bytes the layout holds.
+    /// Chain whose bytes the layout lists.
     pub content_id: ContentId,
     /// Newest commit whose bytes the layout covers.
     pub committed_seq: ChangeSeq,
@@ -429,17 +429,17 @@ pub struct DeltaPosition {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeletedBinding {
-    /// Directory that held the binding.
+    /// Directory that contained the binding.
     pub parent_inode_id: InodeId,
     /// Canonical key the binding was reachable under.
     pub name_key: NameKey,
-    /// User-facing spelling the binding carried.
+    /// User-facing spelling of the binding.
     pub display_name: DisplayName,
 }
 
 /// Events retained for recoverable subtree deletion.
 ///
-/// The latest event for a root at a sequence decides the root's state there
+/// The latest event for a root at a sequence determines the root's state there
 /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -449,7 +449,7 @@ pub enum TombstoneRowAction {
         /// The binding the delete removed.
         deleted_binding: DeletedBinding,
     },
-    /// The deletion recorded at `target` is revoked. Only a `set` carries a
+    /// The deletion recorded at `target` is revoked. Only a `set` has a
     /// binding, so the revoke has no place to put one.
     Revoke {
         /// The exact `set` event being compensated.

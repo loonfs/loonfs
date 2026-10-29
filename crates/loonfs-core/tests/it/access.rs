@@ -7,16 +7,16 @@ use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::CreateNamespaceOptions;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::api::v0::FilesystemChange;
+use loonfs_types::options::AttributeInclusion;
 use loonfs_types::options::{ListOptions, StatOptions};
+use loonfs_types::FilesystemChange;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId,
     CommitPrecondition, DestinationBehavior, DisplayName, ErrorCode, InodeId, NamespaceAccess,
     NamespaceId, PrincipalId, PrincipalScope, ROOT_INODE_ID,
 };
 use loonfs_types::{
-    AttributeInclusion, ChangeSeq, ContentRef, Page, PageRequest, RevisionNo, TrashEntry,
-    TrashPageCursor,
+    ChangeSeq, ContentRef, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use std::assert_matches;
 use std::num::NonZeroU64;

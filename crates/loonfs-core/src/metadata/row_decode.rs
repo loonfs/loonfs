@@ -13,7 +13,7 @@ use crate::metadata::{
 use loonfs_types::format::manifest::MetadataRow;
 use loonfs_types::format::wal::WalCommitPayload;
 
-/// The scanned segment can only hold `expected_kind` rows; the foreign row's
+/// The scanned segment can only contain `expected_kind` rows; the foreign row's
 /// self-keyed row key names its actual kind and identity.
 fn foreign_row(expected_kind: &str, row: &MetadataRow) -> CoreError {
     CoreError::NamespaceCorrupt(format!(

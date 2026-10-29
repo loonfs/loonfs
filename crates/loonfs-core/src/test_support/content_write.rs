@@ -3,8 +3,9 @@
 use super::NamespaceFixture;
 use crate::error::Result;
 use crate::path::mutation_path::parse_mutation_path;
-use crate::storage::content::{prepare_stored_content, stage_bytes_under_content_id};
+use crate::storage::content::prepare_stored_content;
 use crate::storage::content_admission::PreparedContent;
+use crate::storage::content_staging::stage_bytes_under_content_id;
 use loonfs_objectstore::ObjectStore;
 
 impl<S: ObjectStore + Clone> NamespaceFixture<S> {

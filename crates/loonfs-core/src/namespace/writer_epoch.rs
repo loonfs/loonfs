@@ -51,16 +51,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Acquires the namespace's writer epoch for `writer_id`, as a test that
-    /// needs a fence without a writer session does.
-    #[cfg(test)]
-    pub(crate) async fn acquire_writer_epoch(
-        &self,
-        writer_id: &WriterId,
-    ) -> Result<AcquiredWriter> {
-        Ok(self.acquire_writer(writer_id).await?.writer)
-    }
-
     /// Acquires the namespace's writer epoch for `writer_id`: publishes
     /// a claim manifest with the next epoch, then writes a fence at the next WAL
     /// number (format spec, "Writer ownership").

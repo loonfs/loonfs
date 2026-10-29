@@ -279,21 +279,21 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         let first = encode_manifest(payload.clone());
         if newer_head {
             let session = Arc::new(std::sync::Mutex::new(
-                crate::commit_engine::WriterSessionStatus::Acquired(
+                crate::commit::engine::WriterSessionStatus::Acquired(
                     crate::namespace::writer_epoch::AcquiredWriter {
                         writer_id: context.writer_id.clone(),
                         writer_epoch: current.payload().writer_epoch,
                     },
                 ),
             ));
-            let mut engine = crate::commit_engine::NamespaceCommitEngine::new(
+            let mut engine = crate::commit::engine::NamespaceCommitEngine::new(
                 crate::test_support::namespace_store(&store, &namespace_id),
                 context.writer_id.clone(),
             )
             .writer_session(session);
             engine
                 .publish_batch(
-                    vec![crate::commit_engine::CommitCandidate::new(
+                    vec![crate::commit::engine::CommitCandidate::new(
                         crate::path::write::CommitIntent {
                             commit_id: loonfs_types::CommitId::generate(),
                             actor_id: loonfs_test_support::ids::test_actor(),
@@ -491,7 +491,7 @@ async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_abs
                 let mut payload = current.payload().clone();
                 payload.status =
                     loonfs_types::format::control::NamespaceStatus::Deleted { deleted_at_ms: 1 };
-                Ok(crate::manifest::publish::ManifestChange::Next(
+                Ok(super::super::publish::ManifestChange::Next(
                     Box::new(payload),
                     (),
                 ))
@@ -658,7 +658,7 @@ async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
             &deadline,
             crate::limits::MAX_CONTENTION_ATTEMPTS,
             |current: crate::namespace::control::LoadedManifest| async move {
-                Ok(crate::manifest::publish::ManifestChange::Next(
+                Ok(super::super::publish::ManifestChange::Next(
                     Box::new(current.payload().clone()),
                     (),
                 ))
@@ -682,7 +682,7 @@ async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
 
 #[tokio::test]
 async fn a_manifest_update_stops_after_the_contention_limit() {
-    use crate::manifest::publish::ManifestChange;
+    use super::super::publish::ManifestChange;
 
     for rival_publishes in [false, true] {
         let directory = tempdir().expect("directory");

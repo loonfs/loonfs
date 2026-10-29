@@ -54,7 +54,7 @@ async fn write_until_the_session_compacts(
     path_prefix: &str,
 ) {
     let mut before = 0;
-    for index in 0..3 * DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..3 * DEFAULT_MAX_DELTA_RUNS.get() {
         write_and_settle(writer, namespace, &format!("{path_prefix}-{index}")).await;
         let after = delta_runs(&current_manifest(store, namespace.id()).await);
         if after < before {
@@ -84,13 +84,13 @@ async fn session_one_fold_short<S: ObjectStore + ?Sized>(
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    for write in 0..DEFAULT_MIN_COMPACTION_RUNS {
+    for write in 0..DEFAULT_MIN_COMPACTION_RUNS.get() {
         let runs = current_manifest(store, &namespace_id)
             .await
             .payload()
             .runs
             .len();
-        if runs == DEFAULT_MIN_COMPACTION_RUNS - 1 {
+        if runs == DEFAULT_MIN_COMPACTION_RUNS.get() - 1 {
             return namespace;
         }
         write_and_settle(writer, &namespace, &format!("/file-{write}")).await;
@@ -152,7 +152,7 @@ async fn a_session_compacts_after_its_own_fold_without_any_hint() {
 
     let manifest = current_manifest(store.as_ref(), &namespace_id).await;
     assert!(
-        delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS,
+        delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS.get(),
         "found {} delta runs",
         delta_runs(&manifest)
     );
@@ -200,7 +200,7 @@ async fn park_a_session_compaction() -> ParkedCompaction {
     // The unit waits for a permit until the gate is armed, so the first
     // segment write it parks at is its own.
     let mut permits = Vec::new();
-    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS {
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS.get() {
         permits.push(writer.execution_budget().compaction_permit().await);
     }
     namespace
@@ -260,7 +260,7 @@ async fn a_session_streaming_compaction_survives_its_own_next_fold() {
     }
     let manifest = parked.manifest().await;
     assert!(
-        delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS,
+        delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS.get(),
         "found {} delta runs",
         delta_runs(&manifest)
     );
@@ -305,7 +305,7 @@ async fn a_session_compaction_reads_no_wal_objects() {
     // The session's compaction finds a unit due after this fold, and waits
     // for a permit while two more writes wait for their fold.
     let mut compaction_permits = Vec::new();
-    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS {
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS.get() {
         compaction_permits.push(writer.execution_budget().compaction_permit().await);
     }
     namespace
@@ -314,7 +314,7 @@ async fn a_session_compaction_reads_no_wal_objects() {
         .expect("put the file whose fold makes compaction due");
     namespace.wait_for_fold().await.expect("the fold settles");
     let mut fold_permits = Vec::new();
-    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS {
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS.get() {
         fold_permits.push(writer.execution_budget().fold_permit().await);
     }
     for path in ["/unfolded-1", "/unfolded-2"] {
@@ -360,7 +360,7 @@ async fn a_session_compaction_reads_no_wal_objects() {
         after.manifest().manifest_no.0 >= before.0 + 2,
         "the unit and the fold both published"
     );
-    assert!(delta_runs(&after) < DEFAULT_MIN_COMPACTION_RUNS);
+    assert!(delta_runs(&after) < DEFAULT_MIN_COMPACTION_RUNS.get());
     assert_eq!(
         store.take_get_keys(),
         Vec::<String>::new(),
@@ -531,7 +531,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     for namespace in &sessions {
         let manifest = current_manifest(store.inner(), namespace.id()).await;
         assert!(
-            delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS,
+            delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS.get(),
             "`{}` still has {} delta runs",
             namespace.id(),
             delta_runs(&manifest)
@@ -604,7 +604,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
     writer.drain().await.expect("the other merge finishes");
     assert!(
         delta_runs(&current_manifest(store.inner(), merging.id()).await)
-            < DEFAULT_MIN_COMPACTION_RUNS
+            < DEFAULT_MIN_COMPACTION_RUNS.get()
     );
     assert_eq!(
         writer.execution_budget().stats(),
@@ -618,7 +618,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
     write_and_settle(&writer, &reopened, "/after-close").await;
     assert!(
         delta_runs(&current_manifest(store.inner(), reopened.id()).await)
-            < DEFAULT_MIN_COMPACTION_RUNS,
+            < DEFAULT_MIN_COMPACTION_RUNS.get(),
         "a later fold on a reopened session compacts"
     );
     writer.shutdown().await.expect("shut down writer");

@@ -3,7 +3,7 @@
 //! below the commit path.
 
 use super::NamespaceFixture;
-use crate::commit_engine::CommitCandidate;
+use crate::commit::engine::CommitCandidate;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::path::mutation_path::parse_mutation_path;

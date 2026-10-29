@@ -12,7 +12,7 @@
 //! and runs its work under an execution budget it may share. It creates and
 //! forks namespaces, and [`LoonFs::open_namespace`] returns a
 //! `Namespace<Writable>`, which is that namespace's writer session. The host
-//! owns each session: it lives while the host holds a handle for it.
+//! owns each session: it stays open while the host keeps a handle on it.
 //!
 //! Maintenance is a capability of a writable runtime.
 //! [`LoonFs::maintenance`] returns a [`Maintenance`] value that runs folds,
@@ -86,7 +86,7 @@ pub struct Writable {
 pub(crate) struct WriterState {
     /// The writer ID that the runtime's sessions commit as.
     pub(crate) writer_id: WriterId,
-    /// The compactor epoch this runtime holds for each namespace. Its
+    /// The compactor epoch this runtime has for each namespace. Its
     /// sessions and every `Maintenance` value share it, so they never fence
     /// each other. It's a `tokio` mutex because a first claim keeps it locked
     /// across `claim_compactor().await`, so concurrent groups share one epoch.
@@ -117,7 +117,7 @@ pub(crate) mod sealed {
 
     /// The data each mode adds to a namespace handle.
     pub(crate) trait Sealed {
-        /// What a namespace handle holds for its writer session: nothing in
+        /// What a namespace handle keeps for its writer session: nothing in
         /// the read-only mode.
         type Session: Clone;
     }
@@ -247,7 +247,7 @@ impl LoonFs<Writable> {
 
     /// Starts a writable runtime builder over a caller-supplied store.
     ///
-    /// For callers who know the store is safe in this runtime's ownership
+    /// For callers who are sure the store is safe in this runtime's ownership
     /// domain. Do not use it to share one provider client across unrelated
     /// runtimes; build another runtime from [`StoreConfig`] instead.
     pub fn builder_with_store(store: SharedObjectStore) -> LoonFsBuilder<Writable> {
@@ -264,7 +264,7 @@ impl LoonFs<Writable> {
     /// `writer_session_closed` while a [`Namespace::close`] of this
     /// namespace's session drains or a fenced session finishes its work. Once
     /// that work ends, opening starts a new session even if old clones are
-    /// still held. Fails with `shutting_down` after shutdown begins.
+    /// still exist. Fails with `shutting_down` after shutdown begins.
     pub fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace<Writable>> {
         trace::in_operation_sync(
             operation_span!(self.core, "open_namespace", namespace_id),
@@ -280,7 +280,7 @@ impl LoonFs<Writable> {
     ///
     /// Maintenance shares this runtime's store client, caches, and
     /// publication service, so fold decisions see the inline bytes of the
-    /// sessions this runtime holds. It also shares the runtime's compactor
+    /// sessions this runtime keeps. It also shares the runtime's compactor
     /// claim, so it never fences this runtime's sessions or another value
     /// from this runtime, and its folds and merges take their permits from
     /// the runtime's [`ExecutionBudget`].
@@ -309,7 +309,7 @@ impl LoonFs<Writable> {
     /// it.
     ///
     /// Mutations submitted from here on fail with `shutting_down`, so a
-    /// readiness probe answers "draining" from this and a load balancer can
+    /// readiness probe reports "draining" from this and a load balancer can
     /// take the instance out before its in-flight work settles.
     pub fn is_shutting_down(&self) -> bool {
         self.mode.publisher.is_admission_closed()

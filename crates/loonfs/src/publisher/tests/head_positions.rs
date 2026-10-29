@@ -469,7 +469,7 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
             now_ms: 1_000,
         },
     )
-    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS.get() - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
     let namespace = writer

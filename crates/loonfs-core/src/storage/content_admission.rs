@@ -9,7 +9,7 @@
 use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::inline_content::InlineContent;
-use loonfs_types::api::v0::ContentToken;
+use loonfs_types::ContentToken;
 use loonfs_types::{
     decode_token, decode_token_bytes, encode_token, encode_token_bytes, ChecksumAlgorithm,
     ContentId, ContentRef, NamespaceId, OpaqueToken, OpaqueTokenError, UploadId,
@@ -285,8 +285,8 @@ mod tests {
     use super::{mint_content_token, verify_content_token, CompletedUploadEvidence};
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use crate::namespace::state::NamespaceReadState;
-    use loonfs_types::api::v0::ContentToken;
     use loonfs_types::format::hex::hex_encode_bytes;
+    use loonfs_types::ContentToken;
     use loonfs_types::{ContentId, ContentRef, NamespaceId};
 
     fn catalog_entry(namespace_id: NamespaceId) -> VerifiedNamespaceCatalogEntry {

@@ -210,7 +210,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// is above it.
     ///
     /// Returns `None` when `basis` was checked the revalidation bound ago or
-    /// longer, before the probe or when its answer arrives, and the caller then
+    /// longer, before the probe or when its response arrives, and the caller then
     /// loads the current manifest through the hint. Garbage collection keeps a
     /// manifest while its successor is younger than the grace window. The basis
     /// had no successor when it was checked, so every manifest above it was
@@ -319,24 +319,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .checked_sub(1)
             .filter(|number| *number > 0)
             .map(ManifestNo);
-        // Identical bytes prove authorship only when the manifest names an object
-        // this attempt created: a fork's source pin, or a segment its predecessor
-        // does not list. A rival can rebuild any other manifest byte for byte.
-        let names_own_object = {
-            let payload = manifest.envelope().payload();
-            let listed = current
-                .iter()
-                .flat_map(|current| &current.manifest.payload().runs)
-                .flat_map(|run| &run.segments)
-                .map(|segment| &segment.segment_id)
-                .collect::<HashSet<_>>();
-            (payload.manifest_no == ManifestNo(1) && payload.fork_basis.is_some())
-                || payload
-                    .runs
-                    .iter()
-                    .flat_map(|run| &run.segments)
-                    .any(|segment| !listed.contains(&segment.segment_id))
-        };
+        let references_own_object = references_own_object(manifest.envelope().payload(), current);
         let object_key =
             metadata_manifest_object(namespace_id, &manifest.envelope().payload().manifest_no);
         let candidate = LoadedManifest {
@@ -361,19 +344,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 ManifestKind::Settled(outcome) => return Ok(outcome),
             }
         }
-        let payload = manifest.envelope().payload();
-        let legal = match current {
-            Some(current) => current
-                .manifest
-                .payload()
-                .ensure_successor(payload)
-                .map_err(|error| error.to_string()),
-            None if payload.manifest_no == ManifestNo(1) => payload
-                .ensure_first_manifest()
-                .map_err(|error| error.to_string()),
-            None => Err("has no predecessor".to_owned()),
-        };
-        legal.expect("a candidate manifest should be a legal successor of the current manifest");
+        assert_legal_successor(manifest.envelope().payload(), current);
         clock.ensure_metadata_publication_budget(namespace_id)?;
         let outcome = match self
             .store
@@ -389,49 +360,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .await?
                 .settled_after_conflict(namespace_id)?,
             Err(error @ ObjectStoreError::Transport { .. }) => {
-                // Only the exact manifest at this number confirms the put;
-                // a later manifest may already cover it.
-                let landed = self
-                    .load_manifest_by_no(candidate.payload().manifest_no)
-                    .await
-                    .map_err(CoreError::ControlObjectLoad)?;
-                let outcome = match landed {
-                    Some(landed) => classify_current(
-                        &landed,
-                        &candidate,
-                        expected_predecessor,
-                        names_own_object,
-                    ),
-                    None => {
-                        self.classify_current_manifest(
-                            current,
-                            &candidate,
-                            expected_predecessor,
-                            names_own_object,
-                        )
-                        .await?
-                    }
-                };
-                let ManifestKind::Settled(outcome) = outcome else {
-                    tracing::error!(
-                        namespace_id = %namespace_id,
-                        object_key = %object_key,
-                        error = %error,
-                        "the outcome of a manifest publication is unknown"
-                    );
-                    return Err(CoreError::OutcomeUnknown {
-                        object_key,
-                        message: error.public_message().into_owned(),
-                    });
-                };
-                if matches!(
-                    outcome,
-                    ManifestPublicationOutcome::Published(_)
-                        | ManifestPublicationOutcome::CoveredByCurrent(_)
-                ) {
-                    ensure_publication_in_budget(&object_key, clock)?;
-                }
-                outcome
+                self.settle_unconfirmed_put(
+                    &error,
+                    &candidate,
+                    current,
+                    expected_predecessor,
+                    references_own_object,
+                    clock,
+                )
+                .await?
             }
             Err(error) => {
                 tracing::error!(
@@ -443,6 +380,64 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 return Err(CoreError::store(&object_key, &error));
             }
         };
+        Ok(outcome)
+    }
+
+    /// Settles a manifest put whose response was lost: the put took effect
+    /// only if the manifest at the candidate's number is the candidate, or a
+    /// later manifest covers it.
+    async fn settle_unconfirmed_put(
+        &self,
+        error: &ObjectStoreError,
+        candidate: &LoadedManifest,
+        current: Option<&PublicationBasis>,
+        expected_predecessor: Option<ManifestNo>,
+        references_own_object: bool,
+        clock: &OperationClock,
+    ) -> Result<ManifestPublicationOutcome> {
+        // Only the exact manifest at this number confirms the put;
+        // a later manifest may already cover it.
+        let found = self
+            .load_manifest_by_no(candidate.payload().manifest_no)
+            .await
+            .map_err(CoreError::ControlObjectLoad)?;
+        let outcome = match found {
+            Some(found) => classify_current(
+                &found,
+                candidate,
+                expected_predecessor,
+                references_own_object,
+            ),
+            None => {
+                self.classify_current_manifest(
+                    current,
+                    candidate,
+                    expected_predecessor,
+                    references_own_object,
+                )
+                .await?
+            }
+        };
+        let object_key = &candidate.object_key;
+        let ManifestKind::Settled(outcome) = outcome else {
+            tracing::error!(
+                namespace_id = %self.namespace_id,
+                object_key = %object_key,
+                error = %error,
+                "the outcome of a manifest publication is unknown"
+            );
+            return Err(CoreError::OutcomeUnknown {
+                object_key: object_key.clone(),
+                message: error.public_message().into_owned(),
+            });
+        };
+        if matches!(
+            outcome,
+            ManifestPublicationOutcome::Published(_)
+                | ManifestPublicationOutcome::CoveredByCurrent(_)
+        ) {
+            ensure_publication_in_budget(object_key, clock)?;
+        }
         Ok(outcome)
     }
 
@@ -481,9 +476,49 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
+/// Returns whether `payload` references an object that this attempt created:
+/// a fork's source pin, or a segment that its predecessor doesn't list.
+///
+/// Identical bytes prove authorship only for such a manifest. A rival can
+/// rebuild any other manifest byte for byte.
+fn references_own_object(
+    payload: &NamespaceManifestPayload,
+    current: Option<&PublicationBasis>,
+) -> bool {
+    let listed = current
+        .iter()
+        .flat_map(|current| &current.manifest.payload().runs)
+        .flat_map(|run| &run.segments)
+        .map(|segment| &segment.segment_id)
+        .collect::<HashSet<_>>();
+    (payload.manifest_no == ManifestNo(1) && payload.fork_basis.is_some())
+        || payload
+            .runs
+            .iter()
+            .flat_map(|run| &run.segments)
+            .any(|segment| !listed.contains(&segment.segment_id))
+}
+
+/// Asserts that `payload` is a legal successor of the current manifest, or a
+/// legal first manifest when there is none.
+fn assert_legal_successor(payload: &NamespaceManifestPayload, current: Option<&PublicationBasis>) {
+    let legal = match current {
+        Some(current) => current
+            .manifest
+            .payload()
+            .ensure_successor(payload)
+            .map_err(|error| error.to_string()),
+        None if payload.manifest_no == ManifestNo(1) => payload
+            .ensure_first_manifest()
+            .map_err(|error| error.to_string()),
+        None => Err("has no predecessor".to_owned()),
+    };
+    legal.expect("a candidate manifest should be a legal successor of the current manifest");
+}
+
 fn ensure_publication_in_budget(object_key: &str, clock: &OperationClock) -> Result<()> {
     let elapsed_ms = clock.elapsed_ms();
-    // A put that lands after the budget may have landed on a reclaimed number.
+    // A put that is written after the budget may have been written at a reclaimed number.
     if elapsed_ms > crate::limits::METADATA_PUBLICATION_BUDGET_MS {
         return Err(CoreError::OutcomeUnknown {
             object_key: object_key.to_owned(),

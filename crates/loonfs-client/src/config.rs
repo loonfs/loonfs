@@ -37,7 +37,7 @@ pub struct ClientConfig {
     /// returns so that the caller retries against the next one) and
     /// network-level transport errors (connect failures, timeouts, resets).
     /// Off by default. The retry
-    /// applies only to reads, commits (which carry a durable replay
+    /// applies only to reads, commits (which include a durable replay
     /// identity), and operations whose repeat semantics are idempotent;
     /// lifecycle mutations
     /// and upload-session creation are always single-attempt.
@@ -120,7 +120,9 @@ fn is_literal_loopback_host(uri: &Uri) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Client;
     use std::assert_matches;
+    use tempfile::tempdir;
 
     fn config(server_url: &str, auth_token: Option<&str>) -> ClientConfig {
         ClientConfig {
@@ -173,5 +175,137 @@ mod tests {
         config("http://example.internal", None)
             .validate()
             .expect("unauthenticated plaintext deployments remain supported");
+    }
+
+    #[test]
+    fn construction_validates_config_like_load_does() {
+        let error = Client::new(ClientConfig {
+            server_url: "ftp://example.com".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        })
+        .expect_err("ftp scheme must be rejected");
+        assert_matches!(
+            &error,
+            ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
+                field: "server_url",
+                ..
+            }),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn client_and_config_debug_redact_the_auth_token() {
+        let raw_token = "client-debug-secret";
+        let config = ClientConfig {
+            server_url: "https://example.com".to_owned(),
+            auth_token: Some(raw_token.into()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        };
+
+        let config_debug = format!("{config:?}");
+        assert!(!config_debug.contains(raw_token), "{config_debug}");
+        assert!(config_debug.contains("<redacted>"), "{config_debug}");
+
+        let client = Client::new(config).expect("valid client config");
+        let client_debug = format!("{client:?}");
+        assert!(!client_debug.contains(raw_token), "{client_debug}");
+        assert!(client_debug.contains("<redacted>"), "{client_debug}");
+    }
+
+    #[test]
+    fn an_unusable_ca_bundle_fails_construction_and_names_the_path() {
+        let dir = tempdir().expect("tempdir");
+        let missing = dir.path().join("absent.crt");
+        let garbage = dir.path().join("garbage.crt");
+        fs::write(&garbage, b"this is not a certificate\n").expect("write garbage");
+
+        for path in [missing, garbage] {
+            let display = path.display().to_string();
+            let error = Client::new(ClientConfig {
+                server_url: "https://example.com".to_owned(),
+                auth_token: None,
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: Some(display.clone()),
+            })
+            .expect_err("unusable ca bundle");
+            match &error {
+                ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
+                    field: "ca_cert_path",
+                    reason,
+                }) => assert!(
+                    reason.contains(&display),
+                    "the reason must name the path, got: {reason}"
+                ),
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn client_config_rejects_unknown_keys() {
+        let error = toml::from_str::<ClientConfig>(
+            "server_url = \"http://localhost:1\"\nauth_tokn = \"oops\"\n",
+        )
+        .expect_err("unknown key must fail decode");
+        assert!(error.to_string().contains("auth_tokn"), "{error}");
+
+        let config: ClientConfig =
+            toml::from_str("server_url = \"http://localhost:1\"\n").expect("minimal config");
+        assert!(config.auth_token.is_none());
+    }
+
+    #[test]
+    fn load_rejects_blank_auth_token() {
+        let path = write_config(
+            r#"
+server_url = "http://127.0.0.1:9400"
+auth_token = "   "
+"#,
+        );
+
+        let error = ClientConfig::load(&path).expect_err("blank auth token");
+
+        assert_matches!(
+            error,
+            ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
+                field,
+                ..
+            }) if field == "auth_token",
+            "expected config validation error, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn load_preserves_missing_file_as_config_io() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("missing.toml");
+
+        let error = ClientConfig::load(&path).expect_err("missing config");
+
+        assert_matches!(error, ClientError::ConfigIo(_));
+    }
+
+    #[test]
+    fn load_preserves_decode_error() {
+        let path = write_config("server_url = [");
+
+        let error = ClientConfig::load(&path).expect_err("decode error");
+
+        assert_matches!(error, ClientError::ConfigDecode(_));
+    }
+
+    fn write_config(contents: &str) -> std::path::PathBuf {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("client.toml");
+        fs::write(&path, contents).expect("write config");
+        let _ = temp_dir.keep();
+        path
     }
 }

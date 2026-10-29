@@ -274,7 +274,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
     seed.create_namespace(&compacts, &loonfs_test_support::test_actor())
         .await
         .expect("create the namespace");
-    for index in 0..=DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..=DEFAULT_MAX_DELTA_RUNS.get() {
         write_and_fold(&seed, &compacts, &format!("/file-{index}")).await;
     }
     let later = ["b-later", "c-later"].map(namespace_id);

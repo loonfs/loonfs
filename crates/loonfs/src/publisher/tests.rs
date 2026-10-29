@@ -27,9 +27,9 @@ use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate,
     NamespaceOverlapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
 };
-use loonfs_types::api::v0::Commit;
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
+use loonfs_types::Commit;
 use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
 use std::assert_matches;
 use std::num::NonZeroUsize;
@@ -421,7 +421,7 @@ async fn wait_for_fold_waiters(writer: &crate::LoonFs<crate::Writable>, expected
 /// fold starts until they drop.
 async fn hold_every_fold_permit(writer: &crate::LoonFs<crate::Writable>) -> Vec<BudgetPermit<'_>> {
     let mut permits = Vec::new();
-    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS {
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS.get() {
         permits.push(writer.execution_budget().fold_permit().await);
     }
     permits
@@ -433,7 +433,7 @@ async fn hold_every_publication_permit(
     writer: &crate::LoonFs<crate::Writable>,
 ) -> Vec<BudgetPermit<'_>> {
     let mut permits = Vec::new();
-    for _ in 0..crate::execution_budget::DEFAULT_MAX_CONCURRENT_PUBLICATIONS {
+    for _ in 0..crate::execution_budget::DEFAULT_MAX_CONCURRENT_PUBLICATIONS.get() {
         permits.push(writer.execution_budget().publication_permit().await);
     }
     permits
@@ -967,7 +967,7 @@ async fn publisher_contender_waits_for_active_request_receipt() {
         conflict,
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
-            committed: Some(loonfs_types::api::v0::CommittedReceipt {
+            committed: Some(loonfs_types::CommittedReceipt {
                 committed_seq: ChangeSeq(1),
                 committed_fingerprint: fingerprint,
             }),
@@ -1174,7 +1174,7 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
         conflict,
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
-            committed: Some(loonfs_types::api::v0::CommittedReceipt {
+            committed: Some(loonfs_types::CommittedReceipt {
                 committed_seq: ChangeSeq(2),
                 ..
             }),
@@ -2208,7 +2208,7 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
             now_ms: 1_000,
         },
     )
-    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS.get() - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
 
@@ -2230,7 +2230,10 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
         .await
         .expect("inspect the folded namespace");
     assert!(status.current_manifest_no.is_some(), "{status:?}");
-    assert!(status.wal_tail_objects < FOLD_AT_WAL_OBJECTS, "{status:?}");
+    assert!(
+        status.wal_tail_objects < FOLD_AT_WAL_OBJECTS.get(),
+        "{status:?}"
+    );
     let position = writer
         .core
         .writer_position(&namespace_id)
@@ -2272,7 +2275,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
             now_ms: 1_000,
         },
     )
-    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS.get() - 1)
     .await
     .expect("seed tail");
     let value = InlineContent::new(
@@ -2392,7 +2395,7 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
             now_ms: 1_000,
         },
     )
-    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS.get() - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
 
@@ -2427,7 +2430,7 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
     assert!(
         tail_objects()
             .await
-            .is_some_and(|objects| objects >= FOLD_AT_WAL_OBJECTS),
+            .is_some_and(|objects| objects >= FOLD_AT_WAL_OBJECTS.get()),
         "the failed fold kept the position"
     );
     loonfs_core::test_support::namespace_store(failing.inner(), &namespace_id)
@@ -2450,7 +2453,7 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
         .expect("fold the rest of the tail");
     let tail_objects = tail_objects().await;
     assert!(
-        tail_objects.is_some_and(|objects| objects < FOLD_AT_WAL_OBJECTS),
+        tail_objects.is_some_and(|objects| objects < FOLD_AT_WAL_OBJECTS.get()),
         "{tail_objects:?}"
     );
     writer.shutdown().await.expect("shut down writer");
@@ -2492,7 +2495,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
                 now_ms: 1_000,
             },
         )
-        .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
+        .append_wal_objects(FOLD_AT_WAL_OBJECTS.get() - 1)
         .await
         .expect("seed the WAL tail below the fold threshold");
     }
@@ -2584,7 +2587,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
                 now_ms: 1_000,
             },
         )
-        .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
+        .append_wal_objects(FOLD_AT_WAL_OBJECTS.get() - 1)
         .await
         .expect("seed the WAL tail below the fold threshold");
     }
@@ -2667,7 +2670,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
             now_ms: 1_000,
         },
     )
-    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS.get() - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
 
@@ -2773,7 +2776,7 @@ async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
             now_ms: 1_000,
         },
     )
-    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS.get() - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
     let writer_folding = writer.open_namespace(&folding).expect("open namespace");

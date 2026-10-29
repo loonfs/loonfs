@@ -150,7 +150,7 @@ impl Attributes {
         self.0.len()
     }
 
-    /// Reports whether the map holds no entries.
+    /// Reports whether the map contains no entries.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -201,10 +201,10 @@ fn logical_bytes_of(entries: &BTreeMap<AttributeKey, AttributeValue>) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum AttributesError {
-    /// The map holds more entries than the limit allows.
+    /// The map contains more entries than the limit allows.
     #[error("attribute map holds {entries} entries, which exceeds the maximum of {MAX_ATTRIBUTE_ENTRIES}")]
     TooManyEntries {
-        /// Number of entries the rejected map held.
+        /// Number of entries the rejected map contained.
         entries: usize,
     },
     /// The whole map is larger than the limit allows.

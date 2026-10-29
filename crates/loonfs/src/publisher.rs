@@ -16,8 +16,8 @@
 //! admission.
 //!
 //! The registry keeps one table of live sessions, for two reasons: an open
-//! returns the session a handle already holds, and shutdown drains every
-//! session. The host decides how long a session lives by holding its
+//! returns the session a handle already has, and shutdown drains every
+//! session. The host sets how long a session stays open by keeping its
 //! writable [`Namespace`](crate::Namespace).
 
 mod admission;
@@ -57,7 +57,7 @@ use worker::elapsed_ms_from;
 /// publication admission.
 struct PublisherContext {
     /// Strong: the runtime core owns neither the registry nor the writer, so
-    /// holding it here cannot cycle. Publications read through its caches,
+    /// keeping it here cannot cycle. Publications read through its caches,
     /// and the core keeps only a weak reference back (see
     /// [`PublisherRegistry::head_positions`]).
     runtime_core: RuntimeCore,
@@ -77,7 +77,7 @@ struct NamespacePublisher {
     context: Arc<PublisherContext>,
     namespace_id: NamespaceId,
     state: Arc<Mutex<NamespacePublisherState>>,
-    /// Admission holds this lock until it reserves bytes against the observed
+    /// Admission keeps this lock locked until it reserves bytes against the observed
     /// tail, so a publication cannot change that tail before the reservation.
     /// Lock it through [`Self::lock_engine`].
     engine: Arc<AsyncMutex<EngineSlot>>,
@@ -208,7 +208,7 @@ struct LastPublish {
 
 impl NamespacePublisherState {
     /// Whether the session is over and nothing it admitted can still
-    /// publish. A session is over once no handle holds it, or once it was
+    /// publish. A session is over once no handle refers to it, or once it was
     /// closed or its namespace deleted.
     fn has_ended(&self, held: bool) -> bool {
         let deleted = matches!(self.admission, PublisherAdmissionStatus::Deleted);
@@ -263,7 +263,7 @@ impl NamespacePublisher {
         lock_state(&self.state)
     }
 
-    /// Open becomes closed; a delete that already landed is terminal and
+    /// Open becomes closed; a delete that was already published is terminal and
     /// stays terminal. Either way the session's compaction is cancelled.
     pub(super) fn close_admission(&self) {
         let mut state = self.lock_state();
@@ -310,11 +310,11 @@ impl NamespacePublisher {
 
     /// Removes this session from the table once it has ended and nothing it
     /// admitted is still running. Dropping the last handle, the worker's
-    /// exit, the fold's exit, a close, and a landed delete each call this,
+    /// exit, the fold's exit, a close, and a published delete each call this,
     /// so whichever of them comes last removes the session. Fenced sessions
-    /// end even while handles are held.
-    /// A session the registry has forgotten never starts a task and never
-    /// holds queued work. Admission and task starts hold the writer-session
+    /// end even while handles still exist.
+    /// A session the registry has removed never starts a task and never
+    /// has queued work. Admission and task starts keep the writer-session
     /// lock through their decision, so fencing prevents both before removal.
     pub(super) fn forget_if_ended(&self) {
         let Some(shared) = self.shared.upgrade() else {

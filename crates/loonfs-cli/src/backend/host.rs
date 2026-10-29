@@ -35,8 +35,8 @@ pub(crate) fn client(
             serves_maintenance: true,
             max_download_bytes: None,
             max_upload_bytes: None,
-            max_concurrent_uploads: DEFAULT_MAX_CONCURRENT_UPLOADS,
-            max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+            max_concurrent_uploads: DEFAULT_MAX_CONCURRENT_UPLOADS.get(),
+            max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS.get(),
             max_in_flight_requests: None,
             content_token_secret: CONTENT_TOKEN_SECRET
                 .get_or_init(|| loonfs_types::generated_id("content-token").into())

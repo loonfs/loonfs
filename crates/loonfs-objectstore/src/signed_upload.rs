@@ -65,10 +65,10 @@ pub(crate) trait ClientMultipart: Send + Sync {
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()>;
 }
 
-/// Cuts a byte stream into fixed-size parts, holding one at a time.
+/// Cuts a byte stream into fixed-size parts, keeping one in memory at a time.
 ///
-/// Chunk boundaries in the source stream carry no meaning, so a chunk that
-/// straddles a part boundary is split and its tail carried into the next
+/// Chunk boundaries in the source stream have no meaning, so a chunk that
+/// straddles a part boundary is split and its tail moved into the next
 /// part. A stream that ends exactly on a boundary produces no final part.
 pub(crate) struct PartReader<'a> {
     body: BoxStream<'a, Result<Bytes>>,

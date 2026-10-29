@@ -2,7 +2,7 @@
 //! checks, and path resolution.
 //!
 //! Primitive reads use indexes at or above [`MetadataState::indexed_seq`]
-//! and scan historical rows below it. Composite visibility decisions live in
+//! and scan historical rows below it. Composite visibility rules are in
 //! [`super::visibility`].
 
 use super::visibility::{self, resolve_in_memory_read, MetadataVisibilityReads};

@@ -15,7 +15,7 @@ pub(crate) enum ProviderClient {
     OneAttempt,
 }
 
-/// Classifies a provider client error, using `client` to decide whether a
+/// Classifies a provider client error, using `client` to determine whether a
 /// `Generic` error is retryable.
 ///
 /// The provider client reports a failed request as `Error::Generic`, whether
@@ -27,7 +27,7 @@ pub(crate) enum ProviderClient {
 ///   failure, because that client already spent its retry budget on the
 ///   request (or refused to spend it, for a status such as 400).
 /// - From [`ProviderClient::OneAttempt`], it's a retryable transport failure,
-///   because the outcome is unknown. The caller's receipt check decides
+///   because the outcome is unknown. The caller's receipt check determines
 ///   whether an earlier attempt succeeded.
 pub(crate) fn map_provider_error(
     object_key: &str,

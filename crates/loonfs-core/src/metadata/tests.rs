@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::error::CoreError;
-use crate::manifest::VerifiedMetadataSegments;
+use crate::segment::VerifiedMetadataSegments;
 use loonfs_test_support::stores::MemoryStore;
 use loonfs_types::format::manifest::DeletedBinding;
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};

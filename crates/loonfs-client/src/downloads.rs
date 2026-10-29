@@ -8,18 +8,18 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::Fuse;
 use futures::{FutureExt as _, StreamExt as _};
-use loonfs_types::api::v0::{
-    CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
-    CreateDownloadResponse, DownloadRange, ObjectTransferAccess,
-};
 use loonfs_types::options::DownloadOptions;
 use loonfs_types::{
     ContentRef, ContentVerifier, InodeId, NamespaceId, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
 };
+use loonfs_types::{
+    CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
+    CreateDownloadResponse, DownloadRange, ObjectTransferAccess,
+};
 use std::collections::VecDeque;
 use std::task::{Context, Poll};
 
-/// The most range responses a download holds open at once: the one being
+/// The most range responses a download keeps open at once: the one being
 /// read and the ones requested behind it, in range order.
 const RANGE_RESPONSES_IN_FLIGHT: usize = 4;
 
@@ -361,7 +361,7 @@ impl Client {
             .await
     }
 
-    /// Opens a download grant, sending the headers it carries unchanged.
+    /// Opens a download grant, sending the grant's headers unchanged.
     ///
     /// The grant names `[start_offset, size_bytes)` of the revision and the
     /// stream starts where it does. For a grant from a nonzero offset, call

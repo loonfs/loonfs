@@ -1,14 +1,22 @@
-//! Converts planned commits into durable WAL payloads.
+//! Commit admission, planning, validation, and publication.
 //!
-//! Planning validates each compiled operation as it goes, producing a
-//! commit plan containing WAL deltas. The result is framed for publication.
-//! `ops` defines the inode-level operations produced by path planning.
+//! A batch of commits is published as one WAL object.
+//! [`NamespaceCommitEngine`](crate::publish::NamespaceCommitEngine) is the
+//! entry point. Planning validates each compiled operation as it goes,
+//! producing a commit plan containing WAL deltas. The result is framed for
+//! publication. `ops` defines the inode-level operations produced by path
+//! planning.
 
+pub(crate) mod batch;
+pub(crate) mod candidates;
+pub(crate) mod engine;
 mod inode_allocator;
 mod ops;
 mod plan;
+pub(crate) mod publish_view;
 mod validate;
 mod wal_payload;
+pub(crate) mod wal_size;
 
 pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation};
 pub(crate) use self::ops::{CommitOperation, NewChild};

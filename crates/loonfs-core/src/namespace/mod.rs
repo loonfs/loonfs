@@ -10,6 +10,7 @@ pub(crate) mod catalog;
 pub(crate) mod control;
 pub(crate) mod delete;
 pub(crate) mod fork;
+pub(crate) mod head_cache;
 pub(crate) mod read_anchor;
 pub(crate) mod state;
 pub(crate) mod status;

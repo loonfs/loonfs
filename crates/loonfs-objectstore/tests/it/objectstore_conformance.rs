@@ -20,7 +20,7 @@ use loonfs_objectstore::{
 };
 use loonfs_objectstore::{ConfiguredObjectStore, MultipartPart};
 use loonfs_test_support::ids::page_limit;
-use loonfs_types::api::v0::StoreProbeResponse;
+use loonfs_types::StoreProbeResponse;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, NamespaceId, Page};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody, ReqwestConnector};
 use std::assert_matches;

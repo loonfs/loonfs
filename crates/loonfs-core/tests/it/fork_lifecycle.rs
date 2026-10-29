@@ -476,7 +476,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
             .complete_upload(
                 &catalog,
                 &upload.upload_id,
-                loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
+                loonfs_types::CompleteUploadBody::ServiceProxied {},
             )
             .await
             .expect("complete upload");

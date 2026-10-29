@@ -1,7 +1,6 @@
 //! Retention floor advancement, and the namespace's retention window, through
 //! a verified successor manifest.
 
-use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::ManifestChange;
@@ -13,6 +12,7 @@ use crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::PublicationBasis;
+use crate::segment::cache::MetadataSegmentCache;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;

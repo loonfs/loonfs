@@ -1,11 +1,11 @@
 //! Completed upload sessions that garbage collection keeps between passes.
 
+use crate::block_cache::CacheScope;
 use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
     DecodedBlockKey,
 };
 use crate::heap_bytes::HeapBytes;
-use crate::manifest::CacheScope;
 use loonfs_types::{ContentId, UploadId};
 use std::sync::Arc;
 
@@ -127,8 +127,8 @@ impl CompletedUploadSessionCache {
 #[cfg(test)]
 mod tests {
     use super::{CompletedUploadSession, CompletedUploadSessionCache};
+    use crate::block_cache::CacheScope;
     use crate::block_cache::{charged_bytes, DecodedBlockCacheStats};
-    use crate::manifest::CacheScope;
     use loonfs_types::{ContentId, UploadId};
 
     fn session() -> CompletedUploadSession {

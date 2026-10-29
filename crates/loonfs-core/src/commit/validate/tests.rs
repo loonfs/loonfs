@@ -8,9 +8,9 @@ use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::commit::{CandidateAllocation, CommitFingerprint, CommitPlan, CommitValidationError};
 use crate::error::{CoreError, ErrorCode, Result};
-use crate::manifest::VerifiedMetadataSegments;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
+use crate::segment::VerifiedMetadataSegments;
 use loonfs_test_support::stores::MemoryStore;
 use loonfs_types::format::control::{NamespaceStatus, WriterBlock};
 use loonfs_types::format::{

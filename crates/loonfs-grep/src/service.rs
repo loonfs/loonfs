@@ -75,9 +75,9 @@ pub(crate) const GREP_CONTENT_READS_IN_FLIGHT: usize = 32;
 pub struct GrepService {
     block_cache: Arc<GrepBlockCache>,
     /// An insert removes the entries whose manifest was dropped once the map
-    /// holds more than twice the entries the last removal kept. Only the
+    /// contains more than twice the entries the last removal kept. Only the
     /// block cache and the queries in progress keep a manifest alive, so the
-    /// map holds at most one more than twice the manifests those kept at the
+    /// map contains at most one more than twice the manifests those kept at the
     /// last removal.
     current_manifests: Mutex<CurrentManifests>,
     timer: Arc<dyn MonotonicTimer>,
@@ -106,7 +106,7 @@ impl CurrentManifests {
         Some((state, checked.clone()))
     }
 
-    /// Records `state` as confirmed at `observed`, unless the entry holds a
+    /// Records `state` as confirmed at `observed`, unless the entry has a
     /// newer manifest.
     fn insert(
         &mut self,

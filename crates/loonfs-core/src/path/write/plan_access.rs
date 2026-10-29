@@ -1,9 +1,8 @@
 //! The publish plan for one access update.
 
 use super::planner::OperationPlanningSession;
-use super::publish_path_planning::{
-    AccessStateRef, CompiledFilesystemOperation, ResolvedTarget, Target,
-};
+use super::planning_authorization::AccessStateRef;
+use super::publish_path_planning::{CompiledFilesystemOperation, ResolvedTarget, Target};
 use crate::commit::CommitOperation;
 use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, ResolvedVisiblePath, VisiblePathError};
