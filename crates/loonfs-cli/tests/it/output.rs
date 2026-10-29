@@ -527,7 +527,7 @@ fn embedded_and_remote_profiles_emit_the_same_error_codes() {
 #[test]
 fn help_lists_the_context_commands() {
     let harness = Harness::new();
-    let output = Command::new(loon_binary_path())
+    let output = Command::new(binary_path("loonfs", ""))
         .env("HOME", &harness.home_dir)
         .arg("--help")
         .output()

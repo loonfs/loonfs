@@ -1,6 +1,7 @@
 //! Process harness and helpers shared by the CLI integration suites.
 
-pub(super) use loonfs_test_support::http::raw_agent;
+pub(super) use loonfs_test_support::http::{raw_agent, reserve_loopback_address};
+use loonfs_test_support::stores::KeyPredicate;
 pub(super) use serde_json::Value;
 pub(super) use std::env;
 pub(super) use std::fs;
@@ -14,6 +15,21 @@ pub(super) use tempfile::TempDir;
 
 /// A valid config with no profiles.
 pub(super) const MINIMAL_CONFIG: &str = "config_version = 1\n";
+
+/// Environment variables removed from every CLI command under test, so the
+/// developer's own CLI configuration doesn't change a test's outcome.
+const ISOLATED_ENVIRONMENT: [&str; 10] = [
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "LOONFS_CONFIG",
+    "LOONFS_PROFILE",
+    "LOONFS_NAMESPACE",
+    "LOONFS_ACTOR_ID",
+    "LOONFS_SUBJECT_ID",
+    "LOONFS_PRINCIPALS",
+    "LOONFS_PRINCIPAL_SCOPE",
+    "LOONFS_AUTH_TOKEN",
+];
 
 /// A file small enough to upload in one request during recursive tests.
 pub(super) const SMALL_TREE_FILE: &[u8] = b"small enough to hold";
@@ -93,6 +109,7 @@ pub(super) fn leave_a_partial_download(
 ///
 /// Callers use a unique size so the match identifies one fixture object.
 pub(super) fn content_object_path(store_root: &Path, size_bytes: u64) -> PathBuf {
+    let content_blob = KeyPredicate::content_blob();
     let objects = walkdir::WalkDir::new(store_root.join("namespaces"))
         .into_iter()
         .filter_map(|entry| entry.ok())
@@ -103,10 +120,7 @@ pub(super) fn content_object_path(store_root: &Path, size_bytes: u64) -> PathBuf
                     .strip_prefix(store_root)
                     .ok()
                     .and_then(|path| path.to_str())
-                    .and_then(loonfs_objectstore::layout::parse_object_key)
-                    .is_some_and(|key| {
-                        key.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
-                    })
+                    .is_some_and(|key| content_blob.matches(key))
                 && entry
                     .metadata()
                     .is_ok_and(|metadata| metadata.len() == size_bytes)
@@ -175,20 +189,16 @@ impl Harness {
 
     /// Builds a command isolated from the developer's CLI configuration.
     pub(super) fn command(&self) -> Command {
-        let mut command = Command::new(loon_binary_path());
+        let mut command = Command::new(binary_path("loonfs", ""));
+        self.isolate(&mut command);
         command
-            .env("HOME", &self.home_dir)
-            .env_remove("XDG_CONFIG_HOME")
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("LOONFS_CONFIG")
-            .env_remove("LOONFS_PROFILE")
-            .env_remove("LOONFS_NAMESPACE")
-            .env_remove("LOONFS_ACTOR_ID")
-            .env_remove("LOONFS_SUBJECT_ID")
-            .env_remove("LOONFS_PRINCIPALS")
-            .env_remove("LOONFS_PRINCIPAL_SCOPE")
-            .env_remove("LOONFS_AUTH_TOKEN");
-        command
+    }
+
+    fn isolate(&self, command: &mut Command) {
+        command.env("HOME", &self.home_dir);
+        for variable in ISOLATED_ENVIRONMENT {
+            command.env_remove(variable);
+        }
     }
 
     /// Runs a command printed by the CLI through a shell.
@@ -199,24 +209,12 @@ impl Harness {
         let arguments = command
             .strip_prefix("loonfs ")
             .expect("a printed command invokes loonfs");
-        let binary = loon_binary_path();
+        let binary = binary_path("loonfs", "");
         let script = format!("'{}' {arguments}", binary.display());
-        Command::new("sh")
-            .arg("-c")
-            .arg(&script)
-            .env("HOME", &self.home_dir)
-            .env_remove("XDG_CONFIG_HOME")
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("LOONFS_CONFIG")
-            .env_remove("LOONFS_PROFILE")
-            .env_remove("LOONFS_NAMESPACE")
-            .env_remove("LOONFS_ACTOR_ID")
-            .env_remove("LOONFS_SUBJECT_ID")
-            .env_remove("LOONFS_PRINCIPALS")
-            .env_remove("LOONFS_PRINCIPAL_SCOPE")
-            .env_remove("LOONFS_AUTH_TOKEN")
-            .output()
-            .expect("replay the printed command")
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(&script);
+        self.isolate(&mut command);
+        command.output().expect("replay the printed command")
     }
 
     /// Runs the CLI with a payload on standard input.
@@ -287,7 +285,7 @@ auth_token = "test-token"
         key_prefix: &str,
         extra: &str,
     ) -> PathBuf {
-        let bind = format!("127.0.0.1:{}", available_port());
+        let bind = reserve_loopback_address().to_string();
         let path = self
             .temp_dir
             .path()
@@ -314,11 +312,14 @@ key_prefix = "{key_prefix}"
     // Cargo does not build this binary for CLI tests; run `cargo build -p loonfs-server` first.
     pub(super) fn start_external_server(&self, server_config_path: PathBuf) -> ExternalServer {
         for _ in 0..5 {
-            let child = Command::new(loonfs_server_binary_path())
-                .arg("--config")
-                .arg(&server_config_path)
-                .spawn()
-                .expect("spawn loonfs-server");
+            let child = Command::new(binary_path(
+                "loonfs-server",
+                "; run `cargo build -p loonfs-server` first",
+            ))
+            .arg("--config")
+            .arg(&server_config_path)
+            .spawn()
+            .expect("spawn loonfs-server");
             let server_url = server_url_from_config(&server_config_path);
             if wait_for_readiness(&server_url) {
                 return ExternalServer { child, server_url };
@@ -327,7 +328,7 @@ key_prefix = "{key_prefix}"
             let mut child = child;
             let _ = child.kill();
             let _ = child.wait();
-            rewrite_server_bind(&server_config_path, available_port());
+            rewrite_server_bind(&server_config_path, reserve_loopback_address().port());
         }
 
         panic!(
@@ -376,8 +377,10 @@ impl Drop for ExternalServer {
     }
 }
 
-pub(super) fn loon_binary_path() -> PathBuf {
-    if let Some(path) = env::var_os("CARGO_BIN_EXE_loonfs") {
+/// Returns the path of the workspace binary `name`. When the binary is
+/// missing, the failure message ends with `build_hint`.
+pub(super) fn binary_path(name: &str, build_hint: &str) -> PathBuf {
+    if let Some(path) = env::var_os(format!("CARGO_BIN_EXE_{name}")) {
         return PathBuf::from(path);
     }
 
@@ -386,37 +389,10 @@ pub(super) fn loon_binary_path() -> PathBuf {
         .parent()
         .and_then(|path| path.parent())
         .expect("target debug dir");
-    let candidate = debug_dir.join(if cfg!(windows) {
-        "loonfs.exe"
-    } else {
-        "loonfs"
-    });
+    let candidate = debug_dir.join(format!("{name}{}", env::consts::EXE_SUFFIX));
     assert!(
         candidate.exists(),
-        "expected loonfs binary at {}",
-        candidate.display()
-    );
-    candidate
-}
-
-pub(super) fn loonfs_server_binary_path() -> PathBuf {
-    if let Some(path) = env::var_os("CARGO_BIN_EXE_loonfs-server") {
-        return PathBuf::from(path);
-    }
-
-    let current_exe = env::current_exe().expect("current test binary path");
-    let debug_dir = current_exe
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("target debug dir");
-    let candidate = debug_dir.join(if cfg!(windows) {
-        "loonfs-server.exe"
-    } else {
-        "loonfs-server"
-    });
-    assert!(
-        candidate.exists(),
-        "expected loonfs-server binary at {}; run `cargo build -p loonfs-server` first",
+        "expected {name} binary at {}{build_hint}",
         candidate.display()
     );
     candidate
@@ -433,10 +409,10 @@ pub(super) fn server_url_from_config(path: &Path) -> String {
     format!("http://{bind}")
 }
 
-// Polls a spawned server binary for readiness; a wall-clock deadline is the
-// point, so the timer methods the workspace otherwise disallows are scoped
-// to this helper.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the readiness poll of a spawned server binary runs to a wall-clock deadline"
+)]
 pub(super) fn wait_for_readiness(server_url: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -467,14 +443,6 @@ pub(super) fn rewrite_server_bind(path: &Path, port: u16) {
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(path, rewritten).expect("rewrite server bind");
-}
-
-pub(super) fn available_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind port")
-        .local_addr()
-        .expect("local addr")
-        .port()
 }
 
 pub(super) fn assert_success(output: &Output) {

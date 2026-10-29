@@ -208,7 +208,7 @@ fn presigned_expires_at_ms(now: SystemTime) -> u64 {
     let expiry = now + Duration::from_secs(3600);
     expiry
         .duration_since(UNIX_EPOCH)
-        .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX >> 1))
+        .map(loonfs_types::saturating_duration_ms)
         .unwrap_or(0)
 }
 

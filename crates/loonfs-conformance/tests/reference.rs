@@ -542,7 +542,7 @@ struct MultipartRequest {
 #[serde(deny_unknown_fields)]
 struct BytePattern {
     length: usize,
-    modulus: u8,
+    modulus: std::num::NonZeroU8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -567,8 +567,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     let payload = byte_pattern(
         request.content_pattern.length,
         request.content_pattern.modulus,
-    )
-    .expect("valid fixture pattern");
+    );
     let begin = harness
         .client
         .create_direct_multipart_upload_with_options(

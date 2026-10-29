@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
+use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -171,20 +172,9 @@ fn validate_inventory(directory: &Path, cases: &[Case]) -> Result<(), FixtureErr
     Ok(())
 }
 
-/// Invalid byte-pattern input.
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum PatternError {
-    /// The modulus is zero.
-    #[error("byte pattern modulus must be greater than zero")]
-    ZeroModulus,
-}
-
 /// Generates the byte pattern `offset % modulus`.
-pub fn byte_pattern(length: usize, modulus: u8) -> Result<Vec<u8>, PatternError> {
-    if modulus == 0 {
-        return Err(PatternError::ZeroModulus);
-    }
-    Ok((0..modulus).cycle().take(length).collect())
+pub fn byte_pattern(length: usize, modulus: NonZeroU8) -> Vec<u8> {
+    (0..modulus.get()).cycle().take(length).collect()
 }
 
 /// Invalid pagination results.
@@ -248,10 +238,9 @@ mod tests {
     #[test]
     fn deterministic_pattern_has_the_documented_shape() {
         assert_eq!(
-            byte_pattern(8, 3).expect("valid pattern"),
+            byte_pattern(8, NonZeroU8::new(3).expect("3 is nonzero")),
             [0, 1, 2, 0, 1, 2, 0, 1]
         );
-        assert_eq!(byte_pattern(8, 0), Err(PatternError::ZeroModulus));
     }
 
     #[test]

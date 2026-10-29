@@ -15,6 +15,7 @@ mod metadata_map_store;
 mod namespace_overlap_store;
 mod operation;
 mod recording_store;
+mod replace;
 
 pub use crate::delegate_object_store;
 pub use blocking_store::{BlockingInterceptor, BlockingStore};
@@ -33,20 +34,7 @@ pub use operation::{
     sort_head_runs, OperationContext, OperationKind, OperationSelector, RecordedOperation,
 };
 pub use recording_store::{RecordedGet, RecordingInterceptor, RecordingStore, StoreCounts};
-
-use bytes::Bytes;
-use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
-
-/// Replaces the object at `key` with `bytes` by deleting it and creating it
-/// again, for a test that corrupts or rewrites a stored object.
-pub async fn replace_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    bytes: Bytes,
-) -> Result<ObjectMetadata, ObjectStoreError> {
-    store.delete(key).await?;
-    store.put_if_absent(key, bytes).await
-}
+pub use replace::replace_object;
 
 #[cfg(test)]
 mod tests {
@@ -120,5 +108,14 @@ mod tests {
             .complete_multipart_upload(multipart_key, &provider_upload_id, &[], &checksum)
             .await
             .expect("complete multipart upload");
+        replace_object(&store, multipart_key, Bytes::from_static(b"replaced"))
+            .await
+            .expect("replace the assembled object");
+        let replaced = store
+            .head(multipart_key)
+            .await
+            .expect("head the replaced object")
+            .expect("the replaced object exists");
+        assert_eq!(replaced.checksum, Some(Checksum::crc64nvme(b"replaced")));
     }
 }

@@ -404,13 +404,12 @@ fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<Checksum> {
 mod tests {
     use super::{gcp_gcs, gcs_object, stored_crc32c_from_headers, GcpGcsStoreConfig};
     use crate::retry::{RetryWarnings, DEFAULT};
-    use crate::test_support::{
-        gcs_fixture_service_account_key_file, time_out, RequestFault, TokioTimer,
-    };
+    use crate::test_support::{gcs_fixture_service_account_key_file, time_out, RequestFault};
     use crate::timing::MonotonicTimer;
     use crate::GcpGcsCredentials;
     use crate::{ObjectStore, ObjectStoreError};
     use bytes::Bytes;
+    use loonfs_test_support::clock::TokioClock;
     use loonfs_types::Checksum;
     use object_store::client::HttpClient;
     use std::assert_matches;
@@ -518,7 +517,7 @@ mod tests {
             )),
             bucket: "bucket".to_owned(),
             key_prefix: None,
-            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(TokioTimer::start()))),
+            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(TokioClock::start()))),
         }
     }
 
@@ -586,7 +585,7 @@ mod tests {
             };
             let signer = test_signer(&path, HttpClient::new(service.clone()));
             let bytes = Bytes::from_static(b"hello");
-            let clock = TokioTimer::start();
+            let clock = TokioClock::start();
             let error = crate::immutable_write::put_with(
                 &store,
                 &signer.retry_warnings,

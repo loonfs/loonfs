@@ -798,7 +798,7 @@ mod tests {
     use crate::retry::{RetryWarnings, DEFAULT};
     use crate::signed_request::{classify_signed_response, SignedResponse};
     use crate::test_support::{
-        aws_environment_lock, isolated_aws_environment, time_out, RequestFault, TokioTimer,
+        aws_environment_lock, isolated_aws_environment, time_out, RequestFault,
     };
     use crate::timing::MonotonicTimer;
     use crate::ByteRange;
@@ -808,6 +808,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use bytes::Bytes;
+    use loonfs_test_support::clock::TokioClock;
     use loonfs_types::{saturating_duration_ms, Checksum, SecretString};
     use object_store::client::{
         HttpClient, HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
@@ -1026,7 +1027,7 @@ mod tests {
             http: HttpClient::new(provider.clone()),
             io_runtime: tokio::runtime::Handle::current(),
             kind,
-            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(TokioTimer::start()))),
+            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(TokioClock::start()))),
         }
     }
 
@@ -1202,7 +1203,7 @@ mod tests {
                     .await
                     .expect("seed the deleted object");
             }
-            let clock = TokioTimer::start();
+            let clock = TokioClock::start();
             let reported = match operation {
                 "delete" => store.delete(KEY).await.err().map(|error| error.kind()),
                 "head" => store.head(KEY).await.err().map(|error| error.kind()),

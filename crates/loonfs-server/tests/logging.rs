@@ -5,7 +5,7 @@
 
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
-#[path = "it/common/mod.rs"]
+#[path = "it/common.rs"]
 mod common;
 
 use axum::body::{to_bytes, Body};

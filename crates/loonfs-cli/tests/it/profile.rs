@@ -605,7 +605,7 @@ fn unreadable_config_errors_name_the_file_the_field_and_the_way_out() {
 fn unreachable_servers_are_named_with_their_url() {
     let harness = Harness::new();
     // A port that was just free with nothing listening: connection refused.
-    let dead_url = format!("http://127.0.0.1:{}", available_port());
+    let dead_url = format!("http://{}", reserve_loopback_address());
     let create = harness.run(&[
         "--json",
         "profile",
