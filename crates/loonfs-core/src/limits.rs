@@ -32,8 +32,7 @@ pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
 /// at most about 1.6 KiB for a name key of `MAX_NAME_KEY_BYTES`, so the stack
 /// takes at most about 7 MiB. A move can nest a tree deeper than any request
 /// path, and a compaction that meets a deeper tree keeps every row it would
-/// have tested, as it does when the filter would be larger than
-/// `MAX_BLOOM_FILTER_BYTES`.
+/// have tested.
 pub const MAX_KEPT_INODE_WALK_DEPTH: usize = 4_096;
 
 /// Most encoded segment bytes that one fold or compaction keeps in memory

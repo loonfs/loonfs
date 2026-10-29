@@ -211,8 +211,8 @@ async fn a_shared_base_false_positive_is_collected_with_a_later_pass_seed() {
     let (manifest, protected) = shared_layout_manifest(&store, &namespace_id, 1).await;
     publish_layout_manifest(&store, manifest).await;
     let base_key = extent_object_key(&shared_layout(&namespace_id, 0).layout.extents[0]);
-    let mut first = BloomFilter::new(1, GRACE_MS + 1).expect("filter");
-    let mut second = BloomFilter::new(1, GRACE_MS + 2).expect("filter");
+    let mut first = BloomFilter::new(1, GRACE_MS + 1);
+    let mut second = BloomFilter::new(1, GRACE_MS + 2);
     first.insert(base_key.as_bytes()).expect("insert");
     second.insert(base_key.as_bytes()).expect("insert");
     let orphan = (0..100_000)
