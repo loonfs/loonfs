@@ -374,7 +374,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             segment_cache: None,
             writer_position: None,
             #[cfg(any(test, feature = "test-support"))]
-            #[cfg(any(test, feature = "test-support"))]
             segment_row_budget: None,
         }
     }

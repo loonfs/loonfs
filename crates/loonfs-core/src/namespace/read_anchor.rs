@@ -124,7 +124,7 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
     })
 }
 
-pub async fn project_anchor_tail<S: ObjectStore + ?Sized>(
+pub fn project_anchor_tail<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     anchor: &NamespaceReadAnchor,

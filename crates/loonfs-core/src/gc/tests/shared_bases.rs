@@ -2,6 +2,7 @@ use super::*;
 use crate::bloom_filter::BloomFilter;
 use crate::gc::content::ContentSweep;
 use crate::gc::live_set::LiveSet;
+use crate::gc::sweep::Sweep;
 use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::manifest::tests::{
     build_namespace_manifest_from_metadata_state, write_namespace_manifest, ManifestMetadataSource,
@@ -15,6 +16,7 @@ use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::control::{encode_control_state, HintPayload};
 use loonfs_types::format::manifest::{ContentLayoutRecord, NamespaceManifestPayload};
 use loonfs_types::{ChangeSeq, ContentExtent, ContentId, ContentLayout, ExtentObject};
+use std::sync::atomic::AtomicU64;
 
 fn shared_layout(namespace_id: &NamespaceId, index: usize) -> ContentLayoutRecord {
     let shard = index % 16;
@@ -365,19 +367,21 @@ async fn shared_filter_growth_over_the_cap_skips_content_before_any_content_requ
     )
     .await
     .expect("roots");
+    let sweep = Sweep {
+        store: &store,
+        segment_cache: None,
+        namespace_id: &namespace_id,
+        grace_window_ms: GRACE_MS,
+        mutation: &context,
+        live: &live,
+        session_cache: None,
+        listed_bytes: AtomicU64::new(0),
+    };
     for (max_bytes, expected_sweep) in [(40, true), (18, false)] {
         store.reset();
-        let content = ContentSweep::load(
-            &store,
-            None,
-            &namespace_id,
-            &live,
-            128,
-            context.now_ms,
-            max_bytes,
-        )
-        .await
-        .expect("load content roots");
+        let content = ContentSweep::load(&sweep, 128, max_bytes)
+            .await
+            .expect("load content roots");
         assert_eq!(content.is_some(), expected_sweep);
         assert!(store.counts().gets > 0);
         assert_eq!(store.counts().puts, 0);

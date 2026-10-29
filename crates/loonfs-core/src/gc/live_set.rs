@@ -4,7 +4,7 @@
 //! provider timestamp.
 
 use super::charged_set::{Charge, ChargedMap, ChargedSet, PassMemory};
-use super::reap::GraceAge;
+use super::pins::{sweep_pin, GraceAge, PinSweep};
 use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use super::uploads::{load_upload_sessions, ListedUploadSession};
 use crate::context::MutationContext;
@@ -121,7 +121,7 @@ impl LiveSet {
         // a deleted owner is still authorized against its final access state.
         live.protect_manifest(&anchor.manifest)?;
         if live.current_tombstone.is_none() {
-            let tail = project_anchor_tail(store, segment_cache, &anchor).await?;
+            let tail = project_anchor_tail(store, segment_cache, &anchor)?;
             for revision in tail.revisions() {
                 live.content_ids
                     .insert(revision.content_ref.content_id.clone())?;
@@ -230,13 +230,11 @@ impl LiveSet {
                 // manifest is checked on its own, because another pin for the
                 // number can still require retention when an earlier pin was
                 // deletable.
-                match super::reap::sweep_pin(store, &key, grace_window_ms, self, context).await? {
-                    super::reap::PinSweep::Retain { .. } => {
+                match sweep_pin(store, &key, grace_window_ms, self, context).await? {
+                    PinSweep::Retain { .. } => {
                         return Err(missing_root_manifest(namespace_id, manifest_no, &key));
                     }
-                    super::reap::PinSweep::Gone
-                    | super::reap::PinSweep::DeleteUser
-                    | super::reap::PinSweep::DeleteFork => {}
+                    PinSweep::Gone | PinSweep::DeleteUser | PinSweep::DeleteFork => {}
                 }
             }
         }

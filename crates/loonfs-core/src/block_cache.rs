@@ -591,7 +591,9 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             let candidate = candidate
                 .upgrade()
                 .expect("the table keeps the key of a live position");
-            let slot = inner.drop_key(&candidate).expect("live entry");
+            let slot = inner
+                .drop_key(&candidate)
+                .expect("a live position's key is in the table");
             self.record_eviction(slot.charged_bytes);
             if let Some(evicted) = evicted.as_deref_mut() {
                 evicted.push((K::clone(&candidate), slot.block));

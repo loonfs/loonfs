@@ -2,15 +2,16 @@
 use super::deletes::DeletedCounter;
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
-use super::reap::{sweep_pin, GraceAge, PinSweep};
+use super::pins::{sweep_pin, GraceAge, PinSweep};
 use super::session_cache::CompletedUploadSessionCache;
 use super::uploads::{
     load_swept_session, sweep_completed_session, sweep_upload_session, ListedUpload,
-    ListedUploadKind, UploadSessionSweep,
+    ListedUploadKind, OutcomeListing, UploadSessionSweep,
 };
 use crate::context::MutationContext;
 use crate::error::Result;
 use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
+use crate::manifest::MetadataSegmentCache;
 use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::{NamespaceId, RetainedReason, UploadId};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,8 +34,16 @@ pub(super) enum Decision {
     Gone,
 }
 
+/// Whether the pass's live set references one listed content object.
+#[derive(Clone, Copy)]
+pub(super) enum ContentReference {
+    Referenced,
+    Unreferenced,
+}
+
 pub(super) struct Sweep<'a, S: ObjectStore + ?Sized> {
     pub(super) store: &'a S,
+    pub(super) segment_cache: Option<&'a MetadataSegmentCache>,
     pub(super) namespace_id: &'a NamespaceId,
     pub(super) grace_window_ms: u64,
     pub(super) mutation: &'a MutationContext,
@@ -128,8 +137,11 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         match listed.kind {
             ListedUploadKind::Session {
                 upload_id,
-                outcome_listed,
-            } => self.process_upload_session(upload_id, outcome_listed).await,
+                outcome_listing,
+            } => {
+                self.process_upload_session(upload_id, outcome_listing)
+                    .await
+            }
             // An outcome record without its session record is deleted only
             // once it's at least the grace window old by the listing's
             // modification time, the age rule of the other unreferenced
@@ -153,7 +165,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
     async fn process_upload_session(
         &self,
         upload_id: UploadId,
-        outcome_listed: bool,
+        outcome_listing: OutcomeListing,
     ) -> Result<Decision> {
         let sweep = match self.live.completed_sessions.get(&upload_id) {
             Some(session) => {
@@ -178,7 +190,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
             // these records again.
             None => {
                 let Some(state) =
-                    load_swept_session(self.store, self.namespace_id, &upload_id, outcome_listed)
+                    load_swept_session(self.store, self.namespace_id, &upload_id, outcome_listing)
                         .await?
                 else {
                     return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
@@ -211,16 +223,22 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         })
     }
 
-    pub(super) fn content_candidate(&self, entry: ListedObject, protected: bool) -> Decision {
+    pub(super) fn content_candidate(
+        &self,
+        entry: ListedObject,
+        reference: ContentReference,
+    ) -> Decision {
         self.add_listed_bytes(entry.size_bytes);
         if !CandidateFamily::Content.recognizes(&entry.key) {
-            self.retain(RetainedReason::UnrecognizedKey, None)
-        } else if protected {
-            self.retain(RetainedReason::Referenced, None)
-        } else {
-            self.sweep_aged(entry, self.grace_window_ms, |report| {
-                &mut report.deleted.content_objects
-            })
+            return self.retain(RetainedReason::UnrecognizedKey, None);
+        }
+        match reference {
+            ContentReference::Referenced => self.retain(RetainedReason::Referenced, None),
+            ContentReference::Unreferenced => {
+                self.sweep_aged(entry, self.grace_window_ms, |report| {
+                    &mut report.deleted.content_objects
+                })
+            }
         }
     }
 

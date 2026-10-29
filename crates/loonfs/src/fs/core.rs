@@ -74,7 +74,8 @@ pub(crate) struct WriterBits {
     pub(crate) execution_budget: ExecutionBudget,
     /// The compactor epoch this runtime holds for each namespace. Its
     /// sessions and every `Maintenance` value share it, so they never fence
-    /// each other.
+    /// each other. It's a `tokio` mutex because a first claim keeps it locked
+    /// across `claim_compactor().await`, so concurrent groups share one epoch.
     pub(crate) compactor_epochs: tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
 }
 
