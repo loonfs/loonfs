@@ -29,9 +29,7 @@ impl GrepWorkerConfig {
     /// Returns the bounded build/reorganize policy represented by this config.
     pub fn build_policy(self) -> Result<GramIndexBuildPolicy, GrepWorkerConfigError> {
         let max_files_per_step = nonzero_usize("max_files_per_step", self.max_files_per_step)?;
-        if !u32::try_from(self.max_files_per_step)
-            .is_ok_and(|files| files <= MAX_PAGE_LIMIT)
-        {
+        if !u32::try_from(self.max_files_per_step).is_ok_and(|files| files <= MAX_PAGE_LIMIT) {
             return Err(GrepWorkerConfigError::InvalidField {
                 field: "max_files_per_step",
                 reason: format!(
