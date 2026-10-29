@@ -8,12 +8,9 @@ use super::KeyPredicate;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, StreamExt};
-use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
-use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -129,47 +126,19 @@ impl<S> BufferWatchStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
-    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
-        self.inner.checksum_algorithm()
-    }
-
-    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
-        self.inner.identity()
-    }
-
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn create_multipart_upload(&self, key: &str) -> Result<String, ObjectStoreError> {
-        self.inner.create_multipart_upload(key).await
-    }
-
-    async fn complete_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-        parts: &[MultipartPart],
-        checksum: &Checksum,
-    ) -> Result<(), ObjectStoreError> {
-        self.inner
-            .complete_multipart_upload(key, provider_upload_id, parts, checksum)
-            .await
-    }
-
-    async fn abort_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-    ) -> Result<(), ObjectStoreError> {
-        self.inner
-            .abort_multipart_upload(key, provider_upload_id)
-            .await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
+    crate::delegate_object_store!(self => self.inner;
+        checksum_algorithm,
+        identity,
+        head,
+        create_multipart_upload,
+        complete_multipart_upload,
+        abort_multipart_upload,
+        get_with_metadata,
+        assemble,
+        delete,
+        list_entries_from_stream,
+        list_child_prefixes,
+    );
 
     /// Tracks the returned read buffer until the caller drops it.
     ///
@@ -222,29 +191,5 @@ impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
             return self.inner.put_streamed(key, body, mode).await;
         }
         self.inner.put_streamed(key, self.watch(body), mode).await
-    }
-
-    crate::delegate_object_store! { self => self.inner; assemble }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_entries_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
-        self.inner.list_entries_from_stream(prefix, start_after)
-    }
-    async fn list_child_prefixes(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        limit: EffectiveLimit,
-    ) -> Result<Page<String, String>, ObjectStoreError> {
-        self.inner
-            .list_child_prefixes(prefix, start_after, limit)
-            .await
     }
 }

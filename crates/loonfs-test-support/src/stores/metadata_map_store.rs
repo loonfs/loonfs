@@ -5,12 +5,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
-use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    AssemblySource, ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode,
+    AssemblySource, ListedObject, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError,
+    PutMode,
 };
-use loonfs_types::{Checksum, EffectiveLimit, Page};
+use loonfs_types::Checksum;
 use std::fmt;
 use std::sync::Arc;
 
@@ -95,13 +94,22 @@ impl<S: fmt::Debug> fmt::Debug for MetadataMapStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
+    // A streamed write reports a length, not metadata, so `put_streamed` has
+    // nothing to map.
+    crate::delegate_object_store!(self => self.inner;
+        identity,
+        create_multipart_upload,
+        complete_multipart_upload,
+        abort_multipart_upload,
+        get,
+        put_streamed,
+        delete,
+        list_child_prefixes,
+    );
+
     fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
         self.algorithm
             .unwrap_or_else(|| self.inner.checksum_algorithm())
-    }
-
-    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
-        self.inner.identity()
     }
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
@@ -112,45 +120,11 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
             .map(|metadata| self.map(key, metadata)))
     }
 
-    async fn create_multipart_upload(&self, key: &str) -> Result<String, ObjectStoreError> {
-        self.inner.create_multipart_upload(key).await
-    }
-
-    async fn complete_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-        parts: &[MultipartPart],
-        checksum: &Checksum,
-    ) -> Result<(), ObjectStoreError> {
-        self.inner
-            .complete_multipart_upload(key, provider_upload_id, parts, checksum)
-            .await
-    }
-
-    async fn abort_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-    ) -> Result<(), ObjectStoreError> {
-        self.inner
-            .abort_multipart_upload(key, provider_upload_id)
-            .await
-    }
-
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         Ok(self.inner.get_with_metadata(key).await?.map(|mut body| {
             body.metadata = self.map(key, body.metadata);
             body
         }))
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
     }
 
     async fn put(
@@ -161,16 +135,6 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let metadata = self.inner.put(key, bytes, mode).await?;
         Ok(self.map(key, metadata))
-    }
-
-    async fn put_streamed(
-        &self,
-        key: &str,
-        body: ByteStream,
-        mode: PutMode,
-    ) -> Result<u64, ObjectStoreError> {
-        // Nothing to remap: a streamed write reports a length, not identity.
-        self.inner.put_streamed(key, body, mode).await
     }
 
     async fn assemble(
@@ -194,10 +158,6 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
             .compare_and_swap(key, expected_etag, bytes)
             .await?;
         Ok(self.map(key, metadata))
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
     }
 
     fn list_entries_from_stream(
@@ -225,15 +185,5 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
                 })
             })
             .boxed()
-    }
-    async fn list_child_prefixes(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        limit: EffectiveLimit,
-    ) -> Result<Page<String, String>, ObjectStoreError> {
-        self.inner
-            .list_child_prefixes(prefix, start_after, limit)
-            .await
     }
 }

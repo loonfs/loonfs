@@ -76,3 +76,29 @@ impl WallClock for ManualClock {
         ManualClock::now_ms(self)
     }
 }
+
+/// A monotonic timer that reads Tokio's clock, so a paused test runtime moves
+/// the timer when the runtime's clock advances.
+#[derive(Debug)]
+pub struct TokioClock(tokio::time::Instant);
+
+impl TokioClock {
+    /// Returns a timer that reads zero at the test runtime's current time.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the timer starts at the test runtime's current time"
+    )]
+    pub fn start() -> Self {
+        Self(tokio::time::Instant::now())
+    }
+}
+
+impl MonotonicTimer for TokioClock {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the timer reads the test runtime's clock"
+    )]
+    fn monotonic_now_ms(&self) -> u64 {
+        loonfs_types::saturating_duration_ms(tokio::time::Instant::now().duration_since(self.0))
+    }
+}

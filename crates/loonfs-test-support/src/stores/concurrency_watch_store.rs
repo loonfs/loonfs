@@ -15,13 +15,10 @@
 use super::KeyPredicate;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
-use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
-use loonfs_types::{Checksum, EffectiveLimit, Page};
+use loonfs_types::Checksum;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Concurrent requests observed for one operation class.
@@ -115,43 +112,20 @@ impl<S> ConcurrencyWatchStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
-    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
-        self.inner.checksum_algorithm()
-    }
-
-    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
-        self.inner.identity()
-    }
+    crate::delegate_object_store!(self => self.inner;
+        checksum_algorithm,
+        identity,
+        create_multipart_upload,
+        complete_multipart_upload,
+        abort_multipart_upload,
+        compare_and_swap,
+        list_entries_from_stream,
+        list_child_prefixes,
+    );
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let _in_flight = self.enter(key, &self.reads).await;
         self.inner.head(key).await
-    }
-
-    async fn create_multipart_upload(&self, key: &str) -> Result<String, ObjectStoreError> {
-        self.inner.create_multipart_upload(key).await
-    }
-
-    async fn complete_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-        parts: &[MultipartPart],
-        checksum: &Checksum,
-    ) -> Result<(), ObjectStoreError> {
-        self.inner
-            .complete_multipart_upload(key, provider_upload_id, parts, checksum)
-            .await
-    }
-
-    async fn abort_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-    ) -> Result<(), ObjectStoreError> {
-        self.inner
-            .abort_multipart_upload(key, provider_upload_id)
-            .await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
@@ -188,15 +162,6 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         self.inner.put_streamed(key, body, mode).await
     }
 
-    async fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.compare_and_swap(key, expected_etag, bytes).await
-    }
-
     async fn assemble(
         &self,
         key: &str,
@@ -211,23 +176,5 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let _in_flight = self.enter(key, &self.deletes).await;
         self.inner.delete(key).await
-    }
-
-    fn list_entries_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
-        self.inner.list_entries_from_stream(prefix, start_after)
-    }
-    async fn list_child_prefixes(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        limit: EffectiveLimit,
-    ) -> Result<Page<String, String>, ObjectStoreError> {
-        self.inner
-            .list_child_prefixes(prefix, start_after, limit)
-            .await
     }
 }

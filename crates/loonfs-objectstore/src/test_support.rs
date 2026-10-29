@@ -1,55 +1,6 @@
 //! Test-only support shared by object-store unit suites.
 
-use crate::timing::MonotonicTimer;
 use loonfs_test_support::EnvGuard;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Deterministic timer that advances a fixed step per reading.
-#[derive(Debug)]
-pub(crate) struct SteppingTimer {
-    now_ms: AtomicU64,
-    step_ms: u64,
-}
-
-impl SteppingTimer {
-    pub(crate) fn new(step_ms: u64) -> Self {
-        Self {
-            now_ms: AtomicU64::new(0),
-            step_ms,
-        }
-    }
-}
-
-impl MonotonicTimer for SteppingTimer {
-    fn monotonic_now_ms(&self) -> u64 {
-        self.now_ms.fetch_add(self.step_ms, Ordering::SeqCst)
-    }
-}
-
-/// Reads tokio's clock, so a store's retry deadlines run on the clock that
-/// a paused test runtime advances.
-#[derive(Debug)]
-pub(crate) struct TokioTimer(tokio::time::Instant);
-
-impl TokioTimer {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the timer starts at the test runtime's current time"
-    )]
-    pub(crate) fn start() -> Self {
-        Self(tokio::time::Instant::now())
-    }
-}
-
-impl MonotonicTimer for TokioTimer {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the timer reads the test runtime's clock"
-    )]
-    fn monotonic_now_ms(&self) -> u64 {
-        loonfs_types::saturating_duration_ms(tokio::time::Instant::now().duration_since(self.0))
-    }
-}
 
 /// How a scripted provider fails a request.
 #[derive(Debug, Clone, Copy)]

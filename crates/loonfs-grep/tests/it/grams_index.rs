@@ -1,6 +1,6 @@
 //! Tests grep through runtime handles and direct `GrepWorker` operations.
 
-use crate::common::{is_content_object, page_request, GrepHost};
+use crate::common::{page_request, GrepHost};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, DestinationBehavior, ErrorCode, LoonFs, MetadataCache, NamespaceId,
@@ -37,12 +37,13 @@ fn request(pattern: &str) -> GrepRequest {
 /// Content blob object keys currently in the store, for pinpointing the
 /// object behind one file's bytes by diffing around its write.
 async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
+    let content_blob = KeyPredicate::content_blob();
     store
         .list_prefix("namespaces/")
         .await
         .expect("list content blobs")
         .into_iter()
-        .filter(|key| is_content_object(key))
+        .filter(|key| content_blob.matches(key))
         .collect()
 }
 
@@ -190,7 +191,7 @@ async fn a_worker_policy_bounds_each_build_step() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("local store"),
-        KeyPredicate::new(is_content_object),
+        KeyPredicate::content_blob(),
     ));
     let store: SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-config-policy").expect("namespace id");
@@ -269,7 +270,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     const FILES_PER_STEP: usize = 500;
 
     let temp_dir = tempdir().expect("tempdir");
-    let content_keys = KeyPredicate::new(is_content_object);
+    let content_keys = KeyPredicate::content_blob();
     let raw_store = Arc::new(RecordingStore::new(
         RecordingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -804,7 +805,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::new(is_content_object),
+        KeyPredicate::content_blob(),
     ));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-oversized-tail").expect("namespace id");

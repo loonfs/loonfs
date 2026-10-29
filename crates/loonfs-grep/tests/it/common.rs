@@ -5,8 +5,6 @@
 //! service holding the query-side block cache, and a worker over grep's own
 //! keyspace.
 
-#![allow(dead_code)]
-
 use loonfs::{LoonFs, Maintenance, ReadOnly, SharedObjectStore, Writable};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{
@@ -278,12 +276,4 @@ pub(crate) fn page_request(cursor: Option<String>, matches: u32) -> PageRequest<
             .expect("test page limits should be within the pagination policy"),
         cursor,
     }
-}
-
-/// Classifies a key by durable family instead of by its spelling, so the
-/// object-key grammar stays the single place that knows the layout.
-pub(crate) fn is_content_object(key: &str) -> bool {
-    loonfs_objectstore::layout::parse_object_key(key).is_some_and(|parsed| {
-        parsed.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
-    })
 }

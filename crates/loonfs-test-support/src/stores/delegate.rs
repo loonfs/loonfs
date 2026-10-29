@@ -68,7 +68,7 @@ macro_rules! __delegate_object_store_method {
             key: &'key str,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<
+                    Output = ::core::result::Result<
                         Option<::loonfs_objectstore::ObjectMetadata>,
                         ::loonfs_objectstore::ObjectStoreError,
                     >,
@@ -99,7 +99,7 @@ macro_rules! __delegate_object_store_method {
             key: &'key str,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<String, ::loonfs_objectstore::ObjectStoreError>,
+                    Output = ::core::result::Result<String, ::loonfs_objectstore::ObjectStoreError>,
                 > + Send
                 + 'future,
         >>
@@ -127,7 +127,7 @@ macro_rules! __delegate_object_store_method {
             checksum: &'checksum ::loonfs_types::Checksum,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<(), ::loonfs_objectstore::ObjectStoreError>,
+                    Output = ::core::result::Result<(), ::loonfs_objectstore::ObjectStoreError>,
                 > + Send
                 + 'future,
         >>
@@ -153,7 +153,7 @@ macro_rules! __delegate_object_store_method {
             provider_upload_id: &'upload str,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<(), ::loonfs_objectstore::ObjectStoreError>,
+                    Output = ::core::result::Result<(), ::loonfs_objectstore::ObjectStoreError>,
                 > + Send
                 + 'future,
         >>
@@ -176,7 +176,7 @@ macro_rules! __delegate_object_store_method {
             key: &'key str,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<
+                    Output = ::core::result::Result<
                         Option<::loonfs_objectstore::ObjectBody>,
                         ::loonfs_objectstore::ObjectStoreError,
                     >,
@@ -198,7 +198,7 @@ macro_rules! __delegate_object_store_method {
             range: Option<::loonfs_objectstore::ByteRange>,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<
+                    Output = ::core::result::Result<
                         Option<::bytes::Bytes>,
                         ::loonfs_objectstore::ObjectStoreError,
                     >,
@@ -221,7 +221,7 @@ macro_rules! __delegate_object_store_method {
             mode: ::loonfs_objectstore::PutMode,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<
+                    Output = ::core::result::Result<
                         ::loonfs_objectstore::ObjectMetadata,
                         ::loonfs_objectstore::ObjectStoreError,
                     >,
@@ -244,7 +244,7 @@ macro_rules! __delegate_object_store_method {
             mode: ::loonfs_objectstore::PutMode,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<u64, ::loonfs_objectstore::ObjectStoreError>,
+                    Output = ::core::result::Result<u64, ::loonfs_objectstore::ObjectStoreError>,
                 > + Send
                 + 'future,
         >>
@@ -303,7 +303,7 @@ macro_rules! __delegate_object_store_method {
             bytes: ::bytes::Bytes,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<
+                    Output = ::core::result::Result<
                         ::loonfs_objectstore::ObjectMetadata,
                         ::loonfs_objectstore::ObjectStoreError,
                     >,
@@ -327,7 +327,7 @@ macro_rules! __delegate_object_store_method {
             key: &'key str,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<(), ::loonfs_objectstore::ObjectStoreError>,
+                    Output = ::core::result::Result<(), ::loonfs_objectstore::ObjectStoreError>,
                 > + Send
                 + 'future,
         >>
@@ -346,7 +346,7 @@ macro_rules! __delegate_object_store_method {
             start_after: Option<&str>,
         ) -> ::futures::stream::BoxStream<
             'static,
-            Result<::loonfs_objectstore::ListedObject, ::loonfs_objectstore::ObjectStoreError>,
+            ::core::result::Result<::loonfs_objectstore::ListedObject, ::loonfs_objectstore::ObjectStoreError>,
         > {
             $inner.list_entries_from_stream(prefix, start_after)
         }
@@ -358,7 +358,7 @@ macro_rules! __delegate_object_store_method {
             bytes: ::bytes::Bytes,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<
+                    Output = ::core::result::Result<
                         ::loonfs_objectstore::ObjectMetadata,
                         ::loonfs_objectstore::ObjectStoreError,
                     >,
@@ -380,7 +380,7 @@ macro_rules! __delegate_object_store_method {
             bytes: ::bytes::Bytes,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<
+                    Output = ::core::result::Result<
                         ::loonfs_objectstore::ObjectMetadata,
                         ::loonfs_objectstore::ObjectStoreError,
                     >,
@@ -403,7 +403,7 @@ macro_rules! __delegate_object_store_method {
             tail: Vec<::bytes::Bytes>,
             expected: &'expected ::loonfs_types::Checksum,
         ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<Output = Result<::loonfs_objectstore::ObjectMetadata, ::loonfs_objectstore::ObjectStoreError>> + Send + 'future,
+            dyn ::core::future::Future<Output = ::core::result::Result<::loonfs_objectstore::ObjectMetadata, ::loonfs_objectstore::ObjectStoreError>> + Send + 'future,
         >>
         where 'store: 'future, 'key: 'future, 'sources: 'future, 'expected: 'future, Self: 'future,
         {
@@ -416,7 +416,7 @@ macro_rules! __delegate_object_store_method {
             prefix: &str,
         ) -> ::futures::stream::BoxStream<
             'static,
-            Result<String, ::loonfs_objectstore::ObjectStoreError>,
+            ::core::result::Result<String, ::loonfs_objectstore::ObjectStoreError>,
         > {
             $inner.list_prefix_stream(prefix)
         }
@@ -429,7 +429,7 @@ macro_rules! __delegate_object_store_method {
             limit: ::loonfs_types::EffectiveLimit,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<
+                    Output = ::core::result::Result<
                         ::loonfs_types::Page<String, String>,
                         ::loonfs_objectstore::ObjectStoreError,
                     >,
@@ -453,7 +453,7 @@ macro_rules! __delegate_object_store_method {
             prefix: &'prefix str,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<Vec<String>, ::loonfs_objectstore::ObjectStoreError>,
+                    Output = ::core::result::Result<Vec<String>, ::loonfs_objectstore::ObjectStoreError>,
                 > + Send
                 + 'future,
         >>

@@ -1,6 +1,9 @@
 //! Shared fixtures for the crate's integration tests.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "`tests/logging.rs` includes this file and uses only part of it"
+)]
 #![allow(
     clippy::result_large_err,
     reason = "test helpers preserve the client's structured error type"
@@ -8,10 +11,10 @@
 
 use loonfs_client::{Client, ClientConfig, ClientError, ListOptions, NamespacePath};
 use loonfs_server::{
-    app, serve_with_shutdown, AppConfig, GrepConfig, JobMode, MetadataCacheConfig, ServeError,
-    ServerConfig, StoreConfig, TlsServerConfig,
+    app, serve_with_shutdown, AppConfig, JobMode, ServeError, ServerConfig, StoreConfig,
+    TlsServerConfig,
 };
-use loonfs_test_support::http::raw_agent;
+use loonfs_test_support::http::{raw_agent, reserve_loopback_address};
 use loonfs_types::{ErrorCode, ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -183,14 +186,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
 
     TestServer {
         namespaces: state.binding.namespaces.clone(),
-        client: Client::new(ClientConfig {
-            server_url: server_url.clone(),
-            auth_token: auth_token.map(Into::into),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        })
-        .expect("valid client config"),
+        client: client(&server_url, auth_token, None),
         server_url,
         store_root,
         store_key_prefix,
@@ -244,7 +240,7 @@ pub(crate) async fn start_tls_server_with_certificate(
     std::fs::write(&cert_path, certificate.pem()).expect("write certificate");
     std::fs::write(&key_path, signing_key.serialize_pem()).expect("write private key");
 
-    let addr = reserve_loopback_addr().await;
+    let addr = reserve_loopback_address();
     config.bind = addr.to_string();
     config.tls = Some(TlsServerConfig {
         cert_path: cert_path.display().to_string(),
@@ -264,14 +260,7 @@ pub(crate) async fn start_tls_server_with_certificate(
     let server_url = format!("https://{addr}");
     let ca_cert_path = cert_path.display().to_string();
     TlsTestServer {
-        client: Client::new(ClientConfig {
-            server_url: server_url.clone(),
-            auth_token: auth_token.clone().map(Into::into),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: Some(ca_cert_path.clone()),
-        })
-        .expect("valid client config"),
+        client: client(&server_url, auth_token.clone(), Some(ca_cert_path.clone())),
         server_url,
         addr,
         ca_cert_path,
@@ -297,7 +286,7 @@ pub(crate) struct GracefulTestServer {
 }
 
 pub(crate) async fn start_graceful_server(mut config: ServerConfig) -> GracefulTestServer {
-    let addr = reserve_loopback_addr().await;
+    let addr = reserve_loopback_address();
     config.bind = addr.to_string();
     let auth_token = config
         .auth_token
@@ -312,14 +301,7 @@ pub(crate) async fn start_graceful_server(mut config: ServerConfig) -> GracefulT
 
     let server_url = format!("http://{addr}");
     GracefulTestServer {
-        client: Client::new(ClientConfig {
-            server_url: server_url.clone(),
-            auth_token: auth_token.map(Into::into),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        })
-        .expect("valid client config"),
+        client: client(&server_url, auth_token, None),
         server_url,
         shutdown,
         server,
@@ -345,18 +327,22 @@ impl GracefulTestServer {
     }
 }
 
-/// Picks a free loopback port by binding one and letting it go. The server
-/// binds it itself, because `serve_with_shutdown` owns that step and the
-/// point of this harness is to exercise it.
-async fn reserve_loopback_addr() -> SocketAddr {
-    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("probe bind");
-    probe.local_addr().expect("probe addr")
+/// Builds a client of the server at `server_url`.
+fn client(server_url: &str, auth_token: Option<String>, ca_cert_path: Option<String>) -> Client {
+    Client::new(ClientConfig {
+        server_url: server_url.to_owned(),
+        auth_token: auth_token.map(Into::into),
+        request_timeout_ms: None,
+        disable_transient_retry: false,
+        ca_cert_path,
+    })
+    .expect("valid client config")
 }
 
-#[allow(clippy::disallowed_methods)]
-// Test-harness polling for a port the server binds on its own schedule.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the harness polls for a port that the server binds on its own schedule"
+)]
 async fn wait_until_listening(
     addr: SocketAddr,
     server: &mut tokio::task::JoinHandle<Result<(), ServeError>>,
@@ -380,64 +366,27 @@ pub(crate) fn test_config(
     content_token_secret: &str,
     writer_id: &str,
 ) -> ServerConfig {
-    ServerConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        memory_limit_bytes: None,
-        auth_token: Some(auth_token.into()),
-        content_token_secret: content_token_secret.into(),
-        writer_id: loonfs_test_support::ids::writer_id(writer_id),
-        max_concurrent_reads: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_READS).unwrap()
-        },
-        max_concurrent_folds: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS).unwrap()
-        },
-        max_concurrent_compactions: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap()
-        },
-        max_concurrent_content_writes: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).unwrap()
-        },
-        publication: Default::default(),
-        inline_content: Default::default(),
-        metadata_cache: MetadataCacheConfig::default(),
-        grep: GrepConfig {
-            mode: JobMode::ServeAndMaintain,
-            ..GrepConfig::default()
-        },
-        maintenance: JobMode::ServeAndMaintain,
-        min_publish_interval_ms: 0,
-        request_deadline_ms: 60_000,
-        shutdown_deadline_ms: 600_000,
-        max_upload_bytes: 256 * 1024 * 1024,
-        max_download_bytes: 256 * 1024 * 1024,
-        max_in_flight_requests: const { std::num::NonZeroUsize::new(256).unwrap() },
-        max_connections: const { std::num::NonZeroUsize::new(1024).unwrap() },
-        max_concurrent_uploads: const { std::num::NonZeroUsize::new(8).unwrap() },
-        max_concurrent_downloads: const { std::num::NonZeroUsize::new(16).unwrap() },
-        max_concurrent_maintenance: const { std::num::NonZeroUsize::new(8).unwrap() },
-        tick_interval_ms: 5_000,
-        maintenance_interval_ms: 300_000,
-        gc_interval_ms: 3_600_000,
-        full_sweep_interval_ms: 86_400_000,
-        retention_window_ms: None,
-        idle_session_close_after_ms: 1_800_000,
-        max_merge_input_bytes: None,
-        manifest_revalidation_interval_ms: None,
-        max_staleness_ms: None,
-        consistency: Default::default(),
-        max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::DEFAULT_IDLE_FOLD_AFTER_MS,
-        allow_unauthenticated_remote: false,
-        allow_remote_without_tls: false,
-        tls: None,
-        store,
-    }
+    let mut config: ServerConfig = toml::from_str(
+        r#"
+bind = "127.0.0.1:0"
+writer_id = "unused"
+
+[store]
+kind = "local_fs"
+root = "unused"
+"#,
+    )
+    .expect("parse the test config");
+    config.auth_token = Some(auth_token.into());
+    config.content_token_secret = content_token_secret.into();
+    config.writer_id = loonfs_test_support::ids::writer_id(writer_id);
+    config.grep.mode = JobMode::ServeAndMaintain;
+    config.min_publish_interval_ms = 0;
+    config.store = store;
+    config
 }
 
 pub(crate) mod http_split_support {
-    #![allow(dead_code)]
-
     use loonfs_client::{Client, PutFileOptions};
     use loonfs_types::{
         api::v0::{

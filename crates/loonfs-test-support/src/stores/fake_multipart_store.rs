@@ -23,13 +23,10 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
-use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    AssemblySource, ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, Result,
+    AssemblySource, MultipartPart, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, Result,
 };
-use loonfs_types::{Checksum, EffectiveLimit, Page};
+use loonfs_types::Checksum;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -145,13 +142,15 @@ impl<S> FakeMultipartStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
-    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
-        self.inner.checksum_algorithm()
-    }
-
-    fn identity(&self) -> Option<loonfs_objectstore::StoreIdentity> {
-        self.inner.identity()
-    }
+    crate::delegate_object_store!(self => self.inner;
+        checksum_algorithm,
+        identity,
+        get_with_metadata,
+        get,
+        put_streamed,
+        list_entries_from_stream,
+        list_child_prefixes,
+    );
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let mut metadata = self.inner.head(key).await?;
@@ -262,20 +261,13 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
         Ok(())
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
-        self.inner.get(key, range).await
-    }
-
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
-        self.inner.put_streamed(key, body, mode).await
+        let metadata = self.inner.put(key, bytes, mode).await?;
+        self.stored_checksums
+            .lock()
+            .expect("stored checksum lock should not be poisoned")
+            .remove(key);
+        Ok(metadata)
     }
 
     async fn assemble(
@@ -337,24 +329,11 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        self.inner.delete(key).await
-    }
-
-    fn list_entries_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<ListedObject>> {
-        self.inner.list_entries_from_stream(prefix, start_after)
-    }
-    async fn list_child_prefixes(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        limit: EffectiveLimit,
-    ) -> Result<Page<String, String>> {
-        self.inner
-            .list_child_prefixes(prefix, start_after, limit)
-            .await
+        self.inner.delete(key).await?;
+        self.stored_checksums
+            .lock()
+            .expect("stored checksum lock should not be poisoned")
+            .remove(key);
+        Ok(())
     }
 }

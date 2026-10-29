@@ -5,7 +5,6 @@ mod composition;
 
 use super::serve::{build_handles, serve_on};
 use super::{app, AppConfig};
-use crate::config::MetadataCacheConfig;
 use crate::{ServerConfig, StoreConfig};
 use axum::http::StatusCode;
 use loonfs::metrics::MetricValue;
@@ -735,62 +734,27 @@ fn options_with_store(store: SharedObjectStore) -> AppConfig {
 }
 
 fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
-    ServerConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        memory_limit_bytes: None,
-        auth_token: Some("test-token".into()),
-        content_token_secret: "test-content-token-secret".into(),
-        writer_id: loonfs_test_support::ids::writer_id(writer_id),
-        max_concurrent_reads: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_READS).unwrap()
-        },
-        max_concurrent_folds: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS).unwrap()
-        },
-        max_concurrent_compactions: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap()
-        },
-        max_concurrent_content_writes: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).unwrap()
-        },
-        publication: Default::default(),
-        inline_content: Default::default(),
-        metadata_cache: MetadataCacheConfig::default(),
-        grep: crate::config::GrepConfig {
-            mode: crate::config::JobMode::ServeAndMaintain,
-            ..crate::config::GrepConfig::default()
-        },
-        maintenance: crate::config::JobMode::ServeAndMaintain,
-        min_publish_interval_ms: 0,
-        request_deadline_ms: 60_000,
-        shutdown_deadline_ms: 600_000,
-        max_upload_bytes: 256 * 1024 * 1024,
-        max_download_bytes: 256 * 1024 * 1024,
-        max_in_flight_requests: const { std::num::NonZeroUsize::new(256).unwrap() },
-        max_connections: const { std::num::NonZeroUsize::new(1024).unwrap() },
-        max_concurrent_uploads: const { std::num::NonZeroUsize::new(8).unwrap() },
-        max_concurrent_downloads: const { std::num::NonZeroUsize::new(16).unwrap() },
-        max_concurrent_maintenance: const { std::num::NonZeroUsize::new(8).unwrap() },
-        tick_interval_ms: 5_000,
-        maintenance_interval_ms: 300_000,
-        gc_interval_ms: 3_600_000,
-        full_sweep_interval_ms: 86_400_000,
-        retention_window_ms: None,
-        idle_session_close_after_ms: 1_800_000,
-        max_merge_input_bytes: None,
-        manifest_revalidation_interval_ms: None,
-        max_staleness_ms: None,
-        consistency: Default::default(),
-        max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::DEFAULT_IDLE_FOLD_AFTER_MS,
-        allow_unauthenticated_remote: false,
-        allow_remote_without_tls: false,
-        tls: None,
-        store: StoreConfig::LocalFs {
-            root: root.display().to_string(),
-            key_prefix: Some("http-tests".to_owned()),
-        },
-    }
+    let mut config: ServerConfig = toml::from_str(
+        r#"
+bind = "127.0.0.1:0"
+writer_id = "unused"
+
+[store]
+kind = "local_fs"
+root = "unused"
+"#,
+    )
+    .expect("parse the test config");
+    config.auth_token = Some("test-token".into());
+    config.content_token_secret = "test-content-token-secret".into();
+    config.writer_id = loonfs_test_support::ids::writer_id(writer_id);
+    config.grep.mode = crate::config::JobMode::ServeAndMaintain;
+    config.min_publish_interval_ms = 0;
+    config.store = StoreConfig::LocalFs {
+        root: root.display().to_string(),
+        key_prefix: Some("http-tests".to_owned()),
+    };
+    config
 }
 
 async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {

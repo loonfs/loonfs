@@ -1,7 +1,5 @@
 //! Shared fixtures for the crate's integration tests.
 
-#![allow(dead_code)]
-
 use loonfs_core::cache::{HeadAndWalTailCache, MetadataSegmentCache, ObjectCache};
 use loonfs_core::control::load_read_anchor;
 use loonfs_core::{MutationContext, NamespaceWriterEngine, RuntimeReadContext};
@@ -46,8 +44,6 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
 }
 
 pub(crate) mod commit_split_support {
-    #![allow(dead_code)]
-
     use loonfs_core::time::Deadline;
     use loonfs_objectstore::timing::StdMonotonicTimer;
 

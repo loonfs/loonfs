@@ -1,5 +1,6 @@
 //! HTTP helpers shared by server tests.
 
+use std::net::{SocketAddr, TcpListener};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 /// Creates an HTTP client with read and write timeouts so a stalled server
@@ -11,6 +12,15 @@ pub fn raw_agent() -> ureq::Agent {
         .build()
 }
 
+/// Picks a free loopback address by binding port zero and releasing the port,
+/// for a server that binds the address itself.
+pub fn reserve_loopback_address() -> SocketAddr {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("binding a loopback port should succeed")
+        .local_addr()
+        .expect("a bound listener should have a local address")
+}
+
 /// Retries the known macOS socket panic caused by an early server disconnect.
 pub fn retry_on_macos_teardown_einval<T>(exchange: impl Fn() -> T) -> T {
     match retry_result_on_macos_teardown_einval(|| Ok::<T, std::convert::Infallible>(exchange())) {
@@ -20,7 +30,10 @@ pub fn retry_on_macos_teardown_einval<T>(exchange: impl Fn() -> T) -> T {
 }
 
 /// Retries the same macOS socket failure when an HTTP exchange returns it.
-#[allow(clippy::print_stderr)]
+#[allow(
+    clippy::print_stderr,
+    reason = "a test reports each retry on standard error"
+)]
 pub fn retry_result_on_macos_teardown_einval<T, E: std::fmt::Debug>(
     exchange: impl Fn() -> Result<T, E>,
 ) -> Result<T, E> {

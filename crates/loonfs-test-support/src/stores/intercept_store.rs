@@ -11,6 +11,7 @@ use loonfs_objectstore::{
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt::Debug;
+use std::future::Future;
 use std::sync::Arc;
 
 /// The result details exposed to an interceptor after an operation.
@@ -97,15 +98,20 @@ impl<S, I: Interceptor> InterceptStore<S, I> {
         &self.interceptor
     }
 
-    fn finish<T>(
-        interceptor: &I,
+    /// Runs `call` between the interceptor's `before` and `after` hooks.
+    async fn intercepted<T>(
+        &self,
         context: &OperationContext<'_>,
-        intercept: Intercept,
-        result: Result<T, ObjectStoreError>,
-        outcome: Outcome,
+        call: impl Future<Output = Result<T, ObjectStoreError>>,
+        outcome: fn(&Result<T, ObjectStoreError>) -> Outcome,
     ) -> Result<T, ObjectStoreError> {
+        let intercept = match self.interceptor.before(context).await {
+            Intercept::FailBefore(error) => return Err(error),
+            intercept => intercept,
+        };
+        let result = call.await;
         if intercept.calls_after() {
-            interceptor.after(context, &outcome);
+            self.interceptor.after(context, &outcome(&result));
         }
         match (intercept, result) {
             (Intercept::FailAfter(error), Ok(_)) => Err(error),
@@ -126,13 +132,8 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let context = OperationContext::new(key, OperationKind::Head);
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self.inner.head(key).await;
-        let outcome = result_outcome(&result);
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+        self.intercepted(&context, self.inner.head(key), result_outcome)
+            .await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String, ObjectStoreError> {
@@ -163,17 +164,16 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         let context = OperationContext::new(key, OperationKind::GetWithMetadata);
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self.inner.get_with_metadata(key).await;
-        let outcome = match &result {
-            Ok(Some(body)) => Outcome::Bytes(body.bytes.len()),
-            Ok(None) => Outcome::Bytes(0),
-            Err(_) => Outcome::Failure,
-        };
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+        self.intercepted(
+            &context,
+            self.inner.get_with_metadata(key),
+            |result| match result {
+                Ok(Some(body)) => Outcome::Bytes(body.bytes.len()),
+                Ok(None) => Outcome::Bytes(0),
+                Err(_) => Outcome::Failure,
+            },
+        )
+        .await
     }
 
     async fn get(
@@ -187,17 +187,16 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
                 range: range.as_ref(),
             },
         );
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self.inner.get(key, range.clone()).await;
-        let outcome = match &result {
-            Ok(Some(bytes)) => Outcome::Bytes(bytes.len()),
-            Ok(None) => Outcome::Bytes(0),
-            Err(_) => Outcome::Failure,
-        };
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+        self.intercepted(
+            &context,
+            self.inner.get(key, range.clone()),
+            |result| match result {
+                Ok(Some(bytes)) => Outcome::Bytes(bytes.len()),
+                Ok(None) => Outcome::Bytes(0),
+                Err(_) => Outcome::Failure,
+            },
+        )
+        .await
     }
 
     async fn put(
@@ -213,13 +212,8 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
                 mode: &mode,
             },
         );
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self.inner.put(key, bytes.clone(), mode.clone()).await;
-        let outcome = result_outcome(&result);
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+        let call = self.inner.put(key, bytes.clone(), mode.clone());
+        self.intercepted(&context, call, result_outcome).await
     }
 
     async fn put_streamed(
@@ -229,16 +223,12 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         mode: PutMode,
     ) -> Result<u64, ObjectStoreError> {
         let context = OperationContext::new(key, OperationKind::PutStreamed { mode: &mode });
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self.inner.put_streamed(key, body, mode.clone()).await;
-        let outcome = match &result {
+        let call = self.inner.put_streamed(key, body, mode.clone());
+        self.intercepted(&context, call, |result| match result {
             Ok(bytes) => Outcome::StreamedBytes(*bytes),
             Err(_) => Outcome::Failure,
-        };
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+        })
+        .await
     }
 
     async fn compare_and_swap(
@@ -254,16 +244,10 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
                 bytes: &bytes,
             },
         );
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self
+        let call = self
             .inner
-            .compare_and_swap(key, expected_etag, bytes.clone())
-            .await;
-        let outcome = result_outcome(&result);
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+            .compare_and_swap(key, expected_etag, bytes.clone());
+        self.intercepted(&context, call, result_outcome).await
     }
 
     async fn assemble(
@@ -281,27 +265,14 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
                 expected,
             },
         );
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self
-            .inner
-            .assemble(key, sources, tail.clone(), expected)
-            .await;
-        let outcome = result_outcome(&result);
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+        let call = self.inner.assemble(key, sources, tail.clone(), expected);
+        self.intercepted(&context, call, result_outcome).await
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let context = OperationContext::new(key, OperationKind::Delete);
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self.inner.delete(key).await;
-        let outcome = result_outcome(&result);
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+        self.intercepted(&context, self.inner.delete(key), result_outcome)
+            .await
     }
 
     async fn list_child_prefixes(
@@ -311,16 +282,8 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         limit: EffectiveLimit,
     ) -> Result<Page<String, String>, ObjectStoreError> {
         let context = OperationContext::new(prefix, OperationKind::List);
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self
-            .inner
-            .list_child_prefixes(prefix, start_after, limit)
-            .await;
-        let outcome = result_outcome(&result);
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+        let call = self.inner.list_child_prefixes(prefix, start_after, limit);
+        self.intercepted(&context, call, result_outcome).await
     }
 
     fn list_entries_from_stream(

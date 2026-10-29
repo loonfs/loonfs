@@ -79,7 +79,7 @@ impl KeyPredicate {
         })
     }
 
-    pub(crate) fn matches(&self, key: &str) -> bool {
+    pub fn matches(&self, key: &str) -> bool {
         (self.predicate)(key)
     }
 }

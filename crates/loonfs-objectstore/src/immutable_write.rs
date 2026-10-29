@@ -98,7 +98,7 @@ pub(crate) fn verify_stored_checksum(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::SteppingTimer;
+    use loonfs_test_support::clock::ManualClock;
     use loonfs_types::OperationDeadline;
     use std::assert_matches;
     use std::time::Duration;
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn immutable_retry_deadline_is_one_budget_across_attempts() {
-        let timer = SteppingTimer::new(70_000);
+        let timer = ManualClock::stepping(70_000);
         let deadline = OperationDeadline::start(&timer, Duration::from_secs(120));
         assert_eq!(deadline.remaining(), Some(Duration::from_secs(50)));
         assert_eq!(deadline.remaining(), None);

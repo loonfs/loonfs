@@ -9,10 +9,7 @@ use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
-use loonfs_server::{
-    app, AppConfig, GarbageCollection, GrepConfig, JobMode, MetadataCacheConfig, ServerConfig,
-    StoreConfig,
-};
+use loonfs_server::{app, AppConfig, GarbageCollection, JobMode, ServerConfig, StoreConfig};
 use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::{
     CapabilityDocument, ChangeSeq, ErrorResponse, GrepResponse, NamespaceId,
@@ -780,66 +777,18 @@ async fn seed_namespace(
 }
 
 fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
-    ServerConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        memory_limit_bytes: None,
-        auth_token: Some("test-token".into()),
-        content_token_secret: "test-content-token-secret".into(),
-        writer_id: loonfs_test_support::ids::writer_id(&format!("grep-mode-{mode:?}")),
-        max_concurrent_reads: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_READS).unwrap()
-        },
-        max_concurrent_folds: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS).unwrap()
-        },
-        max_concurrent_compactions: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap()
-        },
-        max_concurrent_content_writes: const {
-            std::num::NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).unwrap()
-        },
-        publication: Default::default(),
-        inline_content: Default::default(),
-        metadata_cache: MetadataCacheConfig::default(),
-        grep: GrepConfig {
-            mode,
-            ..GrepConfig::default()
-        },
-        maintenance: JobMode::ServeAndMaintain,
-        min_publish_interval_ms: 0,
-        request_deadline_ms: 60_000,
-        shutdown_deadline_ms: 600_000,
-        max_upload_bytes: loonfs::DEFAULT_MAX_READ_CONTENT_BYTES,
-        max_download_bytes: loonfs::DEFAULT_MAX_READ_CONTENT_BYTES,
-        max_in_flight_requests: const { std::num::NonZeroUsize::new(256).unwrap() },
-        max_connections: const { std::num::NonZeroUsize::new(1024).unwrap() },
-        max_concurrent_uploads: const {
-            std::num::NonZeroUsize::new(loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS).unwrap()
-        },
-        max_concurrent_downloads: const {
-            std::num::NonZeroUsize::new(loonfs_http::DEFAULT_MAX_CONCURRENT_DOWNLOADS).unwrap()
-        },
-        max_concurrent_maintenance: const { std::num::NonZeroUsize::new(2).unwrap() },
-        tick_interval_ms: 5_000,
-        maintenance_interval_ms: 300_000,
-        gc_interval_ms: 3_600_000,
-        full_sweep_interval_ms: 86_400_000,
-        retention_window_ms: None,
-        idle_session_close_after_ms: 1_800_000,
-        max_merge_input_bytes: None,
-        manifest_revalidation_interval_ms: None,
-        max_staleness_ms: None,
-        consistency: Default::default(),
-        max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::DEFAULT_IDLE_FOLD_AFTER_MS,
-        allow_unauthenticated_remote: false,
-        allow_remote_without_tls: false,
-        tls: None,
-        store: StoreConfig::LocalFs {
+    let mut config = crate::common::test_config(
+        StoreConfig::LocalFs {
             root: store_root.display().to_string(),
             key_prefix: None,
         },
-    }
+        "test-token",
+        "test-content-token-secret",
+        &format!("grep-mode-{mode:?}"),
+    );
+    config.grep.mode = mode;
+    config.max_concurrent_maintenance = const { NonZeroUsize::new(2).unwrap() };
+    config
 }
 
 /// Runs one maintenance sweep pass, so the durable state read next is the
