@@ -117,8 +117,7 @@ pub use capability::{
 };
 pub use civil_date::{civil_from_days, CivilDate};
 pub use commit_identity::{
-    expiry_commit_fingerprint, semantic_commit_fingerprint, CommitFingerprint, ExpiredDeletion,
-    InlineContentIdentity, SemanticFingerprintError,
+    semantic_commit_fingerprint, CommitFingerprint, InlineContentIdentity, SemanticFingerprintError,
 };
 pub use content::{
     Checksum, ChecksumAlgorithm, ChecksumDigest, ChecksumHex, ChecksumHexValidationError,

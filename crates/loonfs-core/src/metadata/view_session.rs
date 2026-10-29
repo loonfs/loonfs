@@ -799,9 +799,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(tombstone)
     }
 
-    /// One page of the namespace's recoverable deletions in `range`, oldest
-    /// deletion first. Uncached: one call serves one trash listing page, or
-    /// one scan of a writer's expiry.
+    /// One page of the namespace's deletions in `range` that no undelete has
+    /// cancelled, oldest deletion first. Uncached: one call serves one trash
+    /// listing page.
     pub(crate) async fn active_deletions_page(
         &mut self,
         range: &ActiveDeletionRange,
@@ -852,6 +852,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 /// through the canonical [`super::visibility`] rule bodies.
 impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_, '_, S> {
     type Error = CoreError;
+
+    fn retention_floor_seq(&self) -> ChangeSeq {
+        self.base.retention_floor_seq()
+    }
 
     async fn find_inode(
         &mut self,

@@ -806,6 +806,113 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(revisions.items[1].content_ref, inherited_ref);
 }
 
+/// The inode rows that the current manifest's segments store.
+async fn inode_rows<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> u64 {
+    loonfs_core::control::load_namespace_statistics(store, namespace_id)
+        .await
+        .expect("load the namespace's statistics")
+        .inode_record_count
+}
+
+/// Checks that a fork's base compactions remove the rows of a deletion that
+/// the fork inherited with no writer session ever opened in the fork,
+/// because the fork's retention floor and acknowledged floor start at its
+/// fork point, so every inherited deletion has expired. The source keeps
+/// its rows, and the fork's first write commits right after the fork point.
+#[tokio::test]
+async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let source_namespace_id = namespace_id("source");
+    let fork_namespace_id = NamespaceId::parse("fork").expect("valid namespace id");
+    bootstrap_namespace(&store, &source_namespace_id, &context)
+        .await
+        .expect("bootstrap source");
+    // Each file is folded into a run of its own, so the fork inherits more
+    // than one run of the inode and revision groups, and its compaction of
+    // those groups has a window to merge.
+    let source = namespace_engine(&store, &source_namespace_id, &context);
+    for (path, commit_id) in [("/old/a.txt", "seed-old"), ("/kept.txt", "seed-kept")] {
+        write_file_bytes(
+            &store,
+            &source_namespace_id,
+            path,
+            b"body",
+            &context,
+            Some(commit_id),
+        )
+        .await
+        .expect("seed a file");
+        source.fold_wal().await.expect("fold the file");
+    }
+    submit_operation(
+        &store,
+        &source_namespace_id,
+        test_commit_id(Some("delete-old")),
+        FilesystemOperation::DeletePath {
+            path: AbsolutePath::parse("/old").expect("path"),
+            behavior: loonfs_types::DeleteDirectoryBehavior::Recursive,
+            expected_inode_id: None,
+        },
+        &context,
+    )
+    .await
+    .expect("delete /old");
+    source.fold_wal().await.expect("fold the deletion");
+    fork_namespace(&store, &source_namespace_id, &fork_namespace_id, &context)
+        .await
+        .expect("fork");
+    let fork_head = head_state(&store, &fork_namespace_id).await;
+    let source_rows = inode_rows(&store, &source_namespace_id).await;
+    let fork_rows = inode_rows(&store, &fork_namespace_id).await;
+    assert_eq!(fork_rows, source_rows);
+
+    let fork = namespace_engine(&store, &fork_namespace_id, &context);
+    for _ in 0..16 {
+        let outcome = fork
+            .compact_metadata_unit(
+                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                loonfs_core::CompactionAdmission::AnySize,
+                loonfs_types::CompactorEpoch(0),
+                &loonfs_core::MetadataCompactionCancellation::default(),
+            )
+            .await
+            .expect("compact the fork");
+        if matches!(outcome, loonfs_core::CompactionUnitOutcome::NotNeeded) {
+            break;
+        }
+    }
+    assert_eq!(
+        inode_rows(&store, &fork_namespace_id).await,
+        fork_rows - 2,
+        "the fork removes the rows of /old and /old/a.txt"
+    );
+    assert_eq!(
+        inode_rows(&store, &source_namespace_id).await,
+        source_rows,
+        "the source keeps the rows of its recoverable deletion"
+    );
+    let after_compaction = head_state(&store, &fork_namespace_id).await;
+    assert_eq!(after_compaction.seq, fork_head.seq);
+    assert_eq!(
+        after_compaction.writer_epoch, fork_head.writer_epoch,
+        "no writer session ran in the fork"
+    );
+
+    let first_write = write_file_bytes(
+        &store,
+        &fork_namespace_id,
+        "/new.txt",
+        b"new",
+        &context,
+        Some("fork-first-write"),
+    )
+    .await
+    .expect("the fork's first write");
+    assert_eq!(first_write.committed_seq.0, fork_head.seq.0 + 1);
+}
+
 #[tokio::test]
 async fn fork_clone_survives_source_delete() {
     let temp_dir = tempdir().expect("tempdir");

@@ -6,9 +6,7 @@ use super::batch::BatchOutcomeSlot;
 use super::publish_view::PublishMetadataView;
 use crate::authorize::Authorizer;
 use crate::commit::{CandidateAllocation, CommitFingerprint, ValidatedCommitPlan};
-use crate::commit_engine::{
-    CandidateRequest, CommitCandidate, ContentPreparation, ContentPreparationError,
-};
+use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::metadata::CommitReceiptRecord;
@@ -181,14 +179,9 @@ pub(super) fn validate_candidate_content_references(
     namespace_id: &NamespaceId,
     now_ms: u64,
 ) -> Result<()> {
-    let intent = match candidate.request() {
-        CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => intent,
-        // An expiry refers to no content.
-        CandidateRequest::Expiry(_) => return Ok(()),
-    };
     match candidate.content_preparation() {
         ContentPreparation::Ready(admissions) => validate_commit_content_references(
-            intent,
+            candidate.intent(),
             admissions,
             candidate.inline_content(),
             namespace_id,

@@ -8,7 +8,7 @@ use super::publish_path_planning::{
     ResolvedParents,
 };
 use crate::authorize::Absence;
-use crate::commit::{CandidateAllocation, CommitOperand, CommitOperation, CommitValidationError};
+use crate::commit::{CandidateAllocation, CommitOperation, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
@@ -113,11 +113,7 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
                 Absence::Inode,
             )
             .await?;
-            return Err(CommitValidationError::TargetNotDeleted {
-                operand: CommitOperand::UndeleteTarget,
-                inode_id,
-            }
-            .into());
+            return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
         }
     };
     let saved_parent = deleted_binding.parent_inode_id;

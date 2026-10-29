@@ -325,9 +325,11 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         kept(b"alpha two\n"),
         "the newest revision at the floor stays"
     );
+    // The floor reached the deletion of `/docs/tmp.txt`, and the later
+    // writes' WAL objects acknowledged that floor once they were folded.
     assert!(
-        kept(b"scratch\n"),
-        "a deleted file keeps its newest revision"
+        !kept(b"scratch\n"),
+        "a file that an expired deletion hides keeps no revision"
     );
 
     let binds = manifest_rows_for_family(
@@ -410,8 +412,13 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
         vec![bind(1, 0), unbind(2), bind(2, 1)],
     );
 
-    merge_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
-        .expect("drop");
+    merge_rows_with_retention(
+        MetadataFamilyGroup::Bindings,
+        &mut rows,
+        ChangeSeq(1),
+        ChangeSeq(0),
+    )
+    .expect("drop");
 
     assert_eq!(rows[&ApiMetadataRowFamily::DirentryBinds].len(), 3);
     assert_eq!(rows[&ApiMetadataRowFamily::DirentryChildBinds].len(), 3);
@@ -456,8 +463,13 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         vec![bind(0), unbind.clone(), bind(2)],
     );
 
-    merge_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
-        .expect("drop");
+    merge_rows_with_retention(
+        MetadataFamilyGroup::Bindings,
+        &mut rows,
+        ChangeSeq(1),
+        ChangeSeq(0),
+    )
+    .expect("drop");
 
     // Only the delta-2 rebind (the slot's latest) survives; the superseded
     // delta-0 bind and its spent unbind marker are gone from both families.

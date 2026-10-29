@@ -279,7 +279,6 @@ pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRe
         | FilesystemChange::Moved { .. }
         | FilesystemChange::Deleted { .. }
         | FilesystemChange::Undeleted { .. }
-        | FilesystemChange::DeletionExpired { .. }
         | FilesystemChange::AttributesChanged { .. }
         | FilesystemChange::AccessChanged { .. }
         | FilesystemChange::Unknown => None,

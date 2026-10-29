@@ -2119,6 +2119,8 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     assert_eq!(input_runs, 2);
     assert!(input_runs <= policy.max_input_runs_per_step.get());
     assert!(rows_read <= policy.max_decoded_input_rows_per_step.get() as u64);
+    // The basis manifest's acknowledged floor is 0, so the unit builds no
+    // kept inode filter and reads none of the basis's slot index for one.
     let reads = store.count(OperationSelector::Read);
     // The namespace's floor is still 0, so the base unit builds no kept inode
     // filter and walks nothing.

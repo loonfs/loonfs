@@ -27,7 +27,6 @@ fn event_kind(event: &FilesystemChange) -> &'static str {
         FilesystemChange::Moved { .. } => "moved",
         FilesystemChange::Deleted { .. } => "deleted",
         FilesystemChange::Undeleted { .. } => "undeleted",
-        FilesystemChange::DeletionExpired { .. } => "deletion_expired",
         FilesystemChange::AttributesChanged { .. } => "attributes_changed",
         FilesystemChange::AccessChanged { .. } => "access_changed",
         FilesystemChange::Unknown => "unknown",

@@ -216,6 +216,10 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     assert_eq!(forked.kind, source_before_fork.kind);
     assert_eq!(forked.attributes, source_before_fork.attributes);
 
+    // The floor advances before the deletion below, so the deletion stays
+    // recoverable and listed after the advance.
+    fs.advance_retention_floor_blocking(&source_id)
+        .expect("advance retention");
     let trash_creator = actor("trash-creator");
     fs.put_file_blocking(
         &source_id,
@@ -249,8 +253,6 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
 
     fs.create_snapshot_blocking(&source_id)
         .expect("checkpoint deletion rows");
-    fs.advance_retention_floor_blocking(&source_id)
-        .expect("advance retention");
     drop(fs);
 
     let reopened = open_runtime(object_store, "attribution-projections-reopened");

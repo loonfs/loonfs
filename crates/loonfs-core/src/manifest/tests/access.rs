@@ -47,6 +47,7 @@ fn the_merge_keeps_a_latest_empty_revision() {
         MetadataFamilyGroup::Access,
         &mut rows_by_family,
         ChangeSeq(9),
+        ChangeSeq(0),
     )
     .expect("merge access");
 

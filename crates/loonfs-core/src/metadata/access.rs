@@ -12,12 +12,12 @@ use std::collections::BTreeSet;
 ///
 /// The walk starts at the inode, follows current parent bindings, and
 /// stops after a row whose boundary is set or at the root. A deletion root
-/// has no current binding; while the deletion is recoverable, its `set`
-/// event's saved parent repairs that one edge, so a deleted item's own row
-/// and boundary are evaluated before the walk continues. The walk stops at
-/// the root of an expired deletion, so an expired subtree inherits no grant
-/// from above it. Inodes without a row contribute nothing and are not
-/// recorded.
+/// has no current binding; while the deletion is recoverable (above the
+/// view's retention floor), its `set` event's saved parent repairs that one
+/// edge, so a deleted item's own row and boundary are evaluated before the
+/// walk continues. The walk stops at the root of an expired deletion, so an
+/// expired subtree inherits no grant from above it. Inodes without a row
+/// contribute nothing and are not recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct AccessChain {
     rows: Vec<AccessRevisionRecord>,
@@ -70,11 +70,15 @@ where
         let parent = match reads.current_parent_binding_for_child(current).await? {
             Some(binding) => binding.parent_inode_id,
             None => match reads.find_hiding_subtree_tombstone(current).await? {
-                Some(tombstone) => match tombstone.action {
-                    TombstoneRowAction::Set { deleted_binding } => deleted_binding.parent_inode_id,
-                    TombstoneRowAction::Expire { .. } | TombstoneRowAction::Revoke { .. } => break,
-                },
-                None => break,
+                Some(tombstone) if tombstone.committed_seq > reads.retention_floor_seq() => {
+                    match tombstone.action {
+                        TombstoneRowAction::Set { deleted_binding } => {
+                            deleted_binding.parent_inode_id
+                        }
+                        TombstoneRowAction::Revoke { .. } => break,
+                    }
+                }
+                Some(_) | None => break,
             },
         };
         current = parent;

@@ -73,10 +73,11 @@ pub enum MetadataRowFamily {
     DirentryChildBinds,
     /// Stores file revisions newest-first within each inode.
     Revisions,
-    /// Stores set, revoke, and expire events used to determine active subtree tombstones.
+    /// Stores set and revoke events used to determine active subtree tombstones.
     Tombstones,
-    /// Names the deletions that are recoverable right now, derived from the
-    /// tombstone family and ordered by deletion time.
+    /// Lists the deletions that no undelete has cancelled, derived from the
+    /// tombstone family and ordered by deletion sequence. The trash listing
+    /// reads the rows above the retention floor.
     ActiveDeletions,
     /// Preserves commit idempotency evidence independently of retained WAL history.
     CommitReceipts,
@@ -246,10 +247,10 @@ pub enum MetadataRow {
     FileRevision(RevisionRecord),
     /// Changes whether one root inode has an active subtree tombstone.
     Tombstone(SubtreeTombstoneRecord),
-    /// Derived row used to list currently recoverable deletions.
+    /// Derived row used to list recoverable deletions.
     ///
     /// Materialization writes `listed` for each tombstone set and `removed` for
-    /// each revoke or expire. This lets trash listing use an ordered range scan
+    /// each revoke. This lets trash listing use an ordered range scan
     /// instead of replaying all historical deletion events.
     ActiveDeletion(ActiveDeletionRecord),
     /// Preserves the evidence needed to answer a retried logical commit.
@@ -543,43 +544,30 @@ pub enum TombstoneRowAction {
         /// The exact `set` event being compensated.
         target: DeltaPosition,
     },
-    /// The deletion recorded at `target` can no longer be undeleted. The
-    /// subtree stays hidden, and like a revoke, the event carries no binding.
-    Expire {
-        /// The exact `set` event being expired.
-        target: DeltaPosition,
-    },
 }
 
 impl TombstoneRowAction {
     /// Whether a root whose latest event is this one hides its subtree.
     pub const fn hides_subtree(&self) -> bool {
         match self {
-            Self::Set { .. } | Self::Expire { .. } => true,
-            Self::Revoke { .. } => false,
-        }
-    }
-
-    /// Whether a root whose latest event is this one can be undeleted.
-    pub const fn is_recoverable(&self) -> bool {
-        match self {
             Self::Set { .. } => true,
-            Self::Revoke { .. } | Self::Expire { .. } => false,
+            Self::Revoke { .. } => false,
         }
     }
 }
 
-/// Current-state rows for recoverable deletions.
+/// Current-state rows for deletions.
 ///
-/// `Listed` exposes a deletion in trash; `Removed` hides it after an undelete
-/// or an expiry. Both rows share a key prefix, with `Removed` sorting first,
-/// so scans can suppress cancelled entries. Compaction later removes the
-/// cancelled pair.
+/// `Listed` exposes a deletion in trash; `Removed` hides it after an undelete.
+/// Both rows share a key prefix, with `Removed` sorting first, so scans can
+/// suppress cancelled entries. Compaction later removes the cancelled pair,
+/// and the `Listed` row of a deletion at or below the acknowledged floor.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActiveDeletionRowAction {
-    /// The deletion is recoverable; these are the fields the trash entry
-    /// renders, denormalized so a page needs no per-entry join.
+    /// The deletion is in the trash while it's above the retention floor;
+    /// these are the fields the trash entry renders, denormalized so a page
+    /// needs no per-entry join.
     Listed {
         /// Whether the deleted root is a file or a directory.
         inode_kind: InodeKind,
@@ -592,11 +580,9 @@ pub enum ActiveDeletionRowAction {
         /// this row derives from.
         deleted_binding: DeletedBinding,
     },
-    /// The deletion was cancelled by an undelete or an expiry at
-    /// `removed_seq`.
+    /// The deletion was cancelled by an undelete at `removed_seq`.
     Removed {
-        /// Commit sequence of the undelete or expiry that cancelled the
-        /// deletion.
+        /// Commit sequence of the undelete that cancelled the deletion.
         removed_seq: ChangeSeq,
     },
 }

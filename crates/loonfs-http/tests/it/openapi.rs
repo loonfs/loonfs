@@ -1206,7 +1206,6 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FilesystemChangeMoved",
                 "FilesystemChangeDeleted",
                 "FilesystemChangeUndeleted",
-                "FilesystemChangeDeletionExpired",
                 "FilesystemChangeAttributesChanged",
                 "FilesystemChangeAccessChanged",
             ][..],

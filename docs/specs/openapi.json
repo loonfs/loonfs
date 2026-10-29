@@ -1529,7 +1529,6 @@
             "attributes_changed": "#/components/schemas/FilesystemChangeAttributesChanged",
             "content_changed": "#/components/schemas/FilesystemChangeContentChanged",
             "deleted": "#/components/schemas/FilesystemChangeDeleted",
-            "deletion_expired": "#/components/schemas/FilesystemChangeDeletionExpired",
             "directory_created": "#/components/schemas/FilesystemChangeDirectoryCreated",
             "file_created": "#/components/schemas/FilesystemChangeFileCreated",
             "moved": "#/components/schemas/FilesystemChangeMoved",
@@ -1555,9 +1554,6 @@
           },
           {
             "$ref": "#/components/schemas/FilesystemChangeUndeleted"
-          },
-          {
-            "$ref": "#/components/schemas/FilesystemChangeDeletionExpired"
           },
           {
             "$ref": "#/components/schemas/FilesystemChangeAttributesChanged"
@@ -1689,31 +1685,6 @@
         "required": [
           "inode_id",
           "deleted_binding",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "FilesystemChangeDeletionExpired": {
-        "description": "A deletion stopped being recoverable. The deleted subtree stays hidden, and an undelete of\nthe deletion returns `not_deleted`.",
-        "properties": {
-          "deletion_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The sequence of the commit that deleted the subtree."
-          },
-          "inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "The inode at the root of the deleted subtree."
-          },
-          "kind": {
-            "enum": [
-              "deletion_expired"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "inode_id",
-          "deletion_seq",
           "kind"
         ],
         "type": "object"
