@@ -21,6 +21,7 @@ use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, EffectiveLimit, 
 use serde::{Deserialize, Serialize};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -851,7 +852,11 @@ fn is_scratch_name(name: &str) -> bool {
     name == STORE_LOCK_FILE_NAME || (name.starts_with('.') && name.contains(".tmp-"))
 }
 
+/// Returns a scratch path next to `path` that no other write in this process
+/// uses: the process ID and a wall-clock stamp separate processes, and a
+/// process-wide counter separates concurrent writes of one key.
 fn temp_path(path: &Path) -> PathBuf {
+    static NEXT_TEMP_NO: AtomicU64 = AtomicU64::new(0);
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -860,8 +865,12 @@ fn temp_path(path: &Path) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    let temp_no = NEXT_TEMP_NO.fetch_add(1, Ordering::Relaxed);
 
-    path.with_file_name(format!(".{file_name}.tmp-{}-{stamp}", std::process::id()))
+    path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{stamp}-{temp_no}",
+        std::process::id()
+    ))
 }
 
 fn etag(checksum: &Checksum) -> String {
@@ -1146,6 +1155,21 @@ mod tests {
         for reader in readers {
             reader.await.expect("reader task");
         }
+    }
+
+    #[test]
+    fn concurrent_writes_of_one_key_stage_under_different_names() {
+        let path = std::path::Path::new("/store/namespaces/demo/manifests/1.json.zst");
+        let first = super::temp_path(path);
+        let second = super::temp_path(path);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), path.parent());
+        assert!(super::is_scratch_name(
+            first
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("a scratch name")
+        ));
     }
 
     #[tokio::test]
