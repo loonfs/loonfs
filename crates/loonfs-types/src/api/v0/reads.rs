@@ -2,8 +2,8 @@
 
 use super::DirectoryBinding;
 use crate::{
-    AbsolutePath, ActorId, Attributes, AttributesRevisionNo, BindingVersion, ChangeSeq, ContentRef,
-    DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
+    AbsolutePath, ActorId, Attributes, AttributesRevisionNo, BindingVersion, ChangeSeq, CommitId,
+    ContentRef, DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -282,6 +282,47 @@ pub struct ListTrashResponse {
     /// The recoverable deletions, oldest first.
     pub entries: Vec<TrashEntry>,
     /// The cursor for the next page. It's present when another page follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub next_cursor: Option<String>,
+}
+
+/// One immutable revision of a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct FileRevision {
+    /// The file inode that this revision belongs to.
+    #[serde(with = "crate::public_inode_id")]
+    pub inode_id: InodeId,
+    /// The revision number within the file inode.
+    pub revision_no: RevisionNo,
+    /// The namespace sequence of the commit that created this revision.
+    pub committed_seq: ChangeSeq,
+    /// The ID of the commit that created this revision.
+    pub commit_id: CommitId,
+    /// The time the revision was committed, in Unix milliseconds. Commit order comes from
+    /// `committed_seq`, not from this time.
+    pub committed_at_ms: u64,
+    /// The actor responsible for this revision, as the application supplied it.
+    pub committed_by: crate::ActorId,
+    /// The content stored for this revision.
+    pub content_ref: ContentRef,
+}
+
+/// One page of a file's revisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ListFileRevisionsResponse {
+    /// The namespace that was read.
+    pub namespace_id: NamespaceId,
+    /// The file inode whose revisions were returned.
+    #[serde(with = "crate::public_inode_id")]
+    pub inode_id: InodeId,
+    /// The namespace head sequence that the read used.
+    pub head_seq: ChangeSeq,
+    /// The retained revisions, in order.
+    pub revisions: Vec<FileRevision>,
+    /// An opaque cursor for the next page, if more revisions are available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
@@ -612,6 +653,38 @@ mod tests {
                 destination_parent_inode_id: None,
                 destination_display_name: None,
             }
+        );
+    }
+
+    #[test]
+    fn file_revision_provenance_fields_are_pinned_on_the_wire() {
+        let content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::ContentId::generate(),
+            b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
+        );
+        let revision = FileRevision {
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(3),
+            committed_seq: ChangeSeq(7),
+            commit_id: CommitId::parse("c_revision_owner").expect("commit id"),
+            committed_at_ms: 1_752_624_000_000,
+            committed_by: crate::ActorId::loonfs(),
+            content_ref: content_ref.clone(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(revision).expect("serialize file revision"),
+            serde_json::json!({
+                "inode_id": "ino_2",
+                "revision_no": 3,
+                "committed_seq": 7,
+                "commit_id": "c_revision_owner",
+                "committed_at_ms": 1_752_624_000_000_u64,
+                "committed_by": "loonfs",
+                "content_ref": content_ref,
+            })
         );
     }
 }

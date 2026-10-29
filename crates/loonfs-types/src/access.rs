@@ -4,7 +4,7 @@
 //! or a public audience. LoonFS stores principal ids as opaque strings and
 //! never resolves them.
 
-use crate::ids::{numeric_id, string_id, validation_error};
+use crate::id_macros::{numeric_id, string_id, validation_error};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

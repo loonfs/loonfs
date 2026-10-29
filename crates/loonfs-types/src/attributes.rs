@@ -1,6 +1,6 @@
 //! Validated key-value attributes stored on inodes.
 
-use crate::ids::{numeric_id, string_id, validation_error};
+use crate::id_macros::{numeric_id, string_id, validation_error};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
