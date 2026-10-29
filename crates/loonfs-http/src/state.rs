@@ -490,7 +490,11 @@ impl<S: HostState> WriterSessions for Namespaces<S> {
         }
         handles.remove(namespace_id);
         drop(handles);
-        let active_writer_id = error.to_error_response().details.and_then(|details| details.active_writer).map(|writer| writer.active_writer_id);
+        let active_writer_id = error
+            .to_error_response()
+            .details
+            .and_then(|details| details.active_writer)
+            .map(|writer| writer.active_writer_id);
         tracing::warn!(
             %namespace_id,
             active_writer_id = active_writer_id.as_ref().map(tracing::field::display),

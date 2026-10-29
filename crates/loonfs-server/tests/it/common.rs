@@ -150,7 +150,10 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
     let store = configured.into_shared();
     let (router, _) = app(
         config.validate().expect("validate the test config"),
-        AppConfig { store: Some(store.clone()), direct_transfers },
+        AppConfig {
+            store: Some(store.clone()),
+            direct_transfers,
+        },
     )
     .await
     .expect("build app");

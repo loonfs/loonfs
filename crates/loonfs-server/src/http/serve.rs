@@ -14,7 +14,9 @@ use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{LoonFs, Maintenance, SharedObjectStore, TraceMode, Writable, WriterId};
 use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
-use loonfs_http::{BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, Namespaces};
+use loonfs_http::{
+    BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, Namespaces,
+};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use loonfs_types::config::ConfigFieldError;
