@@ -654,7 +654,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
 
     let unexpiring = harness
         .client
-        .create_snapshot(&namespace, "operator", None)
+        .create_snapshot(&namespace, "operator")
         .await
         .expect("create a snapshot without an expiry");
     assert_eq!(unexpiring.expires_at_ms, None);

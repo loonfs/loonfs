@@ -5,9 +5,9 @@ use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, Prepare
 use crate::ByteStream;
 use crate::Result;
 use crate::{
-    AccessState, ActorId, AppendFileOptions, AttributeChanges, ChangeSeq, Commit, CommitId,
-    CommitOptions, ContentRef, CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId,
-    MoveOptions, NamespaceId, PutFileOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions,
+    AccessState, ActorId, AppendFileOptions, AttributeChanges, ChangeSeq, Commit, CommitOptions,
+    ContentRef, CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions,
+    NamespaceId, PutFileOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions,
     UpdateAttributesOptions,
 };
 use crate::{LoonFs, Namespace, Writable};
@@ -21,7 +21,7 @@ fn single_operation(
     operation: FilesystemOperation,
 ) -> CommitIntent {
     CommitIntent::single(
-        commit.commit_id.clone().unwrap_or_else(CommitId::generate),
+        commit.commit_id_or_generate(),
         actor.clone(),
         commit.message.clone(),
         operation,

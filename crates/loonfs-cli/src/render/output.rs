@@ -2,6 +2,7 @@
 
 use super::{human, json, json_error};
 use crate::commands::{CommandData, CommandFailure, CommandOutput, ListingHeadDrift};
+use crate::config::ProfileMode;
 use crate::error::CliError;
 use loonfs_types::PathEntry;
 use serde::Serialize;
@@ -72,13 +73,13 @@ pub(crate) fn render_error(failure: &CommandFailure, format: OutputFormat) -> io
         stderr.write_all(body.as_bytes())?;
         stderr.write_all(b"\n")?;
     } else {
-        stderr.write_all(human_error(&failure.error, failure.mode.as_deref()).as_bytes())?;
+        stderr.write_all(human_error(&failure.error, failure.mode).as_bytes())?;
         stderr.write_all(b"\n")?;
     }
     Ok(())
 }
 
-pub(super) fn human_error(error: &CliError, mode: Option<&str>) -> String {
+pub(super) fn human_error(error: &CliError, mode: Option<ProfileMode>) -> String {
     let mut rendered = error.message.clone();
     rendered.push_str(&request_id_suffix(error.request_id.as_deref(), mode));
     if let Some(feature) = &error.feature {
@@ -90,8 +91,8 @@ pub(super) fn human_error(error: &CliError, mode: Option<&str>) -> String {
     rendered
 }
 
-pub(super) fn request_id_suffix(request_id: Option<&str>, mode: Option<&str>) -> String {
-    if mode == Some("embedded") {
+pub(super) fn request_id_suffix(request_id: Option<&str>, mode: Option<ProfileMode>) -> String {
+    if mode == Some(ProfileMode::Embedded) {
         return String::new();
     }
     request_id.map_or_else(String::new, |request_id| {

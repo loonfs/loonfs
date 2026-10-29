@@ -1,6 +1,7 @@
 //! Stable JSON envelopes for successful commands and failures.
 
 use super::*;
+use crate::config::ProfileMode;
 
 const CLI_JSON_FORMAT_VERSION: u32 = 1;
 
@@ -12,7 +13,7 @@ where
     kind: &'a str,
     format_version: u32,
     profile: Option<&'a str>,
-    mode: Option<&'a str>,
+    mode: Option<ProfileMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<&'a T>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,7 +39,7 @@ pub(crate) fn write_json_success(output: &CommandOutput, writer: impl Write) -> 
                 kind: output.kind.as_str(),
                 format_version: CLI_JSON_FORMAT_VERSION,
                 profile: output.profile.as_deref(),
-                mode: output.mode.as_deref(),
+                mode: output.mode,
                 data: Some(data),
                 error: None,
             },
@@ -80,7 +81,7 @@ pub(crate) fn json_error(failure: &CommandFailure) -> io::Result<String> {
         kind: failure.kind.as_str(),
         format_version: CLI_JSON_FORMAT_VERSION,
         profile: failure.profile.as_deref(),
-        mode: failure.mode.as_deref(),
+        mode: failure.mode,
         data: None,
         error: Some(&failure.error),
     })

@@ -361,7 +361,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
     // Pin the head, then give up incremental replay below it.
     harness
         .client
-        .create_snapshot(&namespace, "retired", None)
+        .create_snapshot(&namespace, "retired")
         .await
         .expect("create checkpoint");
     let advanced = maintenance_past_the_grace_window(harness.store.clone())
@@ -442,16 +442,13 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
 
     match error {
         ClientError::Api {
-            status,
-            code,
-            details,
-            ..
+            status, response, ..
         } => {
             // The code stays the failing operation's own; the position is
             // what batching adds.
             assert_eq!(status, 404);
-            assert_eq!(code, ErrorCode::PathNotFound.as_str());
-            let details = details.expect("failed batch carries details");
+            assert_eq!(response.code, ErrorCode::PathNotFound.as_str());
+            let details = response.details.expect("failed batch carries details");
             assert_eq!(details.operation_index, Some(2));
             assert_eq!(
                 details.commit_id.as_ref().map(CommitId::as_str),
@@ -471,7 +468,9 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
             .await
             .expect_err("the aborted batch wrote nothing");
         match missing {
-            ClientError::Api { code, .. } => assert_eq!(code, ErrorCode::PathNotFound.as_str()),
+            ClientError::Api { response, .. } => {
+                assert_eq!(response.code, ErrorCode::PathNotFound.as_str())
+            }
             other => panic!("expected path_not_found, got {other:?}"),
         }
     }
@@ -521,9 +520,11 @@ async fn an_empty_operation_list_is_rejected() {
         .await
         .expect_err("an empty request has nothing to commit");
     match error {
-        ClientError::Api { status, code, .. } => {
+        ClientError::Api {
+            status, response, ..
+        } => {
             assert_eq!(status, 400);
-            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(response.code, ErrorCode::InvalidRequest.as_str());
         }
         other => panic!("expected invalid_request, got {other:?}"),
     }
@@ -579,16 +580,15 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
         .expect_err("revision requires an inode");
     match error {
         ClientError::Api {
-            status,
-            code,
-            param,
-            details,
-            ..
+            status, response, ..
         } => {
             assert_eq!(status, 400);
-            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
-            assert_eq!(param.as_deref(), Some("/operations/0/expected_revision_no"));
-            let details = details.expect("operation details");
+            assert_eq!(response.code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(
+                response.param.as_deref(),
+                Some("/operations/0/expected_revision_no")
+            );
+            let details = response.details.expect("operation details");
             assert_eq!(details.operation_index, Some(0));
             assert_eq!(details.precondition_index, None);
         }
@@ -656,19 +656,15 @@ async fn a_foreign_binding_precondition_identifies_the_version_field() {
         .expect_err("version belongs to another namespace");
     match error {
         ClientError::Api {
-            status,
-            code,
-            param,
-            details,
-            ..
+            status, response, ..
         } => {
             assert_eq!(status, 400);
-            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(response.code, ErrorCode::InvalidRequest.as_str());
             assert_eq!(
-                param.as_deref(),
+                response.param.as_deref(),
                 Some("/preconditions/0/expected_binding_version")
             );
-            let details = details.expect("precondition details");
+            let details = response.details.expect("precondition details");
             assert_eq!(details.precondition_index, Some(0));
             assert_eq!(details.operation_index, None);
         }
@@ -714,14 +710,11 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .expect_err("the root cannot be created");
     match alone {
         ClientError::Api {
-            status,
-            code,
-            details,
-            ..
+            status, response, ..
         } => {
             assert_eq!(status, 400);
-            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
-            let details = details.expect("a failed commit carries details");
+            assert_eq!(response.code, ErrorCode::InvalidRequest.as_str());
+            let details = response.details.expect("a failed commit carries details");
             assert_eq!(details.operation_index, Some(0));
             assert_eq!(
                 details.commit_id.as_ref().map(CommitId::as_str),
@@ -758,14 +751,11 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .expect_err("the root cannot be deleted");
     match in_batch {
         ClientError::Api {
-            status,
-            code,
-            details,
-            ..
+            status, response, ..
         } => {
             assert_eq!(status, 400);
-            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
-            let details = details.expect("a failed commit carries details");
+            assert_eq!(response.code, ErrorCode::InvalidRequest.as_str());
+            let details = response.details.expect("a failed commit carries details");
             // Planning stops at the root operation, so the batch names its
             // position like it names every other failure's.
             assert_eq!(
@@ -814,9 +804,11 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .await
         .expect_err("the namespace does not exist");
     match unknown {
-        ClientError::Api { status, code, .. } => {
+        ClientError::Api {
+            status, response, ..
+        } => {
             assert_eq!(status, 404);
-            assert_eq!(code, ErrorCode::NamespaceNotFound.as_str());
+            assert_eq!(response.code, ErrorCode::NamespaceNotFound.as_str());
         }
         other => panic!("expected namespace_not_found, got {other:?}"),
     }
@@ -901,8 +893,8 @@ async fn a_batch_replays_under_its_commit_id() {
         .await
         .expect_err("a different batch cannot reuse the id");
     match conflict {
-        ClientError::Api { code, .. } => {
-            assert_eq!(code, ErrorCode::CommitIdReuseConflict.as_str());
+        ClientError::Api { response, .. } => {
+            assert_eq!(response.code, ErrorCode::CommitIdReuseConflict.as_str());
         }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
@@ -1044,8 +1036,8 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         .await
         .expect_err("a different batch cannot reuse the embedded id");
     match conflict {
-        ClientError::Api { code, .. } => {
-            assert_eq!(code, ErrorCode::CommitIdReuseConflict.as_str());
+        ClientError::Api { response, .. } => {
+            assert_eq!(response.code, ErrorCode::CommitIdReuseConflict.as_str());
         }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }

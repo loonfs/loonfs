@@ -67,25 +67,20 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
         )
         .await
     {
-        Err(ClientError::Api {
-            code,
-            request_id,
-            details,
-            ..
-        }) => {
-            assert_eq!(code, "commit_id_reuse_conflict");
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict");
             // The error carries the caller's reconciliation identity as
             // structured fields, not prose (API spec, "Standard error
             // contract"). The server decided this against the durable
             // receipt, so it reports where the id landed too — the one read
             // a retry needs, instead of a search of the feed.
-            let details = details.expect("structured details");
+            let details = response.details.expect("structured details");
             assert_eq!(details.commit_id, Some(commit_id));
             assert_eq!(
                 details.committed.map(|committed| committed.committed_seq),
                 Some(first.committed_seq)
             );
-            let request_id = request_id.expect("request id");
+            let request_id = response.request_id.expect("request id");
             assert!(request_id.starts_with("req_"), "got `{request_id}`");
         }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
@@ -209,8 +204,8 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         )
         .await
     {
-        Err(ClientError::Api { code, .. }) => {
-            assert_eq!(code, "commit_id_reuse_conflict")
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict")
         }
         other => panic!("expected attributed retry conflict, got {other:?}"),
     }
@@ -236,8 +231,8 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         )
         .await
     {
-        Err(ClientError::Api { code, .. }) => {
-            assert_eq!(code, "commit_id_reuse_conflict")
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict")
         }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
@@ -311,7 +306,9 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
         )
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict")
+        }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
@@ -332,7 +329,9 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
         )
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict")
+        }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
@@ -412,11 +411,11 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
         )
         .await
     {
-        Err(ClientError::Api { code, details, .. }) => {
-            assert_eq!(code, "commit_id_reuse_conflict");
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict");
             // The receipt named both halves of what landed, so the client
             // had everything it needed and still refused.
-            let details = details.expect("structured details");
+            let details = response.details.expect("structured details");
             let committed = details.committed.expect("the receipt");
             assert_eq!(committed.committed_seq, first.committed_seq);
             let fingerprint = committed.committed_fingerprint;
@@ -429,7 +428,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
     }
 
     match harness.client.stat(&second_target).await {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
+        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "path_not_found"),
         other => panic!("the refused rerun wrote nothing, got {other:?}"),
     }
     let entry = harness.client.stat(&first_target).await.expect("stat path");
@@ -495,7 +494,9 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
         )
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict")
+        }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
@@ -513,7 +514,9 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
         )
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict")
+        }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
@@ -593,7 +596,9 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
         )
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict")
+        }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
@@ -664,7 +669,9 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
         )
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict")
+        }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
@@ -706,7 +713,9 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
         )
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict")
+        }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
@@ -757,7 +766,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     // Pin the head, then give up incremental replay below it.
     harness
         .client
-        .create_snapshot(&namespace, "trimmed", None)
+        .create_snapshot(&namespace, "trimmed")
         .await
         .expect("create checkpoint");
     let advanced = maintenance_past_the_grace_window(harness.store.clone())
@@ -782,11 +791,11 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         )
         .await
     {
-        Err(ClientError::Api { code, details, .. }) => {
-            assert_eq!(code, "commit_id_reuse_conflict");
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "commit_id_reuse_conflict");
             // The server still knows where the id landed; the feed just
             // cannot answer for that sequence any more.
-            let details = details.expect("structured details");
+            let details = response.details.expect("structured details");
             assert_eq!(
                 details.committed.map(|committed| committed.committed_seq),
                 Some(first.committed_seq)
@@ -917,7 +926,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .expect("move repeat");
     assert_eq!(move_repeated, move_first);
     match harness.client.stat(&copied).await {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
+        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "path_not_found"),
         other => panic!("expected path_not_found for moved-from path, got {other:?}"),
     }
     let moved_entry = harness.client.stat(&moved).await.expect("moved stat");
@@ -957,7 +966,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .expect("delete repeat");
     assert_eq!(delete_repeated, delete_first);
     match harness.client.stat(&moved).await {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
+        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "path_not_found"),
         other => panic!("expected path_not_found for deleted path, got {other:?}"),
     }
 
@@ -1043,18 +1052,16 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
             )
             .await
         {
-            Err(ClientError::Api {
-                code,
-                message,
-                details,
-                ..
-            }) => {
-                assert_eq!(code, loonfs_types::ErrorCode::WriterFenced.as_str());
-                let details = details.expect("fenced details");
+            Err(ClientError::Api { response, .. }) => {
+                assert_eq!(
+                    response.code,
+                    loonfs_types::ErrorCode::WriterFenced.as_str()
+                );
+                let details = response.details.expect("fenced details");
                 let active_writer = details.active_writer.expect("the active writer");
                 assert_eq!(active_writer.active_writer_id.as_str(), winning_writer_id);
                 let acquired_at_ms = active_writer.active_acquired_at_ms;
-                assert!(message.contains(&format!(
+                assert!(response.message.contains(&format!(
                     "(writer `{winning_writer_id}`, acquired at {acquired_at_ms} ms)"
                 )));
             }

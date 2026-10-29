@@ -1,8 +1,11 @@
 //! Ranged reads of a file's content through the server.
 
-use super::*;
+use crate::operations::{self, Operation};
 use crate::transport::StreamedResponse;
+use crate::{Client, ClientError, NamespacePath, PayloadStream, Result};
+use futures::StreamExt as _;
 use loonfs_types::options::{ReadFileOptions, ReadRange};
+use loonfs_types::{InodeId, NamespaceId};
 
 /// One byte range of a file, streamed through the server.
 ///
@@ -59,8 +62,12 @@ impl Client {
         range: ReadRange,
         options: &ReadFileOptions,
     ) -> Result<FileRangeStream> {
-        self.read_range(&self.file_content_url(spec, None, options), range)
-            .await
+        self.read_range(
+            operations::GET_FILE_CONTENT,
+            &self.file_content_url(spec, None, options),
+            range,
+        )
+        .await
     }
 
     /// Streams one byte range of the current content of a visible file inode
@@ -95,15 +102,21 @@ impl Client {
         options: &ReadFileOptions,
     ) -> Result<FileRangeStream> {
         self.read_range(
+            operations::GET_FILE_CONTENT_BY_INODE,
             &self.inode_content_url(namespace_id, inode_id, options),
             range,
         )
         .await
     }
 
-    async fn read_range(&self, url: &str, range: ReadRange) -> Result<FileRangeStream> {
+    async fn read_range(
+        &self,
+        operation: Operation,
+        url: &str,
+        range: ReadRange,
+    ) -> Result<FileRangeStream> {
         let request = self
-            .get(url)
+            .request(operation, url)
             .header(http::header::RANGE.as_str(), range.to_range_header());
         let response = self.call_for_streamed_response(&request).await?;
         let (start_offset, end_offset, size_bytes) =

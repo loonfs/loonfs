@@ -1,12 +1,36 @@
-//! The checkpoint inventory, maintenance, store probes, and grep maintenance.
+//! The checkpoint inventory, maintenance jobs, store probes, and grep
+//! maintenance.
 
-use super::*;
 use crate::operations;
 use crate::transport::QueryBuilder;
-use loonfs_types::{headers, ActorId, PageRequest};
+use crate::{Client, ClientError, Result};
+use loonfs_types::api::v0::{GrepIndex, StoreProbeRequest, StoreProbeResponse};
+use loonfs_types::options::GcOptions;
+use loonfs_types::{
+    headers, ActorId, AdvanceRetentionRequest, AdvanceRetentionResponse, Checkpoint, GcRequest,
+    GcResponse, ListCheckpointsResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
+    NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PinId, PrincipalId,
+    RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceRequest,
+    RunMaintenanceResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
+};
+use std::num::NonZeroU64;
 
 /// A pager over existing checkpoints.
-pub type CheckpointsPager = loonfs_types::Pager<ListCheckpointsResponse, ClientError>;
+pub type CheckpointsPager = Pager<ListCheckpointsResponse, ClientError>;
+
+/// Returns the response of the job that a typed maintenance method asked
+/// for, or a protocol error when the server ran a different one.
+macro_rules! job_response {
+    ($response:expr, $variant:ident) => {
+        match $response {
+            RunMaintenanceResponse::$variant(response) => Ok(response),
+            _ => Err(ClientError::Protocol(format!(
+                "the server returned another job's response to a `{}` maintenance job",
+                stringify!($variant)
+            ))),
+        }
+    };
+}
 
 impl Client {
     /// Returns namespace state and storage details used by maintenance.
@@ -18,25 +42,20 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/diagnostics",
             self.base_url
         );
-        self.request_json::<(), NamespaceDiagnostics>(
-            self.get(&url),
-            None,
-            operations::GET_NAMESPACE_DIAGNOSTICS,
-        )
-        .await
+        self.send_json(self.request(operations::GET_NAMESPACE_DIAGNOSTICS, &url))
+            .await
     }
 
     /// Lists every pin as a checkpoint, including fork pins and expired
     /// snapshots that garbage collection has not yet deleted (maintenance API
     /// group).
     pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        loonfs_types::Pager::new(move |request| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            async move { client.checkpoints_page(&namespace_id, request).await }
-        })
+        Pager::with_state(
+            (self.clone(), namespace_id.clone()),
+            |(client, namespace_id), request| async move {
+                client.checkpoints_page(&namespace_id, request).await
+            },
+        )
     }
 
     async fn checkpoints_page(
@@ -49,13 +68,8 @@ impl Client {
             self.base_url
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
-        let url = query.build();
-        self.request_json::<(), ListCheckpointsResponse>(
-            self.get(&url),
-            None,
-            operations::LIST_CHECKPOINTS,
-        )
-        .await
+        self.send_json(self.request(operations::LIST_CHECKPOINTS, &query.build()))
+            .await
     }
 
     /// Returns one existing pin, as the checkpoint listing returns it,
@@ -70,30 +84,185 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
             self.base_url
         );
-        self.request_json::<(), Checkpoint>(self.get(&url), None, operations::GET_CHECKPOINT)
+        self.send_json(self.request(operations::GET_CHECKPOINT, &url))
             .await
     }
 
     /// Runs one maintenance job against a namespace (maintenance API group).
     ///
-    /// `actor_id` attributes the administrator recovery commit when supplied.
-    /// Retrying this request starts a distinct attempt.
+    /// An administrator recovery needs an actor, so recover an administrator
+    /// with [`Self::recover_administrator`] instead. Retrying this request
+    /// starts a distinct attempt.
     pub async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
         request: &RunMaintenanceRequest,
-        actor_id: Option<&ActorId>,
+    ) -> Result<RunMaintenanceResponse> {
+        self.run_maintenance_as(namespace_id, request, None).await
+    }
+
+    async fn run_maintenance_as(
+        &self,
+        namespace_id: &NamespaceId,
+        request: &RunMaintenanceRequest,
+        actor: Option<&ActorId>,
     ) -> Result<RunMaintenanceResponse> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/runs",
             self.base_url
         );
-        let mut wire_request = self.post(&url);
-        if let Some(actor_id) = actor_id {
-            wire_request = wire_request.header(headers::ACTOR, actor_id.as_str());
+        let mut wire_request = self.request(operations::RUN_MAINTENANCE, &url);
+        if let Some(actor) = actor {
+            wire_request = wire_request.header(headers::ACTOR, actor.as_str());
         }
-        self.request_json(wire_request, Some(request), operations::RUN_MAINTENANCE)
+        self.send_json(wire_request.json(request)?).await
+    }
+
+    /// Folds the WAL tail when it's due, and compacts metadata until nothing
+    /// is due or the job reaches its work limit.
+    ///
+    /// See [`Self::maintain_metadata_while_due_with_options`].
+    pub async fn maintain_metadata_while_due(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<MetadataMaintenanceResponse> {
+        self.maintain_metadata_while_due_with_options(
+            namespace_id,
+            &MetadataMaintenanceRequest::default(),
+        )
+        .await
+    }
+
+    /// Folds the WAL tail when it reaches the length that `options` sets, and
+    /// compacts metadata until nothing is due or the job reaches its work
+    /// limit.
+    ///
+    /// The runtime's options for this job include a compaction policy that
+    /// the wire request has no field for, so this method takes the request
+    /// body. Retrying this request starts a distinct attempt.
+    pub async fn maintain_metadata_while_due_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &MetadataMaintenanceRequest,
+    ) -> Result<MetadataMaintenanceResponse> {
+        let response = self
+            .run_maintenance(
+                namespace_id,
+                &RunMaintenanceRequest::Metadata(options.clone()),
+            )
+            .await?;
+        job_response!(response, Metadata)
+    }
+
+    /// Runs one garbage collection pass over a namespace with the server's
+    /// default grace window.
+    ///
+    /// See [`Self::gc_with_options`].
+    pub async fn gc(&self, namespace_id: &NamespaceId) -> Result<GcResponse> {
+        let response = self
+            .run_maintenance(
+                namespace_id,
+                &RunMaintenanceRequest::Gc(GcRequest::default()),
+            )
+            .await?;
+        job_response!(response, Gc)
+    }
+
+    /// Runs one garbage collection pass over a namespace with the grace
+    /// window that `options` sets.
+    ///
+    /// The request has no field for `options.content_shard_rows`, so the
+    /// server's pass uses its default. Retrying this request starts a
+    /// distinct attempt.
+    pub async fn gc_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &GcOptions,
+    ) -> Result<GcResponse> {
+        let response = self
+            .run_maintenance(
+                namespace_id,
+                &RunMaintenanceRequest::Gc(GcRequest {
+                    grace_window_ms: Some(options.grace_window_ms),
+                }),
+            )
+            .await?;
+        job_response!(response, Gc)
+    }
+
+    /// Advances the namespace's retention floor toward the folded manifest
+    /// head.
+    ///
+    /// See [`Self::advance_retention_floor_with_options`].
+    pub async fn advance_retention_floor(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<AdvanceRetentionResponse> {
+        self.advance_retention_floor_with_options(namespace_id, &AdvanceRetentionRequest::default())
             .await
+    }
+
+    /// Advances the namespace's retention floor toward the target that
+    /// `options` sets.
+    ///
+    /// The floor doesn't pass a commit that's less than one hour old. The
+    /// runtime's options for this job include targets that the wire request
+    /// can't express, so this method takes the request body. Retrying this
+    /// request starts a distinct attempt.
+    pub async fn advance_retention_floor_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &AdvanceRetentionRequest,
+    ) -> Result<AdvanceRetentionResponse> {
+        let response = self
+            .run_maintenance(
+                namespace_id,
+                &RunMaintenanceRequest::Retention(options.clone()),
+            )
+            .await?;
+        job_response!(response, Retention)
+    }
+
+    /// Sets the namespace's retention window, or clears it when
+    /// `retention_window_ms` is `None`, so that the server's window applies.
+    ///
+    /// Retrying this request starts a distinct attempt.
+    pub async fn set_retention_window(
+        &self,
+        namespace_id: &NamespaceId,
+        retention_window_ms: Option<NonZeroU64>,
+    ) -> Result<SetRetentionWindowResponse> {
+        let response = self
+            .run_maintenance(
+                namespace_id,
+                &RunMaintenanceRequest::RetentionWindow(SetRetentionWindowRequest {
+                    retention_window_ms,
+                }),
+            )
+            .await?;
+        job_response!(response, RetentionWindow)
+    }
+
+    /// Grants `admin` on the root to `principal_id`, through a commit that
+    /// `actor` makes and that doesn't check any subject's rights.
+    ///
+    /// Retrying this request starts a distinct attempt.
+    pub async fn recover_administrator(
+        &self,
+        namespace_id: &NamespaceId,
+        principal_id: &PrincipalId,
+        actor: &ActorId,
+    ) -> Result<RecoverAdministratorResponse> {
+        let response = self
+            .run_maintenance_as(
+                namespace_id,
+                &RunMaintenanceRequest::RecoverAdministrator(RecoverAdministratorRequest {
+                    principal_id: principal_id.clone(),
+                }),
+                Some(actor),
+            )
+            .await?;
+        job_response!(response, RecoverAdministrator)
     }
 
     /// Proves the server's backing store honours the object-store contract
@@ -106,7 +275,7 @@ impl Client {
     /// Retrying this request starts a distinct attempt.
     pub async fn probe_store(&self, request: &StoreProbeRequest) -> Result<StoreProbeResponse> {
         let url = format!("{}/v0/maintenance/store/probe", self.base_url);
-        self.request_json(self.post(&url), Some(request), operations::PROBE_STORE)
+        self.send_json(self.request(operations::PROBE_STORE, &url).json(request)?)
             .await
     }
 
@@ -119,7 +288,7 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index",
             self.base_url
         );
-        self.request_json::<(), GrepIndex>(self.get(&url), None, operations::GET_GREP_INDEX)
+        self.send_json(self.request(operations::GET_GREP_INDEX, &url))
             .await
     }
 
@@ -132,7 +301,7 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
             self.base_url
         );
-        self.request_json::<(), GrepIndex>(self.post(&url), None, operations::ENABLE_GREP_INDEX)
+        self.send_json(self.request(operations::ENABLE_GREP_INDEX, &url))
             .await
     }
 
@@ -145,7 +314,7 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
             self.base_url
         );
-        self.request_json::<(), GrepIndex>(self.post(&url), None, operations::DISABLE_GREP_INDEX)
+        self.send_json(self.request(operations::DISABLE_GREP_INDEX, &url))
             .await
     }
 }

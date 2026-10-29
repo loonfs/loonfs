@@ -312,7 +312,9 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
         .put_upload_content(&namespace, &begin.upload_id, b"different bytes")
         .await
     {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "upload_content_conflict")
+        }
         other => panic!("expected upload_content_conflict, got {other:?}"),
     }
 

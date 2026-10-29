@@ -1,11 +1,12 @@
 //! Query API operations.
 
-use super::*;
 use crate::operations;
 use crate::transport::QueryBuilder;
+use crate::{Client, ClientError, Result};
+use loonfs_types::{GrepRequest, GrepResponse, GrepScope, NamespaceId, PageRequest, Pager};
 
 /// A pager over grep matches.
-pub type GrepPager = loonfs_types::Pager<GrepResponse, ClientError>;
+pub type GrepPager = Pager<GrepResponse, ClientError>;
 
 impl Client {
     /// Searches content through the namespace's grep index (query API group).
@@ -14,43 +15,36 @@ impl Client {
     /// deployments; the namespace must also have a materialized active grep
     /// manifest or the server answers `not_supported`.
     pub fn grep(&self, namespace_id: &NamespaceId, request: &GrepRequest) -> GrepPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        let request = request.clone();
-        loonfs_types::Pager::new(move |page| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            let request = request.clone();
-            async move { client.grep_page(&namespace_id, &request, page).await }
-        })
+        Pager::with_state(
+            (self.clone(), namespace_id.clone(), request.clone()),
+            |(client, namespace_id, request), page| async move {
+                client.grep_page(&namespace_id, &request, page).await
+            },
+        )
     }
 
     async fn grep_page(
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
-        page: loonfs_types::PageRequest<String>,
+        page: PageRequest<String>,
     ) -> Result<GrepResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/grep",
-            self.base_url
-        ));
+        let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/grep"));
         query.push("pattern", &request.pattern);
         query.push("case_insensitive", request.case_insensitive);
         match &request.scope {
-            loonfs_types::GrepScope::Namespace => {}
-            loonfs_types::GrepScope::PathPrefix(path_prefix) => {
+            GrepScope::Namespace => {}
+            GrepScope::PathPrefix(path_prefix) => {
                 query.push("path_prefix", path_prefix.as_str());
             }
-            loonfs_types::GrepScope::Inode(inode_id) => {
+            GrepScope::Inode(inode_id) => {
                 query.push("inode_id", loonfs_types::public_inode_id::encode(*inode_id));
             }
         }
         query.push("allow_scan", request.allow_scan);
         query.push("allow_stale", request.allow_stale);
         query.pagination(Some(page.limit.get()), page.cursor.as_deref());
-        let url = query.build();
-        self.request_json::<(), _>(self.get(&url), None, operations::GREP)
+        self.send_json(self.request(operations::GREP, &query.build()))
             .await
     }
 }
@@ -59,6 +53,7 @@ impl Client {
 mod tests {
     use super::*;
     use crate::scripted_transport::{self, Outcome};
+    use crate::ClientConfig;
 
     fn grep_page(next_cursor: Option<&str>) -> Outcome {
         Outcome::Success(
@@ -92,7 +87,7 @@ mod tests {
         let request = GrepRequest {
             pattern: "needle".to_owned(),
             case_insensitive: false,
-            scope: loonfs_types::GrepScope::Namespace,
+            scope: GrepScope::Namespace,
             allow_stale: false,
             allow_scan: false,
         };

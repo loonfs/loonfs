@@ -1,58 +1,26 @@
-//! Options for one namespace collection.
+//! Checks the options of one namespace collection against the core's limits.
 
 use crate::error::{CoreError, Result};
-use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
-use loonfs_types::GcRequest;
+use crate::limits::GC_MIN_GRACE_WINDOW_MS;
+pub use loonfs_types::options::GcOptions;
 
-/// Default layout rows one content shard covers. A pass picks the shard width
-/// that splits its layout rows into shards of about this many, so it holds the
-/// extent keys of about 65,536 rows at once.
-const GC_CONTENT_SHARD_ROWS: usize = 65_536;
-
-/// Limits for one namespace collection pass.
-#[derive(Debug, Clone)]
-pub struct GcOptions {
-    pub grace_window_ms: u64,
-    pub content_shard_rows: usize,
-}
-
-impl Default for GcOptions {
-    fn default() -> Self {
-        Self {
-            grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
-            content_shard_rows: GC_CONTENT_SHARD_ROWS,
-        }
+/// Rejects options that would let a pass delete an object that a publication
+/// still in flight wrote, or that would make the pass take no rows per shard.
+pub(super) fn validate_gc_options(options: &GcOptions) -> Result<()> {
+    // The minimum grace window is derived from the publication budgets and
+    // provider deadlines in `limits`. Below it, a publish still in flight
+    // could have written objects that already look old enough to delete, so
+    // the configuration is rejected outright.
+    if options.grace_window_ms < GC_MIN_GRACE_WINDOW_MS {
+        return Err(CoreError::InvalidGcOptions(format!(
+            "`grace_window_ms` {} is below the derived safety minimum {}",
+            options.grace_window_ms, GC_MIN_GRACE_WINDOW_MS
+        )));
     }
-}
-
-impl GcOptions {
-    /// Resolves a wire-level collection request. An absent grace window
-    /// takes the default.
-    pub fn from_request(request: GcRequest) -> Self {
-        Self {
-            grace_window_ms: request
-                .grace_window_ms
-                .unwrap_or(GC_DEFAULT_GRACE_WINDOW_MS),
-            ..Self::default()
-        }
+    if options.content_shard_rows == 0 {
+        return Err(CoreError::InvalidGcOptions(
+            "`content_shard_rows` must be at least 1".to_owned(),
+        ));
     }
-
-    pub(super) fn validate(&self) -> Result<()> {
-        // The minimum grace window is derived from the publication budgets
-        // and provider deadlines in `limits`. Below it, a publish still in
-        // flight could have written objects that already look old enough to
-        // delete, so the configuration is rejected outright.
-        if self.grace_window_ms < GC_MIN_GRACE_WINDOW_MS {
-            return Err(CoreError::InvalidGcOptions(format!(
-                "`grace_window_ms` {} is below the derived safety minimum {}",
-                self.grace_window_ms, GC_MIN_GRACE_WINDOW_MS
-            )));
-        }
-        if self.content_shard_rows == 0 {
-            return Err(CoreError::InvalidGcOptions(
-                "`content_shard_rows` must be at least 1".to_owned(),
-            ));
-        }
-        Ok(())
-    }
+    Ok(())
 }

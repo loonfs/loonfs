@@ -1,6 +1,6 @@
 //! Payload sources shared by embedded and remote `put` operations.
 
-use crate::error::CliError;
+use crate::error::{CliError, Result};
 use crate::progress::ProgressReporter;
 use futures::stream::StreamExt;
 use loonfs_client::PayloadSource;
@@ -51,7 +51,7 @@ impl LocalPayload {
     pub(crate) async fn open_source(
         &self,
         progress: &Arc<ProgressReporter>,
-    ) -> Result<PayloadSource, CliError> {
+    ) -> Result<PayloadSource> {
         let source = match self {
             Self::File { path, .. } => PayloadSource::open_file(path)
                 .await

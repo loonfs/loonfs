@@ -1,28 +1,24 @@
 //! `loonfs config` commands: init and config-file inspection.
 
-use super::context::fail;
+use super::context::Invocation;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::profile_config::build_profile_interactive;
-use crate::args::{CommandKind, ConfigCommand, RuntimeBehavior};
+use crate::args::ConfigCommand;
 use crate::config::{
-    load_config_for_repair, mutate_config, redacted_config_table, ConfigLoad, ConfigLocation,
-    ProfileConfig,
+    load_config_for_repair, mutate_config, redacted_config_table, ConfigLoad, ProfileConfig,
 };
-use crate::error::CliError;
+use crate::error::{CliError, Result};
 use crate::profiles::{add_profile, NamedProfile};
 use crate::prompt;
-use std::path::Path;
 
 /// Writes the resolved config file, whichever way it was named, creating
 /// the directories it needs. Naming a path that holds no file yet is the
 /// way back from a default config this build refuses to read: init only
 /// ever touches the file resolution named.
-pub(crate) fn run_config_init(
-    kind: CommandKind,
-    config_path: &Path,
-    runtime: RuntimeBehavior,
-) -> Result<CommandOutput, CommandFailure> {
-    let result = (|| -> Result<NamedProfile<ProfileConfig>, CliError> {
+pub(crate) fn run_config_init(invocation: &Invocation) -> Result<CommandOutput, CommandFailure> {
+    let config_path = invocation.config.path.as_path();
+    let runtime = invocation.behavior;
+    let result = (|| -> Result<NamedProfile<ProfileConfig>> {
         if config_path.exists() {
             return Err(CliError::config_already_exists(
                 &config_path.display().to_string(),
@@ -43,12 +39,12 @@ pub(crate) fn run_config_init(
             Ok(added)
         })
     })()
-    .map_err(|error| fail(kind, None, None, error))?;
+    .map_err(|error| invocation.fail(error))?;
 
     Ok(CommandOutput {
-        kind,
+        kind: invocation.kind,
         profile: Some(result.name),
-        mode: Some(result.profile.mode_str().to_owned()),
+        mode: Some(result.profile.mode()),
         data: CommandData::Profile {
             profile: result.profile,
             default_profile: None,
@@ -57,27 +53,22 @@ pub(crate) fn run_config_init(
 }
 
 pub(crate) fn run_config_command(
-    kind: CommandKind,
-    location: &ConfigLocation,
+    invocation: &Invocation,
     command: ConfigCommand,
 ) -> Result<CommandOutput, CommandFailure> {
+    let location = &invocation.config;
     let config_path = location.path.as_path();
     match command {
         // Path never reads the file: the one command that answers "which
         // config is this build even looking at" has to work while that file
         // is one the build refuses to read.
-        ConfigCommand::Path => Ok(CommandOutput {
-            kind,
-            profile: None,
-            mode: None,
-            data: CommandData::ConfigPath {
-                path: config_path.display().to_string(),
-                source: location.source,
-            },
-        }),
+        ConfigCommand::Path => Ok(invocation.output(CommandData::ConfigPath {
+            path: config_path.display().to_string(),
+            source: location.source,
+        })),
         ConfigCommand::Show => {
-            let loaded = load_config_for_repair(config_path)
-                .map_err(|error| fail(kind, None, None, error))?;
+            let loaded =
+                load_config_for_repair(config_path).map_err(|error| invocation.fail(error))?;
             let data = match loaded {
                 ConfigLoad::Valid(config) => CommandData::ConfigShow {
                     config: config.redacted(),
@@ -87,17 +78,12 @@ pub(crate) fn run_config_command(
                 // top, so the file can be inspected with the tool that reads
                 // it.
                 ConfigLoad::Degraded { table, error } => CommandData::ConfigShowDegraded {
-                    error: error.message,
+                    error: error.message.clone(),
                     config_toml: toml::to_string_pretty(&redacted_config_table(&table))
                         .unwrap_or_else(|_| "failed to render config".to_owned()),
                 },
             };
-            Ok(CommandOutput {
-                kind,
-                profile: None,
-                mode: None,
-                data,
-            })
+            Ok(invocation.output(data))
         }
     }
 }

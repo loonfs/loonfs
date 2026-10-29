@@ -301,14 +301,11 @@ async fn run_error_contract(harness: &Harness, case: &Case) {
         .expect_err("unauthenticated request must fail");
     match error {
         ClientError::Api {
-            status,
-            code,
-            request_id,
-            ..
+            status, response, ..
         } => {
             assert_eq!(status, expected.unauthenticated.status);
-            assert_eq!(code, expected.unauthenticated.code);
-            assert!(request_id.is_some());
+            assert_eq!(response.code, expected.unauthenticated.code);
+            assert!(response.request_id.is_some());
         }
         other => panic!("expected API error, found {other:?}"),
     }
@@ -452,7 +449,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     let payload = request.content_utf8.as_bytes();
     let begin = harness
         .client
-        .create_direct_put_upload(&namespace, Some(payload.len() as u64))
+        .create_direct_put_upload_target(&namespace, Some(payload.len() as u64))
         .await
         .expect("begin direct PUT");
     assert_eq!(upload_mode_name(begin.mode), expected.mode);
@@ -573,7 +570,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     );
     let begin = harness
         .client
-        .create_direct_multipart_upload_with_options(
+        .create_direct_multipart_upload_target_with_options(
             &namespace,
             &DirectMultipartUploadOptions {
                 part_size_bytes: Some(request.part_size_bytes),
@@ -1005,7 +1002,7 @@ async fn run_read_consistency(harness: &Harness, case: &Case) {
     }
 
     let snapshot = client
-        .create_snapshot(&namespace, &request.snapshot_name, None)
+        .create_snapshot(&namespace, &request.snapshot_name)
         .await
         .expect("create snapshot");
     let captured = client
@@ -2529,9 +2526,11 @@ async fn assert_raw_status_error(response: reqwest::Response, expected: &ErrorSt
 
 fn assert_error_response(error: &ClientError, expected: &ErrorStatusExpected) {
     match error {
-        ClientError::Api { status, code, .. } => {
+        ClientError::Api {
+            status, response, ..
+        } => {
             assert_eq!(*status, expected.status);
-            assert_eq!(code, &expected.code);
+            assert_eq!(response.code, expected.code);
         }
         other => panic!("expected API error, found {other:?}"),
     }

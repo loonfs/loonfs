@@ -328,7 +328,7 @@ impl CommitRequest {
     /// has none.
     pub fn with_operations(commit: &CommitOptions, operations: Vec<FilesystemOperation>) -> Self {
         Self {
-            commit_id: commit.commit_id.clone().unwrap_or_else(CommitId::generate),
+            commit_id: commit.commit_id_or_generate(),
             message: commit.message.clone(),
             content_tokens: Vec::new(),
             preconditions: commit.preconditions.clone(),

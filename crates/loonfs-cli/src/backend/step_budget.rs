@@ -1,7 +1,7 @@
 //! Progress and budget state for waiting on a grep index.
 
-use crate::error::CliError;
-use crate::resolve::ResolvedTarget;
+use crate::error::Result;
+use crate::resolve::{Backend, ResolvedTarget};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome};
 use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{ChangeSeq, NamespaceId};
@@ -14,13 +14,13 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         target_seq: ChangeSeq,
         budget: StepBudget,
-    ) -> Result<GrepWaitProgress, CliError> {
+    ) -> Result<GrepWaitProgress> {
         wait_for_grep_index(
             target_seq,
             budget,
             || async { Ok(self.client.get_grep_index(namespace_id).await?.status) },
             || async {
-                let Some(host) = &self.maintenance else {
+                let Backend::Embedded { host, .. } = &self.backend else {
                     rest_between_status_checks().await;
                     return Ok(GrepWaitOutcome::Continue);
                 };
@@ -85,12 +85,12 @@ pub(super) async fn wait_for_grep_index<Read, ReadTurn, Step, StepTurn>(
     budget: StepBudget,
     read: Read,
     step: Step,
-) -> Result<GrepWaitProgress, CliError>
+) -> Result<GrepWaitProgress>
 where
     Read: Fn() -> ReadTurn,
-    ReadTurn: Future<Output = Result<GrepIndexStatus, CliError>>,
+    ReadTurn: Future<Output = Result<GrepIndexStatus>>,
     Step: Fn() -> StepTurn,
-    StepTurn: Future<Output = Result<GrepWaitOutcome, CliError>>,
+    StepTurn: Future<Output = Result<GrepWaitOutcome>>,
 {
     let timer = StdMonotonicTimer::default();
     let started_at_ms = timer.monotonic_now_ms();

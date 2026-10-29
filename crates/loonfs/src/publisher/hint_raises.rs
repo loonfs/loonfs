@@ -300,7 +300,7 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
             }
             Publication::Snapshot => {
                 namespace
-                    .create_snapshot("snapshot", &crate::CreateSnapshotOptions::default())
+                    .create_snapshot("snapshot")
                     .await
                     .expect("create a snapshot");
             }

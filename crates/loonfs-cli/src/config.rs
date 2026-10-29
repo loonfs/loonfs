@@ -1,6 +1,7 @@
 //! The CLI config file: profiles, defaults, and strict TOML loading.
 
-use crate::error::CliError;
+use crate::args::TransientRetry;
+use crate::error::{CliError, Result};
 use loonfs_client::ClientConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_types::config::{validate_non_empty, ConfigFieldError};
@@ -66,9 +67,71 @@ pub(crate) struct CliConfig {
     pub profiles: BTreeMap<String, ProfileConfig>,
 }
 
+/// One configured profile: who it acts as, its default namespace, and how it
+/// reaches LoonFS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ProfileConfigFile", into = "ProfileConfigFile")]
+pub(crate) struct ProfileConfig {
+    pub identity: ProfileIdentity,
+    pub default_namespace: Option<String>,
+    pub connection: ProfileConnection,
+}
+
+/// The actor and the subject a profile acts as.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ProfileIdentity {
+    pub actor_id: Option<ActorId>,
+    pub subject_id: Option<SubjectId>,
+    pub principal_scope: Option<PrincipalScope>,
+    pub principals: Option<Vec<PrincipalId>>,
+}
+
+/// How a profile reaches LoonFS: a runtime in this process over a store, or
+/// a server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProfileConnection {
+    Embedded {
+        store: StoreConfig,
+        writer_id: Option<String>,
+    },
+    Remote {
+        server_url: String,
+        auth_token: Option<SecretString>,
+        /// PEM bundle of extra certificate authorities to trust, for a
+        /// server whose certificate a private CA issued.
+        ca_cert_path: Option<String>,
+    },
+}
+
+/// Whether a profile runs the runtime in this process or talks to a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProfileMode {
+    Embedded,
+    Remote,
+}
+
+impl ProfileMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Embedded => "embedded",
+            Self::Remote => "remote",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "embedded" => Some(Self::Embedded),
+            "remote" => Some(Self::Remote),
+            _ => None,
+        }
+    }
+}
+
+/// A profile as a config file stores it.
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum ProfileConfig {
+enum ProfileConfigFile {
     Embedded {
         store: StoreConfig,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,11 +161,94 @@ pub(crate) enum ProfileConfig {
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_token: Option<SecretString>,
-        /// PEM bundle of extra certificate authorities to trust, for a
-        /// server whose certificate a private CA issued.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ca_cert_path: Option<String>,
     },
+}
+
+impl From<ProfileConfigFile> for ProfileConfig {
+    fn from(file: ProfileConfigFile) -> Self {
+        match file {
+            ProfileConfigFile::Embedded {
+                store,
+                actor_id,
+                subject_id,
+                principal_scope,
+                principals,
+                default_namespace,
+                writer_id,
+            } => Self {
+                identity: ProfileIdentity {
+                    actor_id,
+                    subject_id,
+                    principal_scope,
+                    principals,
+                },
+                default_namespace,
+                connection: ProfileConnection::Embedded { store, writer_id },
+            },
+            ProfileConfigFile::Remote {
+                server_url,
+                actor_id,
+                subject_id,
+                principal_scope,
+                principals,
+                default_namespace,
+                auth_token,
+                ca_cert_path,
+            } => Self {
+                identity: ProfileIdentity {
+                    actor_id,
+                    subject_id,
+                    principal_scope,
+                    principals,
+                },
+                default_namespace,
+                connection: ProfileConnection::Remote {
+                    server_url,
+                    auth_token,
+                    ca_cert_path,
+                },
+            },
+        }
+    }
+}
+
+impl From<ProfileConfig> for ProfileConfigFile {
+    fn from(profile: ProfileConfig) -> Self {
+        let ProfileIdentity {
+            actor_id,
+            subject_id,
+            principal_scope,
+            principals,
+        } = profile.identity;
+        let default_namespace = profile.default_namespace;
+        match profile.connection {
+            ProfileConnection::Embedded { store, writer_id } => Self::Embedded {
+                store,
+                actor_id,
+                subject_id,
+                principal_scope,
+                principals,
+                default_namespace,
+                writer_id,
+            },
+            ProfileConnection::Remote {
+                server_url,
+                auth_token,
+                ca_cert_path,
+            } => Self::Remote {
+                server_url,
+                actor_id,
+                subject_id,
+                principal_scope,
+                principals,
+                default_namespace,
+                auth_token,
+                ca_cert_path,
+            },
+        }
+    }
 }
 
 impl CliConfig {
@@ -114,7 +260,7 @@ impl CliConfig {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), CliError> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.config_version != CONFIG_VERSION {
             return Err(CliError::invalid_config(format!(
                 "unsupported `config_version`: expected `{CONFIG_VERSION}`, got `{}`",
@@ -130,7 +276,8 @@ impl CliConfig {
             }
         }
         for (name, profile) in &self.profiles {
-            validate_profile_name(name).map_err(|error| CliError::invalid_config(error.message))?;
+            validate_profile_name(name)
+                .map_err(|error| CliError::invalid_config(error.message.clone()))?;
             profile.validate(name)?;
         }
         Ok(())
@@ -156,96 +303,51 @@ impl Default for CliConfig {
 }
 
 impl ProfileConfig {
-    pub(crate) fn actor_id(&self) -> Option<ActorId> {
-        match self {
-            Self::Embedded { actor_id, .. } | Self::Remote { actor_id, .. } => actor_id.clone(),
-        }
-    }
-
-    pub(crate) fn subject_id(&self) -> Option<SubjectId> {
-        match self {
-            Self::Embedded { subject_id, .. } | Self::Remote { subject_id, .. } => {
-                subject_id.clone()
-            }
-        }
-    }
-
-    pub(crate) fn principal_scope(&self) -> Option<PrincipalScope> {
-        match self {
-            Self::Embedded {
-                principal_scope, ..
-            }
-            | Self::Remote {
-                principal_scope, ..
-            } => principal_scope.clone(),
-        }
-    }
-
-    pub(crate) fn principals(&self) -> Option<Vec<PrincipalId>> {
-        match self {
-            Self::Embedded { principals, .. } | Self::Remote { principals, .. } => {
-                principals.clone()
-            }
-        }
-    }
-
-    pub(crate) fn mode_str(&self) -> &'static str {
-        match self {
-            ProfileConfig::Embedded { .. } => "embedded",
-            ProfileConfig::Remote { .. } => "remote",
+    pub(crate) fn mode(&self) -> ProfileMode {
+        match self.connection {
+            ProfileConnection::Embedded { .. } => ProfileMode::Embedded,
+            ProfileConnection::Remote { .. } => ProfileMode::Remote,
         }
     }
 
     pub(crate) fn store_kind_str(&self) -> Option<&'static str> {
-        match self {
-            ProfileConfig::Embedded { store, .. } => Some(store.kind().as_str()),
-            ProfileConfig::Remote { .. } => None,
+        match &self.connection {
+            ProfileConnection::Embedded { store, .. } => Some(store.kind().as_str()),
+            ProfileConnection::Remote { .. } => None,
         }
     }
 
-    pub(crate) fn validate(&self, name: &str) -> Result<(), CliError> {
-        match self {
-            ProfileConfig::Embedded {
-                store,
-                principal_scope,
-                principals,
-                default_namespace,
-                ..
-            } => {
-                validate_profile_default_namespace(name, default_namespace.as_deref())?;
-                validate_profile_subject(name, principal_scope.as_ref(), principals.as_deref())?;
-                store
-                    .validate()
-                    .map_err(|error| profile_field_error(name, &error))
-            }
-            ProfileConfig::Remote {
+    pub(crate) fn validate(&self, name: &str) -> Result<()> {
+        if let Some(namespace) = self.default_namespace.as_deref() {
+            validate_default_namespace(&profile_field(name, "default_namespace"), namespace)?;
+        }
+        validate_profile_subject(
+            name,
+            self.identity.principal_scope.as_ref(),
+            self.identity.principals.as_deref(),
+        )?;
+        match &self.connection {
+            ProfileConnection::Embedded { store, .. } => store
+                .validate()
+                .map_err(|error| profile_field_error(name, &error)),
+            ProfileConnection::Remote {
                 server_url,
-                actor_id: _,
-                subject_id: _,
-                principal_scope,
-                principals,
-                default_namespace,
                 auth_token,
                 ca_cert_path,
-            } => {
-                validate_profile_default_namespace(name, default_namespace.as_deref())?;
-                validate_profile_subject(name, principal_scope.as_ref(), principals.as_deref())?;
-                validate_stored_remote_client_config(
-                    name,
-                    server_url,
-                    auth_token.as_ref(),
-                    ca_cert_path.as_deref(),
-                )?;
-                Ok(())
-            }
+            } => validate_stored_remote_client_config(
+                name,
+                server_url,
+                auth_token.as_ref(),
+                ca_cert_path.as_deref(),
+            ),
         }
     }
 
-    pub(crate) fn ensure_store_usable(&self, name: &str) -> Result<(), CliError> {
-        if let Self::Embedded {
+    pub(crate) fn ensure_store_usable(&self, name: &str) -> Result<()> {
+        if let ProfileConnection::Embedded {
             store: StoreConfig::LocalFs(LocalFsStoreConfig { root, .. }),
             ..
-        } = self
+        } = &self.connection
         {
             if !Path::new(root).is_absolute() {
                 return Err(CliError::invalid_config(format!(
@@ -258,43 +360,25 @@ impl ProfileConfig {
     }
 
     pub(crate) fn redacted(&self) -> Self {
-        match self {
-            ProfileConfig::Embedded {
-                store,
-                actor_id,
-                subject_id,
-                principal_scope,
-                principals,
-                default_namespace,
-                writer_id,
-            } => ProfileConfig::Embedded {
+        let connection = match &self.connection {
+            ProfileConnection::Embedded { store, writer_id } => ProfileConnection::Embedded {
                 store: store.redacted(),
-                actor_id: actor_id.clone(),
-                subject_id: subject_id.clone(),
-                principal_scope: principal_scope.clone(),
-                principals: principals.clone(),
-                default_namespace: default_namespace.clone(),
                 writer_id: writer_id.clone(),
             },
-            ProfileConfig::Remote {
+            ProfileConnection::Remote {
                 server_url,
-                actor_id,
-                subject_id,
-                principal_scope,
-                principals,
-                default_namespace,
                 auth_token,
                 ca_cert_path,
-            } => ProfileConfig::Remote {
+            } => ProfileConnection::Remote {
                 server_url: server_url.clone(),
-                actor_id: actor_id.clone(),
-                subject_id: subject_id.clone(),
-                principal_scope: principal_scope.clone(),
-                principals: principals.clone(),
-                default_namespace: default_namespace.clone(),
                 auth_token: auth_token.as_ref().map(SecretString::masked),
                 ca_cert_path: ca_cert_path.clone(),
             },
+        };
+        Self {
+            identity: self.identity.clone(),
+            default_namespace: self.default_namespace.clone(),
+            connection,
         }
     }
 }
@@ -322,23 +406,13 @@ fn validate_profile_subject(
     profile_name: &str,
     principal_scope: Option<&PrincipalScope>,
     principals: Option<&[PrincipalId]>,
-) -> Result<(), CliError> {
+) -> Result<()> {
     ensure_subject_pairing(principal_scope, principals).map_err(|error| match error {
         SubjectPartsError::Missing { part, required_by } => CliError::invalid_config(format!(
             "`profiles.{profile_name}.{part}` is required with `profiles.{profile_name}.{required_by}`"
         )),
         other => CliError::invalid_config(other.to_string()),
     })
-}
-
-fn validate_profile_default_namespace(
-    name: &str,
-    default_namespace: Option<&str>,
-) -> Result<(), CliError> {
-    if let Some(namespace) = default_namespace {
-        validate_default_namespace(&profile_field(name, "default_namespace"), namespace)?;
-    }
-    Ok(())
 }
 
 /// Reports a store or client config field failure under the profile's path.
@@ -387,7 +461,7 @@ impl ConfigLocation {
 /// An explicit path is selected even when the file does not exist, allowing
 /// commands such as `loonfs init --config <path>` to create a replacement
 /// for an invalid default config.
-pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocation, CliError> {
+pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocation> {
     if let Some(path) = flag {
         return Ok(ConfigLocation::at(path.to_path_buf(), ConfigSource::Flag));
     }
@@ -400,7 +474,7 @@ pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocat
 /// Selects `$XDG_CONFIG_HOME/loonfs/config.toml` when the variable is
 /// absolute, otherwise `$HOME/.config/loonfs/config.toml`. File existence
 /// never changes which location is selected.
-fn default_config_location() -> Result<ConfigLocation, CliError> {
+fn default_config_location() -> Result<ConfigLocation> {
     let (directory, source) = match absolute_env_path("XDG_CONFIG_HOME") {
         Some(directory) => (directory, ConfigSource::Xdg),
         None => {
@@ -419,7 +493,7 @@ fn default_config_location() -> Result<ConfigLocation, CliError> {
     ))
 }
 
-pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {
+pub(crate) fn validate_profile_name(name: &str) -> Result<()> {
     Ok(validate_non_empty("profile name", name)?)
 }
 
@@ -427,7 +501,7 @@ fn profile_field(name: &str, field: &str) -> String {
     format!("{name}.{field}")
 }
 
-pub(crate) fn load_config(path: &Path) -> Result<CliConfig, CliError> {
+pub(crate) fn load_config(path: &Path) -> Result<CliConfig> {
     let source = load_config_source(path)?;
     decode_config_source(path, &source.text)
 }
@@ -445,7 +519,7 @@ pub(crate) enum ConfigLoad {
     },
 }
 
-pub(crate) fn load_config_for_repair(path: &Path) -> Result<ConfigLoad, CliError> {
+pub(crate) fn load_config_for_repair(path: &Path) -> Result<ConfigLoad> {
     let source = load_config_source(path)?;
     match decode_config_source(path, &source.text) {
         Ok(config) => Ok(ConfigLoad::Valid(config)),
@@ -470,7 +544,7 @@ struct ConfigDocument {
 /// version probe. Unknown fields and per-profile shape problems survive
 /// this stage; unreadable files, TOML syntax errors, and other config
 /// versions do not.
-fn load_config_source(path: &Path) -> Result<ConfigDocument, CliError> {
+fn load_config_source(path: &Path) -> Result<ConfigDocument> {
     let bytes = fs::read(path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             CliError::invalid_config(format!(
@@ -523,7 +597,7 @@ fn load_config_source(path: &Path) -> Result<ConfigDocument, CliError> {
 /// already built. That costs a second parse of a small file and buys the
 /// line, column, and quoted source line a TOML error carries only when it
 /// knows where in the text it is.
-fn decode_config_source(path: &Path, text: &str) -> Result<CliConfig, CliError> {
+fn decode_config_source(path: &Path, text: &str) -> Result<CliConfig> {
     let config: CliConfig = toml::from_str(text).map_err(|err| {
         unusable_config(format!("failed to decode config {}: {err}", path.display()))
     })?;
@@ -545,7 +619,7 @@ fn unusable_config(problem: String) -> CliError {
     CliError::invalid_config(format!("{problem}\n{CONFIG_REMEDY}"))
 }
 
-pub(crate) fn load_config_if_exists(path: &Path) -> Result<Option<CliConfig>, CliError> {
+pub(crate) fn load_config_if_exists(path: &Path) -> Result<Option<CliConfig>> {
     // A broken symlink is a file the user put there, not an absent config.
     match fs::symlink_metadata(path) {
         Ok(_) => load_config(path).map(Some),
@@ -557,11 +631,11 @@ pub(crate) fn load_config_if_exists(path: &Path) -> Result<Option<CliConfig>, Cl
     }
 }
 
-pub(crate) fn load_or_default_config(path: &Path) -> Result<CliConfig, CliError> {
+pub(crate) fn load_or_default_config(path: &Path) -> Result<CliConfig> {
     Ok(load_config_if_exists(path)?.unwrap_or_default())
 }
 
-fn write_config_locked(path: &Path, config: &CliConfig) -> Result<(), CliError> {
+fn write_config_locked(path: &Path, config: &CliConfig) -> Result<()> {
     // The caller already holds the config lock, which is not reentrant.
     config.validate()?;
     let contents = toml::to_string_pretty(config)
@@ -572,7 +646,7 @@ fn write_config_locked(path: &Path, config: &CliConfig) -> Result<(), CliError> 
 /// Persists a loose config table as-is (atomic, owner-only), for the repair
 /// commands when the file no longer strict-decodes: round-tripping through
 /// [`CliConfig`] would drop the content the user still needs to fix.
-pub(crate) fn save_config_table(path: &Path, table: &toml::Table) -> Result<(), CliError> {
+pub(crate) fn save_config_table(path: &Path, table: &toml::Table) -> Result<()> {
     let _lock = lock_config(path)?;
     let contents = toml::to_string_pretty(table)
         .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
@@ -584,8 +658,8 @@ pub(crate) fn save_config_table(path: &Path, table: &toml::Table) -> Result<(), 
 /// comes back to the caller once the file is durably replaced.
 pub(crate) fn mutate_config<T>(
     path: &Path,
-    mutate: impl FnOnce(&mut CliConfig) -> Result<T, CliError>,
-) -> Result<T, CliError> {
+    mutate: impl FnOnce(&mut CliConfig) -> Result<T>,
+) -> Result<T> {
     let _lock = lock_config(path)?;
     let mut config = load_or_default_config(path)?;
     let value = mutate(&mut config)?;
@@ -593,7 +667,7 @@ pub(crate) fn mutate_config<T>(
     Ok(value)
 }
 
-fn lock_config(path: &Path) -> Result<File, CliError> {
+fn lock_config(path: &Path) -> Result<File> {
     let parent = path.parent().ok_or_else(|| {
         CliError::invalid_config(format!(
             "config path has no parent directory: {}",
@@ -622,7 +696,7 @@ fn lock_config(path: &Path) -> Result<File, CliError> {
     Ok(file)
 }
 
-fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> {
+fn persist_config_contents(path: &Path, contents: &str) -> Result<()> {
     // The caller's config lock already proved that this parent directory exists.
     let parent = path
         .parent()
@@ -697,7 +771,7 @@ fn redacted_config_value(key: Option<&str>, value: &toml::Value) -> toml::Value 
     }
 }
 
-fn validate_default_namespace(field: &str, value: &str) -> Result<(), CliError> {
+fn validate_default_namespace(field: &str, value: &str) -> Result<()> {
     NamespaceId::parse(value)
         .map(|_| ())
         .map_err(|err| CliError::invalid_config(format!("invalid `{field}`: {err}")))
@@ -708,13 +782,13 @@ pub(crate) fn remote_client_config(
     server_url: &str,
     auth_token: Option<&SecretString>,
     ca_cert_path: Option<&str>,
-    no_retry: bool,
+    transient_retry: TransientRetry,
 ) -> ClientConfig {
     remote_client_config_from(
         server_url,
         auth_token,
         ca_cert_path,
-        no_retry,
+        transient_retry,
         non_empty_env,
     )
 }
@@ -723,7 +797,7 @@ fn remote_client_config_from(
     server_url: &str,
     auth_token: Option<&SecretString>,
     ca_cert_path: Option<&str>,
-    no_retry: bool,
+    transient_retry: TransientRetry,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> ClientConfig {
     ClientConfig {
@@ -734,7 +808,7 @@ fn remote_client_config_from(
                 .map(SecretString::from)
         }),
         request_timeout_ms: None,
-        disable_transient_retry: no_retry,
+        disable_transient_retry: transient_retry == TransientRetry::NoRetry,
         ca_cert_path: ca_cert_path.map(ToOwned::to_owned),
     }
 }
@@ -744,10 +818,10 @@ pub(crate) fn validate_remote_client_config(
     server_url: &str,
     auth_token: Option<&SecretString>,
     ca_cert_path: Option<&str>,
-) -> Result<(), CliError> {
+) -> Result<()> {
     validate_client_config(
         profile_name,
-        remote_client_config(server_url, auth_token, ca_cert_path, false),
+        remote_client_config(server_url, auth_token, ca_cert_path, TransientRetry::Retry),
     )
 }
 
@@ -756,14 +830,20 @@ fn validate_stored_remote_client_config(
     server_url: &str,
     auth_token: Option<&SecretString>,
     ca_cert_path: Option<&str>,
-) -> Result<(), CliError> {
+) -> Result<()> {
     validate_client_config(
         profile_name,
-        remote_client_config_from(server_url, auth_token, ca_cert_path, false, |_| None),
+        remote_client_config_from(
+            server_url,
+            auth_token,
+            ca_cert_path,
+            TransientRetry::Retry,
+            |_| None,
+        ),
     )
 }
 
-fn validate_client_config(profile_name: &str, config: ClientConfig) -> Result<(), CliError> {
+fn validate_client_config(profile_name: &str, config: ClientConfig) -> Result<()> {
     config
         .validate()
         .map_err(|error| profile_field_error(profile_name, &error))
@@ -772,7 +852,10 @@ fn validate_client_config(profile_name: &str, config: ClientConfig) -> Result<()
 #[cfg(test)]
 mod tests {
 
-    use super::{remote_client_config_from, CliConfig, ProfileConfig};
+    use super::{
+        remote_client_config_from, CliConfig, ProfileConfig, ProfileConnection, ProfileIdentity,
+    };
+    use crate::args::TransientRetry;
     use loonfs_test_support::EnvGuard;
     use loonfs_types::env::AUTH_TOKEN_ENV;
     use loonfs_types::SecretString;
@@ -784,7 +867,7 @@ mod tests {
             "https://loonfs.example.com",
             Some(&stored),
             None,
-            false,
+            TransientRetry::Retry,
             |_| Some("env-token".to_owned()),
         );
         assert_eq!(
@@ -793,11 +876,16 @@ mod tests {
         );
         assert!(!from_config.disable_transient_retry);
 
-        let from_environment =
-            remote_client_config_from("https://loonfs.example.com", None, None, true, |name| {
+        let from_environment = remote_client_config_from(
+            "https://loonfs.example.com",
+            None,
+            None,
+            TransientRetry::NoRetry,
+            |name| {
                 assert_eq!(name, AUTH_TOKEN_ENV);
                 Some("env-token".to_owned())
-            });
+            },
+        );
         assert_eq!(
             from_environment
                 .auth_token
@@ -810,10 +898,13 @@ mod tests {
             "--no-retry reaches the client"
         );
 
-        let blank =
-            remote_client_config_from("https://loonfs.example.com", None, None, true, |_| {
-                Some("  ".to_owned())
-            });
+        let blank = remote_client_config_from(
+            "https://loonfs.example.com",
+            None,
+            None,
+            TransientRetry::NoRetry,
+            |_| Some("  ".to_owned()),
+        );
         assert!(blank.auth_token.is_none());
     }
 
@@ -1026,9 +1117,13 @@ secret_access_key = "secret"
         let secret_key = EnvGuard::set("AWS_SECRET_ACCESS_KEY", "parity-secret");
         let cli = super::load_config(&cli_path).expect("load cli config");
         drop((access_key, secret_key));
-        let ProfileConfig::Embedded {
+        let ProfileConnection::Embedded {
             store: cli_store, ..
-        } = cli.profiles.get("parity").expect("parity profile")
+        } = &cli
+            .profiles
+            .get("parity")
+            .expect("parity profile")
+            .connection
         else {
             panic!("expected embedded profile")
         };
@@ -1129,17 +1224,16 @@ secret_access_key = "secret"
                         super::mutate_config(path, |config| {
                             config.profiles.insert(
                                 profile_name.clone(),
-                                ProfileConfig::Remote {
-                                    server_url: format!(
-                                        "https://agent-{thread_index}-{mutation_index}.example.com"
-                                    ),
-                                    actor_id: None,
-                                    subject_id: None,
-                                    principal_scope: None,
-                                    principals: None,
+                                ProfileConfig {
+                                    identity: ProfileIdentity::default(),
                                     default_namespace: Some(namespace),
-                                    auth_token: None,
-                                    ca_cert_path: None,
+                                    connection: ProfileConnection::Remote {
+                                        server_url: format!(
+                                            "https://agent-{thread_index}-{mutation_index}.example.com"
+                                        ),
+                                        auth_token: None,
+                                        ca_cert_path: None,
+                                    },
                                 },
                             );
                             Ok(())
@@ -1160,8 +1254,10 @@ secret_access_key = "secret"
             let profile_name = format!("agent-{thread_index}");
             let expected_namespace =
                 format!("namespace-{thread_index}-{}", MUTATIONS_PER_THREAD - 1);
-            let Some(ProfileConfig::Remote {
-                default_namespace, ..
+            let Some(ProfileConfig {
+                default_namespace,
+                connection: ProfileConnection::Remote { .. },
+                ..
             }) = config.profiles.get(&profile_name)
             else {
                 panic!("missing remote profile {profile_name}");

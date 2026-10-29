@@ -178,15 +178,14 @@ impl ReadView {
     /// Lists the change feed after `after_seq` through this view's captured
     /// head.
     pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
-        let view = self.clone();
-        loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
-            let view = view.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.clone(), after_seq),
+            |(view, after_seq), request: PageRequest<ChangeSeq>| async move {
                 let permit = view.core.inner.config.execution_budget.read_permit().await;
                 view.changes_page(request.cursor.unwrap_or(after_seq), request.limit, &permit)
                     .await
-            }
-        })
+            },
+        )
     }
 
     async fn changes_page(
@@ -249,20 +248,15 @@ impl ReadView {
         absolute_path: &str,
         options: &ListOptions,
     ) -> PathEntriesPager {
-        let view = self.clone();
-        let absolute_path = absolute_path.to_owned();
-        let options = options.clone();
-        loonfs_types::Pager::new(move |request| {
-            let view = view.clone();
-            let absolute_path = absolute_path.clone();
-            let options = options.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.clone(), absolute_path.to_owned(), options.clone()),
+            |(view, absolute_path, options), request| async move {
                 let permit = view.core.inner.config.execution_budget.read_permit().await;
                 let request = decode_list_page_request(request, &options)?;
                 view.path_entries_page(&absolute_path, request, options, &permit)
                     .await
-            }
-        })
+            },
+        )
     }
 
     async fn path_entries_page(
@@ -344,18 +338,15 @@ impl ReadView {
         inode_id: InodeId,
         options: &ListOptions,
     ) -> InodeChildrenPager {
-        let view = self.clone();
-        let options = options.clone();
-        loonfs_types::Pager::new(move |request| {
-            let view = view.clone();
-            let options = options.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.clone(), inode_id, options.clone()),
+            |(view, inode_id, options), request| async move {
                 let permit = view.core.inner.config.execution_budget.read_permit().await;
                 let request = decode_list_page_request(request, &options)?;
                 view.inode_children_page(inode_id, request, options, &permit)
                     .await
-            }
-        })
+            },
+        )
     }
 
     async fn inode_children_page(
@@ -903,20 +894,15 @@ impl<M: crate::Mode> Namespace<M> {
         absolute_path: &str,
         options: &ListOptions,
     ) -> PathEntriesPager {
-        let reader = self.read_only();
-        let absolute_path = absolute_path.to_owned();
-        let options = options.clone();
-        loonfs_types::Pager::new(move |request| {
-            let reader = reader.clone();
-            let absolute_path = absolute_path.clone();
-            let options = options.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.read_only(), absolute_path.to_owned(), options.clone()),
+            |(reader, absolute_path, options), request| async move {
                 let request = decode_list_page_request(request, &options)?;
                 reader
                     .path_entries_page(&absolute_path, request, options)
                     .await
-            }
-        })
+            },
+        )
     }
 
     #[tracing::instrument(
@@ -993,16 +979,13 @@ impl<M: crate::Mode> Namespace<M> {
         inode_id: InodeId,
         options: &ListOptions,
     ) -> InodeChildrenPager {
-        let reader = self.read_only();
-        let options = options.clone();
-        loonfs_types::Pager::new(move |request| {
-            let reader = reader.clone();
-            let options = options.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.read_only(), inode_id, options.clone()),
+            |(reader, inode_id, options), request| async move {
                 let request = decode_list_page_request(request, &options)?;
                 reader.inode_children_page(inode_id, request, options).await
-            }
-        })
+            },
+        )
     }
 
     #[tracing::instrument(
@@ -1433,18 +1416,14 @@ impl<M: crate::Mode> Namespace<M> {
         checkpoint_id: &PinId,
         options: &ListCheckpointFilesOptions,
     ) -> CheckpointFilesPager {
-        let reader = self.read_only();
-        let checkpoint_id = checkpoint_id.clone();
-        let options = *options;
-        loonfs_types::Pager::new(move |request| {
-            let reader = reader.clone();
-            let checkpoint_id = checkpoint_id.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.read_only(), checkpoint_id.clone(), *options),
+            |(reader, checkpoint_id, options), request| async move {
                 reader
                     .checkpoint_files_page(&checkpoint_id, request, options)
                     .await
-            }
-        })
+            },
+        )
     }
 
     #[tracing::instrument(
@@ -1560,16 +1539,14 @@ impl<M: crate::Mode> Namespace<M> {
     /// Lists the namespace's recoverable deletions, oldest deletion first,
     /// as `options` asks.
     pub fn list_trash_with_options(&self, options: &ListTrashOptions) -> TrashPager {
-        let reader = self.read_only();
-        let consistency = options.consistency;
-        loonfs_types::Pager::new(move |request| {
-            let reader = reader.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.read_only(), options.consistency),
+            |(reader, consistency), request| async move {
                 reader
                     .trash_page(decode_page_request(request)?, consistency)
                     .await
-            }
-        })
+            },
+        )
     }
 
     #[tracing::instrument(
@@ -1623,18 +1600,18 @@ impl<M: crate::Mode> Namespace<M> {
         absolute_path: &str,
         options: &ListFileRevisionsOptions,
     ) -> FileRevisionsPager {
-        let reader = self.read_only();
-        let absolute_path = absolute_path.to_owned();
-        let consistency = options.consistency;
-        loonfs_types::Pager::new(move |request| {
-            let reader = reader.clone();
-            let absolute_path = absolute_path.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (
+                self.read_only(),
+                absolute_path.to_owned(),
+                options.consistency,
+            ),
+            |(reader, absolute_path, consistency), request| async move {
                 reader
                     .file_revisions_page(&absolute_path, decode_page_request(request)?, consistency)
                     .await
-            }
-        })
+            },
+        )
     }
 
     #[tracing::instrument(
@@ -1693,11 +1670,9 @@ impl<M: crate::Mode> Namespace<M> {
         inode_id: InodeId,
         options: &ListFileRevisionsOptions,
     ) -> FileRevisionsPager {
-        let reader = self.read_only();
-        let consistency = options.consistency;
-        loonfs_types::Pager::new(move |request| {
-            let reader = reader.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.read_only(), inode_id, options.consistency),
+            |(reader, inode_id, consistency), request| async move {
                 reader
                     .file_revisions_by_inode_page(
                         inode_id,
@@ -1705,8 +1680,8 @@ impl<M: crate::Mode> Namespace<M> {
                         consistency,
                     )
                     .await
-            }
-        })
+            },
+        )
     }
 
     #[tracing::instrument(
@@ -2048,17 +2023,14 @@ impl<M: crate::Mode> Namespace<M> {
         after_seq: ChangeSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
-        let reader = self.read_only();
-        let at = options.at.clone();
-        loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
-            let reader = reader.clone();
-            let at = at.clone();
-            async move {
+        loonfs_types::Pager::with_state(
+            (self.read_only(), after_seq, options.at.clone()),
+            |(reader, after_seq, at), request: PageRequest<ChangeSeq>| async move {
                 reader
                     .changes_page(request.cursor.unwrap_or(after_seq), request.limit, &at)
                     .await
-            }
-        })
+            },
+        )
     }
 
     #[tracing::instrument(

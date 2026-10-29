@@ -56,7 +56,7 @@ fn a_created_snapshot_is_listed_with_its_expiry() {
     )
     .expect("put file");
 
-    let snapshot = block_on(namespace.create_snapshot(
+    let snapshot = block_on(namespace.create_snapshot_with_options(
         "report-run",
         &CreateSnapshotOptions {
             ttl_ms: std::num::NonZeroU64::new(60_000),
@@ -106,7 +106,7 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
     store.fail_next(1);
 
     let snapshot = namespace
-        .create_snapshot("report-run", &CreateSnapshotOptions::default())
+        .create_snapshot("report-run")
         .await
         .expect("reconcile the durable snapshot record");
 
@@ -145,7 +145,7 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace
-        .create_snapshot(
+        .create_snapshot_with_options(
             "report-run",
             &CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(60_000),
@@ -192,7 +192,7 @@ async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace
-        .create_snapshot("report-run", &CreateSnapshotOptions::default())
+        .create_snapshot("report-run")
         .await
         .expect("create snapshot");
     store.fail_next(1);
@@ -311,9 +311,7 @@ async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete(
         ErrorCode::NamespaceDeleted,
     );
     assert_core_error_kind(
-        namespace
-            .create_snapshot("after-delete", &CreateSnapshotOptions::default())
-            .await,
+        namespace.create_snapshot("after-delete").await,
         ErrorCode::NamespaceDeleted,
     );
 }
@@ -344,7 +342,7 @@ async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed()
         .await
         .expect("put file");
     let snapshot = namespace
-        .create_snapshot(
+        .create_snapshot_with_options(
             "short",
             &CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(1_000),
@@ -443,7 +441,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
     let root = namespace_reader.stat("/").await.expect("root");
     let before = namespace_reader.stat("/file").await.expect("file");
     let snapshot = namespace_writer
-        .create_snapshot("options", &CreateSnapshotOptions::default())
+        .create_snapshot("options")
         .await
         .expect("snapshot");
     namespace_writer
@@ -520,7 +518,7 @@ async fn shared_file_and_download_options_select_the_snapshot() {
         .await
         .expect("file");
     let snapshot = namespace_writer
-        .create_snapshot("file-options", &CreateSnapshotOptions::default())
+        .create_snapshot("file-options")
         .await
         .expect("snapshot");
     namespace_writer

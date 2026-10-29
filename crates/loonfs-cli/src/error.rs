@@ -1,10 +1,9 @@
 //! [`CliError`]: the structured failure every command surfaces.
 
-use crate::args::CommandKind;
 use crate::config::NAMESPACE_ENV;
 use loonfs_client::ClientError;
 use loonfs_types::config::ConfigFieldError;
-use loonfs_types::ErrorCode;
+use loonfs_types::{ErrorCode, ErrorResponse};
 use serde::{Deserialize, Serialize};
 
 macro_rules! cli_error_codes {
@@ -55,31 +54,32 @@ cli_error_codes! {
 
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
 ///
-/// `code` is either a shared API error code or a code local to the backend or
-/// CLI.
+/// The failure is the wire error body, so its `code` is either a shared API
+/// error code or a code local to the backend or CLI.
 ///
 /// API codes pass through unchanged so embedded and remote profiles report the
 /// same code. Validation after argument parsing uses `invalid_request`.
 /// Parser errors use the CLI-local `invalid_usage` code. Other local codes are
 /// created by the constructors below.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CliError {
-    pub code: String,
-    /// Feature key for `not_supported` errors.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub feature: Option<String>,
-    pub message: String,
-    /// Identifies the invalid input. Body fields use JSON Pointer paths;
-    /// query and path parameters use their names; CLI errors use the flag or
-    /// argument as written.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub param: Option<String>,
-    /// Correlation id assigned by the HTTP binding.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-    /// Structured context for the code, when the backend carried any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<Box<loonfs_types::ErrorDetails>>,
+#[serde(transparent)]
+pub(crate) struct CliError(ErrorResponse);
+
+/// The result of a CLI operation.
+pub(crate) type Result<T, E = CliError> = std::result::Result<T, E>;
+
+impl std::ops::Deref for CliError {
+    type Target = ErrorResponse;
+
+    fn deref(&self) -> &ErrorResponse {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for CliError {
+    fn deref_mut(&mut self) -> &mut ErrorResponse {
+        &mut self.0
+    }
 }
 
 impl CliError {
@@ -93,14 +93,14 @@ impl CliError {
     }
 
     pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
+        Self(ErrorResponse {
             code: code.into(),
             feature: None,
             message: message.into(),
             param: None,
             request_id: None,
             details: None,
-        }
+        })
     }
 
     pub(crate) fn invalid_config(message: impl Into<String>) -> Self {
@@ -120,28 +120,7 @@ impl CliError {
     }
 
     pub(crate) fn with_param(mut self, param: impl Into<String>) -> Self {
-        self.param = Some(param.into());
-        self
-    }
-
-    pub(crate) fn with_command_hint(mut self, kind: CommandKind, path: Option<&str>) -> Self {
-        match (kind, ErrorCode::parse(&self.code)) {
-            (CommandKind::FilesystemRm, Some(ErrorCode::DirectoryNotEmpty)) => {
-                if let Some(path) = path {
-                    let command_path = crate::commands::shell_quote(path);
-                    self.message = format!(
-                        "directory `{path}` is not empty; use `loonfs rm -r {command_path}` to delete it and everything under it"
-                    );
-                }
-            }
-            (CommandKind::FilesystemGrep, Some(ErrorCode::NotSupported))
-                if self.feature.as_deref() == Some("query.grep") =>
-            {
-                self.message
-                    .push_str("; enable it with `loonfs maintenance index enable`");
-            }
-            _ => {}
-        }
+        self.0.param = Some(param.into());
         self
     }
 
@@ -257,28 +236,10 @@ impl From<ClientError> for CliError {
             ClientError::Http(message)
             | ClientError::Json(message)
             | ClientError::Protocol(message) => Self::client_error(message),
-            ClientError::Api {
-                status: _,
-                code,
-                feature,
-                message,
-                param,
-                request_id,
-                details,
-            } => Self {
-                code,
-                feature,
-                message,
-                param,
-                request_id,
-                details,
-            },
-            ClientError::UploadTooLarge { size_bytes, reason } => Self::new(
-                ErrorCode::ContentTooLarge.as_str(),
-                format!(
-                    "payload of {size_bytes} bytes exceeds every upload transport this deployment offers: {reason}"
-                ),
-            ),
+            ClientError::Api { response, .. } => Self(*response),
+            error @ ClientError::UploadTooLarge { .. } => {
+                Self::new(ErrorCode::ContentTooLarge.as_str(), error.to_string())
+            }
             ClientError::Io(message) => Self::io_error(format!("i/o error: {message}")),
             // `ClientError` is non-exhaustive across crate boundaries, so future
             // variants map to a generic transport failure. Add an explicit arm when a
@@ -288,16 +249,9 @@ impl From<ClientError> for CliError {
     }
 }
 
-impl From<loonfs_types::ErrorResponse> for CliError {
-    fn from(error: loonfs_types::ErrorResponse) -> Self {
-        Self {
-            code: error.code,
-            message: error.message,
-            feature: error.feature,
-            param: error.param,
-            request_id: error.request_id,
-            details: error.details,
-        }
+impl From<ErrorResponse> for CliError {
+    fn from(error: ErrorResponse) -> Self {
+        Self(error)
     }
 }
 

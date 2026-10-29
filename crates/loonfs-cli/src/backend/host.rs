@@ -1,6 +1,7 @@
 //! Hosts the HTTP binding over the CLI's runtime without a listener.
 
-use crate::error::CliError;
+use crate::args::TransientRetry;
+use crate::error::Result;
 use crate::render::write_stderr_warning;
 use http_body_util::BodyExt as _;
 use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable};
@@ -27,8 +28,8 @@ pub(crate) struct MaintenanceHost {
 pub(crate) fn client(
     host: &MaintenanceHost,
     grep_service: GrepService,
-    no_retry: bool,
-) -> Result<Client, CliError> {
+    transient_retry: TransientRetry,
+) -> Result<Client> {
     let state = BindingState::new(
         BindingConfig {
             serves_maintenance: true,
@@ -81,7 +82,7 @@ pub(crate) fn client(
             server_url: "http://embedded.invalid".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
-            disable_transient_retry: no_retry,
+            disable_transient_retry: transient_retry == TransientRetry::NoRetry,
             ca_cert_path: None,
         },
         service,

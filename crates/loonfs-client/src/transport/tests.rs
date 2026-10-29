@@ -1,6 +1,7 @@
 //! Transport retry, identity, streaming, and timeout contracts.
 
 use super::*;
+use crate::operations::Operation;
 use crate::{scripted_transport, ClientConfig};
 use futures::FutureExt as _;
 use loonfs_test_support::clock::ManualClock;
@@ -140,33 +141,47 @@ async fn transport_retries_stop_when_the_operation_deadline_is_spent() {
     let client = deadline_client(&transport);
 
     client
-        .call(
-            &client.get("http://example.invalid/control"),
-            None,
-            SendPolicy::Retry,
-        )
+        .call(&client.request(
+            Operation::retry(Method::GET),
+            "http://example.invalid/control",
+        ))
         .await
         .expect_err("the spent deadline must preserve the first failure");
 
     assert_eq!(transport.attempts(), 1);
 }
 
+/// Checks that a content read retries without the operation deadline, both
+/// buffered and streamed, and that a streamed read resends until its response
+/// head arrives.
 #[tokio::test]
 async fn content_transfer_retries_are_exempt_from_the_operation_deadline() {
     let transport = scripted_transport::failure_then_success(b"content".to_vec());
     let client = deadline_client(&transport);
+    let content = client.request(
+        Operation::retry_without_deadline(Method::GET),
+        "http://example.invalid/content",
+    );
 
     let response = client
-        .call(
-            &client.get("http://example.invalid/content"),
-            None,
-            SendPolicy::RetryWithoutDeadline,
-        )
+        .call(&content)
         .await
         .expect("the count-bounded content retry succeeds");
-
     assert_eq!(response.bytes, b"content");
-    assert!(transport.attempts() >= 2, "{}", transport.attempts());
+    assert_eq!(transport.attempts(), 2);
+
+    let transport = scripted_transport::failure_then_success(b"content".to_vec());
+    let client = deadline_client(&transport);
+    let mut stream = client
+        .call_for_response_stream(&content)
+        .await
+        .expect("the streamed read resends until a response head arrives");
+    let mut streamed = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        streamed.extend_from_slice(&chunk.expect("a body chunk"));
+    }
+    assert_eq!(streamed, b"content");
+    assert_eq!(transport.attempts(), 2);
 }
 
 fn service_client<S>(service: S, request_timeout_ms: Option<u64>) -> Client
@@ -229,25 +244,20 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
     client.transport_retry.initial_backoff_ms = 0;
     client.transport_retry.max_backoff_ms = 0;
     let request = client
-        .post("http://127.0.0.1/commits")
-        .header("Loonfs-Actor", "actor");
+        .request(Operation::retry(Method::POST), "http://127.0.0.1/commits")
+        .header("Loonfs-Actor", "actor")
+        .json(&serde_json::json!({"key": "value"}))
+        .expect("serialize the body");
     let _: serde_json::Value = client
-        .request_json(
-            request,
-            Some(&serde_json::json!({"key": "value"})),
-            SendPolicy::Retry,
-        )
+        .send_json(request)
         .await
         .expect("body failure retried");
     client
-        .call(
-            &WireRequest::presigned(
-                Method::GET,
-                "https://provider.invalid/object?signature=opaque",
-            ),
-            None,
+        .call(&WireRequest::presigned(
+            Method::GET,
+            "https://provider.invalid/object?signature=opaque",
             SendPolicy::Once,
-        )
+        ))
         .await
         .expect("provider request");
 
@@ -315,7 +325,10 @@ async fn service_timeouts_cover_readiness_headers_and_streamed_bodies() {
         let transport =
             scripted_transport::script([scripted_transport::Outcome::Success(Vec::new())]);
         let (client, clock) = timed_client(transport.clone(), timeout);
-        let request = client.put("http://127.0.0.1/content");
+        let request = client.request(
+            Operation::retry_without_deadline(Method::PUT),
+            "http://127.0.0.1/content",
+        );
         let upload = client.call_streamed_once(&request, futures::stream::pending().boxed(), None);
         tokio::pin!(upload);
         assert!(futures::poll!(&mut upload).is_pending());
@@ -349,7 +362,10 @@ async fn service_timeouts_cover_readiness_headers_and_streamed_bodies() {
         });
         let (client, clock) = timed_client(service, timeout);
         let mut stream = client
-            .call_for_response_stream(&client.get("http://127.0.0.1/content"))
+            .call_for_response_stream(&client.request(
+                Operation::retry_without_deadline(Method::GET),
+                "http://127.0.0.1/content",
+            ))
             .await
             .expect("response headers");
         let chunk = stream.next();
@@ -403,7 +419,10 @@ async fn upload_progress_resets_inactivity_without_resetting_the_request_deadlin
         )]);
         let (client, clock) = timed_client(transport.clone(), timeout);
         let (senders, chunks) = pending_chunks(5);
-        let request = client.put("http://127.0.0.1/content");
+        let request = client.request(
+            Operation::retry_without_deadline(Method::PUT),
+            "http://127.0.0.1/content",
+        );
         let upload = client.call_streamed_once(&request, chunks, Some(15));
         tokio::pin!(upload);
         for (index, sender) in senders.into_iter().enumerate() {
@@ -461,7 +480,10 @@ async fn response_progress_resets_inactivity_without_resetting_total_deadlines()
         });
         let (client, clock) = timed_client(service, configured);
         let request = client
-            .build(&client.get("http://127.0.0.1/content"), Body::empty())
+            .build(
+                &client.request(Operation::retry(Method::GET), "http://127.0.0.1/content"),
+                Body::empty(),
+            )
             .expect("request");
         let response = client.send(request, attempt.map(Duration::from_millis));
         tokio::pin!(response);

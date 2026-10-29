@@ -297,6 +297,66 @@ impl ErrorCode {
             | ErrorCode::ServerError => false,
         }
     }
+
+    /// Returns whether a commit that failed with this code was refused by the
+    /// namespace's state or by one of the request's preconditions, so sending
+    /// the same request again fails the same way.
+    ///
+    /// A client that keeps a prepared commit request for a later resend
+    /// discards the request after one of these codes.
+    pub fn refuses_commit_permanently(self) -> bool {
+        match self {
+            ErrorCode::ContentNotPrepared
+            | ErrorCode::PathNotFound
+            | ErrorCode::InodeNotFound
+            | ErrorCode::RevisionNotFound
+            | ErrorCode::PathConflict
+            | ErrorCode::DirectoryNotEmpty
+            | ErrorCode::StaleHead
+            | ErrorCode::StaleRevision
+            | ErrorCode::StaleAttributes
+            | ErrorCode::StaleAccess
+            | ErrorCode::NamespaceUnrestricted
+            | ErrorCode::BindingVersionMismatch
+            | ErrorCode::NotDeleted
+            | ErrorCode::WouldCycle => true,
+            ErrorCode::InvalidRequest
+            | ErrorCode::Unauthorized
+            | ErrorCode::Forbidden
+            | ErrorCode::StoragePermissionDenied
+            | ErrorCode::ContentTooLarge
+            | ErrorCode::RangeNotSatisfiable
+            | ErrorCode::NotSupported
+            | ErrorCode::RouteNotFound
+            | ErrorCode::MethodNotAllowed
+            | ErrorCode::NamespaceNotFound
+            | ErrorCode::NamespaceDeleted
+            | ErrorCode::NamespaceExists
+            | ErrorCode::SnapshotNotFound
+            | ErrorCode::WriterFenced
+            | ErrorCode::CommitIdReuseConflict
+            | ErrorCode::CommitOutcomeUnknown
+            | ErrorCode::OutcomeUnknown
+            | ErrorCode::CommitQueueFull
+            | ErrorCode::ServerBusy
+            | ErrorCode::ShuttingDown
+            | ErrorCode::WriterSessionClosed
+            | ErrorCode::StoreContention
+            | ErrorCode::DeadlineExceeded
+            | ErrorCode::CheckpointUnavailable
+            | ErrorCode::ContentNotMaterialized
+            | ErrorCode::MaintenanceRequired
+            | ErrorCode::UploadNotFound
+            | ErrorCode::UploadAlreadyCompleted
+            | ErrorCode::UploadContentConflict
+            | ErrorCode::RebootstrapRequired
+            | ErrorCode::QueryUnindexable
+            | ErrorCode::IndexLagging
+            | ErrorCode::IndexCorrupt
+            | ErrorCode::NamespaceCorrupt
+            | ErrorCode::ServerError => false,
+        }
+    }
 }
 
 impl fmt::Display for ErrorCode {

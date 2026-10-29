@@ -368,7 +368,13 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
 
     let created = harness
         .client
-        .create_snapshot(&namespace, "first", std::num::NonZeroU64::new(5_000))
+        .create_snapshot_with_options(
+            &namespace,
+            "first",
+            &loonfs_client::CreateSnapshotOptions {
+                ttl_ms: std::num::NonZeroU64::new(5_000),
+            },
+        )
         .await
         .expect("create snapshot");
     assert_eq!(created.namespace_id, namespace);
@@ -429,7 +435,13 @@ async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
     for name in ["first", "second"] {
         harness
             .client
-            .create_snapshot(&namespace, name, std::num::NonZeroU64::new(5_000))
+            .create_snapshot_with_options(
+                &namespace,
+                name,
+                &loonfs_client::CreateSnapshotOptions {
+                    ttl_ms: std::num::NonZeroU64::new(5_000),
+                },
+            )
             .await
             .expect("create snapshot");
     }
@@ -482,13 +494,10 @@ async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
     for rejection in rejections {
         match rejection {
             Err(ClientError::Api {
-                status,
-                code,
-                param,
-                ..
+                status, response, ..
             }) => {
-                assert_eq!((status, code.as_str()), (400, "invalid_request"));
-                assert_eq!(param.as_deref(), Some("cursor"));
+                assert_eq!((status, response.code.as_str()), (400, "invalid_request"));
+                assert_eq!(response.param.as_deref(), Some("cursor"));
             }
             other => panic!("expected an invalid cursor, got {other:?}"),
         }
@@ -515,7 +524,13 @@ async fn snapshot_and_checkpoint_retrieves_return_their_listed_rows() {
         .expect("create namespace");
     let created = harness
         .client
-        .create_snapshot(&namespace, "first", std::num::NonZeroU64::new(5_000))
+        .create_snapshot_with_options(
+            &namespace,
+            "first",
+            &loonfs_client::CreateSnapshotOptions {
+                ttl_ms: std::num::NonZeroU64::new(5_000),
+            },
+        )
         .await
         .expect("create snapshot");
 
@@ -550,7 +565,9 @@ async fn snapshot_and_checkpoint_retrieves_return_their_listed_rows() {
         .await
         .expect("delete snapshot");
     let code = |error: ClientError| match error {
-        ClientError::Api { status, code, .. } => (status, code),
+        ClientError::Api {
+            status, response, ..
+        } => (status, response.code),
         other => panic!("expected an API error, got {other:?}"),
     };
     assert_eq!(

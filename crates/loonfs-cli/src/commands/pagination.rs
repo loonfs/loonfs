@@ -1,7 +1,7 @@
 //! Pagination shared by CLI listing commands.
 
 use crate::args::PageLimitArgs;
-use crate::error::CliError;
+use crate::error::{CliError, Result};
 use loonfs_types::{usize_from_u64, EffectiveLimit, LimitError, PagedResponse, Pager};
 
 pub(super) enum PagedListing<P> {
@@ -18,11 +18,11 @@ pub(super) async fn visit_pages<P, E, V>(
     mut pager: Pager<P, E>,
     args: &PageLimitArgs,
     mut visit: V,
-) -> Result<(), CliError>
+) -> Result<()>
 where
     P: PagedResponse,
     CliError: From<E>,
-    V: FnMut(P) -> Result<(), CliError>,
+    V: FnMut(P) -> Result<()>,
 {
     // Both flags meet the pagination contract here, with the error the
     // server gives for an invalid `limit`.
@@ -52,7 +52,7 @@ pub(super) async fn collect_or_stream_pages<P, E, O>(
     pager: Pager<P, E>,
     args: &PageLimitArgs,
     mut observe: O,
-) -> Result<PagedListing<P>, CliError>
+) -> Result<PagedListing<P>>
 where
     P: PagedResponse,
     P::Item: serde::Serialize,

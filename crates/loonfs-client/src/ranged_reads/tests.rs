@@ -2,6 +2,9 @@
 
 use super::*;
 use crate::scripted_transport::{self, Outcome, ScriptedTransport};
+use crate::ClientConfig;
+use loonfs_types::options::ReadAt;
+use loonfs_types::PinId;
 use std::assert_matches;
 use std::num::NonZeroU64;
 

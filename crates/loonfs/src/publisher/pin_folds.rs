@@ -56,12 +56,7 @@ fn start_creations(
     let source = namespace_id.clone();
     let target = NamespaceId::parse(format!("{namespace_id}-fork")).expect("fork namespace id");
     vec![
-        tokio::spawn(async move {
-            namespace
-                .create_snapshot("snapshot", &crate::CreateSnapshotOptions::default())
-                .await
-                .map(|_| ())
-        }),
+        tokio::spawn(async move { namespace.create_snapshot("snapshot").await.map(|_| ()) }),
         tokio::spawn(async move {
             fork_writer
                 .fork_namespace(&source, &target, &loonfs_test_support::test_actor())
@@ -97,7 +92,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
     let snapshot = writer
         .open_namespace(&folded)
         .expect("open namespace")
-        .create_snapshot(
+        .create_snapshot_with_options(
             "fork-basis",
             &crate::CreateSnapshotOptions {
                 ttl_ms: std::num::NonZeroU64::new(60_000),

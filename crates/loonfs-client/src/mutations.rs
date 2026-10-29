@@ -1,10 +1,21 @@
 //! Commit submission and path-oriented filesystem mutations.
 
-use super::*;
 use crate::operations;
 use crate::uploads::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
-use loonfs_types::options::{AccessState, AttributeChanges};
-use loonfs_types::{headers, ActorId};
+use crate::{
+    Client, ClientError, MultipartUploadResume, NamespacePath, PayloadSource, PutFileJournal,
+    Result,
+};
+use loonfs_types::api::v0::{Commit, ContentToken};
+use loonfs_types::options::{
+    AccessState, AppendFileOptions, AttributeChanges, CommitOptions, CopyOptions,
+    CreateDirectoryOptions, DeleteOptions, MoveOptions, PutFileOptions, UndeleteOptions,
+    UpdateAccessOptions, UpdateAttributesOptions,
+};
+use loonfs_types::{
+    headers, ActorId, ChangeSeq, CommitRequest, ContentRef, FileContent, FilesystemOperation,
+    InodeId, NamespaceId, RevisionNo,
+};
 
 impl Client {
     /// Applies a commit atomically, preserving operation order.
@@ -19,12 +30,12 @@ impl Client {
         actor: &ActorId,
         request: &CommitRequest,
     ) -> Result<Commit> {
-        let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
+        let url = self.namespace_url(namespace_id, "/commits");
         // The request's commit id resolves an ambiguous resend through a durable receipt.
-        self.request_json::<_, Commit>(
-            self.post(&url).header(headers::ACTOR, actor.as_str()),
-            Some(request),
-            operations::CREATE_COMMIT,
+        self.send_json(
+            self.request(operations::CREATE_COMMIT, &url)
+                .header(headers::ACTOR, actor.as_str())
+                .json(request)?,
         )
         .await
     }
@@ -636,7 +647,16 @@ impl Client {
 mod tests {
     use super::*;
     use crate::transport::{retryable_transport_failure, FailureSource, DEFAULT};
-    use loonfs_types::{CommitId, ContentId, ErrorCode};
+    use crate::ClientConfig;
+    use loonfs_types::api::v0::{
+        CompleteUploadBody, CreateUploadBody, DeleteSnapshotResponse, ObjectTransferAccess,
+        UploadSession, UploadSessionStatus,
+    };
+    use loonfs_types::options::DeleteNamespaceOptions;
+    use loonfs_types::{
+        CommitId, ContentId, ErrorCode, ErrorResponse, NamespaceDiagnostics, NamespaceMetadata,
+        PinId, UploadId,
+    };
     use std::assert_matches;
     use std::fs;
     use tempfile::tempdir;
@@ -652,7 +672,7 @@ mod tests {
 
     #[test]
     fn construction_validates_config_like_load_does() {
-        let error = super::Client::new(super::ClientConfig {
+        let error = Client::new(ClientConfig {
             server_url: "ftp://example.com".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
@@ -662,7 +682,7 @@ mod tests {
         .expect_err("ftp scheme must be rejected");
         assert_matches!(
             &error,
-            super::ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
+            ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
                 field: "server_url",
                 ..
             }),
@@ -700,7 +720,7 @@ mod tests {
 
         for path in [missing, garbage] {
             let display = path.display().to_string();
-            let error = super::Client::new(super::ClientConfig {
+            let error = Client::new(ClientConfig {
                 server_url: "https://example.com".to_owned(),
                 auth_token: None,
                 request_timeout_ms: None,
@@ -709,12 +729,10 @@ mod tests {
             })
             .expect_err("unusable ca bundle");
             match &error {
-                super::ClientError::ConfigField(
-                    loonfs_types::config::ConfigFieldError::Invalid {
-                        field: "ca_cert_path",
-                        reason,
-                    },
-                ) => assert!(
+                ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
+                    field: "ca_cert_path",
+                    reason,
+                }) => assert!(
                     reason.contains(&display),
                     "the reason must name the path, got: {reason}"
                 ),
@@ -739,12 +757,14 @@ mod tests {
     fn retryable_transport_failure_covers_transport_and_unavailability_only() {
         let api = |code: &str| ClientError::Api {
             status: 503,
-            code: code.to_owned(),
-            feature: None,
-            message: String::new(),
-            param: None,
-            request_id: None,
-            details: None,
+            response: Box::new(ErrorResponse {
+                code: code.to_owned(),
+                feature: None,
+                message: String::new(),
+                param: None,
+                request_id: None,
+                details: None,
+            }),
         };
         assert!(retryable_transport_failure(
             FailureSource::Network,
@@ -887,7 +907,12 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .delete_namespace(&namespace_id, Some(ChangeSeq(7)))
+                .delete_namespace_with_options(
+                    &namespace_id,
+                    &DeleteNamespaceOptions {
+                        expected_head_seq: Some(ChangeSeq(7)),
+                    },
+                )
                 .await,
             &transport,
         );
@@ -900,7 +925,13 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .create_snapshot(&namespace_id, "backup", std::num::NonZeroU64::new(10_000))
+                .create_snapshot_with_options(
+                    &namespace_id,
+                    "backup",
+                    &crate::CreateSnapshotOptions {
+                        ttl_ms: std::num::NonZeroU64::new(10_000),
+                    },
+                )
                 .await,
             &transport,
         );
@@ -1026,7 +1057,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .create_direct_put_upload(&namespace_id, Some(b"direct".len() as u64))
+                .create_direct_put_upload_target(&namespace_id, Some(b"direct".len() as u64))
                 .await,
             &transport,
         );
@@ -1052,8 +1083,7 @@ mod tests {
     #[tokio::test]
     async fn retry_policy_proxied_upload_content_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let upload_id = loonfs_types::UploadId::parse("upl_00000000000000000000000001")
-            .expect("valid upload id");
+        let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("valid upload id");
         let response = UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
@@ -1082,8 +1112,7 @@ mod tests {
     #[tokio::test]
     async fn retry_policy_upload_completion_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let upload_id = loonfs_types::UploadId::parse("upl_00000000000000000000000001")
-            .expect("valid upload id");
+        let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("valid upload id");
         let content_ref = test_content_ref(b"content");
         let response = UploadSession {
             namespace_id: namespace_id.clone(),
@@ -1176,12 +1205,14 @@ mod tests {
     fn api_error(status: u16, code: &str) -> ClientError {
         ClientError::Api {
             status,
-            code: code.to_owned(),
-            feature: None,
-            message: "test".to_owned(),
-            param: None,
-            request_id: None,
-            details: None,
+            response: Box::new(ErrorResponse {
+                code: code.to_owned(),
+                feature: None,
+                message: "test".to_owned(),
+                param: None,
+                request_id: None,
+                details: None,
+            }),
         }
     }
 

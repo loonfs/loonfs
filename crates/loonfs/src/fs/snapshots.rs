@@ -49,14 +49,10 @@ impl<M: crate::Mode> Namespace<M> {
     /// Lists snapshots in ascending id order, including expired snapshots
     /// that garbage collection hasn't deleted.
     pub fn list_snapshots(&self) -> SnapshotsPager {
-        let reader = self.read_only();
-        loonfs_types::Pager::new(move |request| {
-            let reader = reader.clone();
-            async move {
-                reader
-                    .snapshots_page(super::core::decode_page_request(request)?)
-                    .await
-            }
+        loonfs_types::Pager::with_state(self.read_only(), |reader, request| async move {
+            reader
+                .snapshots_page(super::core::decode_page_request(request)?)
+                .await
         })
     }
 
@@ -94,6 +90,14 @@ impl<M: crate::Mode> Namespace<M> {
 }
 
 impl Namespace<Writable> {
+    /// Creates a snapshot of the current namespace state that doesn't expire.
+    ///
+    /// See [`Self::create_snapshot_with_options`].
+    pub async fn create_snapshot(&self, name: &str) -> Result<Snapshot> {
+        self.create_snapshot_with_options(name, &CreateSnapshotOptions::default())
+            .await
+    }
+
     /// Creates a snapshot of the current namespace state. The name is a
     /// label that doesn't need to be unique, and every call creates a new
     /// snapshot with a new id.
@@ -117,7 +121,7 @@ impl Namespace<Writable> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_snapshot(
+    pub async fn create_snapshot_with_options(
         &self,
         name: &str,
         options: &CreateSnapshotOptions,

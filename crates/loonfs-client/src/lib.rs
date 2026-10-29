@@ -9,10 +9,6 @@
 //! and decodes their responses, and the server does the work.
 
 #![warn(missing_docs)]
-#![allow(
-    clippy::result_large_err,
-    reason = "ClientError::Api exposes all structured server error fields"
-)]
 
 mod body;
 mod config;
@@ -26,6 +22,7 @@ mod operations;
 mod payload;
 mod query;
 mod ranged_reads;
+mod read_at_fields;
 mod reads;
 mod reqwest_transport;
 mod transport;
@@ -36,32 +33,11 @@ mod transport_error;
 mod scripted_transport;
 mod uploads;
 
-use bytes::Bytes;
-use futures::StreamExt as _;
-use loonfs_types::{
-    api::v0::{
-        Commit, CompleteUploadBody, CompletedUploadPart, ContentToken,
-        CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse,
-        CreateSnapshotRequest, CreateUploadBody, DeleteSnapshotResponse, ExtendSnapshotRequest,
-        GrepIndex, ListChangesResponse, ListSnapshotsResponse, ObjectTransferAccess,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, Snapshot,
-        StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadPartChecksumClaim,
-        UploadSession, UploadSessionStatus,
-    },
-    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, Checksum, ChecksumAlgorithm,
-    ChecksumDigest, CommitRequest, ContentRef, CreateNamespaceRequest, DeleteNamespaceResponse,
-    FileContent, FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListTrashResponse, NamespaceDiagnostics, NamespaceId,
-    NamespaceMetadata, PathEntry, PinId, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse,
-    SecretString, UploadId, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
-};
-use payload::PartReader;
+use loonfs_types::{CapabilityDocument, SecretString};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tower::{util::BoxCloneSyncService, Service};
+use transport::{StdMonotonicTimer, TransportRetryPolicy, DEFAULT};
 
 pub use body::Body;
 pub use config::ClientConfig;
@@ -71,22 +47,22 @@ pub use payload::{PayloadSource, PayloadStream};
 pub use query::GrepPager;
 pub use ranged_reads::FileRangeStream;
 pub use reads::{
-    ChangesPager, CreateNamespaceOptions, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
-    SnapshotsPager, TrashPager,
+    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, SnapshotsPager,
+    TrashPager,
 };
-use transport::{StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT};
 pub use transport_error::TransportError;
 
 /// Per-operation options, defined once in `loonfs-types` and shared with the
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
 pub use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
-    Consistency, CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
-    ListFileRevisionsOptions, ListOptions, ListTrashOptions, MoveOptions, PutFileOptions, ReadAt,
-    ReadFileOptions, ReadRange, StatOptions, UndeleteDestination, UndeleteOptions,
-    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
-    UpdateAttributesOptions,
+    Consistency, CopyOptions, CreateDirectoryOptions, CreateNamespaceOptions,
+    CreateSnapshotOptions, DeleteByInodeOptions, DeleteNamespaceOptions, DeleteOptions,
+    DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, GcOptions,
+    ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions, MoveOptions,
+    PutFileOptions, ReadAt, ReadFileOptions, ReadRange, StatOptions, UndeleteDestination,
+    UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.
@@ -202,7 +178,7 @@ impl Client {
         }
         let url = format!("{}/v0/capabilities", self.base_url);
         let mut document: CapabilityDocument = self
-            .request_json::<(), _>(self.get(&url), None, operations::GET_CAPABILITIES)
+            .send_json(self.request(operations::GET_CAPABILITIES, &url))
             .await?;
         document.retain_well_formed();
         // If a racing clone fetched first, keep its copy; both came from the
@@ -218,7 +194,7 @@ impl Client {
     /// Checks the server's health endpoint.
     pub async fn get_health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
-        self.call(&self.get(&url), None, operations::GET_HEALTH)
+        self.call(&self.request(operations::GET_HEALTH, &url))
             .await?;
         Ok(())
     }

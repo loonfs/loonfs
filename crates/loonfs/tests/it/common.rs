@@ -410,7 +410,7 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<Snapshot> {
         self.namespace_writer(namespace_id)?
-            .create_snapshot("test-pin", &loonfs::CreateSnapshotOptions::default())
+            .create_snapshot("test-pin")
             .await
     }
 

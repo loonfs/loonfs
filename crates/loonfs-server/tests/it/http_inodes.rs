@@ -311,7 +311,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .expect("create deleted namespace");
     harness
         .client
-        .delete_namespace(&deleted_namespace, None)
+        .delete_namespace(&deleted_namespace)
         .await
         .expect("delete namespace");
     assert_api_code(

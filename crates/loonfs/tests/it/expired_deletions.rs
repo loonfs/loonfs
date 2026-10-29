@@ -2,9 +2,9 @@
 //! reached, and the trash listing of a fork.
 
 use loonfs::{
-    AccessState, ChangeSeq, CreateNamespaceOptions, CreateSnapshotOptions, DeleteDirectoryBehavior,
-    DeleteOptions, ErrorCode, InodeId, LoonFs, Namespace, PinId, ReadAt, ReadOnly, RevisionNo,
-    SharedObjectStore, StatOptions, Writable,
+    AccessState, ChangeSeq, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
+    ErrorCode, InodeId, LoonFs, Namespace, PinId, ReadAt, ReadOnly, RevisionNo, SharedObjectStore,
+    StatOptions, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -338,7 +338,7 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
         .expect("stat")
         .inode_id;
     let snapshot_id = namespace
-        .create_snapshot("before", &CreateSnapshotOptions::default())
+        .create_snapshot("before")
         .await
         .expect("create snapshot")
         .snapshot_id;

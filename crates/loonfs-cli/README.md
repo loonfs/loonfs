@@ -476,7 +476,9 @@ Profile create options
     --secret-access-key <secret>       static credentials only
     --session-token <token>            optional static session token
     --endpoint-url <url>               optional
-    --force-path-style                 optional
+    --force-path-style[=<path|virtual-hosted>]
+                                       optional. The bare flag selects
+                                       path-style addressing
 
   loonfs profile create r2:
     --bucket <name>
@@ -508,8 +510,9 @@ Update options
 
   A flag that doesn't apply to the profile's own store is rejected. The
   mode and the store kind can't be changed after the profile is created.
-  S3 updates accept --force-path-style true or false. Omit it to keep the
-  stored value.
+  S3 updates accept --force-path-style=path or
+  --force-path-style=virtual-hosted, and the bare flag selects path-style
+  addressing. Omit it to keep the stored value.
 
   Shared:
     --key-prefix <prefix>
@@ -525,7 +528,7 @@ Update options
     --secret-access-key <secret>
     --session-token <token>
     --endpoint-url <url>
-    --force-path-style <true|false>
+    --force-path-style[=<path|virtual-hosted>]
 
   cloudflare_r2 profile updates:
     --bucket <name>

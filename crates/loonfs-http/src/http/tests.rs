@@ -1306,13 +1306,11 @@ async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
         .expect_err("the recreated inode must fail the precondition")
     {
         ClientError::Api {
-            status,
-            code,
-            details: Some(details),
-            ..
+            status, response, ..
         } => {
             assert_eq!(status, 409);
-            assert_eq!(code, "path_conflict");
+            assert_eq!(response.code, "path_conflict");
+            let details = response.details.expect("structured path conflict details");
             assert_eq!(details.expected_inode_id, Some(observed.inode_id));
             assert_eq!(details.actual_inode_id, Some(recreated.inode_id));
         }
@@ -2688,23 +2686,22 @@ async fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
     match result {
         Err(ClientError::Api {
             status: actual_status,
-            code: actual_code,
-            feature,
-            message,
+            response,
             ..
         }) => {
             assert_eq!(actual_status, status);
-            assert_eq!(actual_code, code.as_str());
+            assert_eq!(response.code, code.as_str());
             assert!(
-                message.contains(message_fragment),
-                "expected `{message_fragment}` in `{message}`"
+                response.message.contains(message_fragment),
+                "expected `{message_fragment}` in `{}`",
+                response.message
             );
             if code == ErrorCode::NotSupported {
                 // The reported feature is the capability key clients gate
                 // on, not a private name for the index.
-                assert_eq!(feature.as_deref(), Some(FEATURE_QUERY_GREP));
+                assert_eq!(response.feature.as_deref(), Some(FEATURE_QUERY_GREP));
             } else {
-                assert_eq!(feature, None);
+                assert_eq!(response.feature, None);
             }
         }
         other => panic!(
@@ -2844,14 +2841,13 @@ fn assert_error_response<T: std::fmt::Debug>(
     match result {
         Err(ClientError::Api {
             status: actual_status,
-            code: actual_code,
-            message: actual_message,
+            response,
             ..
         }) => {
             assert_eq!(actual_status, status);
-            assert_eq!(actual_code, code);
+            assert_eq!(response.code, code);
             if let Some(expected_message) = message {
-                assert_eq!(actual_message, expected_message);
+                assert_eq!(response.message, expected_message);
             }
         }
         other => panic!("expected api error {status} {code}, got {other:?}"),
@@ -3146,7 +3142,7 @@ mod direct_download {
             .expect("put file");
         let inode_id = client.stat(&path).await.expect("stat").inode_id;
         let checkpoint_id = client
-            .create_snapshot(&namespace, "pinned", None)
+            .create_snapshot(&namespace, "pinned")
             .await
             .expect("snapshot")
             .snapshot_id;
@@ -3197,13 +3193,10 @@ mod direct_download {
         for (result, expected) in cases {
             match result {
                 Err(ClientError::Api {
-                    status,
-                    code,
-                    param,
-                    ..
+                    status, response, ..
                 }) => {
-                    assert_eq!((status, code.as_str()), (400, "invalid_request"));
-                    assert_eq!(param.as_deref(), Some(expected));
+                    assert_eq!((status, response.code.as_str()), (400, "invalid_request"));
+                    assert_eq!(response.param.as_deref(), Some(expected));
                 }
                 other => panic!("expected invalid_request at `{expected}`, got {other:?}"),
             }
@@ -3716,10 +3709,9 @@ mod direct_download {
             result,
             Err(ClientError::Api {
                 status: 400,
-                code,
-                param: Some(param),
-                ..
-            }) if code == ErrorCode::InvalidRequest.as_str() && param == "/start_offset"
+                response,
+            }) if response.code == ErrorCode::InvalidRequest.as_str()
+                && response.param.as_deref() == Some("/start_offset")
         );
     }
 
@@ -3946,14 +3938,14 @@ mod direct_download {
             .expect_err("a deployment with no issuer cannot grant reads");
         match &error {
             ClientError::Api {
-                status,
-                code,
-                feature,
-                ..
+                status, response, ..
             } => {
                 assert_eq!(*status, 501);
-                assert_eq!(code, ErrorCode::NotSupported.as_str());
-                assert_eq!(feature.as_deref(), Some(FEATURE_DOWNLOADS_DIRECT_GET));
+                assert_eq!(response.code, ErrorCode::NotSupported.as_str());
+                assert_eq!(
+                    response.feature.as_deref(),
+                    Some(FEATURE_DOWNLOADS_DIRECT_GET)
+                );
             }
             other => panic!("expected a typed not_supported, got {other:?}"),
         }
@@ -3968,14 +3960,14 @@ mod direct_download {
             .expect_err("the inode route honors the same provider gate");
         match inode_error {
             ClientError::Api {
-                status,
-                code,
-                feature,
-                ..
+                status, response, ..
             } => {
                 assert_eq!(status, 501);
-                assert_eq!(code, ErrorCode::NotSupported.as_str());
-                assert_eq!(feature.as_deref(), Some(FEATURE_DOWNLOADS_DIRECT_GET));
+                assert_eq!(response.code, ErrorCode::NotSupported.as_str());
+                assert_eq!(
+                    response.feature.as_deref(),
+                    Some(FEATURE_DOWNLOADS_DIRECT_GET)
+                );
             }
             other => panic!("expected a typed not_supported, got {other:?}"),
         }
@@ -4049,7 +4041,7 @@ mod direct_download {
             .await
             .expect("create namespace");
         let begin = client
-            .create_direct_put_upload(&namespace_id, Some(5))
+            .create_direct_put_upload_target(&namespace_id, Some(5))
             .await
             .expect("begin direct put");
 
@@ -4086,15 +4078,12 @@ mod direct_download {
             .expect_err("multipart completion body does not belong to direct put");
         match error {
             ClientError::Api {
-                status,
-                code,
-                message,
-                ..
+                status, response, ..
             } => {
                 assert_eq!(status, 400);
-                assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+                assert_eq!(response.code, ErrorCode::InvalidRequest.as_str());
                 assert_eq!(
-                    message,
+                    response.message,
                     "invalid upload content: completion mode `direct_multipart` does not match \
                      stored upload mode `direct_put`"
                 );

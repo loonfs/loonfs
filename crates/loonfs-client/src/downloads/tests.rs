@@ -4,9 +4,10 @@
 
 use super::*;
 use crate::scripted_transport::{self, Outcome};
-use loonfs_types::api::v0::ObjectTransferAccess;
+use crate::ClientConfig;
+use loonfs_types::options::{Consistency, ReadAt};
 use loonfs_types::{
-    CapabilityDocument, ContentId, ContentRef, API_GROUP_FILESYSTEM_V0, PROTOCOL_VERSION,
+    AbsolutePath, CapabilityDocument, ContentId, PinId, API_GROUP_FILESYSTEM_V0, PROTOCOL_VERSION,
 };
 use std::assert_matches;
 use std::collections::BTreeMap;

@@ -1,10 +1,12 @@
 //! Per-operation options and payloads shared by the embedded runtime and HTTP
 //! client.
 
+use crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
-    AttributesRevisionNo, CommitId, CommitPrecondition, DeleteDirectoryBehavior,
-    DestinationBehavior, DestinationPrecondition, DisplayName, InodeId, PinId, RevisionNo,
+    AttributesRevisionNo, ChangeSeq, CommitId, CommitPrecondition, DeleteDirectoryBehavior,
+    DestinationBehavior, DestinationPrecondition, DisplayName, InodeId, NamespaceAccess, PinId,
+    RevisionNo,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -132,6 +134,14 @@ pub struct CommitOptions {
     pub message: Option<String>,
     /// Ordered admission conditions evaluated before any operations.
     pub preconditions: Vec<CommitPrecondition>,
+}
+
+impl CommitOptions {
+    /// Returns the caller's commit ID, or a generated one when the caller set
+    /// none.
+    pub fn commit_id_or_generate(&self) -> CommitId {
+        self.commit_id.clone().unwrap_or_else(CommitId::generate)
+    }
 }
 
 /// Options for stating one entry by path or by inode.
@@ -504,6 +514,86 @@ pub struct DirectMultipartUploadOptions {
 pub struct ForkNamespaceOptions {
     /// Fork from this unexpired snapshot instead of the current head.
     pub snapshot_id: Option<PinId>,
+}
+
+/// Options for creating a namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateNamespaceOptions {
+    /// The access mode, which can't be changed after the namespace is created.
+    pub access: NamespaceAccess,
+    /// The namespace's retention window, which a host's scheduled retention
+    /// advance uses instead of the host's own setting, or `None` when the
+    /// host's window applies.
+    pub retention_window_ms: Option<NonZeroU64>,
+    /// Whether creating a namespace that already exists succeeds and returns
+    /// the existing namespace's state.
+    pub allow_existing: bool,
+}
+
+impl Default for CreateNamespaceOptions {
+    fn default() -> Self {
+        Self {
+            access: NamespaceAccess::Unrestricted {},
+            retention_window_ms: None,
+            allow_existing: false,
+        }
+    }
+}
+
+/// Options for deleting a namespace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteNamespaceOptions {
+    /// Delete only if the head is still at this sequence. A mismatch fails
+    /// with `stale_head` instead of deleting work the caller has not seen.
+    pub expected_head_seq: Option<ChangeSeq>,
+}
+
+/// Options for creating a snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CreateSnapshotOptions {
+    /// The snapshot's lifetime in milliseconds, counted from the clock of the
+    /// runtime or server that creates the snapshot. Without it, the snapshot
+    /// doesn't expire.
+    pub ttl_ms: Option<NonZeroU64>,
+}
+
+/// Default layout rows one content shard of a garbage collection pass covers.
+/// A pass picks the shard width that splits its layout rows into shards of
+/// about this many, so it holds the extent keys of about 65,536 rows at once.
+const GC_CONTENT_SHARD_ROWS: usize = 65_536;
+
+/// Options for one garbage collection pass over a namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcOptions {
+    /// How old an unreferenced object must be before the pass deletes it, in
+    /// milliseconds. A runtime rejects a window below its derived minimum.
+    pub grace_window_ms: u64,
+    /// About how many layout rows one content shard of the pass covers. The
+    /// wire request has no field for it, so a pass that a server runs uses
+    /// the default.
+    pub content_shard_rows: usize,
+}
+
+impl Default for GcOptions {
+    fn default() -> Self {
+        Self {
+            grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
+            content_shard_rows: GC_CONTENT_SHARD_ROWS,
+        }
+    }
+}
+
+impl GcOptions {
+    /// Converts a wire collection request. An absent grace window takes the
+    /// default.
+    pub fn from_request(request: crate::GcRequest) -> Self {
+        Self {
+            grace_window_ms: request
+                .grace_window_ms
+                .unwrap_or(GC_DEFAULT_GRACE_WINDOW_MS),
+            ..Self::default()
+        }
+    }
 }
 
 #[cfg(test)]

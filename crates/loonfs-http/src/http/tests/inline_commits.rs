@@ -469,8 +469,8 @@ async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised()
         } else {
             assert_matches!(
                 retry,
-                Err(ClientError::Api { code, .. })
-                    if code == ErrorCode::CommitIdReuseConflict.as_str()
+                Err(ClientError::Api { response, .. })
+                    if response.code == ErrorCode::CommitIdReuseConflict.as_str()
             );
         }
         harness.state.runtime.shutdown().await.expect("shutdown");

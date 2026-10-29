@@ -1,112 +1,91 @@
 //! `loonfs profile` commands: list, show, create, update, and delete.
 
-use super::context::fail;
+use super::context::Invocation;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::profile_config::{
-    apply_update_flags, apply_update_interactive, build_profile_from_create_spec,
-    create_profile_spec_from_create, has_update_flags, profile_update_spec,
+    apply_update_flags, apply_update_interactive, build_profile_from_command,
     validate_update_provider,
 };
-use crate::args::{
-    CommandKind, ProfileCommand, ProfileCreateCommand, ProfileUpdateCommand, RuntimeBehavior,
-};
+use crate::args::{ProfileCommand, ProfileProviderCommand};
 use crate::config::{
     load_config, load_config_for_repair, load_config_if_exists, mutate_config, save_config_table,
-    ConfigLoad, ProfileConfig,
+    ConfigLoad, ProfileConfig, ProfileMode,
 };
-use crate::error::CliError;
+use crate::error::{CliError, Result};
 use crate::profiles::{
     add_profile, delete_profile, delete_profile_in_table, list_profiles, set_default_profile,
     set_default_profile_in_table, show_profile, update_profile, NamedProfile,
 };
 use crate::prompt;
-use std::path::Path;
 
 pub(crate) fn run_profile_command(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     command: ProfileCommand,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
+    let config_path = invocation.config.path.as_path();
     match command {
-        ProfileCommand::Create { provider } => {
-            run_profile_create(kind, config_path, *provider, runtime)
-        }
+        ProfileCommand::Create { provider } => run_profile_create(invocation, *provider),
         ProfileCommand::List => {
-            let config = load_config_if_exists(config_path)
-                .map_err(|error| fail(kind, None, None, error))?;
-            Ok(CommandOutput {
-                kind,
-                profile: None,
-                mode: None,
-                data: CommandData::ProfileList {
-                    default_profile: config.as_ref().and_then(|c| c.default_profile.clone()),
-                    profiles: list_profiles(config.as_ref()),
-                },
-            })
+            let config =
+                load_config_if_exists(config_path).map_err(|error| invocation.fail(error))?;
+            Ok(invocation.output(CommandData::ProfileList {
+                default_profile: config.as_ref().and_then(|c| c.default_profile.clone()),
+                profiles: list_profiles(config.as_ref()),
+            }))
         }
         ProfileCommand::Show { name } => {
-            let config =
-                load_config(config_path).map_err(|error| fail(kind, name.clone(), None, error))?;
-            let shown = show_profile(&config, name.as_deref())
-                .map_err(|error| fail(kind, name.clone(), None, error))?;
-            Ok(CommandOutput {
-                kind,
-                profile: Some(shown.name),
-                mode: Some(shown.profile.mode_str().to_owned()),
-                data: CommandData::Profile {
-                    profile: shown.profile,
-                    default_profile: None,
-                },
-            })
+            let shown = load_config(config_path)
+                .and_then(|config| show_profile(&config, name.as_deref()))
+                .map_err(|error| invocation.fail_for_profile(name.as_deref(), error))?;
+            Ok(profile_output(invocation, shown, None))
         }
-        ProfileCommand::Update { provider } => {
-            run_profile_update(kind, config_path, *provider, runtime)
-        }
-        ProfileCommand::Delete { name } => run_profile_delete(kind, config_path, &name, runtime),
-        ProfileCommand::Use { name } => run_profile_use(kind, config_path, &name),
+        ProfileCommand::Update { provider } => run_profile_update(invocation, *provider),
+        ProfileCommand::Delete { name } => run_profile_delete(invocation, &name),
+        ProfileCommand::Use { name } => run_profile_use(invocation, &name),
+    }
+}
+
+fn profile_output(
+    invocation: &Invocation,
+    named: NamedProfile<ProfileConfig>,
+    default_profile: Option<String>,
+) -> CommandOutput {
+    CommandOutput {
+        kind: invocation.kind,
+        profile: Some(named.name),
+        mode: Some(named.profile.mode()),
+        data: CommandData::Profile {
+            profile: named.profile,
+            default_profile,
+        },
     }
 }
 
 fn run_profile_create(
-    kind: CommandKind,
-    config_path: &Path,
-    command: ProfileCreateCommand,
-    runtime: RuntimeBehavior,
+    invocation: &Invocation,
+    command: ProfileProviderCommand,
 ) -> Result<CommandOutput, CommandFailure> {
-    let NamedProfile {
-        name,
-        profile: spec,
-    } = create_profile_spec_from_create(command);
-    let (result, default_profile) = (|| {
-        let profile = build_profile_from_create_spec(&name, spec, runtime)?;
-        mutate_config(config_path, |config| {
-            let result = add_profile(config, &name, profile)?;
-            Ok((result, config.default_profile.clone()))
-        })
-    })()
-    .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
+    let name = command.name().to_owned();
+    let (result, default_profile) =
+        build_profile_from_command(&command, &invocation.selectors.subject, invocation.behavior)
+            .and_then(|profile| {
+                mutate_config(&invocation.config.path, |config| {
+                    let result = add_profile(config, &name, profile)?;
+                    Ok((result, config.default_profile.clone()))
+                })
+            })
+            .map_err(|error| invocation.fail_for_profile(Some(&name), error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(result.name),
-        mode: Some(result.profile.mode_str().to_owned()),
-        data: CommandData::Profile {
-            profile: result.profile,
-            default_profile,
-        },
-    })
+    Ok(profile_output(invocation, result, default_profile))
 }
 
 fn run_profile_update(
-    kind: CommandKind,
-    config_path: &Path,
-    command: ProfileUpdateCommand,
-    runtime: RuntimeBehavior,
+    invocation: &Invocation,
+    command: ProfileProviderCommand,
 ) -> Result<CommandOutput, CommandFailure> {
-    let spec = profile_update_spec(command);
-    let name = spec.name.clone();
-    let result = (|| -> Result<NamedProfile<ProfileConfig>, CliError> {
+    let name = command.name().to_owned();
+    let config_path = invocation.config.path.as_path();
+    let result = (|| -> Result<NamedProfile<ProfileConfig>> {
         // The update is gathered before the lock: the interactive editor can
         // sit at a prompt for minutes, and holding the config lock across it
         // would block every other writer. `update_profile` re-checks the
@@ -118,10 +97,11 @@ fn run_profile_update(
             .ok_or_else(|| CliError::profile_not_found(&name))?
             .clone();
 
-        let updated = if has_update_flags(&spec) {
-            apply_update_flags(&name, existing, &spec)?
-        } else if runtime.interactive {
-            validate_update_provider(&name, &existing, &spec)?;
+        let subject = &invocation.selectors.subject;
+        let updated = if command.has_update_flags(subject) {
+            apply_update_flags(existing, &command, subject)?
+        } else if invocation.behavior.interactive {
+            validate_update_provider(&existing, &command)?;
             apply_update_interactive(&name, existing)?
         } else {
             return Err(CliError::non_interactive_input_required(
@@ -131,98 +111,74 @@ fn run_profile_update(
 
         mutate_config(config_path, |config| update_profile(config, &name, updated))
     })()
-    .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
+    .map_err(|error| invocation.fail_for_profile(Some(&name), error))?;
 
-    Ok(CommandOutput {
-        kind,
-        profile: Some(result.name),
-        mode: Some(result.profile.mode_str().to_owned()),
-        data: CommandData::Profile {
-            profile: result.profile,
-            default_profile: None,
-        },
-    })
+    Ok(profile_output(invocation, result, None))
 }
 
 fn run_profile_delete(
-    kind: CommandKind,
-    config_path: &Path,
+    invocation: &Invocation,
     name: &str,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    if runtime.interactive {
+    let fail = |mode: Option<ProfileMode>, error: CliError| {
+        super::context::fail(invocation.kind, Some(name.to_owned()), mode, error)
+    };
+    if invocation.behavior.interactive {
         let confirmed = prompt::prompt_confirm(&format!("delete profile `{name}`?"))
-            .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+            .map_err(|error| fail(None, error))?;
         if !confirmed {
-            return Err(fail(
-                kind,
-                Some(name.to_owned()),
-                None,
-                CliError::cancelled(),
-            ));
+            return Err(fail(None, CliError::cancelled()));
         }
     }
 
     // Delete is a repair command: it operates on the loose table when the
     // strict decode fails, so the profile that broke the config can still be
     // removed with the tool that manages it.
-    let loaded = load_config_for_repair(config_path)
-        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    let config_path = invocation.config.path.as_path();
+    let loaded = load_config_for_repair(config_path).map_err(|error| fail(None, error))?;
     let removed = match loaded {
         ConfigLoad::Valid(_) => {
             let mut removed_mode = None;
             mutate_config(config_path, |config| {
                 let removed = delete_profile(config, name)?;
-                removed_mode = Some(removed.mode.clone());
+                removed_mode = ProfileMode::parse(&removed.mode);
                 Ok(removed)
             })
-            .map_err(|error| fail(kind, Some(name.to_owned()), removed_mode, error))?
+            .map_err(|error| fail(removed_mode, error))?
         }
         ConfigLoad::Degraded { mut table, .. } => {
-            let removed = delete_profile_in_table(&mut table, name)
-                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-            save_config_table(config_path, &table).map_err(|error| {
-                fail(
-                    kind,
-                    Some(name.to_owned()),
-                    Some(removed.mode.clone()),
-                    error,
-                )
-            })?;
+            let removed =
+                delete_profile_in_table(&mut table, name).map_err(|error| fail(None, error))?;
+            save_config_table(config_path, &table)
+                .map_err(|error| fail(ProfileMode::parse(&removed.mode), error))?;
             removed
         }
     };
     Ok(CommandOutput {
-        kind,
+        kind: invocation.kind,
         profile: Some(name.to_owned()),
-        mode: Some(removed.mode.clone()),
+        mode: ProfileMode::parse(&removed.mode),
         data: CommandData::ProfileSummary(removed),
     })
 }
 
-fn run_profile_use(
-    kind: CommandKind,
-    config_path: &Path,
-    name: &str,
-) -> Result<CommandOutput, CommandFailure> {
+fn run_profile_use(invocation: &Invocation, name: &str) -> Result<CommandOutput, CommandFailure> {
     // Use is a repair command like delete: switching the default away from a
     // profile that broke the config must not require hand-editing the file.
-    let loaded = load_config_for_repair(config_path)
-        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    let config_path = invocation.config.path.as_path();
+    let fail = |error| invocation.fail_for_profile(Some(name), error);
+    let loaded = load_config_for_repair(config_path).map_err(fail)?;
     match loaded {
         ConfigLoad::Valid(_) => {
-            mutate_config(config_path, |config| set_default_profile(config, name))
-                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?
+            mutate_config(config_path, |config| set_default_profile(config, name)).map_err(fail)?
         }
         ConfigLoad::Degraded { mut table, .. } => {
-            set_default_profile_in_table(&mut table, name)
-                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-            save_config_table(config_path, &table)
-                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+            set_default_profile_in_table(&mut table, name).map_err(fail)?;
+            save_config_table(config_path, &table).map_err(fail)?;
         }
     }
     Ok(CommandOutput {
-        kind,
+        kind: invocation.kind,
         profile: Some(name.to_owned()),
         mode: None,
         data: CommandData::DefaultProfile {
