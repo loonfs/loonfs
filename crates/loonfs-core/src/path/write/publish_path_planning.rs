@@ -6,7 +6,7 @@ use crate::commit::{AppendedContent, CandidateAllocation, CommitOperation, Resol
 use crate::error::{CoreError, Result};
 use crate::metadata::access::{access_chain, effective_rights, is_administrator};
 use crate::metadata::MetadataVisibilityReads;
-use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
+use crate::metadata::{AccessRevisionRecord, MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::read;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
@@ -17,6 +17,7 @@ use loonfs_types::{
 use loonfs_types::{AccessGrants, AccessRight, AccessRights, PrincipalId};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 pub(super) fn is_missing_visible_path(error: &CoreError) -> bool {
     matches!(
@@ -454,8 +455,8 @@ impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
     pub(super) async fn authorize_access_update(
         &self,
         target: InodeId,
-        current: (bool, &AccessGrants),
-        next: (bool, &AccessGrants),
+        current: AccessStateRef<'_>,
+        next: AccessStateRef<'_>,
         absence: Absence<'_>,
     ) -> Result<()> {
         let Authorizer::Subject { principals } = self.authorizer else {
@@ -466,7 +467,8 @@ impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
         if effective.is_empty() {
             return Err(absence.not_found(target));
         }
-        if target == ROOT_INODE_ID && administrators(current.1) != administrators(next.1) {
+        if target == ROOT_INODE_ID && administrators(current.grants) != administrators(next.grants)
+        {
             return if is_administrator(&mut reads, principals).await? {
                 Ok(())
             } else {
@@ -476,18 +478,24 @@ impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
         if effective.contains(AccessRight::Manage) {
             return Ok(());
         }
-        if current.0 != next.0 {
+        if current.boundary != next.boundary {
             return Err(CoreError::Forbidden { inode_id: target });
         }
         let named: BTreeSet<&PrincipalId> = current
-            .1
+            .grants
             .iter()
-            .chain(next.1.iter())
+            .chain(next.grants.iter())
             .map(|(principal, _)| principal)
             .collect();
         for principal in named {
-            let added = next.1.get(principal).difference(current.1.get(principal));
-            let removed = current.1.get(principal).difference(next.1.get(principal));
+            let added = next
+                .grants
+                .get(principal)
+                .difference(current.grants.get(principal));
+            let removed = current
+                .grants
+                .get(principal)
+                .difference(next.grants.get(principal));
             if !added.union(removed).is_subset_of(effective) {
                 return Err(CoreError::Forbidden { inode_id: target });
             }
@@ -496,6 +504,31 @@ impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
             Ok(())
         } else {
             Err(CoreError::Forbidden { inode_id: target })
+        }
+    }
+}
+
+/// An inode's boundary flag and direct grants, borrowed for one access check.
+#[derive(Clone, Copy)]
+pub(super) struct AccessStateRef<'a> {
+    pub(super) boundary: bool,
+    pub(super) grants: &'a AccessGrants,
+}
+
+impl<'a> AccessStateRef<'a> {
+    /// Returns the access that `row` records, which is no boundary and no
+    /// grants when the inode has no access row.
+    pub(super) fn from_row(row: Option<&'a AccessRevisionRecord>) -> Self {
+        static NO_GRANTS: LazyLock<AccessGrants> = LazyLock::new(AccessGrants::default);
+        match row {
+            Some(row) => Self {
+                boundary: row.boundary,
+                grants: &row.grants,
+            },
+            None => Self {
+                boundary: false,
+                grants: &NO_GRANTS,
+            },
         }
     }
 }

@@ -9,8 +9,7 @@ async fn assert_leaf_reads_every_owner(store: &LocalFsStore, namespaces: &[Names
         .expect("fresh leaf view");
     for (index, owner) in namespaces.iter().enumerate() {
         let file = view
-            .get_file_bytes(
-                store,
+            .read_file_bytes(
                 &format!("/owned-{index}"),
                 None,
                 &ReadAccess::live(Authorizer::Unrestricted),

@@ -226,7 +226,7 @@ async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_r
         complete_proxied(&store, &namespace_id, &upload_id, 4_000)
             .await
             .map(drop),
-        crate::protocol::get_upload_status(&store, &namespace_id, &upload_id, None, 4_000)
+        crate::protocol::get_upload(&store, &namespace_id, &upload_id, None, 4_000)
             .await
             .map(drop),
     ] {

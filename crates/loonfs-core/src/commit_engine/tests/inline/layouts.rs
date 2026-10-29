@@ -357,7 +357,6 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     let access = ReadAccess::live(Authorizer::Unrestricted);
     assert_eq!(
         view.direct_download_target(
-            &store,
             "/file-0",
             None,
             0,
@@ -390,7 +389,6 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     ] {
         let target = view
             .direct_download_target(
-                &store,
                 "/file-0",
                 Some(revision),
                 0,
@@ -561,7 +559,7 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     let content_writes = crate::test_support::content_writes();
     store.reset();
     let target = view
-        .direct_download_target(&store, "/file-0", None, 105, &access, &content_writes)
+        .direct_download_target("/file-0", None, 105, &access, &content_writes)
         .await
         .expect("resumed ranges");
     assert_eq!(
@@ -582,7 +580,6 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     assert!(content_operations(&store).is_empty());
     let previous = view
         .direct_download_target(
-            &store,
             "/file-0",
             Some(RevisionNo(2)),
             105,
@@ -607,7 +604,6 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
         .expect("view");
     let target = view
         .direct_download_target(
-            &store,
             "/empty-0",
             None,
             0,
@@ -1052,7 +1048,6 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
                 blocked.block_next();
             }
             let mut download = std::pin::pin!(view.direct_download_target(
-                &blocked,
                 "/file-0",
                 Some(revision),
                 0,
@@ -1238,7 +1233,6 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
             .expect("view");
         let read = view
             .read_file_revision_bytes(
-                &store,
                 "/target-0",
                 RevisionNo(2),
                 None,
@@ -1291,7 +1285,7 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
     store.reset();
     for path in ["/file-0", "/file-1"] {
         assert_matches!(
-            view.direct_download_target(&denied, path, None, 10, &access, &content_writes)
+            view.direct_download_target(path, None, 10, &access, &content_writes)
                 .await,
             Err(CoreError::ResumeOffsetOutOfRange { .. })
         );
@@ -1299,7 +1293,7 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
     assert_eq!(denied.attempts(), 0);
     for path in ["/file-0", "/file-1"] {
         assert_matches!(
-            view.direct_download_target(&denied, path, None, 0, &access, &content_writes)
+            view.direct_download_target(path, None, 0, &access, &content_writes)
                 .await,
             Err(CoreError::ContentNotMaterialized { .. })
         );
@@ -1523,7 +1517,6 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 .expect("view");
             let bytes = view
                 .read_file_revision_bytes(
-                    &store,
                     if restore { "/file-0" } else { "/target-0" },
                     RevisionNo(if restore { 4 } else { 2 }),
                     None,

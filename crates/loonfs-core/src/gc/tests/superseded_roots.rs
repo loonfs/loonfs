@@ -167,8 +167,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
             assert_eq!(retained.deleted.metadata_segments, 0);
             assert_eq!(retained.retained.within_grace_window, 0);
             let file = view
-                .get_file_bytes(
-                    &store,
+                .read_file_bytes(
                     "/docs/one",
                     None,
                     &ReadAccess::live(Authorizer::Unrestricted),

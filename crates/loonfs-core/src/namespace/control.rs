@@ -51,6 +51,19 @@ pub struct LoadedManifest {
     pub state: CurrentManifest,
 }
 
+pub(crate) fn ensure_head_identity(
+    head: &NamespaceReadState,
+    namespace_id: &NamespaceId,
+) -> crate::error::Result<()> {
+    if &head.namespace_id != namespace_id {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "head namespace `{}` does not match requested namespace `{}`",
+            head.namespace_id, namespace_id
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_namespace_live(head: &NamespaceReadState) -> crate::error::Result<()> {
     if head.status.is_deleted() {
         return Err(CoreError::NamespaceDeleted {

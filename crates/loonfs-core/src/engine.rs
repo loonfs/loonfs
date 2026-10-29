@@ -522,7 +522,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.get_file_bytes(&self.store, path.as_ref(), max_content_bytes, &access)
+        view.read_file_bytes(path.as_ref(), max_content_bytes, &access)
             .await
     }
 
@@ -537,7 +537,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.get_file_bytes_by_inode(&self.store, inode_id, max_content_bytes, &access)
+        view.read_file_bytes_by_inode(inode_id, max_content_bytes, &access)
             .await
     }
 
@@ -567,9 +567,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        let (entry, content_ref) = view
+        let entry = view
             .resolve_file_content(path.as_ref(), revision_no, &access)
             .await?;
+        let content_ref = crate::path::read::file_content_ref(&entry)?;
         range.ensure_within(content_ref.size_bytes)?;
         Ok(FileContentStream::open_inner(
             self.store.clone(),
@@ -632,7 +633,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
         view.direct_download_target(
-            &self.store,
             path.as_ref(),
             revision_no,
             start_offset,
@@ -655,7 +655,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
         view.direct_download_target_by_inode(
-            &self.store,
             inode_id,
             revision_no,
             start_offset,
@@ -685,7 +684,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         path: impl AsRef<str>,
         request: PageRequest<FileRevisionsPageCursor>,
         context: &RuntimeReadContext,
-    ) -> Result<(InodeId, Page<FileRevision, FileRevisionsPageCursor>)> {
+    ) -> Result<crate::path::read::FileRevisionsPage> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
@@ -711,15 +710,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// The method ignores the current metadata basis and WAL tail, so every page
     /// comes from the same snapshot even when new commits arrive. The read
     /// context is used only to validate the namespace identity and confirm that
-    /// it has not been deleted. A snapshot that expired at or before `now_ms`
-    /// returns `snapshot_not_found`.
+    /// it has not been deleted. A snapshot that expired at or before the
+    /// current wall-clock time returns `snapshot_not_found`.
     pub async fn list_checkpoint_files_page(
         &self,
         checkpoint_id: &PinId,
         request: PageRequest<CheckpointFilesPageCursor>,
         options: ListCheckpointFilesOptions,
         context: &RuntimeReadContext,
-        now_ms: u64,
     ) -> Result<CheckpointFilesPage> {
         // Rejects a mismatched or deleted namespace before any read work.
         self.ensure_live_context(context)?;
@@ -730,7 +728,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             checkpoint_id,
             request,
             options,
-            now_ms,
+            self.now_ms(),
         )
         .await
     }
@@ -791,7 +789,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<Vec<u8>> {
         self.ensure_administrator(context).await?;
-        self.ensure_live_context(context)?;
         let view = self.load_read_view(context).await?;
         if !view
             .metadata_view()
@@ -814,14 +811,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     fn ensure_live_context(&self, context: &RuntimeReadContext) -> Result<()> {
-        if context.head.namespace_id != self.namespace_id {
-            return Err(crate::error::CoreError::NamespaceCorrupt(format!(
-                "head namespace `{}` does not match requested namespace `{}`",
-                context.head.namespace_id, self.namespace_id
-            )));
-        }
-        crate::namespace::control::ensure_namespace_live(&context.head)?;
-        Ok(())
+        crate::namespace::control::ensure_head_identity(&context.head, &self.namespace_id)?;
+        crate::namespace::control::ensure_namespace_live(&context.head)
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.
@@ -850,14 +841,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.read_file_revision_bytes(
-            &self.store,
-            path.as_ref(),
-            revision_no,
-            max_content_bytes,
-            &access,
-        )
-        .await
+        view.read_file_revision_bytes(path.as_ref(), revision_no, max_content_bytes, &access)
+            .await
     }
 
     /// Reads one revision's content against the pinned runtime read context.
@@ -871,14 +856,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.read_file_revision_bytes_by_inode(
-            &self.store,
-            inode_id,
-            revision_no,
-            max_content_bytes,
-            &access,
-        )
-        .await
+        view.read_file_revision_bytes_by_inode(inode_id, revision_no, max_content_bytes, &access)
+            .await
     }
 
     async fn load_read_view<'a>(
@@ -1184,12 +1163,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns an upload session. Completed uploads include new evidence so
     /// the caller can retry publication without uploading the content again.
-    pub async fn get_upload_status(
+    pub async fn get_upload(
         &self,
         upload_id: &UploadId,
         subject: Option<&Subject>,
     ) -> Result<UploadSessionView> {
-        crate::protocol::get_upload_status(
+        crate::protocol::get_upload(
             &self.store,
             &self.namespace_id,
             upload_id,
@@ -1495,7 +1474,7 @@ mod tests {
             evidence,
             ..
         } = reader
-            .get_upload_status(&begun.upload_id, None)
+            .get_upload(&begun.upload_id, None)
             .await
             .expect("reader engine reads upload status");
 

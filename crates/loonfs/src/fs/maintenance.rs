@@ -1051,7 +1051,7 @@ impl crate::Namespace<crate::Writable> {
         use loonfs_types::{AccessGrants, AccessRight, AccessRights};
 
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, context) = self
+        let crate::cache::PinnedRead { engine, context } = self
             .core
             .pinned_read(&self.namespace_id, crate::cache::HeadConfirmation::View)
             .await?;

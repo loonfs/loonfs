@@ -8,9 +8,11 @@ use loonfs_types::{ActorId, CommitId, CommitPrecondition, Subject};
 /// There is one spelling of a pre-planning operation across the workspace:
 /// what a client sends is what the planner matches on, so no surface
 /// translates between two versions of the same language. The durable
-/// fingerprint preimage is a separate, frozen spelling, and the planner's
-/// `operation_fingerprint_input` is the only place this one is renamed
-/// into it.
+/// fingerprint preimage is a separate, frozen spelling, and
+/// `operation_fingerprint_input` in `loonfs-types`, which
+/// [`semantic_commit_fingerprint`](loonfs_types::semantic_commit_fingerprint)
+/// calls, is the only function that renames this spelling into the preimage
+/// spelling.
 pub use loonfs_types::FilesystemOperation;
 
 /// A request to commit one or more filesystem operations.

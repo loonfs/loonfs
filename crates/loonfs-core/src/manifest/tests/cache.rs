@@ -141,7 +141,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     .expect("load segments against a degenerate budget");
     let root_inode_key = "inode-00000000000000000001";
     assert!(degenerate_segments
-        .get_for_lookup(ApiMetadataRowFamily::Inodes, root_inode_key, root_inode_key)
+        .find_row(ApiMetadataRowFamily::Inodes, root_inode_key, root_inode_key)
         .await
         .expect("get inode")
         .is_some());
@@ -585,7 +585,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     store.reset();
     let key = "inode-00000000000000000001";
     assert!(segments
-        .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
+        .find_row(ApiMetadataRowFamily::Inodes, key, key)
         .await
         .expect("first lookup")
         .is_some());
@@ -593,13 +593,13 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     assert!(first_lookup_gets > 0, "a cold lookup fetches blocks");
 
     assert!(segments
-        .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
+        .find_row(ApiMetadataRowFamily::Inodes, key, key)
         .await
         .expect("repeated lookup")
         .is_some());
     let other = "inode-00000000000000000002";
     assert!(segments
-        .get_for_lookup(ApiMetadataRowFamily::Inodes, other, other)
+        .find_row(ApiMetadataRowFamily::Inodes, other, other)
         .await
         .expect("second-key lookup")
         .is_some());
@@ -666,13 +666,13 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     for segments in [&read_view, &fold_view] {
         store.reset();
         assert!(segments
-            .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
+            .find_row(ApiMetadataRowFamily::Inodes, key, key)
             .await
             .expect("first lookup")
             .is_some());
         let first_lookup_reads = store.count(OperationSelector::Read);
         assert!(segments
-            .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
+            .find_row(ApiMetadataRowFamily::Inodes, key, key)
             .await
             .expect("repeated lookup")
             .is_some());

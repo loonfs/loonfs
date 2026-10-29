@@ -99,7 +99,10 @@ impl NamespacePublisher {
                 return Ok(());
             }
         }
-        let (reader, context) = self
+        let crate::cache::PinnedRead {
+            engine: reader,
+            context,
+        } = self
             .runtime_core
             .pinned_read(namespace_id, crate::cache::HeadConfirmation::View)
             .await?;

@@ -218,7 +218,6 @@ async fn read_file(
         .await
         .expect("view")
         .read_file_revision_bytes(
-            store,
             "/file-0",
             revision_no,
             None,

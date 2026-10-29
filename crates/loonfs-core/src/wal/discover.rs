@@ -15,7 +15,7 @@ use loonfs_types::{NamespaceId, WalNo, MAX_PUBLIC_INTEGER};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-/// Largest window of WAL numbers that one round of [`read_wal_after`] reads,
+/// Largest window of WAL numbers that one round of [`load_wal_after`] reads,
 /// at most 16 GETs in flight. A round is a lockstep wave by design, because
 /// each round's results decide whether the reads stop and how wide the next
 /// window is.
@@ -47,7 +47,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
         head.basis_floor_seq,
     );
     // Replay needs every object above the folded boundary, so discovery keeps the bodies.
-    let outcome = read_wal_after(store, namespace_id, head.wal_no, |object_key, envelope| {
+    let outcome = load_wal_after(store, namespace_id, head.wal_no, |object_key, envelope| {
         let object = walk.validate(object_key, envelope).map_err(wal_error)?;
         head = head.after_wal_object(object.envelope().payload());
         objects.push(object);
@@ -63,7 +63,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     })
 }
 
-/// How [`read_wal_after`] ended.
+/// How [`load_wal_after`] ended.
 enum WalReadOutcome {
     /// The reads reached the first missing number or the largest WAL number,
     /// or `visit` stopped them.
@@ -73,7 +73,7 @@ enum WalReadOutcome {
     Gap { object_key: String },
 }
 
-/// Reads the WAL numbers after `after` in widening windows, and passes each
+/// Loads the WAL objects after `after` in widening windows, and passes each
 /// object to `visit` in WAL order, until the first number that's still missing
 /// or until `visit` returns `ControlFlow::Break`.
 ///
@@ -83,7 +83,7 @@ enum WalReadOutcome {
 /// still missing, this function returns [`WalReadOutcome::Gap`] with that
 /// number's object key. Discovery reports the gap as corruption, and a warm
 /// probe returns false so that the read runs discovery.
-async fn read_wal_after<S: ObjectStore + ?Sized>(
+async fn load_wal_after<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     after: WalNo,
@@ -227,7 +227,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         }
         Ok(ControlFlow::Continue(()))
     };
-    let outcome = read_wal_after(store, &namespace_id, context.head.wal_no, visit).await?;
+    let outcome = load_wal_after(store, &namespace_id, context.head.wal_no, visit).await?;
     if other_epoch || matches!(outcome, WalReadOutcome::Gap { .. }) {
         return Ok(false);
     }

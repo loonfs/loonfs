@@ -312,7 +312,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     );
     let access = ReadAccess::live(Authorizer::Unrestricted);
     assert_eq!(
-        old.get_file_bytes(&store, "/file", None, &access)
+        old.read_file_bytes("/file", None, &access)
             .await
             .expect("snapshot bytes")
             .bytes
@@ -321,7 +321,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     );
     assert_eq!(
         current
-            .get_file_bytes(&store, "/file", None, &access)
+            .read_file_bytes("/file", None, &access)
             .await
             .expect("current bytes")
             .bytes

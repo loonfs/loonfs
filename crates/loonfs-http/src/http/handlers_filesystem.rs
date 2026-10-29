@@ -739,7 +739,6 @@ pub(super) async fn create_commit(
                 &namespace_id,
                 &put_content_refs,
                 &content_tokens,
-                state.runtime.now_ms(),
             )
             .await?,
         )

@@ -19,7 +19,7 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
         });
     }
     let payload = wal.envelope().payload();
-    let object_key = super::wal_object_key(&payload.namespace_id, &payload.wal_no);
+    let object_key = wal_object_key(&payload.namespace_id, &payload.wal_no);
     let elapsed_ms = tip.age_ms();
     if elapsed_ms > crate::limits::WAL_PUBLISH_BUDGET_MS {
         return Err(WalPublishError::PublishBudgetExceeded {
@@ -52,4 +52,16 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
         .into());
     }
     Ok(())
+}
+
+/// The key of the WAL object at `wal_no`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the wal module is the physical WAL boundary, so only it builds WAL object keys"
+)]
+pub(super) fn wal_object_key(
+    namespace_id: &loonfs_types::NamespaceId,
+    wal_no: &loonfs_types::WalNo,
+) -> String {
+    loonfs_objectstore::keys::wal_object(namespace_id, wal_no)
 }

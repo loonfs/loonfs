@@ -66,10 +66,9 @@ impl<'a> ContentTokenVerifier<'a> {
         namespaces: &Namespaces,
         namespace: &Namespace<Writable>,
         token: &ContentToken,
-        now_ms: u64,
     ) -> Result<Result<PreparedContent, ContentTokenError>, ApiResponseError> {
         namespace
-            .prepare_content_token(self.secret, token, now_ms)
+            .prepare_content_token(self.secret, token)
             .await
             .map_err(ApiResponseError::for_namespace_writer(
                 namespaces,
@@ -404,7 +403,6 @@ pub(super) async fn content_preparation_for_puts(
     namespace_id: &NamespaceId,
     content_refs: &[&ContentRef],
     tokens: &[ContentToken],
-    now_ms: u64,
 ) -> Result<PutContentPreparation, ApiResponseError> {
     let mut prepared_content = Vec::new();
     let mut rejections = Vec::new();
@@ -412,10 +410,7 @@ pub(super) async fn content_preparation_for_puts(
         .iter()
         .filter(|token| content_refs.contains(&&token.content_ref))
     {
-        match verifier
-            .prepare(namespaces, namespace, token, now_ms)
-            .await?
-        {
+        match verifier.prepare(namespaces, namespace, token).await? {
             Ok(prepared) => prepared_content.push(prepared),
             Err(error) => {
                 let content_id = token.content_ref.content_id.clone();

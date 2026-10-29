@@ -2,12 +2,11 @@
 
 use super::reads::ReadSource;
 use super::RuntimeCore;
-use crate::{Consistency, CoreError, Error, NamespaceId, Result, SharedObjectStore};
+use crate::cache::PinnedRead;
+use crate::{Consistency, CoreError, Error, NamespaceId, Result};
 use loonfs_core::control::{load_namespace_current_manifest, load_snapshot_read_basis};
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
-use loonfs_core::{
-    ManifestLoadError, MetadataProjectionLoadError, NamespaceReaderEngine, RuntimeReadContext,
-};
+use loonfs_core::{ManifestLoadError, MetadataProjectionLoadError, RuntimeReadContext};
 use tracing::Instrument;
 
 /// A read that finds a segment missing returns what a new read of `source`
@@ -64,7 +63,7 @@ impl RuntimeCore {
         read: F,
     ) -> Result<T>
     where
-        F: Fn(NamespaceReaderEngine<SharedObjectStore>, RuntimeReadContext) -> Fut,
+        F: Fn(PinnedRead) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
         if let Some(Consistency::Eventual {
@@ -81,19 +80,15 @@ impl RuntimeCore {
                 });
             }
         }
-        let (engine, context) = self
+        let pinned = self
             .pinned_read(namespace_id, consistency)
             .instrument(
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
             )
             .await?;
-        let result = classify_read_result(
-            self,
-            &context,
-            &ReadSource::Head,
-            read(engine, context.clone()).await,
-        )
-        .await;
+        let context = pinned.context.clone();
+        let result =
+            classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await;
         if !matches!(result, Err(Error::StaleHead { .. })) {
             return result;
         }
@@ -103,18 +98,13 @@ impl RuntimeCore {
         self.drop_writer_position(namespace_id).await;
         self.invalidate_namespace_read_cache(namespace_id);
         self.reload_namespace_head(namespace_id).await?;
-        let (engine, context) = self
+        let pinned = self
             .pinned_read(namespace_id, consistency)
             .instrument(
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
             )
             .await?;
-        classify_read_result(
-            self,
-            &context,
-            &ReadSource::Head,
-            read(engine, context.clone()).await,
-        )
-        .await
+        let context = pinned.context.clone();
+        classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await
     }
 }

@@ -27,7 +27,7 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
 ) -> Result<Option<InodeRecord>> {
     let key = lookup_keys::inode_key(inode_id);
     segments
-        .get_for_lookup(MetadataRowFamily::Inodes, &key, &key)
+        .find_row(MetadataRowFamily::Inodes, &key, &key)
         .await?
         .map(inode_from_manifest_row)
         .transpose()
@@ -39,7 +39,7 @@ pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
 ) -> Result<Option<WalCommitPayload>> {
     let key = lookup_keys::commit_row_key(seq);
     segments
-        .get_for_lookup(MetadataRowFamily::Commits, &key, &key)
+        .find_row(MetadataRowFamily::Commits, &key, &key)
         .await?
         .map(commit_from_manifest_row)
         .transpose()

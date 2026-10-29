@@ -118,8 +118,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .expect("fresh view");
     assert_eq!(view.head().seq, ChangeSeq(1));
     let file = view
-        .get_file_bytes(
-            &store,
+        .read_file_bytes(
             "/lost-ack-0",
             None,
             &ReadAccess::live(Authorizer::Unrestricted),

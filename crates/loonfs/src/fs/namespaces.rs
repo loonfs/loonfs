@@ -16,7 +16,7 @@ impl LoonFs<Writable> {
         if self.core.subject.is_none() {
             return Ok(());
         }
-        let (engine, context) = self
+        let crate::cache::PinnedRead { engine, context } = self
             .core
             .pinned_read(namespace_id, crate::Consistency::Strong)
             .await?;
@@ -158,7 +158,7 @@ impl<M: crate::Mode> Namespace<M> {
         if self.core.subject.is_none() {
             return Ok(());
         }
-        let (engine, context) = self
+        let crate::cache::PinnedRead { engine, context } = self
             .core
             .pinned_read(&self.namespace_id, crate::Consistency::Strong)
             .await?;

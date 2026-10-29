@@ -849,14 +849,14 @@ async fn upload_sessions_belong_to_their_subject() {
     let session = engine.begin_upload(Some(&ada)).await.expect("begin");
     assert_eq!(
         engine
-            .get_upload_status(&session.upload_id, Some(&bob))
+            .get_upload(&session.upload_id, Some(&bob))
             .await
             .expect_err("hidden session")
             .code(),
         ErrorCode::UploadNotFound
     );
     engine
-        .get_upload_status(&session.upload_id, Some(&ada))
+        .get_upload(&session.upload_id, Some(&ada))
         .await
         .expect("owner session");
     let unrestricted = NamespaceId::parse("unrestricted").expect("namespace");
@@ -866,7 +866,7 @@ async fn upload_sessions_belong_to_their_subject() {
     let engine = namespace_engine(&store, &unrestricted, &context);
     let session = engine.begin_upload(Some(&ada)).await.expect("begin");
     engine
-        .get_upload_status(&session.upload_id, None)
+        .get_upload(&session.upload_id, None)
         .await
         .expect("subject ignored");
 }
@@ -1221,7 +1221,7 @@ async fn history_needs_the_history_right() {
             engine
                 .list_file_revisions_page("/team/file", read_page(10), &context)
                 .await
-                .map(|(_, page)| page.items.len())
+                .map(|revisions| revisions.page.items.len())
                 .map_err(|error| error.code()),
             expected
         );
