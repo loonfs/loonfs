@@ -24,6 +24,7 @@ use loonfs_model::visibility::ResolvedPath;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, MetadataRow};
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::format::wal::WalDelta;

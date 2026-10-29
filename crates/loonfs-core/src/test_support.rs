@@ -47,6 +47,7 @@ pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?S
     session: &loonfs_types::format::control::UploadSessionPayload,
     outcome: Option<loonfs_types::format::control::UploadOutcome>,
 ) -> String {
+    use loonfs_objectstore::ObjectStoreExtension;
     use loonfs_types::format::control::{
         encode_control_state, ControlObjectKind, UploadOutcomePayload,
     };

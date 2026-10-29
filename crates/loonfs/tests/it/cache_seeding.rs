@@ -218,8 +218,11 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
                 wal_puts += 1;
             }
             loonfs_test_support::stores::RecordedOperation::GetWithMetadata { key, .. }
-            | loonfs_test_support::stores::RecordedOperation::CompareAndSwap { key, .. }
-                if key == &loonfs_objectstore::keys::hint(&namespace_id) => {}
+            | loonfs_test_support::stores::RecordedOperation::Put {
+                key,
+                mode: loonfs_objectstore::PutMode::CompareAndSwap { .. },
+                ..
+            } if key == &loonfs_objectstore::keys::hint(&namespace_id) => {}
             other => panic!("unexpected operation after fold: {other:?}"),
         }
     }

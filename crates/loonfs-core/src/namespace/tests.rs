@@ -4,6 +4,7 @@ use crate::commit_engine::NamespaceCommitEngine;
 use crate::manifest::tests::control_requests;
 use crate::test_support::WriterAt;
 use crate::wal::tests::publish;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
     keys::{hint, metadata_manifest_object},
     local_fs_store::LocalFsStore,

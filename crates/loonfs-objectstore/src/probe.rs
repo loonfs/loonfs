@@ -9,6 +9,7 @@
 //! when [`crate::ConfiguredObjectStore::direct_transfers`] returns a bundle.
 
 use crate::object_store::Result as StoreResult;
+use crate::ObjectStoreExtension;
 use crate::{
     ByteRange, ObjectStore, ObjectStoreError, PROVIDER_MULTIPART_PART_BYTES,
     PROVIDER_MULTIPART_THRESHOLD_BYTES,

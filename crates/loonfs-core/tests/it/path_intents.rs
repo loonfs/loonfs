@@ -8,6 +8,7 @@ use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{commit_id, namespace_id, page_limit};
 use loonfs_test_support::stores::OperationSelector;
 use loonfs_types::{

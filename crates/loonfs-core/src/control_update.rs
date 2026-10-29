@@ -3,6 +3,7 @@
 use crate::error::CoreError;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use bytes::Bytes;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
 

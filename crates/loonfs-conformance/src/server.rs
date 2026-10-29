@@ -13,6 +13,7 @@ use loonfs_objectstore::presign::{
     DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, DirectTransferIssuers,
     PresignedGetRequest, PresignedPartRequest, PresignedPutRequest, PresignedUrl,
 };
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ByteRange, ObjectStoreError, SharedObjectStore};
 use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
 use loonfs_types::ChecksumAlgorithm;

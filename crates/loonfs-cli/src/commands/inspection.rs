@@ -16,6 +16,7 @@ use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::keys::probe_runs_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::api::v0::StoreProbeResponse;
 use loonfs_types::{CapabilityDocument, PROTOCOL_VERSION};
 use std::path::Path;

@@ -23,6 +23,7 @@ use loonfs_objectstore::keys::{
     metadata_segment_prefix, pin_prefix, wal_prefix,
 };
 use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::api::v0::GcResponse;
 use loonfs_types::format::control::{
     decode_control_object, ControlObjectKind, PinOwner, PinPayload, UploadOutcome,

@@ -61,6 +61,7 @@ use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
@@ -973,7 +974,6 @@ pub(crate) fn control_requests(
             let kind = match operation {
                 RecordedOperation::Head { .. } => "head",
                 RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => "get",
-                RecordedOperation::CompareAndSwap { .. } => "cas",
                 RecordedOperation::Put {
                     mode: PutMode::CompareAndSwap { .. },
                     ..

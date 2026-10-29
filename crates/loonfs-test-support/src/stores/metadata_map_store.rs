@@ -147,19 +147,6 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
         loonfs_objectstore::buffered::assemble(self, key, sources, tail, expected).await
     }
 
-    async fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let metadata = self
-            .inner
-            .compare_and_swap(key, expected_etag, bytes)
-            .await?;
-        Ok(self.map(key, metadata))
-    }
-
     fn list_entries_from_stream(
         &self,
         prefix: &str,

@@ -238,25 +238,6 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         .await
     }
 
-    async fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let context = OperationContext::new(
-            key,
-            OperationKind::CompareAndSwap {
-                expected_etag,
-                bytes: &bytes,
-            },
-        );
-        let call = self
-            .inner
-            .compare_and_swap(key, expected_etag, bytes.clone());
-        self.intercepted(&context, call, result_outcome).await
-    }
-
     async fn assemble(
         &self,
         key: &str,

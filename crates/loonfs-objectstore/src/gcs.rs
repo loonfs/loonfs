@@ -416,7 +416,7 @@ mod tests {
     use crate::retry::{TransportRetry, DEFAULT};
     use crate::test_support::{gcs_fixture_service_account_key_file, time_out, RequestFault};
     use crate::GcpGcsCredentials;
-    use crate::{ObjectStore, ObjectStoreError};
+    use crate::{ObjectStoreError, ObjectStoreExtension};
     use bytes::Bytes;
     use loonfs_test_support::clock::TokioClock;
     use loonfs_types::Checksum;

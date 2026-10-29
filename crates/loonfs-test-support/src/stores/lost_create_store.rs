@@ -4,6 +4,7 @@
 use super::KeyPredicate;
 use async_trait::async_trait;
 use bytes::Bytes;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use std::sync::atomic::{AtomicBool, Ordering};
 

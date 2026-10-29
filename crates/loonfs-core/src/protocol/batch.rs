@@ -321,6 +321,7 @@ mod tests {
     use loonfs_objectstore::keys::{hint, wal_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
+    use loonfs_objectstore::ObjectStoreExtension;
     use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, NamespaceId, MAX_PUBLIC_INTEGER};
     use std::assert_matches;
     use tempfile::tempdir;

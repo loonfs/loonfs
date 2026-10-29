@@ -12,6 +12,7 @@ use loonfs_objectstore::metrics::{
     RangeKind, VecObjectStoreMetricsRecorder,
 };
 use loonfs_objectstore::ListedObject;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
     AssemblySource, ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError,
     ObjectStoreErrorKind, PutMode,
@@ -160,9 +161,9 @@ async fn convenience_writes_funnel_through_put_with_distinct_modes() {
         .expect("compare and swap");
 
     let inner = store.into_inner();
-    // The sugar methods are trait defaults now: every write funnels through
-    // the one instrumented `put`, so the inner store sees `put` twice while
-    // the samples still record the distinct modes below.
+    // Every convenience write funnels through the one instrumented `put`, so
+    // the inner store sees `put` twice while the samples still record the
+    // distinct modes below.
     assert_eq!(inner.calls(), vec!["put", "put"]);
 
     let samples = recorder.samples();
@@ -296,10 +297,9 @@ async fn records_list_count() {
 
     assert_eq!(keys.len(), 2);
     let sample = recorder.samples().pop().expect("list sample");
-    assert_eq!(sample.operation, ObjectStoreOperation::ListPrefix);
+    assert_eq!(sample.operation, ObjectStoreOperation::ListPrefixStream);
     assert_eq!(sample.result, ObjectStoreResultKind::Ok);
     assert_eq!(sample.item_count, Some(2));
-    assert_eq!(sample.range_class, Some(RangeKind::Prefix));
 
     let page = store
         .list_child_prefixes("namespaces/", None, page_limit(10))
@@ -505,29 +505,12 @@ impl ObjectStore for DelegatingWriteStore {
         Ok(self.record_call("put"))
     }
 
-    async fn put_if_absent(
-        &self,
-        _key: &str,
-        _bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        Ok(self.record_call("put_if_absent"))
-    }
-
     async fn put_immutable_verified(
         &self,
         _key: &str,
         _bytes: Bytes,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         Ok(self.record_call("put_immutable_verified"))
-    }
-
-    async fn compare_and_swap(
-        &self,
-        _key: &str,
-        _expected_etag: &str,
-        _bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        Ok(self.record_call("compare_and_swap"))
     }
 
     async fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {

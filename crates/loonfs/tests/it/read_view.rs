@@ -14,7 +14,7 @@ async fn read_during_compaction_and_collection(
     durable: bool,
     head_view: bool,
 ) -> (loonfs::Result<loonfs::PathEntry>, LoonFs<loonfs::ReadOnly>) {
-    use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
+    use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStoreExtension};
     use loonfs_test_support::stores::{
         BlockingStore, KeyPredicate, MetadataMapStore, OperationSelector,
     };
@@ -962,7 +962,9 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
 
 #[tokio::test]
 async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_propagate() {
-    use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
+    use loonfs_objectstore::{
+        keys, local_fs_store::LocalFsStore, ObjectStore, ObjectStoreExtension,
+    };
     use loonfs_test_support::stores::{
         FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
     };

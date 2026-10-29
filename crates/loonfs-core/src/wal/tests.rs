@@ -8,6 +8,7 @@ use crate::limits::READ_REVALIDATION_BOUND_MS;
 use crate::test_support::WriterAt;
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::{metadata_manifest_object, wal_object, wal_prefix};
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{

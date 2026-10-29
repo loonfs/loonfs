@@ -47,6 +47,7 @@ mod tests {
     use futures::TryStreamExt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
+    use loonfs_objectstore::ObjectStoreExtension;
     use loonfs_types::Checksum;
 
     #[tokio::test]

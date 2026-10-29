@@ -1,6 +1,7 @@
 //! Replacement of a stored object's bytes.
 
 use bytes::Bytes;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 
 /// Replaces the object at `key` with `bytes` by deleting it and creating it

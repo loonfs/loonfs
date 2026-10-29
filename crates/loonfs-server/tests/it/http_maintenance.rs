@@ -7,7 +7,7 @@ use bytes::Bytes;
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
-use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
+use loonfs_objectstore::{ConfiguredObjectStore, ObjectStoreExtension};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::replace_object;

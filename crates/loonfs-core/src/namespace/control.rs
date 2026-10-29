@@ -10,6 +10,7 @@ use crate::namespace::store::NamespaceStore;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::format::control::{ControlObjectKind, HintPayload, ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_types::{CompactorEpoch, ManifestNo, NamespaceId};
@@ -395,6 +396,7 @@ const _: () = assert!(
 mod tests {
     use super::*;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::PutMode;
     use loonfs_test_support::stores::{
         FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
         RecordedOperation, RecordingStore,
@@ -438,7 +440,15 @@ mod tests {
             store
                 .take()
                 .iter()
-                .filter(|operation| matches!(operation, RecordedOperation::CompareAndSwap { .. }))
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        RecordedOperation::Put {
+                            mode: PutMode::CompareAndSwap { .. },
+                            ..
+                        }
+                    )
+                })
                 .count(),
             1
         );

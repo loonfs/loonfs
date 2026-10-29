@@ -4,7 +4,7 @@ use bytes::Bytes;
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_objectstore::layout::list_namespace_ids;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
 use loonfs_types::ManifestNo;

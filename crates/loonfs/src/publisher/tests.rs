@@ -20,6 +20,7 @@ use loonfs_core::test_support::WriterAt;
 use loonfs_core::time::OperationClock;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::stores::{

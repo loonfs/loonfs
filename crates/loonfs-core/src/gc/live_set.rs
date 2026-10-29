@@ -27,6 +27,7 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::format::manifest::{MetadataRowFamily, NamespaceManifestPayload};
 use loonfs_types::{ContentId, ManifestNo, NamespaceId, UploadId, WalNo};
 use std::collections::{BTreeMap, BTreeSet};

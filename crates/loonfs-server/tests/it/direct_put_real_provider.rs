@@ -6,6 +6,7 @@ use futures::StreamExt;
 use loonfs_client::{Client, ClientError, DownloadOptions, NamespacePath, PayloadSource};
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
     AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
 };
