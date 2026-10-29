@@ -8,6 +8,7 @@ use loonfs::{LoonFs, Writable};
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{app, AppConfig, GarbageCollection, JobMode, ServerConfig, StoreConfig};
 use loonfs_types::api::v0::{self, GrepIndex};
@@ -778,10 +779,10 @@ async fn seed_namespace(
 
 fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
     let mut config = crate::common::test_config(
-        StoreConfig::LocalFs {
+        StoreConfig::LocalFs(LocalFsStoreConfig {
             root: store_root.display().to_string(),
             key_prefix: None,
-        },
+        }),
         "test-token",
         "test-content-token-secret",
         &format!("grep-mode-{mode:?}"),
@@ -1047,7 +1048,5 @@ fn grep_limits() -> [&'static str; 2] {
 }
 
 fn observation() -> loonfs::engine::Observation {
-    loonfs::engine::Observation::now(Arc::new(
-        loonfs_objectstore::timing::StdMonotonicTimer::default(),
-    ))
+    loonfs::engine::Observation::now(Arc::new(loonfs_types::StdMonotonicTimer::default()))
 }

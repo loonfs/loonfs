@@ -1,4 +1,4 @@
-//! Shared key helpers for provider stores.
+//! Key validation and the key prefix that scopes a store's keys.
 
 use crate::object_store::Result;
 use crate::ObjectStoreError;
@@ -50,110 +50,147 @@ pub(crate) fn validate_segments(
     Ok(segments)
 }
 
-pub(crate) fn normalize_key_prefix(key_prefix: Option<&str>) -> Result<Option<String>> {
-    let Some(key_prefix) = key_prefix else {
-        return Ok(None);
-    };
-    if key_prefix.trim().is_empty() {
-        return Ok(None);
-    }
-
-    let segments = validate_segments(key_prefix, TrailingSeparator::Refused)?;
-    Ok(Some(segments.join("/")))
+/// The key prefix that one store scopes every key beneath.
+///
+/// A store, its request signer, and its presigner share one value, so all
+/// three resolve a key to the same provider key. A signed write under another
+/// spelling of the prefix would be stored where the store's reads, listings,
+/// and garbage collection never look.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct KeyScope {
+    /// The normalized prefix, which is never empty.
+    prefix: Option<String>,
 }
 
-pub(crate) fn scope_object_key(key_prefix: Option<&str>, key: &str) -> Result<String> {
-    validate_segments(key, TrailingSeparator::Refused)?;
+/// The provider prefix of one listing, and the provider key it starts after.
+pub(crate) struct ScopedListing {
+    pub(crate) prefix: String,
+    pub(crate) start_after: Option<String>,
+}
 
-    match key_prefix {
-        Some(key_prefix) if !key_prefix.is_empty() && !key.is_empty() => {
-            Ok(format!("{key_prefix}/{key}"))
+impl KeyScope {
+    /// Normalizes a configured key prefix. A blank prefix scopes nothing.
+    pub(crate) fn new(raw: Option<&str>) -> Result<Self> {
+        let prefix = match raw {
+            Some(raw) if !raw.trim().is_empty() => {
+                Some(validate_segments(raw, TrailingSeparator::Refused)?.join("/"))
+            }
+            _ => None,
+        };
+        Ok(Self { prefix })
+    }
+
+    /// Returns the normalized prefix, or `None` when keys are not scoped.
+    pub(crate) fn prefix(&self) -> Option<&str> {
+        self.prefix.as_deref()
+    }
+
+    /// Returns the provider key of the object at `key`.
+    pub(crate) fn object_key(&self, key: &str) -> Result<String> {
+        validate_segments(key, TrailingSeparator::Refused)?;
+        Ok(match &self.prefix {
+            Some(prefix) if key.is_empty() => prefix.clone(),
+            Some(prefix) => format!("{prefix}/{key}"),
+            None => key.to_owned(),
+        })
+    }
+
+    /// Returns the provider prefix of a listing of `prefix`.
+    pub(crate) fn listing_prefix(&self, prefix: &str) -> Result<String> {
+        validate_segments(prefix, TrailingSeparator::Allowed)?;
+        Ok(match &self.prefix {
+            Some(scope) if prefix.is_empty() => format!("{scope}/"),
+            Some(scope) => format!("{scope}/{prefix}"),
+            None => prefix.to_owned(),
+        })
+    }
+
+    /// Returns the provider prefix of a child-prefix listing, which names a
+    /// level of the key tree and so must be empty or end with `/`.
+    pub(crate) fn child_listing_prefix(&self, prefix: &str) -> Result<String> {
+        if !prefix.is_empty() && !prefix.ends_with('/') {
+            return Err(ObjectStoreError::InvalidKey {
+                object_key: prefix.to_owned(),
+                message: "a child-prefix listing needs an empty prefix or one ending with `/`"
+                    .to_owned(),
+            });
         }
-        Some(key_prefix) if !key_prefix.is_empty() => Ok(key_prefix.to_owned()),
-        _ => Ok(key.to_owned()),
+        self.listing_prefix(prefix)
     }
-}
 
-pub(crate) fn scope_list_prefix(key_prefix: Option<&str>, prefix: &str) -> Result<String> {
-    validate_segments(prefix, TrailingSeparator::Allowed)?;
+    /// Returns the provider prefix of a listing of `prefix` and the provider
+    /// key of `start_after`.
+    pub(crate) fn listing(&self, prefix: &str, start_after: Option<&str>) -> Result<ScopedListing> {
+        Ok(ScopedListing {
+            prefix: self.listing_prefix(prefix)?,
+            start_after: start_after.map(|key| self.object_key(key)).transpose()?,
+        })
+    }
 
-    match key_prefix {
-        Some(key_prefix) if !key_prefix.is_empty() && !prefix.is_empty() => {
-            Ok(format!("{key_prefix}/{prefix}"))
+    /// Returns the caller's key for a listed provider key, or `None` when the
+    /// provider key is outside this scope.
+    pub(crate) fn unscope(&self, scoped_key: &str) -> Option<String> {
+        match &self.prefix {
+            Some(prefix) => scoped_key
+                .strip_prefix(prefix.as_str())?
+                .strip_prefix('/')
+                .map(str::to_owned),
+            None => Some(scoped_key.to_owned()),
         }
-        Some(key_prefix) if !key_prefix.is_empty() => Ok(format!("{key_prefix}/")),
-        _ => Ok(prefix.to_owned()),
     }
-}
-
-/// Scopes the prefix of a child-prefix listing, which names a level of the
-/// key tree and so must be empty or end with `/`.
-pub(crate) fn scope_child_listing_prefix(key_prefix: Option<&str>, prefix: &str) -> Result<String> {
-    if !prefix.is_empty() && !prefix.ends_with('/') {
-        return Err(ObjectStoreError::InvalidKey {
-            object_key: prefix.to_owned(),
-            message: "a child-prefix listing needs an empty prefix or one ending with `/`"
-                .to_owned(),
-        });
-    }
-    scope_list_prefix(key_prefix, prefix)
-}
-
-pub(crate) fn unscope_listed_key(key_prefix: Option<&str>, scoped_key: &str) -> Option<String> {
-    let key_prefix = key_prefix.filter(|value| !value.is_empty())?;
-    let prefix = format!("{key_prefix}/");
-    scoped_key.strip_prefix(&prefix).map(str::to_owned)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
-        validate_segments, TrailingSeparator,
-    };
+    use super::{validate_segments, KeyScope, TrailingSeparator};
     use crate::keys::hint;
     use crate::ObjectStoreError;
     use std::assert_matches;
 
     #[test]
-    fn normalize_key_prefix_rejects_traversal_and_empty_segments() {
+    fn a_key_prefix_rejects_traversal_and_empty_segments() {
         assert_matches!(
-            normalize_key_prefix(Some("tenant-a//bad")),
+            KeyScope::new(Some("tenant-a//bad")),
             Err(ObjectStoreError::InvalidKey { object_key, .. }) if object_key == "tenant-a//bad"
         );
         assert_matches!(
-            normalize_key_prefix(Some("../escape")),
+            KeyScope::new(Some("../escape")),
             Err(ObjectStoreError::InvalidKey { object_key, .. }) if object_key == "../escape"
         );
     }
 
     #[test]
-    fn a_plain_key_prefix_survives_normalization_and_a_blank_one_becomes_none() {
-        assert_matches!(
-            normalize_key_prefix(Some("tenant-a/reports")),
-            Ok(Some(prefix)) if prefix == "tenant-a/reports"
+    fn a_plain_key_prefix_survives_normalization_and_a_blank_one_scopes_nothing() {
+        let scope = KeyScope::new(Some("tenant-a/reports")).expect("plain prefix");
+        assert_eq!(scope.prefix(), Some("tenant-a/reports"));
+        assert_eq!(
+            KeyScope::new(Some("   ")).expect("blank prefix").prefix(),
+            None
         );
-        assert_matches!(normalize_key_prefix(Some("   ")), Ok(None));
     }
 
     #[test]
-    fn scoped_key_helpers_keep_prefix_isolation() {
+    fn scoped_keys_keep_prefix_isolation() {
         let hint_key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let scope = KeyScope::new(Some("tenant-a")).expect("prefix");
         assert_matches!(
-            scope_object_key(Some("tenant-a"), &hint_key),
+            scope.object_key(&hint_key),
             Ok(scoped) if scoped == format!("tenant-a/{hint_key}")
         );
         assert_matches!(
-            scope_list_prefix(Some("tenant-a"), "namespaces/ns-1/"),
+            scope.listing_prefix("namespaces/ns-1/"),
             Ok(scoped) if scoped == "tenant-a/namespaces/ns-1/"
         );
         assert_eq!(
-            unscope_listed_key(Some("tenant-a"), &format!("tenant-a/{hint_key}")),
-            Some(hint_key)
+            scope.unscope(&format!("tenant-a/{hint_key}")),
+            Some(hint_key.clone())
         );
+        assert_eq!(scope.unscope("tenant-b/namespaces/ns-1/hint.json"), None);
+        assert_eq!(scope.unscope("tenant-ab/namespaces/ns-1/hint.json"), None);
         assert_eq!(
-            unscope_listed_key(Some("tenant-a"), "tenant-b/namespaces/ns-1/hint.json"),
-            None
+            KeyScope::default().unscope(&hint_key),
+            Some(hint_key.clone()),
+            "an unscoped store lists every key as the caller wrote it"
         );
     }
 

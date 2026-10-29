@@ -1,6 +1,7 @@
 //! Checkpoint, maintenance, store probe, grep, and change-feed commands.
 
 use super::common::*;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 
 #[test]
 fn grep_allow_scan_searches_an_unindexable_pattern() {
@@ -34,10 +35,12 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/visible.txt"]));
     assert_success(&harness.run(&["maintenance", "index", "enable"]));
     // One commit puts more files past the index than a query scans.
-    let writer = loonfs::LoonFs::builder(loonfs_objectstore::StoreConfig::LocalFs {
-        root: harness.store_root("default").display().to_string(),
-        key_prefix: None,
-    })
+    let writer = loonfs::LoonFs::builder(loonfs_objectstore::StoreConfig::LocalFs(
+        LocalFsStoreConfig {
+            root: harness.store_root("default").display().to_string(),
+            key_prefix: None,
+        },
+    ))
     .writer_id(loonfs_test_support::ids::writer_id("stale-grep-fixture"))
     .build()
     .await

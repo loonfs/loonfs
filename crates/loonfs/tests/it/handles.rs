@@ -12,6 +12,7 @@ use loonfs::{
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::clock::ManualClock;
@@ -26,10 +27,10 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 fn store_config(root: &Path) -> StoreConfig {
-    StoreConfig::LocalFs {
+    StoreConfig::LocalFs(LocalFsStoreConfig {
         root: root.to_string_lossy().into_owned(),
         key_prefix: None,
-    }
+    })
 }
 
 fn wal_tail_object_threshold() -> u64 {

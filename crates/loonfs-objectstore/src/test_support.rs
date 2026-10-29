@@ -1,6 +1,8 @@
 //! Test-only support shared by object-store unit suites.
 
 use loonfs_test_support::EnvGuard;
+use object_store as provider_store;
+use object_store::path::Path;
 
 /// How a scripted provider fails a request.
 #[derive(Debug, Clone, Copy)]
@@ -22,7 +24,7 @@ pub(crate) enum RequestFault {
     reason = "a stalled scripted request waits on the paused test clock"
 )]
 pub(crate) async fn time_out(request_body_bytes: u64) -> object_store::client::HttpError {
-    let timeout = crate::provider_object_store::request_phase_timeout_for(request_body_bytes);
+    let timeout = crate::provider_limits::request_phase_timeout_for(request_body_bytes);
     tokio::time::sleep(timeout).await;
     object_store::client::HttpError::new(
         object_store::client::HttpErrorKind::Timeout,
@@ -31,6 +33,22 @@ pub(crate) async fn time_out(request_body_bytes: u64) -> object_store::client::H
             timeout,
         },
     )
+}
+
+/// A provider client failure that reached no provider, as a lost connection does.
+pub(crate) fn transport_glitch() -> provider_store::Error {
+    provider_store::Error::Generic {
+        store: "flaky",
+        source: "error sending request".into(),
+    }
+}
+
+/// A provider's refusal of the request's credentials for `location`.
+pub(crate) fn auth_rejection(location: &Path) -> provider_store::Error {
+    provider_store::Error::PermissionDenied {
+        path: location.to_string(),
+        source: "access denied".into(),
+    }
 }
 
 /// A service-account JSON whose RSA key is real enough to sign with and

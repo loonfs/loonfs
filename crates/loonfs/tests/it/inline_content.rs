@@ -11,11 +11,11 @@ use loonfs_core::time::Deadline;
 use loonfs_core::{MutationContext, NamespaceEngine};
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
+use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, CommitId, ContentId, ContentRef, DestinationBehavior,
     NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo, Subject,

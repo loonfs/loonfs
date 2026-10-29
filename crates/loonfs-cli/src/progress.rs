@@ -5,7 +5,7 @@
 //! are part of the CLI contract.
 
 use crate::args::RuntimeBehavior;
-use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+use loonfs_types::{MonotonicTimer, StdMonotonicTimer};
 use std::io::{IsTerminal, Write};
 use std::sync::Mutex;
 

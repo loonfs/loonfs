@@ -224,7 +224,7 @@ pub fn mint_content_token(
     };
     let payload_part = encode_token(&payload, CONTENT_TOKEN_FORMAT_VERSION)
         .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
-    let signature_part = encode_token_bytes(&loonfs_objectstore::crypto::hmac_sha256(
+    let signature_part = encode_token_bytes(&loonfs_types::crypto::hmac_sha256(
         secret.as_bytes(),
         payload_part.as_bytes(),
     ));
@@ -245,14 +245,14 @@ pub fn verify_content_token(
         .split_once('.')
         .ok_or(ContentTokenError::Malformed)?;
     let expected_signature =
-        loonfs_objectstore::crypto::hmac_sha256(secret.as_bytes(), payload_part.as_bytes());
+        loonfs_types::crypto::hmac_sha256(secret.as_bytes(), payload_part.as_bytes());
     // A hex signature is also base64url and decodes, but to 48 bytes rather than
     // the 32 of an HMAC-SHA256, so the length check reports it as malformed.
     let actual_signature = decode_token_bytes(signature_part)
         .ok()
         .filter(|signature| signature.len() == expected_signature.len())
         .ok_or(ContentTokenError::Malformed)?;
-    if !loonfs_objectstore::crypto::constant_time_eq(&actual_signature, &expected_signature) {
+    if !loonfs_types::crypto::constant_time_eq(&actual_signature, &expected_signature) {
         return Err(ContentTokenError::BadSignature);
     }
 
@@ -369,7 +369,7 @@ mod tests {
         let current =
             mint_content_token("golden-secret", &evidence(&content), 1_000).expect("mint");
         let (payload_part, _) = current.token.split_once('.').expect("signed token");
-        let hex_signature = hex_encode_bytes(&loonfs_objectstore::crypto::hmac_sha256(
+        let hex_signature = hex_encode_bytes(&loonfs_types::crypto::hmac_sha256(
             b"golden-secret",
             payload_part.as_bytes(),
         ));
@@ -411,7 +411,7 @@ mod tests {
             expires_at_ms: 2_000,
         };
         let payload_part = encode_token(&payload, CONTENT_TOKEN_FORMAT_VERSION).expect("encode");
-        let signature_part = encode_token_bytes(&loonfs_objectstore::crypto::hmac_sha256(
+        let signature_part = encode_token_bytes(&loonfs_types::crypto::hmac_sha256(
             b"secret",
             payload_part.as_bytes(),
         ));

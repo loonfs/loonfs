@@ -12,14 +12,23 @@ tokio::task_local! {
     static CALL_ATTEMPTS: Arc<AtomicU32>;
 }
 
+/// The output of one measured call and the attempts it made.
+pub(crate) struct Counted<T> {
+    pub(crate) output: T,
+    pub(crate) attempts: u32,
+}
+
 /// Runs `call` under a fresh tally and reports the attempts it made.
 ///
 /// The count starts at the one attempt every call makes, so a sample's
 /// attempt count is never zero.
-pub(crate) async fn counting_attempts<F: Future>(call: F) -> (F::Output, u32) {
+pub(crate) async fn counting_attempts<F: Future>(call: F) -> Counted<F::Output> {
     let attempts = Arc::new(AtomicU32::new(1));
     let output = CALL_ATTEMPTS.scope(Arc::clone(&attempts), call).await;
-    (output, attempts.load(Ordering::Relaxed))
+    Counted {
+        output,
+        attempts: attempts.load(Ordering::Relaxed),
+    }
 }
 
 /// Counts one granted retry against the measured call it belongs to.
@@ -33,25 +42,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_call_that_never_retries_reports_one_attempt() {
-        let (output, attempts) = counting_attempts(async { 7 }).await;
-        assert_eq!(output, 7);
-        assert_eq!(attempts, 1);
+        let counted = counting_attempts(async { 7 }).await;
+        assert_eq!(counted.output, 7);
+        assert_eq!(counted.attempts, 1);
     }
 
     #[tokio::test]
     async fn granted_retries_count_against_the_call_that_made_them() {
-        let (_, attempts) = counting_attempts(async {
+        let counted = counting_attempts(async {
             count_retry_attempt();
             count_retry_attempt();
         })
         .await;
-        assert_eq!(attempts, 3);
+        assert_eq!(counted.attempts, 3);
     }
 
     #[tokio::test]
     async fn a_retry_outside_a_measured_call_counts_nothing() {
         count_retry_attempt();
-        let (_, attempts) = counting_attempts(async {}).await;
-        assert_eq!(attempts, 1);
+        let counted = counting_attempts(async {}).await;
+        assert_eq!(counted.attempts, 1);
     }
 }

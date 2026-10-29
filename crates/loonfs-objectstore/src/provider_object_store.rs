@@ -1,16 +1,18 @@
-//! The shared provider transport: timeouts, the classification of provider
-//! client errors, and the routing of large creates to the provider's own
-//! conditional requests.
+//! [`ProviderObjectStore`]: the adapter from the upstream `object_store`
+//! provider clients to the LoonFS [`ObjectStore`] contract, and the routing
+//! of large creates to the provider's own conditional requests.
 
-use crate::keyspace::{
-    normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
-    unscope_listed_key,
-};
-use crate::object_store::{unsupported_multipart, Result};
+use crate::keyspace::KeyScope;
+use crate::object_store::{error_stream, unsupported_multipart, Result};
 use crate::presign::DirectTransferIssuers;
-use crate::retry::{with_transport_retry, RetryWarnings, DEFAULT};
+use crate::provider_error::{map_provider_error, sanitize_provider_message, ProviderClient};
+use crate::provider_limits::{
+    provider_client_options, PROVIDER_MULTIPART_PARTS_IN_FLIGHT, PROVIDER_MULTIPART_PART_BYTES,
+    PROVIDER_MULTIPART_THRESHOLD_BYTES,
+};
+use crate::retry::TransportRetry;
+use crate::signed_upload::{ClientMultipart, PartReader, ProviderSigner};
 use crate::store_io_runtime::StoreIoRuntime;
-use crate::timing::StdMonotonicTimer;
 use crate::transfer_timeouts::is_transfer_timeout;
 use crate::ListedObject;
 use crate::{
@@ -19,11 +21,11 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
-use loonfs_types::{Checksum, ChecksumAlgorithm, REDACTED};
+use loonfs_types::{Checksum, ChecksumAlgorithm};
 use loonfs_types::{EffectiveLimit, Page};
 use object_store as provider_store;
+use object_store::client::{HttpClient, HttpConnector};
 use provider_store::list::{PaginatedListOptions, PaginatedListStore};
 use provider_store::path::Path;
 use provider_store::{
@@ -34,143 +36,20 @@ use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Configures logical key scoping for a generic provider client, and the
-/// location that the store's identity reports.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderObjectStoreConfig {
-    /// Prefix prepended to every provider key, or `None` to expose the bucket root.
-    pub key_prefix: Option<String>,
-    /// The bucket, with the endpoint when the configuration sets one, as
-    /// [`StoreIdentity::location`] describes.
-    pub location: String,
+/// Connects the HTTP client that sends the requests a provider adapter signs
+/// itself, on the store's IO runtime and under [`provider_client_options`].
+pub(crate) fn provider_http(io_runtime: &StoreIoRuntime) -> Result<HttpClient> {
+    io_runtime
+        .connector()
+        .connect(&provider_client_options())
+        .map_err(configuration_error)
 }
 
-/// Timeout for one control-plane HTTP attempt's request phase.
-///
-/// An attempt that makes no progress for this long fails and counts against the
-/// operation deadline instead of consuming it invisibly.
-pub const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Timeout between two frames of a response body, for every request.
-///
-/// A response body that sends no frame for this long fails, and its attempt
-/// counts against the operation deadline.
-pub(crate) const PROVIDER_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// One HTTP attempt's connect timeout.
-pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Deadline shared by all retries of one logical object-store operation.
-///
-/// The retrying provider client applies it to each request it sends, as its
-/// retry timeout. LoonFS applies it to each of its own retry loops: one
-/// verified immutable write, or one request it signs, such as a part, so one
-/// part's retries cannot outlast it. A new attempt may start only while time
-/// remains. The garbage-collection grace period is longer than the maximum
-/// publication operation.
-pub const PROVIDER_OPERATION_DEADLINE: Duration = Duration::from_secs(120);
-
-/// Maximum retry delay after the provider client admits a final retry.
-pub const PROVIDER_MAX_RETRY_BACKOFF: Duration = Duration::from_secs(15);
-
-/// Minimum payload size for a multipart upload.
-///
-/// A `put` is one conditional request at every size. A verified immutable
-/// write at or above this size uses the provider's own conditional
-/// multipart path.
-pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
-
-/// Fixed size of every multipart part except the last.
-///
-/// Cloudflare R2 requires all non-final parts to share one size, and every
-/// supported provider requires at least 5 MiB per non-final part; 8 MiB matches
-/// the part size mainstream storage clients default to, and keeps every part a
-/// cheap retry that fits comfortably inside one flat attempt bound.
-pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
-
-/// Concurrent in-flight parts of one verified immutable write.
-///
-/// A `put_streamed` write sends one part at a time.
-pub const PROVIDER_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
-
-/// The smallest part every supported provider accepts anywhere but last, and
-/// so the shortest base prefix a provider copies instead of receiving it
-/// again.
-pub const PROVIDER_MIN_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024;
-
-/// The largest part every supported provider accepts.
-pub const PROVIDER_MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-
-/// Parts one provider multipart upload accepts.
-///
-/// Every supported provider stops at 10,000, which with the part size sets the
-/// largest object a multipart write can produce.
-pub const PROVIDER_MAX_MULTIPART_PARTS: u32 = 10_000;
-
-/// Request-phase timeout for one HTTP attempt that carries a payload.
-///
-/// Upload progress is not observable while a request body is being sent, so
-/// this fixed timeout treats an excessively slow part as stalled. Multipart
-/// parts are bounded by [`PROVIDER_MULTIPART_PART_BYTES`].
-pub const PROVIDER_TRANSFER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Request-phase allowance for a single-request publication.
-///
-/// The provider client checks its retry deadline before backoff, so a
-/// resent request may finish one backoff and one payload attempt after that
-/// deadline. A conditional WAL or manifest put is one attempt, even with a
-/// payload-sized body, so the bound still holds for it. This does not bound
-/// response-body consumption or prove that a timed-out request cannot take
-/// effect remotely.
-pub const PROVIDER_PUBLICATION_REQUEST_BOUND: Duration = PROVIDER_OPERATION_DEADLINE
-    .saturating_add(PROVIDER_MAX_RETRY_BACKOFF)
-    .saturating_add(PROVIDER_TRANSFER_ATTEMPT_TIMEOUT);
-
-/// Request bodies at least this large are payload transfers and get
-/// [`PROVIDER_TRANSFER_ATTEMPT_TIMEOUT`] as their request-phase timeout;
-/// smaller bodies are control-plane traffic bounded by
-/// [`PROVIDER_ATTEMPT_TIMEOUT`]. Sits well below the part size so multipart
-/// tail parts classify with their siblings.
-pub(crate) const PROVIDER_MIN_TRANSFER_BODY_BYTES: u64 = 1024 * 1024;
-
-/// Returns the timeout for one HTTP attempt's request phase (connect,
-/// request-body upload, response headers), by request body size: flat and
-/// small for control-plane requests, flat and generous for payload transfers.
-pub(crate) fn request_phase_timeout_for(request_body_bytes: u64) -> Duration {
-    if request_body_bytes >= PROVIDER_MIN_TRANSFER_BODY_BYTES {
-        PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
-    } else {
-        PROVIDER_ATTEMPT_TIMEOUT
-    }
-}
-
-/// Client options every provider builder applies: an explicit per-attempt
-/// total-request timeout and connect timeout, so a client built from these
-/// options alone is bounded by named constants instead of upstream defaults.
-/// [`crate::transfer_timeouts::TransferTimeoutConnector`] strips the
-/// total-request timeout and replaces it with payload-aware request timeouts
-/// and response-body idle timeouts.
-pub(crate) fn provider_client_options() -> provider_store::ClientOptions {
-    provider_store::ClientOptions::new()
-        .with_timeout(PROVIDER_ATTEMPT_TIMEOUT)
-        .with_connect_timeout(PROVIDER_CONNECT_TIMEOUT)
-}
-
-/// Retry configuration every provider builder applies: the client's retries
-/// of each request it sends share [`PROVIDER_OPERATION_DEADLINE`] as one
-/// budget, matching LoonFS's own retry loop.
-pub(crate) fn provider_retry_config() -> provider_store::RetryConfig {
-    provider_store::RetryConfig {
-        retry_timeout: PROVIDER_OPERATION_DEADLINE,
-        backoff: provider_store::BackoffConfig {
-            init_backoff: DEFAULT.initial_backoff,
-            max_backoff: PROVIDER_MAX_RETRY_BACKOFF,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
+/// Returns the error for a provider client that couldn't be built.
+pub(crate) fn configuration_error(error: impl fmt::Display) -> ObjectStoreError {
+    ObjectStoreError::Configuration(error.to_string())
 }
 
 /// The size routing for multipart writes: payloads at or above the
@@ -190,62 +69,22 @@ impl MultipartGeometry {
     };
 }
 
+/// The version field that a provider's conditional writes compare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompareToken {
+    /// The ETag, as S3 and Cloudflare R2 compare it.
     Etag,
+    /// The object generation, as GCS compares it.
     Generation,
 }
 
-#[async_trait]
-pub(crate) trait StoredChecksumReader: Send + Sync {
-    async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>>;
-}
-
-/// The provider's own multi-request writes, sent as requests this crate
-/// signs: client-driven multipart uploads, large conditional creates, and
-/// assemblies.
-#[async_trait]
-pub(crate) trait MultipartController: Send + Sync {
-    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
-        let _ = key;
-        Err(unsupported_multipart())
-    }
-
-    async fn complete_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-        parts: &[MultipartPart],
-        checksum: &Checksum,
-    ) -> Result<()> {
-        let _ = (key, provider_upload_id, parts, checksum);
-        Err(unsupported_multipart())
-    }
-
-    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
-        let _ = (key, provider_upload_id);
-        Err(unsupported_multipart())
-    }
-
-    /// Writes `head` and then every part of `rest` to `key` only while `key`
-    /// is absent, with at most `part_window`
-    /// parts in flight. A provider whose upload takes its parts in order
-    /// sends them one at a time.
-    async fn put_if_absent(
-        &self,
-        key: &str,
-        head: Bytes,
-        rest: PartReader<'_>,
-        part_window: usize,
-    ) -> Result<ObjectMetadata>;
-
-    async fn assemble(
-        &self,
-        key: &str,
-        sources: &[AssemblySource],
-        tail: Vec<Bytes>,
-        expected: &Checksum,
-    ) -> Result<ObjectMetadata>;
+/// The requests that create an object while its key is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreatePath {
+    /// The provider client's conditional put.
+    ProviderClient,
+    /// A request that the store's signer sends with the object's checksum.
+    Signer,
 }
 
 /// A provider store and the issuers that sign direct transfers against it.
@@ -254,90 +93,78 @@ pub(crate) struct ConfiguredProvider {
     pub(crate) direct_transfers: DirectTransferIssuers,
 }
 
+/// The clients and provider facts that one provider store is built from.
+pub(crate) struct ProviderParts<P> {
+    /// The client that retries each request it sends. Reads, deletes, and
+    /// listings go through it.
+    pub(crate) provider: Arc<P>,
+    /// The same client built to send each request once. Every single-request
+    /// put goes through it, so [`map_provider_error`] can tell which client
+    /// an error came from.
+    pub(crate) one_attempt: Arc<dyn provider_store::ObjectStore>,
+    pub(crate) signer: Arc<dyn ProviderSigner>,
+    /// The client-driven multipart requests, or `None` for a provider whose
+    /// adapter signs none.
+    pub(crate) client_multipart: Option<Arc<dyn ClientMultipart>>,
+    pub(crate) kind: ConfiguredObjectStoreKind,
+    pub(crate) key_scope: KeyScope,
+    /// The bucket, with the endpoint when the configuration sets one, as
+    /// [`StoreIdentity::location`] describes.
+    pub(crate) location: String,
+    pub(crate) io_runtime: StoreIoRuntime,
+    pub(crate) retry: Arc<TransportRetry>,
+}
+
 /// Adapts the upstream `object_store` provider surface to the narrower LoonFS contract.
 #[derive(Clone)]
 pub struct ProviderObjectStore {
     inner: Arc<dyn provider_store::ObjectStore>,
     one_attempt: Arc<dyn provider_store::ObjectStore>,
     paginated: Arc<dyn PaginatedListStore>,
-    checksum_reader: Arc<dyn StoredChecksumReader>,
-    multipart_controller: Arc<dyn MultipartController>,
-    compare_token: CompareToken,
+    signer: Arc<dyn ProviderSigner>,
+    client_multipart: Option<Arc<dyn ClientMultipart>>,
     kind: ConfiguredObjectStoreKind,
-    checksum_algorithm: ChecksumAlgorithm,
     io_runtime: StoreIoRuntime,
     multipart_geometry: MultipartGeometry,
-    key_prefix: Option<String>,
+    key_scope: KeyScope,
     location: String,
-    retry_warnings: Arc<RetryWarnings>,
+    retry: Arc<TransportRetry>,
 }
 
 impl fmt::Debug for ProviderObjectStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProviderObjectStore")
             .field("kind", &self.kind.as_str())
-            .field("key_prefix", &self.key_prefix)
+            .field("key_prefix", &self.key_scope.prefix())
             .field("io_runtime", &self.io_runtime)
             .finish_non_exhaustive()
     }
 }
 
 impl ProviderObjectStore {
-    /// Wraps a provider client, the same client built to never resend a
-    /// request, and the paged delimiter listing surface.
-    ///
-    /// Every single-request put goes to `one_attempt`, and reads, deletes and
-    /// listings use `inner`, so [`map_provider_error`] can tell which client
-    /// an error came from. Construction fails when `config.key_prefix` is not
-    /// a normalized, non-escaping logical prefix.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "a provider store is assembled from its clients, its configuration, and its \
-                  provider's checksum and multipart adapters"
-    )]
-    pub(crate) fn new(
-        inner: Arc<dyn provider_store::ObjectStore>,
-        one_attempt: Arc<dyn provider_store::ObjectStore>,
-        paginated: Arc<dyn PaginatedListStore>,
-        config: ProviderObjectStoreConfig,
-        kind: ConfiguredObjectStoreKind,
-        checksum_algorithm: ChecksumAlgorithm,
-        io_runtime: StoreIoRuntime,
-        checksum_reader: Arc<dyn StoredChecksumReader>,
-        multipart_controller: Arc<dyn MultipartController>,
-    ) -> Result<Self> {
-        Ok(Self {
-            inner,
-            one_attempt,
-            paginated,
-            checksum_reader,
-            multipart_controller,
-            compare_token: CompareToken::Etag,
-            kind,
-            checksum_algorithm,
-            io_runtime,
+    /// Builds a store from a provider's clients, its signer, and its facts.
+    pub(crate) fn new<P>(parts: ProviderParts<P>) -> Self
+    where
+        P: provider_store::ObjectStore + PaginatedListStore,
+    {
+        Self {
+            inner: Arc::clone(&parts.provider) as Arc<dyn provider_store::ObjectStore>,
+            one_attempt: parts.one_attempt,
+            paginated: parts.provider,
+            signer: parts.signer,
+            client_multipart: parts.client_multipart,
+            kind: parts.kind,
+            io_runtime: parts.io_runtime,
             multipart_geometry: MultipartGeometry::DEFAULT,
-            key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
-            location: config.location,
-            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(StdMonotonicTimer::default()))),
-        })
-    }
-
-    pub(crate) fn compare_token(mut self, compare_token: CompareToken) -> Self {
-        self.compare_token = compare_token;
-        self
-    }
-
-    /// Shares `retry_warnings` with the requests a provider adapter signs
-    /// itself, so the bucket keeps one limiter and one retry clock.
-    pub(crate) fn retry_warnings(mut self, retry_warnings: Arc<RetryWarnings>) -> Self {
-        self.retry_warnings = retry_warnings;
-        self
+            key_scope: parts.key_scope,
+            location: parts.location,
+            retry: parts.retry,
+        }
     }
 
     #[cfg(test)]
-    fn multipart_controller(mut self, multipart_controller: Arc<dyn MultipartController>) -> Self {
-        self.multipart_controller = multipart_controller;
+    fn signer(mut self, signer: Arc<dyn ProviderSigner>) -> Self {
+        self.signer = signer;
         self
     }
 
@@ -351,22 +178,17 @@ impl ProviderObjectStore {
     }
 
     fn to_path(&self, key: &str) -> Result<Path> {
-        let scoped = scope_object_key(self.key_prefix.as_deref(), key)?;
-        Path::parse(scoped).map_err(|err| ObjectStoreError::InvalidKey {
-            object_key: key.to_owned(),
-            message: err.to_string(),
-        })
+        provider_path(key, self.key_scope.object_key(key)?)
     }
 
     fn validate_key(&self, key: &str) -> Result<()> {
         self.to_path(key).map(|_| ())
     }
 
-    fn unscoped(&self, scoped_key: &str) -> Option<String> {
-        match self.key_prefix.as_deref() {
-            Some(key_prefix) => unscope_listed_key(Some(key_prefix), scoped_key),
-            None => Some(scoped_key.to_owned()),
-        }
+    fn client_multipart(&self) -> Result<&dyn ClientMultipart> {
+        self.client_multipart
+            .as_deref()
+            .ok_or_else(unsupported_multipart)
     }
 
     fn metadata_from_provider(&self, meta: ObjectMeta) -> ObjectMetadata {
@@ -390,7 +212,7 @@ impl ProviderObjectStore {
     }
 
     fn with_compare_token(&self, metadata: ObjectMetadata) -> ObjectMetadata {
-        match self.compare_token {
+        match self.kind.compare_token() {
             CompareToken::Etag => metadata,
             CompareToken::Generation => ObjectMetadata {
                 etag: metadata.version.clone(),
@@ -400,7 +222,7 @@ impl ProviderObjectStore {
     }
 
     fn validate_compare_token(&self, key: &str, mode: &PutMode) -> Result<()> {
-        if self.compare_token == CompareToken::Generation {
+        if self.kind.compare_token() == CompareToken::Generation {
             if let PutMode::CompareAndSwap { expected_etag } = mode {
                 expected_etag
                     .parse::<u64>()
@@ -426,138 +248,111 @@ impl ProviderObjectStore {
             Err(err) => RangedGet::Refused(err),
         }
     }
-}
 
-/// Cuts a byte stream into fixed-size parts, holding one at a time.
-///
-/// Chunk boundaries in the source stream carry no meaning, so a chunk that
-/// straddles a part boundary is split and its tail carried into the next
-/// part. A stream that ends exactly on a boundary produces no final part.
-pub(crate) struct PartReader<'a> {
-    body: BoxStream<'a, Result<Bytes>>,
-    /// The tail of a chunk that overran the part being cut.
-    carry: Option<Bytes>,
-    part_bytes: usize,
-    exhausted: bool,
-}
-
-impl<'a> PartReader<'a> {
-    pub(crate) fn new(body: BoxStream<'a, Result<Bytes>>, part_bytes: usize) -> Self {
-        Self {
-            body,
-            carry: None,
-            part_bytes,
-            exhausted: false,
-        }
-    }
-
-    /// Cuts the next part: exactly `part_bytes`, or whatever is left when
-    /// the stream ends. `None` once nothing is left.
-    ///
-    /// A full part is returned without polling the stream again, so a
-    /// caller cannot conclude from a full part that more is coming — only
-    /// a short part proves the stream ended.
-    pub(crate) async fn next_part(&mut self) -> Result<Option<Bytes>> {
-        let mut buffer = bytes::BytesMut::with_capacity(self.part_bytes);
-        while buffer.len() < self.part_bytes {
-            let mut chunk = match self.carry.take() {
-                Some(chunk) => chunk,
-                None if self.exhausted => break,
-                None => match self.body.next().await {
-                    Some(chunk) => chunk?,
-                    None => {
-                        self.exhausted = true;
-                        break;
-                    }
-                },
-            };
-            let take = (self.part_bytes - buffer.len()).min(chunk.len());
-            buffer.extend_from_slice(&chunk.split_to(take));
-            if !chunk.is_empty() {
-                self.carry = Some(chunk);
-            }
-        }
-        Ok((!buffer.is_empty()).then(|| buffer.freeze()))
-    }
-
-    /// Whether the stream has already reported its end.
-    pub(crate) fn exhausted(&self) -> bool {
-        self.exhausted && self.carry.is_none()
-    }
-}
-
-/// Aborts a provider upload when its write is abandoned.
-///
-/// A write that finishes, or that aborts explicitly, disarms this guard. A
-/// failed or cancelled write that does neither has no cleanup `await` point,
-/// so `Drop` starts `abort` on the store's IO runtime, which keeps running
-/// when the caller's runtime shuts down and when the drop happens outside any
-/// runtime. The abort is best effort: if it fails, or the store's runtime has
-/// already shut down, the provider's cleanup of incomplete uploads removes
-/// what was sent.
-pub(crate) struct AbortUploadOnDrop {
-    object_key: String,
-    io_runtime: tokio::runtime::Handle,
-    abort: Option<BoxFuture<'static, Result<()>>>,
-}
-
-impl AbortUploadOnDrop {
-    pub(crate) fn new(
-        object_key: &str,
-        io_runtime: tokio::runtime::Handle,
-        abort: BoxFuture<'static, Result<()>>,
-    ) -> Self {
-        Self {
-            object_key: object_key.to_owned(),
-            io_runtime,
-            abort: Some(abort),
-        }
-    }
-
-    pub(crate) fn disarm(&mut self) {
-        self.abort = None;
-    }
-}
-
-impl Drop for AbortUploadOnDrop {
-    fn drop(&mut self) {
-        let Some(abort) = self.abort.take() else {
-            return;
+    /// Streams the objects of one listing, after checking its prefix and
+    /// its resume key.
+    fn entries_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> Result<BoxStream<'static, Result<ListedObject>>> {
+        let listing = self.key_scope.listing(prefix, start_after)?;
+        provider_path(prefix, listing.prefix.clone())?;
+        let offset = match (start_after, listing.start_after) {
+            (Some(key), Some(scoped)) => Some(provider_path(key, scoped)?.to_string()),
+            _ => None,
         };
-        let object_key = std::mem::take(&mut self.object_key);
-        self.io_runtime.spawn(async move {
-            if abort.await.is_err() {
-                tracing::warn!(
-                    object_key,
-                    operation = "abort_multipart",
-                    "failed to abort the upload of an abandoned write",
-                );
+        let scoped_prefix = listing.prefix;
+        let key_scope = self.key_scope.clone();
+        let listed_prefix = prefix.to_owned();
+        let start_after = start_after.map(str::to_owned);
+        let paginated = Arc::clone(&self.paginated);
+        let options = PaginatedListOptions {
+            offset,
+            ..Default::default()
+        };
+        Ok(stream::try_unfold(Some(options), move |options| {
+            let paginated = Arc::clone(&paginated);
+            let scoped_prefix = scoped_prefix.clone();
+            async move {
+                let Some(options) = options else {
+                    return Ok::<_, provider_store::Error>(None);
+                };
+                let next_options = options.clone();
+                let page = paginated
+                    .list_paginated(
+                        Some(scoped_prefix.as_str()).filter(|prefix| !prefix.is_empty()),
+                        options,
+                    )
+                    .await?;
+                let next = page.page_token.map(|page_token| PaginatedListOptions {
+                    page_token: Some(page_token),
+                    ..next_options
+                });
+                Ok(Some((page.result.objects, next)))
             }
-        });
+        })
+        .map_ok(|objects| stream::iter(objects.into_iter().map(Ok)))
+        .try_flatten()
+        .filter_map(move |result| {
+            let listed = match result {
+                Ok(meta) => key_scope
+                    .unscope(meta.location.as_ref())
+                    .filter(|key| {
+                        key.starts_with(&listed_prefix)
+                            && start_after
+                                .as_deref()
+                                .is_none_or(|after| key.as_str() > after)
+                    })
+                    .map(|key| {
+                        Ok(ListedObject {
+                            key,
+                            last_modified_at_ms: last_modified_at_ms(meta.last_modified.into()),
+                            size_bytes: meta.size,
+                        })
+                    }),
+                Err(err) => Some(Err(map_provider_error(
+                    &listed_prefix,
+                    err,
+                    ProviderClient::Retrying,
+                ))),
+            };
+            std::future::ready(listed)
+        })
+        .boxed())
     }
+}
+
+/// Parses the provider path of `scoped`, and reports a failure against the
+/// caller's `key`.
+fn provider_path(key: &str, scoped: String) -> Result<Path> {
+    Path::parse(scoped).map_err(|err| ObjectStoreError::InvalidKey {
+        object_key: key.to_owned(),
+        message: err.to_string(),
+    })
 }
 
 #[async_trait]
 impl ObjectStore for ProviderObjectStore {
     fn checksum_algorithm(&self) -> ChecksumAlgorithm {
-        self.checksum_algorithm
+        self.kind.checksum_algorithm()
     }
 
     fn identity(&self) -> Option<StoreIdentity> {
         Some(StoreIdentity {
             provider: self.kind.as_str(),
             location: self.location.clone(),
-            key_prefix: self.key_prefix.clone(),
+            key_prefix: self.key_scope.prefix().map(str::to_owned),
         })
     }
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.validate_key(key)?;
-        self.checksum_reader.head_metadata(key).await
+        self.signer.head_metadata(key).await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
-        self.multipart_controller.create_multipart_upload(key).await
+        self.client_multipart()?.create_multipart_upload(key).await
     }
 
     async fn complete_multipart_upload(
@@ -567,13 +362,13 @@ impl ObjectStore for ProviderObjectStore {
         parts: &[MultipartPart],
         checksum: &Checksum,
     ) -> Result<()> {
-        self.multipart_controller
+        self.client_multipart()?
             .complete_multipart_upload(key, provider_upload_id, parts, checksum)
             .await
     }
 
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
-        self.multipart_controller
+        self.client_multipart()?
             .abort_multipart_upload(key, provider_upload_id)
             .await
     }
@@ -587,10 +382,7 @@ impl ObjectStore for ProviderObjectStore {
                     .bytes()
                     .await
                     .map_err(|err| map_provider_error(key, err, ProviderClient::Retrying))?;
-                Ok(Some(ObjectBody {
-                    metadata,
-                    bytes: bytes.to_vec(),
-                }))
+                Ok(Some(ObjectBody { metadata, bytes }))
             }
             Err(err) if provider_not_found(&err) => Ok(None),
             Err(err) => Err(map_provider_error(key, err, ProviderClient::Retrying)),
@@ -678,16 +470,11 @@ impl ObjectStore for ProviderObjectStore {
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         let path = self.to_path(key)?;
         self.validate_compare_token(key, &mode)?;
-        if self.kind == ConfiguredObjectStoreKind::GcpGcs && matches!(mode, PutMode::CreateIfAbsent)
-        {
-            let mut rest = PartReader::new(stream::empty().boxed(), 1);
-            rest.next_part().await?;
-            return self
-                .multipart_controller
-                .put_if_absent(key, bytes, rest, 1)
-                .await;
-        }
         let checksum = Checksum::compute(self.checksum_algorithm(), &bytes);
+        if matches!(mode, PutMode::CreateIfAbsent) && self.kind.create_path() == CreatePath::Signer
+        {
+            return self.signer.create_checked(key, bytes, &checksum).await;
+        }
         let size_bytes = bytes.len() as u64;
         // A conditional write is one request at every size, so its
         // precondition failure is never its own landing, and a publication
@@ -723,19 +510,19 @@ impl ObjectStore for ProviderObjectStore {
     /// one request's allowance: content and segments come through here,
     /// never a publication.
     async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
-        if (bytes.len() as u64) < self.multipart_geometry.threshold_bytes {
-            return crate::immutable_write::put(self, &self.retry_warnings, key, bytes).await;
-        }
-        let controller = &self.multipart_controller;
-        crate::immutable_write::put_with(self, &self.retry_warnings, key, &bytes, || {
+        let multipart = bytes.len() as u64 >= self.multipart_geometry.threshold_bytes;
+        crate::immutable_write::put_with(self, &self.retry, key, &bytes, || {
             let bytes = bytes.clone();
             async move {
+                if !multipart {
+                    return self.put(key, bytes, PutMode::CreateIfAbsent).await;
+                }
                 let mut parts = PartReader::new(
                     stream::once(async { Ok(bytes) }).boxed(),
                     loonfs_types::usize_from_u64(self.multipart_geometry.part_bytes),
                 );
                 let head = parts.next_part().await?.unwrap_or_default();
-                controller
+                self.signer
                     .put_if_absent(key, head, parts, PROVIDER_MULTIPART_PARTS_IN_FLIGHT)
                     .await
             }
@@ -771,7 +558,7 @@ impl ObjectStore for ProviderObjectStore {
         }
         match mode {
             PutMode::CreateIfAbsent => self
-                .multipart_controller
+                .signer
                 .put_if_absent(key, head, reader, 1)
                 .await
                 .map(|metadata| metadata.size_bytes),
@@ -792,20 +579,21 @@ impl ObjectStore for ProviderObjectStore {
     /// retrying client returns at once.
     async fn delete(&self, key: &str) -> Result<()> {
         let path = self.to_path(key)?;
-        with_transport_retry(&self.retry_warnings, key, "delete", 0, || async {
-            match self.inner.delete(&path).await {
-                Ok(()) => Ok(()),
-                Err(error) if provider_not_found(&error) => Ok(()),
-                Err(error) if is_transfer_timeout(&error) => {
-                    Err(ObjectStoreError::retryable_transport(
-                        key,
-                        sanitize_provider_message(&error.to_string()),
-                    ))
+        self.retry
+            .run(key, "delete", 0, || async {
+                match self.inner.delete(&path).await {
+                    Ok(()) => Ok(()),
+                    Err(error) if provider_not_found(&error) => Ok(()),
+                    Err(error) if is_transfer_timeout(&error) => {
+                        Err(ObjectStoreError::retryable_transport(
+                            key,
+                            sanitize_provider_message(&error.to_string()),
+                        ))
+                    }
+                    Err(error) => Err(map_provider_error(key, error, ProviderClient::Retrying)),
                 }
-                Err(error) => Err(map_provider_error(key, error, ProviderClient::Retrying)),
-            }
-        })
-        .await
+            })
+            .await
     }
 
     async fn assemble(
@@ -828,10 +616,7 @@ impl ObjectStore for ProviderObjectStore {
                 return crate::immutable_write::verify_stored_checksum(key, expected, existing);
             }
         }
-        let created = self
-            .multipart_controller
-            .assemble(key, sources, tail, expected)
-            .await;
+        let created = self.signer.assemble(key, sources, tail, expected).await;
         crate::immutable_write::verify_created(self, key, expected, created).await
     }
 
@@ -840,86 +625,8 @@ impl ObjectStore for ProviderObjectStore {
         prefix: &str,
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<ListedObject>> {
-        let scoped_prefix = match scope_list_prefix(self.key_prefix.as_deref(), prefix) {
-            Ok(scoped_prefix) => scoped_prefix,
-            Err(err) => return stream::once(async { Err(err) }).boxed(),
-        };
-        if let Err(err) = Path::parse(&scoped_prefix) {
-            let error = ObjectStoreError::InvalidKey {
-                object_key: prefix.to_owned(),
-                message: err.to_string(),
-            };
-            return stream::once(async { Err(error) }).boxed();
-        }
-        let offset = match start_after.map(|key| self.to_path(key)).transpose() {
-            Ok(offset) => offset.map(|path| path.to_string()),
-            Err(err) => return stream::once(async { Err(err) }).boxed(),
-        };
-        let key_prefix = self.key_prefix.clone();
-        let listed_prefix = prefix.to_owned();
-        let start_after = start_after.map(str::to_owned);
-        let paginated = Arc::clone(&self.paginated);
-        let options = PaginatedListOptions {
-            offset,
-            ..Default::default()
-        };
-        stream::try_unfold(Some(options), move |options| {
-            let paginated = Arc::clone(&paginated);
-            let scoped_prefix = scoped_prefix.clone();
-            async move {
-                let Some(options) = options else {
-                    return Ok::<_, provider_store::Error>(None);
-                };
-                let next_options = options.clone();
-                let page = paginated
-                    .list_paginated(
-                        Some(scoped_prefix.as_str()).filter(|prefix| !prefix.is_empty()),
-                        options,
-                    )
-                    .await?;
-                let next = page.page_token.map(|page_token| PaginatedListOptions {
-                    page_token: Some(page_token),
-                    ..next_options
-                });
-                Ok(Some((page.result.objects, next)))
-            }
-        })
-        .map_ok(|objects| stream::iter(objects.into_iter().map(Ok)))
-        .try_flatten()
-        .filter_map(move |result| {
-            let key_prefix = key_prefix.clone();
-            let listed_prefix = listed_prefix.clone();
-            let start_after = start_after.clone();
-            async move {
-                match result {
-                    Ok(meta) => {
-                        let key = meta.location.as_ref();
-                        let key = match key_prefix.as_deref() {
-                            Some(prefix) => unscope_listed_key(Some(prefix), key)?,
-                            None => key.to_owned(),
-                        };
-                        if !key.starts_with(&listed_prefix)
-                            || start_after
-                                .as_deref()
-                                .is_some_and(|after| key.as_str() <= after)
-                        {
-                            return None;
-                        }
-                        Some(Ok(ListedObject {
-                            key,
-                            last_modified_at_ms: last_modified_at_ms(meta.last_modified.into()),
-                            size_bytes: meta.size,
-                        }))
-                    }
-                    Err(err) => Some(Err(map_provider_error(
-                        &listed_prefix,
-                        err,
-                        ProviderClient::Retrying,
-                    ))),
-                }
-            }
-        })
-        .boxed()
+        self.entries_stream(prefix, start_after)
+            .unwrap_or_else(error_stream)
     }
 
     async fn list_child_prefixes(
@@ -928,7 +635,7 @@ impl ObjectStore for ProviderObjectStore {
         start_after: Option<&str>,
         limit: EffectiveLimit,
     ) -> Result<Page<String, String>> {
-        let scoped_prefix = scope_child_listing_prefix(self.key_prefix.as_deref(), prefix)?;
+        let scoped_prefix = self.key_scope.child_listing_prefix(prefix)?;
         let offset = start_after
             .map(|key| {
                 // Every key under a child `p/c/` sorts before `p/c0`, because
@@ -939,7 +646,7 @@ impl ObjectStore for ProviderObjectStore {
                     Some(child) => format!("{child}0"),
                     None => key.to_owned(),
                 };
-                scope_object_key(self.key_prefix.as_deref(), &resume_key)
+                self.key_scope.object_key(&resume_key)
             })
             .transpose()?;
         let options = PaginatedListOptions {
@@ -960,7 +667,7 @@ impl ObjectStore for ProviderObjectStore {
             .result
             .common_prefixes
             .iter()
-            .filter_map(|child| self.unscoped(&format!("{child}/")))
+            .filter_map(|child| self.key_scope.unscope(&format!("{child}/")))
             .collect();
         let next_cursor = match listed.page_token {
             None => None,
@@ -969,7 +676,7 @@ impl ObjectStore for ProviderObjectStore {
                     .result
                     .objects
                     .last()
-                    .and_then(|object| self.unscoped(object.location.as_ref()));
+                    .and_then(|object| self.key_scope.unscope(object.location.as_ref()));
                 let last_entry = children.last().cloned().max(last_object);
                 Some(last_entry.ok_or_else(|| {
                     ObjectStoreError::transport(
@@ -991,7 +698,7 @@ impl ProviderObjectStore {
         match mode {
             PutMode::CreateIfAbsent => provider_store::PutMode::Create,
             PutMode::CompareAndSwap { expected_etag } => {
-                let version = match self.compare_token {
+                let version = match self.kind.compare_token() {
                     CompareToken::Etag => UpdateVersion {
                         e_tag: Some(expected_etag),
                         version: None,
@@ -1031,218 +738,127 @@ fn provider_not_found(error: &provider_store::Error) -> bool {
     matches!(error, provider_store::Error::NotFound { .. })
 }
 
-/// The provider client that returned an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderClient {
-    /// The client that retries each request it sends, under
-    /// [`provider_retry_config`].
-    Retrying,
-    /// The client that sends each request once, for conditional puts.
-    OneAttempt,
-}
-
-/// Classifies a provider client error, using `client` to decide whether a
-/// `Generic` error is retryable.
-///
-/// The provider client reports a failed request as `Error::Generic`, whether
-/// the provider responded with a status or no response arrived, and its retry
-/// error type is private, so LoonFS can't read the status. LoonFS classifies
-/// a `Generic` error by the client that returned it instead:
-///
-/// - From [`ProviderClient::Retrying`], it's a non-retryable transport
-///   failure, because that client already spent its retry budget on the
-///   request (or refused to spend it, for a status such as 400).
-/// - From [`ProviderClient::OneAttempt`], it's a retryable transport failure,
-///   because the outcome is unknown. The caller's receipt check decides
-///   whether an earlier attempt succeeded.
-pub(crate) fn map_provider_error(
-    object_key: &str,
-    error: provider_store::Error,
-    client: ProviderClient,
-) -> ObjectStoreError {
-    match error {
-        provider_store::Error::NotFound { .. } => ObjectStoreError::NotFound {
-            object_key: object_key.to_owned(),
-        },
-        provider_store::Error::AlreadyExists { .. }
-        | provider_store::Error::Precondition { .. }
-        | provider_store::Error::NotModified { .. } => ObjectStoreError::PreconditionFailed {
-            object_key: object_key.to_owned(),
-        },
-        provider_store::Error::InvalidPath { source } => ObjectStoreError::InvalidKey {
-            object_key: object_key.to_owned(),
-            message: source.to_string(),
-        },
-        provider_store::Error::NotSupported { .. }
-        | provider_store::Error::NotImplemented { .. } => {
-            ObjectStoreError::Unsupported("provider object store operation")
-        }
-        provider_store::Error::UnknownConfigurationKey { key, store } => {
-            ObjectStoreError::transport(
-                object_key,
-                format!("unknown {store} configuration key `{key}`"),
-            )
-        }
-        provider_store::Error::Generic { source, .. } => {
-            match source.downcast::<ObjectStoreError>() {
-                Ok(error) => *error,
-                Err(source) => {
-                    let message = sanitize_provider_message(&source.to_string());
-                    match client {
-                        ProviderClient::Retrying => {
-                            ObjectStoreError::transport(object_key, message)
-                        }
-                        ProviderClient::OneAttempt => {
-                            ObjectStoreError::retryable_transport(object_key, message)
-                        }
-                    }
-                }
-            }
-        }
-        provider_store::Error::JoinError { source } => {
-            ObjectStoreError::transport(object_key, sanitize_provider_message(&source.to_string()))
-        }
-        provider_store::Error::PermissionDenied { source, .. }
-        | provider_store::Error::Unauthenticated { source, .. } => {
-            ObjectStoreError::PermissionDenied {
-                object_key: object_key.to_owned(),
-                message: sanitize_provider_message(&source.to_string()),
-            }
-        }
-        other => {
-            ObjectStoreError::transport(object_key, sanitize_provider_message(&other.to_string()))
-        }
-    }
-}
-
-/// Credential query parameters that providers may include in error messages.
-const CREDENTIAL_QUERY_PARAMS: &[&str] = &[
-    "X-Amz-Signature",
-    "X-Amz-Credential",
-    "X-Amz-Security-Token",
-    "AWSAccessKeyId",
-    "Signature",
-    "sig",
-];
-
-/// XML elements that may contain signing data in authentication errors.
-const CREDENTIAL_XML_ELEMENTS: &[&str] = &[
-    "StringToSign",
-    "StringToSignBytes",
-    "CanonicalRequest",
-    "SignatureProvided",
-    "AWSAccessKeyId",
-];
-
-/// Redacts credential and signing data from provider error messages.
-fn sanitize_provider_message(message: &str) -> String {
-    let mut sanitized = message.to_owned();
-    for param in CREDENTIAL_QUERY_PARAMS {
-        sanitized = mask_query_param_values(&sanitized, param);
-    }
-    for element in CREDENTIAL_XML_ELEMENTS {
-        sanitized = mask_xml_element_text(&sanitized, element);
-    }
-    sanitized
-}
-
-/// Redacts a query parameter without matching it inside a longer name.
-fn mask_query_param_values(message: &str, param: &str) -> String {
-    let needle = format!("{param}=");
-    let mut out = String::with_capacity(message.len());
-    let mut cursor = 0;
-    while let Some(found) = message[cursor..].find(&needle) {
-        let start = cursor + found;
-        let value_start = start + needle.len();
-        out.push_str(&message[cursor..value_start]);
-        cursor = value_start;
-        let at_boundary = start > 0 && matches!(message.as_bytes()[start - 1], b'?' | b'&');
-        if at_boundary {
-            let value_len = message[cursor..]
-                .find(|c: char| {
-                    matches!(c, '&' | '"' | '\'' | ')' | '<' | '>' | ':' | ',') || c.is_whitespace()
-                })
-                .unwrap_or(message.len() - cursor);
-            out.push_str(REDACTED);
-            cursor += value_len;
-        }
-    }
-    out.push_str(&message[cursor..]);
-    out
-}
-
-/// Redacts an XML element, including a truncated element without a closing tag.
-fn mask_xml_element_text(message: &str, element: &str) -> String {
-    let open = format!("<{element}>");
-    let close = format!("</{element}>");
-    let mut out = String::with_capacity(message.len());
-    let mut rest = message;
-    while let Some(position) = rest.find(&open) {
-        let text_start = position + open.len();
-        out.push_str(&rest[..text_start]);
-        out.push_str(REDACTED);
-        rest = &rest[text_start..];
-        match rest.find(&close) {
-            Some(text_end) => rest = &rest[text_end..],
-            None => rest = "",
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aws_credentials::{aws_credentials_source, ObjectStoreAwsCredentialProvider};
     use crate::metrics::{InstrumentedObjectStore, VecObjectStoreMetricsRecorder};
-    use crate::test_support::{aws_environment_lock, isolated_aws_environment};
+    use crate::test_support::{auth_rejection, transport_glitch};
     use futures::{StreamExt, TryStreamExt};
-    use loonfs_types::transport_retry_backoff;
-    use object_store::client::CredentialProvider;
     use object_store::memory::InMemory;
     use provider_store::list::PaginatedListResult;
+    use std::time::Duration;
 
     fn memory_store() -> ProviderObjectStore {
-        memory_store_over(Arc::new(InMemory::default()))
+        retrying_store(Arc::new(FlakyStore::default()))
     }
 
-    fn memory_store_over(inner: Arc<InMemory>) -> ProviderObjectStore {
-        ProviderObjectStore::new(
-            Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
-            Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
-            Arc::new(MemoryPages(Arc::clone(&inner))),
-            ProviderObjectStoreConfig {
-                key_prefix: Some("tenant-a".to_owned()),
-                location: "bucket".to_owned(),
-            },
-            ConfiguredObjectStoreKind::LocalFs,
-            ChecksumAlgorithm::Crc64nvme,
-            StoreIoRuntime::new().expect("store io runtime"),
-            Arc::clone(&inner) as Arc<dyn StoredChecksumReader>,
-            Arc::new(ConditionalPutController::over(inner, Some("tenant-a"))),
-        )
-        .expect("provider store")
+    /// Builds a store whose provider clients are scripted doubles, and whose
+    /// signer is a [`TestSigner`] over `provider`.
+    fn provider_store(
+        provider: Arc<FlakyStore>,
+        one_attempt: Arc<FlakyStore>,
+        kind: ConfiguredObjectStoreKind,
+        key_prefix: Option<&str>,
+    ) -> ProviderObjectStore {
+        let key_scope = KeyScope::new(key_prefix).expect("key prefix");
+        ProviderObjectStore::new(ProviderParts {
+            provider: Arc::clone(&provider),
+            one_attempt,
+            signer: Arc::new(TestSigner {
+                provider,
+                key_scope: key_scope.clone(),
+            }),
+            client_multipart: None,
+            kind,
+            key_scope,
+            location: "bucket".to_owned(),
+            io_runtime: StoreIoRuntime::new().expect("store io runtime"),
+            retry: Arc::new(TransportRetry::new(Arc::new(
+                loonfs_types::StdMonotonicTimer::default(),
+            ))),
+        })
     }
 
-    /// Creates a multipart payload with one conditional put on the provider
-    /// client, standing in for a provider's signed multipart requests.
-    struct ConditionalPutController {
-        client: Arc<dyn provider_store::ObjectStore>,
-        key_prefix: Option<&'static str>,
+    /// Reads stored checksums from the provider double and creates a
+    /// multipart payload with one conditional put on the provider double,
+    /// standing in for a provider's signed requests.
+    struct TestSigner {
+        provider: Arc<FlakyStore>,
+        key_scope: KeyScope,
     }
 
-    impl ConditionalPutController {
-        fn over(
-            client: Arc<dyn provider_store::ObjectStore>,
-            key_prefix: Option<&'static str>,
-        ) -> Self {
-            Self { client, key_prefix }
+    impl TestSigner {
+        async fn create(&self, key: &str, bytes: Vec<u8>) -> Result<ObjectMetadata> {
+            let (size_bytes, checksum) = (bytes.len() as u64, Checksum::crc64nvme(&bytes));
+            let options = PutOptions {
+                mode: provider_store::PutMode::Create,
+                ..Default::default()
+            };
+            let path = Path::from(self.key_scope.object_key(key)?);
+            let result = provider_store::ObjectStore::put_opts(
+                self.provider.as_ref(),
+                &path,
+                PutPayload::from(bytes),
+                options,
+            )
+            .await
+            .map_err(|error| map_provider_error(key, error, ProviderClient::OneAttempt))?;
+            Ok(ObjectMetadata {
+                etag: result.e_tag,
+                version: result.version,
+                size_bytes,
+                last_modified_at_ms: None,
+                checksum: Some(checksum),
+            })
         }
     }
 
     #[async_trait]
-    impl MultipartController for ConditionalPutController {
+    impl ProviderSigner for TestSigner {
+        async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+            let provider = &self.provider;
+            provider.heads.fetch_add(1, Ordering::SeqCst);
+            let path = Path::from(self.key_scope.object_key(key)?);
+            let mut metadata = match provider.inner.get(&path).await {
+                Ok(result) => {
+                    let meta = result.meta.clone();
+                    let bytes = result.bytes().await.map_err(|error| {
+                        map_provider_error(key, error, ProviderClient::Retrying)
+                    })?;
+                    Some(ObjectMetadata {
+                        etag: meta.e_tag,
+                        version: meta.version,
+                        size_bytes: meta.size,
+                        last_modified_at_ms: last_modified_at_ms(meta.last_modified.into()),
+                        checksum: Some(Checksum::crc64nvme(&bytes)),
+                    })
+                }
+                Err(error) if provider_not_found(&error) => None,
+                Err(error) => return Err(map_provider_error(key, error, ProviderClient::Retrying)),
+            };
+            if provider
+                .missing_checksum
+                .lock()
+                .expect("checksum fault")
+                .as_deref()
+                == Some(key)
+            {
+                if let Some(metadata) = &mut metadata {
+                    metadata.checksum = None;
+                }
+            }
+            Ok(metadata)
+        }
+
+        async fn create_checked(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            _checksum: &Checksum,
+        ) -> Result<ObjectMetadata> {
+            self.create(key, bytes.to_vec()).await
+        }
+
         async fn put_if_absent(
             &self,
             key: &str,
@@ -1254,24 +870,7 @@ mod tests {
             while let Some(part) = rest.next_part().await? {
                 bytes.extend_from_slice(&part);
             }
-            let (size_bytes, checksum) = (bytes.len() as u64, Checksum::crc64nvme(&bytes));
-            let options = PutOptions {
-                mode: provider_store::PutMode::Create,
-                ..Default::default()
-            };
-            let path = Path::from(scope_object_key(self.key_prefix, key)?);
-            let result = self
-                .client
-                .put_opts(&path, PutPayload::from(bytes), options)
-                .await
-                .map_err(|error| map_provider_error(key, error, ProviderClient::OneAttempt))?;
-            Ok(ObjectMetadata {
-                etag: result.e_tag,
-                version: result.version,
-                size_bytes,
-                last_modified_at_ms: None,
-                checksum: Some(checksum),
-            })
+            self.create(key, bytes).await
         }
 
         async fn assemble(
@@ -1282,43 +881,6 @@ mod tests {
             _expected: &Checksum,
         ) -> Result<ObjectMetadata> {
             Err(ObjectStoreError::Unsupported("test assembly"))
-        }
-    }
-
-    #[async_trait]
-    impl StoredChecksumReader for InMemory {
-        async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-            let path = Path::from(format!("tenant-a/{key}"));
-            match self.get(&path).await {
-                Ok(result) => {
-                    let meta = result.meta.clone();
-                    let bytes = result.bytes().await.map_err(|error| {
-                        map_provider_error(key, error, ProviderClient::Retrying)
-                    })?;
-                    Ok(Some(ObjectMetadata {
-                        etag: meta.e_tag,
-                        version: meta.version,
-                        size_bytes: meta.size,
-                        last_modified_at_ms: last_modified_at_ms(meta.last_modified.into()),
-                        checksum: Some(Checksum::crc64nvme(&bytes)),
-                    }))
-                }
-                Err(error) if provider_not_found(&error) => Ok(None),
-                Err(error) => Err(map_provider_error(key, error, ProviderClient::Retrying)),
-            }
-        }
-    }
-
-    struct MemoryPages(Arc<InMemory>);
-
-    #[async_trait]
-    impl PaginatedListStore for MemoryPages {
-        async fn list_paginated(
-            &self,
-            prefix: Option<&str>,
-            options: PaginatedListOptions,
-        ) -> provider_store::Result<PaginatedListResult> {
-            memory_page(&self.0, prefix, options).await
         }
     }
 
@@ -1396,64 +958,14 @@ mod tests {
         );
     }
 
-    /// Checks that an opaque provider client failure is retryable only from
-    /// the client that sends each request once, and that a permission
-    /// failure is classified the same way from either client.
-    #[test]
-    fn provider_client_failures_are_classified_at_the_adapter_boundary() {
-        let path = Path::from("private-key");
-        for (client, opaque) in [
-            (ProviderClient::Retrying, crate::ObjectStoreErrorKind::Other),
-            (
-                ProviderClient::OneAttempt,
-                crate::ObjectStoreErrorKind::RetryableTransport,
-            ),
-        ] {
-            assert_eq!(
-                map_provider_error("private-key", transport_glitch(), client).kind(),
-                opaque
-            );
-            assert_eq!(
-                map_provider_error("private-key", auth_rejection(&path), client).kind(),
-                crate::ObjectStoreErrorKind::PermissionDenied
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn credential_provider_failures_preserve_configuration_class_and_public_message() {
-        let _lock = aws_environment_lock().await;
-        let tempdir =
-            tempfile::tempdir().expect("temporary AWS config directory should be created");
-        let _environment = isolated_aws_environment(&tempdir, None);
-        let source = aws_credentials_source(&crate::AwsS3Credentials::Ambient {}, "us-east-1")
-            .expect("ambient credential source should be constructed");
-        let provider = ObjectStoreAwsCredentialProvider::new(source);
-        let error = provider
-            .get_credential()
-            .await
-            .expect_err("isolated credential chain should be empty");
-
-        let error = map_provider_error("private-key", error, ProviderClient::Retrying);
-
-        assert_eq!(error.kind(), crate::ObjectStoreErrorKind::Configuration);
-        assert_eq!(
-            error.to_string(),
-            "invalid object store configuration: could not resolve `store.credentials` through the standard AWS credential chain"
-        );
-        assert_eq!(
-            error.public_message(),
-            "object-store configuration is invalid; verify the provider, bucket, credentials, endpoint, and key prefix fields"
-        );
-    }
-
     #[test]
     fn compare_tokens_populate_only_the_matching_provider_field() {
-        for (compare_token, expected_etag, expected_version) in [
-            (CompareToken::Etag, Some("token"), None),
-            (CompareToken::Generation, None, Some("token")),
+        for (kind, expected_etag, expected_version) in [
+            (ConfiguredObjectStoreKind::AwsS3, Some("token"), None),
+            (ConfiguredObjectStoreKind::GcpGcs, None, Some("token")),
         ] {
-            let store = memory_store().compare_token(compare_token);
+            let flaky = Arc::new(FlakyStore::default());
+            let store = provider_store(Arc::clone(&flaky), flaky, kind, None);
             let provider_store::PutMode::Update(version) =
                 store.map_put_mode(PutMode::CompareAndSwap {
                     expected_etag: "token".to_owned(),
@@ -1465,67 +977,6 @@ mod tests {
             assert_eq!(version.e_tag.as_deref(), expected_etag);
             assert_eq!(version.version.as_deref(), expected_version);
         }
-    }
-
-    #[test]
-    fn provider_messages_drop_credential_material_and_keep_the_diagnosis() {
-        let presigned = sanitize_provider_message(
-            "Generic S3 error: error sending request for url \
-             (https://bucket.s3.amazonaws.com/k?X-Amz-Algorithm=AWS4-HMAC-SHA256\
-             &X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260726%2Fus-east-1%2Fs3%2Faws4_request\
-             &X-Amz-Signature=deadbeefcafe): operation timed out",
-        );
-        assert!(!presigned.contains("AKIAIOSFODNN7EXAMPLE"), "{presigned}");
-        assert!(!presigned.contains("deadbeefcafe"), "{presigned}");
-        assert!(
-            presigned.contains("X-Amz-Signature=<redacted>"),
-            "{presigned}"
-        );
-        assert!(presigned.contains("operation timed out"), "{presigned}");
-        assert!(
-            presigned.contains("bucket.s3.amazonaws.com/k"),
-            "{presigned}"
-        );
-
-        let signature_mismatch = sanitize_provider_message(
-            "Client error with status 403 Forbidden: <Error>\
-             <Code>SignatureDoesNotMatch</Code>\
-             <StringToSign>AWS4-HMAC-SHA256 20260726T000000Z scope digest</StringToSign>\
-             <SignatureProvided>cafe0123</SignatureProvided>\
-             <AWSAccessKeyId>AKIAIOSFODNN7EXAMPLE</AWSAccessKeyId></Error>",
-        );
-        assert!(
-            !signature_mismatch.contains("AKIAIOSFODNN7EXAMPLE"),
-            "{signature_mismatch}"
-        );
-        assert!(
-            !signature_mismatch.contains("cafe0123"),
-            "{signature_mismatch}"
-        );
-        assert!(
-            !signature_mismatch.contains("20260726T000000Z"),
-            "{signature_mismatch}"
-        );
-        assert!(
-            signature_mismatch.contains("SignatureDoesNotMatch"),
-            "{signature_mismatch}"
-        );
-        assert!(
-            signature_mismatch.contains("403 Forbidden"),
-            "{signature_mismatch}"
-        );
-
-        let azure_sas = sanitize_provider_message(
-            "error for url https://account.blob.core.windows.net/c/k?sv=2021-08-06\
-             &se=2026-07-26&sig=aGVsbG8: 403",
-        );
-        assert!(!azure_sas.contains("aGVsbG8"), "{azure_sas}");
-        assert!(azure_sas.contains("sig=<redacted>"), "{azure_sas}");
-
-        // A bare name inside a longer parameter is not a boundary match.
-        let unrelated = sanitize_provider_message("policy?ResponseSignature=keep&sigil=keep2");
-        assert!(unrelated.contains("keep2"), "{unrelated}");
-        assert!(!unrelated.contains("Signature=<redacted>"), "{unrelated}");
     }
 
     #[tokio::test]
@@ -1593,8 +1044,8 @@ mod tests {
 
     #[tokio::test]
     async fn child_prefix_pages_resume_after_whole_children_inside_the_key_prefix() {
-        let inner = Arc::new(InMemory::default());
-        let store = memory_store_over(Arc::clone(&inner));
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
         for key in [
             "namespaces/a/hint.json",
             "namespaces/a1",
@@ -1609,7 +1060,7 @@ mod tests {
                 .expect("put");
         }
         provider_store::ObjectStoreExt::put(
-            inner.as_ref(),
+            &flaky.inner,
             &Path::from("tenant-b/namespaces/z/hint.json"),
             PutPayload::from_static(b"outside"),
         )
@@ -1799,20 +1250,6 @@ mod tests {
         }
     }
 
-    fn transport_glitch() -> provider_store::Error {
-        provider_store::Error::Generic {
-            store: "flaky",
-            source: "error sending request".into(),
-        }
-    }
-
-    fn auth_rejection(location: &Path) -> provider_store::Error {
-        provider_store::Error::PermissionDenied {
-            path: location.to_string(),
-            source: "access denied".into(),
-        }
-    }
-
     #[async_trait]
     impl provider_store::ObjectStore for FlakyStore {
         async fn put_opts(
@@ -1921,68 +1358,17 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl StoredChecksumReader for FlakyStore {
-        async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-            self.heads.fetch_add(1, Ordering::SeqCst);
-            let mut metadata = self.inner.head_metadata(key).await?;
-            if self
-                .missing_checksum
-                .lock()
-                .expect("checksum fault")
-                .as_deref()
-                == Some(key)
-            {
-                if let Some(metadata) = &mut metadata {
-                    metadata.checksum = None;
-                }
-            }
-            Ok(metadata)
-        }
-    }
-
     fn retrying_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
-        ProviderObjectStore::new(
-            Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
-            Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
-            flaky.clone(),
-            ProviderObjectStoreConfig {
-                key_prefix: Some("tenant-a".to_owned()),
-                location: "bucket".to_owned(),
-            },
+        provider_store(
+            Arc::clone(&flaky),
+            flaky,
             ConfiguredObjectStoreKind::LocalFs,
-            ChecksumAlgorithm::Crc64nvme,
-            StoreIoRuntime::new().expect("store io runtime"),
-            Arc::clone(&flaky) as Arc<dyn StoredChecksumReader>,
-            Arc::new(ConditionalPutController::over(flaky, Some("tenant-a"))),
+            Some("tenant-a"),
         )
-        .expect("provider store")
     }
 
     fn script_puts(flaky: &FlakyStore, script: impl IntoIterator<Item = WriteScript>) {
         flaky.put_script.lock().expect("put script").extend(script);
-    }
-
-    #[test]
-    fn transport_retry_backoff_doubles_and_caps() {
-        let policy = DEFAULT;
-        assert_eq!(
-            transport_retry_backoff(&policy, 1),
-            Duration::from_millis(100)
-        );
-        assert_eq!(
-            transport_retry_backoff(&policy, 2),
-            Duration::from_millis(200)
-        );
-        assert_eq!(
-            transport_retry_backoff(&policy, 8),
-            Duration::from_millis(12_800)
-        );
-        assert_eq!(transport_retry_backoff(&policy, 9), Duration::from_secs(15));
-        assert_eq!(
-            transport_retry_backoff(&policy, 10),
-            Duration::from_secs(15)
-        );
     }
 
     #[tokio::test]
@@ -2001,7 +1387,7 @@ mod tests {
             .expect("get")
             .expect("created");
         assert_eq!(head.checksum, Some(Checksum::crc64nvme(b"created")));
-        assert_eq!(body.bytes, b"created");
+        assert_eq!(body.bytes, b"created".as_slice());
     }
 
     #[tokio::test]
@@ -2159,21 +1545,12 @@ mod tests {
             inner: resending.inner.clone(),
             ..FlakyStore::default()
         });
-        let store = ProviderObjectStore::new(
-            Arc::clone(&resending) as Arc<dyn provider_store::ObjectStore>,
-            Arc::clone(&one_attempt) as Arc<dyn provider_store::ObjectStore>,
-            Arc::clone(&resending) as Arc<dyn PaginatedListStore>,
-            ProviderObjectStoreConfig {
-                key_prefix: None,
-                location: "bucket".to_owned(),
-            },
+        let store = provider_store(
+            Arc::clone(&resending),
+            Arc::clone(&one_attempt),
             ConfiguredObjectStoreKind::LocalFs,
-            ChecksumAlgorithm::Crc64nvme,
-            StoreIoRuntime::new().expect("store io runtime"),
-            resending.clone(),
-            Arc::new(ConditionalPutController::over(resending.clone(), None)),
-        )
-        .expect("provider store");
+            None,
+        );
         script_puts(&one_attempt, [WriteScript::LandThenFail]);
         let key = "namespaces/demo/uploads/upl_11.json";
 
@@ -2279,23 +1656,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn request_phase_timeout_has_two_flat_tiers() {
-        assert_eq!(request_phase_timeout_for(0), PROVIDER_ATTEMPT_TIMEOUT);
-        assert_eq!(
-            request_phase_timeout_for(PROVIDER_MIN_TRANSFER_BODY_BYTES - 1),
-            PROVIDER_ATTEMPT_TIMEOUT
-        );
-        assert_eq!(
-            request_phase_timeout_for(PROVIDER_MIN_TRANSFER_BODY_BYTES),
-            PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
-        );
-        assert_eq!(
-            request_phase_timeout_for(PROVIDER_MULTIPART_PART_BYTES),
-            PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
-        );
-    }
-
     const MULTIPART_TEST_THRESHOLD: usize = 1024;
     const MULTIPART_TEST_PART: usize = 512;
     const MULTIPART_KEY: &str = "namespaces/demo/content/con_abcdef0123456789abcdef0123456789";
@@ -2325,18 +1685,31 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct CountingController {
+    struct CountingSigner {
         part_windows: Mutex<Vec<usize>>,
     }
 
-    impl CountingController {
+    impl CountingSigner {
         fn part_windows(&self) -> Vec<usize> {
             self.part_windows.lock().expect("part windows").clone()
         }
     }
 
     #[async_trait]
-    impl MultipartController for CountingController {
+    impl ProviderSigner for CountingSigner {
+        async fn head_metadata(&self, _key: &str) -> Result<Option<ObjectMetadata>> {
+            Ok(None)
+        }
+
+        async fn create_checked(
+            &self,
+            _key: &str,
+            _bytes: Bytes,
+            _checksum: &Checksum,
+        ) -> Result<ObjectMetadata> {
+            Err(ObjectStoreError::Unsupported("test create"))
+        }
+
         async fn put_if_absent(
             &self,
             _key: &str,
@@ -2378,9 +1751,9 @@ mod tests {
     #[tokio::test]
     async fn a_publication_is_one_put_and_only_verified_creates_get_the_part_window() {
         let flaky = Arc::new(FlakyStore::default());
-        let controller = Arc::new(CountingController::default());
+        let controller = Arc::new(CountingSigner::default());
         let store = multipart_test_store(Arc::clone(&flaky))
-            .multipart_controller(Arc::clone(&controller) as Arc<dyn MultipartController>);
+            .signer(Arc::clone(&controller) as Arc<dyn ProviderSigner>);
         let payload = multipart_payload(1300);
 
         store

@@ -11,10 +11,10 @@ use loonfs_core::publish::{
 use loonfs_core::time::Deadline;
 use loonfs_core::{CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     api::v0::FilesystemChange, AbsolutePath, AttributeKey, AttributeValue, Attributes,
     AttributesRevisionNo, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,

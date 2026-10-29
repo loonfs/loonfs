@@ -11,7 +11,7 @@ use axum::Json;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
-use loonfs_objectstore::crypto::constant_time_eq;
+use loonfs_types::crypto::constant_time_eq;
 use loonfs_types::{
     headers, AbsolutePath, ActorId, NamespaceId, Subject, SubjectPart, SubjectPartsError,
 };

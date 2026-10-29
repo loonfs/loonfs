@@ -214,20 +214,34 @@ fn present<T>(what: &str, value: Option<T>) -> std::result::Result<T, CheckFailu
     value.ok_or_else(|| wrong(format!("{what} read back as absent")))
 }
 
-/// Requires the store to have refused a write whose precondition did not
-/// hold. Anything else — acceptance, or a different failure — means the
-/// precondition is not being enforced as fencing assumes.
-fn refused<T>(what: &str, result: StoreResult<T>) -> CheckResult {
+/// Requires the store to have refused a request with the error that
+/// `matches` accepts, which `expected` describes. Anything else (acceptance,
+/// or a different failure) means the store does not enforce the rule that
+/// the check is about.
+fn expect_error<T>(
+    what: &str,
+    result: StoreResult<T>,
+    expected: &str,
+    matches: fn(&ObjectStoreError) -> bool,
+) -> CheckResult {
     match result {
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
+        Err(error) if matches(&error) => Ok(()),
         Err(error) => Err(wrong(format!(
-            "{what} should have been refused as a failed precondition, but failed differently: {}",
-            error.public_message()
+            "{what} should have been refused as {expected}, but failed differently: {}",
+            safe_message(&error)
         ))),
         Ok(_) => Err(wrong(format!(
-            "{what} was accepted; the store does not enforce this precondition"
+            "{what} was accepted, so the store does not enforce this rule"
         ))),
     }
+}
+
+/// Requires the store to have refused a write whose precondition did not
+/// hold, as fencing assumes.
+fn refused<T>(what: &str, result: StoreResult<T>) -> CheckResult {
+    expect_error(what, result, "a failed precondition", |error| {
+        matches!(error, ObjectStoreError::PreconditionFailed { .. })
+    })
 }
 
 /// Create-if-absent is how a namespace's first writer claims a mutable key
@@ -347,7 +361,7 @@ async fn get_with_metadata_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -
         ok("full-object read", store.get_with_metadata(&key).await)?,
     )?;
 
-    if loaded.bytes != bytes {
+    if loaded.bytes != bytes.as_slice() {
         return Err(wrong("a full-object read returned unexpected bytes"));
     }
     if loaded.metadata.size_bytes != bytes.len() as u64 {
@@ -388,8 +402,8 @@ async fn head_reports_last_modified(store: &dyn ObjectStore, run: &ProbeRun) -> 
         None => Err(wrong(
             "the store reports no last-modified time, so nothing can age out of the grace window",
         )),
-        // Nothing LoonFS writes predates the software, so a stamp at or near
-        // the epoch is a synthesized one rather than a real age.
+        // Nothing LoonFS writes predates the software, so a stamp at the
+        // epoch is a synthesized one rather than a real age.
         Some(0) => Err(wrong(
             "the store reports the unix epoch as an object's last-modified time, \
              which reads as infinitely old and defeats the grace window",
@@ -539,20 +553,12 @@ async fn range_reads(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
             "a read starting at the object's exact end did not return an empty range",
         ));
     }
-    match store.get(&key, bounded(7, 8)).await {
-        Err(ObjectStoreError::InvalidRange { .. }) => {}
-        Err(error) => {
-            return Err(wrong(format!(
-                "a read starting past the object's end should be an invalid range, but failed differently: {}",
-                error.public_message()
-            )))
-        }
-        Ok(_) => {
-            return Err(wrong(
-                "a read starting past the object's end should be an invalid range, but returned a response",
-            ))
-        }
-    }
+    expect_error(
+        "a read starting past the object's end",
+        store.get(&key, bounded(7, 8)).await,
+        "an invalid range",
+        is_invalid_range,
+    )?;
 
     ok("delete", store.delete(&key).await)?;
     let missing = ok(
@@ -564,21 +570,16 @@ async fn range_reads(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
             "a bounded read of a deleted object answered bytes instead of absence",
         ));
     }
-    match store.get(&key, bounded(4, 1)).await {
-        Err(ObjectStoreError::InvalidRange { .. }) => {}
-        Err(error) => {
-            return Err(wrong(format!(
-                "a descending range of a missing object should be an invalid range, but failed differently: {}",
-                error.public_message()
-            )))
-        }
-        Ok(_) => {
-            return Err(wrong(
-                "a descending range of a missing object should be an invalid range, but returned a response",
-            ))
-        }
-    }
-    Ok(())
+    expect_error(
+        "a descending range of a missing object",
+        store.get(&key, bounded(4, 1)).await,
+        "an invalid range",
+        is_invalid_range,
+    )
+}
+
+fn is_invalid_range(error: &ObjectStoreError) -> bool {
+    matches!(error, ObjectStoreError::InvalidRange { .. })
 }
 
 /// Checks the multipart path that every large content object and segment
@@ -621,24 +622,14 @@ async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckR
         ));
     }
 
-    match store
-        .put_immutable_verified(&key, Bytes::from(multipart_payload(payload_len, 1)))
-        .await
-    {
-        Err(ObjectStoreError::DifferentObject { .. }) => {}
-        Ok(_) => {
-            return Err(wrong(
-                "a create-only multipart write over an existing object was accepted",
-            ))
-        }
-        Err(error) => {
-            return Err(wrong(format!(
-                "a create-only multipart write over an existing object should have been \
-                 refused as a different object, but failed differently: {}",
-                immutable_write_message(&error)
-            )))
-        }
-    }
+    expect_error(
+        "a create-only multipart write over an existing object",
+        store
+            .put_immutable_verified(&key, Bytes::from(multipart_payload(payload_len, 1)))
+            .await,
+        "a different object",
+        |error| matches!(error, ObjectStoreError::DifferentObject { .. }),
+    )?;
     let read_back = present(
         "the assembled object",
         ok("read", store.get(&key, None).await)?,
@@ -671,15 +662,14 @@ fn ok_immutable<T>(
         ObjectStoreError::DifferentObject { .. }
         | ObjectStoreError::StoredChecksumMissing { .. } => wrong(format!(
             "{operation} to a new key failed: {}",
-            immutable_write_message(&error)
+            safe_message(&error)
         )),
         error => failed(operation, &error),
     })
 }
 
-/// Describes a failed immutable write without exposing provider or object
-/// identity.
-fn immutable_write_message(error: &ObjectStoreError) -> String {
+/// Describes a failed request without exposing provider or object identity.
+fn safe_message(error: &ObjectStoreError) -> String {
     match error {
         ObjectStoreError::DifferentObject { .. } => {
             "the key already contains different bytes".to_owned()

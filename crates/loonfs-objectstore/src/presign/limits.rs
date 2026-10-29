@@ -4,5 +4,7 @@
 pub(super) const MAX_PRESIGN_TTL: std::time::Duration =
     std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Lifetime of a signed checksum-readback request.
-pub(crate) const CHECKSUM_HEAD_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Lifetime of a request that LoonFS signs for its own use, such as a
+/// checksum readback or a multipart control request. Each is sent at once and
+/// never handed out.
+pub(crate) const INTERNAL_REQUEST_TTL: std::time::Duration = std::time::Duration::from_secs(60);

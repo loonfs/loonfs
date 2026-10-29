@@ -20,7 +20,6 @@ pub mod buffered;
 mod checksum_header;
 mod clock;
 mod configured;
-pub mod crypto;
 mod endpoint;
 pub mod gcs;
 mod immutable_write;
@@ -32,15 +31,17 @@ pub mod metrics;
 pub mod object_store;
 pub mod presign;
 pub mod probe;
+mod provider_error;
+mod provider_limits;
 mod provider_object_store;
 mod retry;
 pub mod s3_compatible;
 mod signed_request;
+mod signed_upload;
 mod store_config;
 mod store_io_runtime;
 #[cfg(test)]
 mod test_support;
-pub mod timing;
 mod transfer_timeouts;
 
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
@@ -50,14 +51,14 @@ pub use object_store::{
     SharedObjectStore, StoreIdentity,
 };
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
-pub use provider_object_store::{
-    ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,
-    PROVIDER_CONNECT_TIMEOUT, PROVIDER_MAX_MULTIPART_PARTS, PROVIDER_MAX_MULTIPART_PART_BYTES,
-    PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_MIN_MULTIPART_PART_BYTES,
-    PROVIDER_MULTIPART_PARTS_IN_FLIGHT, PROVIDER_MULTIPART_PART_BYTES,
-    PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE,
+pub use provider_limits::{
+    PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_CONNECT_TIMEOUT, PROVIDER_MAX_MULTIPART_PARTS,
+    PROVIDER_MAX_MULTIPART_PART_BYTES, PROVIDER_MAX_RETRY_BACKOFF,
+    PROVIDER_MIN_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
+    PROVIDER_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE,
     PROVIDER_PUBLICATION_REQUEST_BOUND, PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };
+pub use provider_object_store::ProviderObjectStore;
 pub use store_config::{
     AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, StoreConfig, ACCESS_KEY_ID_ENV,
     SECRET_ACCESS_KEY_ENV,

@@ -17,6 +17,7 @@ use loonfs::{LoonFs, MaintainMetadataOptions, NamespaceId, StoreConfig, Writable
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
@@ -25,10 +26,10 @@ use tempfile::tempdir;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 fn store_config(root: &Path) -> StoreConfig {
-    StoreConfig::LocalFs {
+    StoreConfig::LocalFs(LocalFsStoreConfig {
         root: root.to_string_lossy().into_owned(),
         key_prefix: None,
-    }
+    })
 }
 
 fn writes_past_wal_tail_threshold() -> u32 {

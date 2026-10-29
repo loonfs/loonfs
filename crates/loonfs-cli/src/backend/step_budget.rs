@@ -3,9 +3,9 @@
 use crate::error::CliError;
 use crate::resolve::ResolvedTarget;
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome};
-use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{ChangeSeq, NamespaceId};
+use loonfs_types::{MonotonicTimer, StdMonotonicTimer};
 use std::future::Future;
 
 impl ResolvedTarget {

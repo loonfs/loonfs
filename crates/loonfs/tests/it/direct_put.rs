@@ -360,46 +360,6 @@ fn put_file_gates_publish_on_its_own_content_write_without_probing() {
 }
 
 #[test]
-fn put_file_retries_a_transient_content_write_failure() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(fail_content_blob_puts_store(temp_dir.path()));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = open_runtime_with(object_store, "content-write-failure-test", |builder| {
-        builder.inline_content(loonfs::InlineContentPolicy {
-            inline_content_threshold_bytes: None,
-            ..Default::default()
-        })
-    });
-
-    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-
-    raw_store.fail_next(1);
-    fs.put_file_with_options_blocking(
-        &namespace_id,
-        "/docs/report.txt",
-        b"overlap survives",
-        &loonfs_test_support::test_actor(),
-        &PutFileOptions {
-            behavior: DestinationBehavior::NoReplace,
-            commit: loonfs_types::options::CommitOptions {
-                preconditions: Vec::new(),
-                commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
-                message: None,
-            },
-            expected_inode_id: None,
-            expected_revision_no: None,
-        },
-    )
-    .expect("immutable write retries the transient failure");
-    let read = fs
-        .read_file_blocking(&namespace_id, "/docs/report.txt")
-        .expect("read file");
-    assert_eq!(read.bytes, b"overlap survives");
-}
-
-#[test]
 fn path_mutations_return_the_commit_id_they_committed_under() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
@@ -596,7 +556,7 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
 }
 
 #[test]
-fn concurrent_puts_both_commit_after_one_transient_content_failure() {
+fn a_transient_content_failure_fails_only_its_own_concurrent_put() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(fail_content_blob_puts_store(temp_dir.path()));
@@ -615,7 +575,8 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
             .expect("create namespace");
 
         // One content write fails once before either submission enters the
-        // commit window. Its immutable retry is independent of its peer.
+        // commit window. The local store doesn't retry it, so that put fails
+        // and its peer commits.
         raw_store.fail_next(1);
         let actor = loonfs_test_support::test_actor();
         let (a, b) = tokio::join!(
@@ -623,17 +584,27 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
             fs.put_file(&namespace_id, "/docs/b.txt", b"beta", &actor),
         );
 
+        let mut committed = 0;
         for (path, bytes, result) in [
             ("/docs/a.txt", b"alpha" as &[u8], a),
             ("/docs/b.txt", b"beta" as &[u8], b),
         ] {
-            result.expect("both puts survive the transient content failure");
-            let read = namespace
-                .read_file(path)
-                .await
-                .expect("read committed file");
-            assert_eq!(read.bytes, bytes);
+            match result {
+                Ok(_) => {
+                    let read = namespace
+                        .read_file(path)
+                        .await
+                        .expect("read committed file");
+                    assert_eq!(read.bytes, bytes);
+                    committed += 1;
+                }
+                Err(error) => assert_eq!(error.code(), ErrorCode::ServerError),
+            }
         }
+        assert_eq!(
+            committed, 1,
+            "only the put whose content write failed fails"
+        );
     });
 }
 

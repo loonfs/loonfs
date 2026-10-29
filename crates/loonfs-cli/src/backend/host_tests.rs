@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_client::{NamespacePath, PayloadSource};
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 
 #[test]
 fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_limit() {
@@ -16,10 +17,10 @@ fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_lim
     runtime.block_on(async {
         let directory = tempfile::tempdir().expect("store directory");
         let target = ResolvedTarget::embedded(
-            &StoreConfig::LocalFs {
+            &StoreConfig::LocalFs(LocalFsStoreConfig {
                 root: directory.path().display().to_string(),
                 key_prefix: None,
-            },
+            }),
             None,
             false,
         )
@@ -61,10 +62,10 @@ fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_lim
 #[test]
 fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
     let directory = tempfile::tempdir().expect("store directory");
-    let config = StoreConfig::LocalFs {
+    let config = StoreConfig::LocalFs(LocalFsStoreConfig {
         root: directory.path().display().to_string(),
         key_prefix: None,
-    };
+    });
     let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
     let actor = loonfs_test_support::test_actor();
     let open = || async {
@@ -138,10 +139,10 @@ fn run_command<T>(command: impl std::future::Future<Output = T>) -> T {
 #[tokio::test]
 async fn an_embedded_fence_fails_the_request_and_a_later_request_starts_a_new_session() {
     let directory = tempfile::tempdir().expect("store directory");
-    let config = StoreConfig::LocalFs {
+    let config = StoreConfig::LocalFs(LocalFsStoreConfig {
         root: directory.path().display().to_string(),
         key_prefix: None,
-    };
+    });
     let first = ResolvedTarget::embedded(&config, None, false)
         .await
         .expect("first embedded host");

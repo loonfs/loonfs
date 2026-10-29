@@ -12,6 +12,7 @@ use loonfs::{ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, TraceMode, Wr
 use loonfs_client::{Client, ClientConfig};
 use loonfs_http::HttpMetrics;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
@@ -750,10 +751,10 @@ root = "unused"
     config.writer_id = loonfs_test_support::ids::writer_id(writer_id);
     config.grep.mode = crate::config::JobMode::ServeAndMaintain;
     config.min_publish_interval_ms = 0;
-    config.store = StoreConfig::LocalFs {
+    config.store = StoreConfig::LocalFs(LocalFsStoreConfig {
         root: root.display().to_string(),
         key_prefix: Some("http-tests".to_owned()),
-    };
+    });
     config
 }
 

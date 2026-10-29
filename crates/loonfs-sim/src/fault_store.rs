@@ -248,7 +248,7 @@ where
                         Some(ObjectStoreFault::GetReturnsStaleValue),
                         SimEventOutcome::Ok,
                     );
-                    return Ok(Some(apply_range(key, body.bytes, range)?));
+                    return Ok(Some(apply_range(key, body.bytes.into(), range)?));
                 }
                 let result = self.inner.get(key, range).await;
                 self.push_trace(
@@ -326,9 +326,11 @@ where
             Some(ObjectStoreFault::CorruptObjectBytes) => {
                 let mut result = self.inner.get_with_metadata(key).await;
                 if let Ok(Some(body)) = &mut result {
-                    if let Some(first) = body.bytes.first_mut() {
+                    let mut bytes = body.bytes.to_vec();
+                    if let Some(first) = bytes.first_mut() {
                         *first ^= 0x01;
                     }
+                    body.bytes = bytes.into();
                 }
                 self.push_trace(
                     op,
@@ -866,7 +868,7 @@ mod tests {
             .expect("get with metadata")
             .expect("body");
 
-        assert_eq!(body.bytes, b"old");
+        assert_eq!(body.bytes, b"old".as_slice());
         assert_eq!(body.metadata.size_bytes, 3);
     }
 

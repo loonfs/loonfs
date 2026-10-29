@@ -1,34 +1,34 @@
 //! Google Cloud Storage provider.
 
-#[path = "gcs_assembly.rs"]
 mod assembly;
 
 use crate::checksum_header::encode_base64_checksum;
 use crate::clock::wall_now;
 use crate::configured::ConfiguredObjectStoreKind;
-use crate::keyspace::{normalize_key_prefix, scope_object_key};
+use crate::keyspace::KeyScope;
 use crate::object_store::Result;
 use crate::presign::{
-    percent_encode_segment, stored_crc32c, DirectTransferIssuers, GcsV4Presigner, CHECKSUM_HEAD_TTL,
+    percent_encode_segment, read_service_account_key, stored_crc32c, DirectTransferIssuers,
+    GcsV4Presigner, INTERNAL_REQUEST_TTL,
 };
+use crate::provider_error::{map_provider_error, ProviderClient};
+use crate::provider_limits::provider_client_options;
 use crate::provider_object_store::{
-    map_provider_error, AbortUploadOnDrop, CompareToken, ConfiguredProvider, MultipartController,
-    PartReader, ProviderClient, StoredChecksumReader,
+    configuration_error, provider_http, ConfiguredProvider, ProviderParts,
 };
-use crate::retry::{with_transport_retry, RetryWarnings};
+use crate::retry::{one_attempt_retry_config, provider_retry_config, TransportRetry};
 use crate::signed_request::{ensure_succeeded, send, send_signed, SignedResponse};
+use crate::signed_upload::{AbortUploadOnDrop, PartReader, ProviderSigner};
 use crate::store_io_runtime::StoreIoRuntime;
-use crate::timing::StdMonotonicTimer;
 use crate::{
     AssemblySource, GcpGcsCredentials, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
-    ProviderObjectStoreConfig,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::FutureExt;
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
-use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest};
-use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, StdMonotonicTimer};
+use object_store::client::{HttpClient, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -64,8 +64,8 @@ struct GcsRequestSigner {
     io_runtime: tokio::runtime::Handle,
     credentials: GcpCredentialProvider,
     bucket: String,
-    key_prefix: Option<String>,
-    retry_warnings: Arc<RetryWarnings>,
+    key_scope: KeyScope,
+    retry: Arc<TransportRetry>,
 }
 
 /// Builds a native GCS adapter whose compare tokens are object generations.
@@ -74,65 +74,55 @@ pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<ProviderObjectStore> {
 }
 
 /// Returns the store and the issuers that sign direct transfers against it.
+///
+/// The service-account key is read once, so the provider client and the
+/// presigner sign with the same key even when the file is replaced.
 pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<ConfiguredProvider> {
-    let request_signer = Arc::new(GcsV4Presigner::new(&config)?);
-    let key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
-    let bucket = config.bucket.clone();
-    let GcpGcsCredentials::ServiceAccountFile {
-        path: service_account_key_path,
-    } = &config.credentials;
+    let key_json = read_service_account_key(&config)?;
+    let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
+    let request_signer = Arc::new(GcsV4Presigner::with_service_account_key(
+        config.bucket.clone(),
+        key_scope.clone(),
+        &key_json,
+    )?);
 
     let io_runtime = StoreIoRuntime::new()?;
-    let http = io_runtime
-        .connector()
-        .connect(&crate::provider_object_store::provider_client_options())
-        .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
+    let http = provider_http(&io_runtime)?;
     let builder = GoogleCloudStorageBuilder::new()
         .with_http_connector(io_runtime.connector())
-        .with_client_options(crate::provider_object_store::provider_client_options())
-        .with_retry(crate::provider_object_store::provider_retry_config())
+        .with_client_options(provider_client_options())
+        .with_retry(provider_retry_config())
         .with_bucket_name(config.bucket.clone())
-        .with_service_account_path(service_account_key_path);
+        .with_service_account_key(key_json);
 
-    let provider = Arc::new(
-        builder
-            .clone()
-            .build()
-            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?,
-    );
+    let provider = Arc::new(builder.clone().build().map_err(configuration_error)?);
     let credentials = Arc::clone(provider.credentials());
     let one_attempt = builder
-        .with_retry(object_store::RetryConfig {
-            max_retries: 0,
-            ..crate::provider_object_store::provider_retry_config()
-        })
+        .with_retry(one_attempt_retry_config())
         .with_credentials(Arc::clone(&credentials))
         .build()
-        .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
-    let retry_warnings = Arc::new(RetryWarnings::new(Arc::new(StdMonotonicTimer::default())));
+        .map_err(configuration_error)?;
+    let retry = Arc::new(TransportRetry::new(Arc::new(StdMonotonicTimer::default())));
     let signer = Arc::new(GcsRequestSigner {
         request_signer: Arc::clone(&request_signer),
         http,
         io_runtime: io_runtime.handle(),
         credentials,
-        bucket: bucket.clone(),
-        key_prefix,
-        retry_warnings: Arc::clone(&retry_warnings),
+        bucket: config.bucket.clone(),
+        key_scope: key_scope.clone(),
+        retry: Arc::clone(&retry),
     });
-    let store = ProviderObjectStore::new(
-        Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
-        Arc::new(one_attempt),
+    let store = ProviderObjectStore::new(ProviderParts {
         provider,
-        ProviderObjectStoreConfig {
-            key_prefix: config.key_prefix,
-            location: bucket,
-        },
-        ConfiguredObjectStoreKind::GcpGcs,
-        ChecksumAlgorithm::Crc32c,
-        io_runtime,
-        signer.clone(),
+        one_attempt: Arc::new(one_attempt),
         signer,
-    )?;
+        client_multipart: None,
+        kind: ConfiguredObjectStoreKind::GcpGcs,
+        key_scope,
+        location: config.bucket,
+        io_runtime,
+        retry,
+    });
     let direct_transfers = DirectTransferIssuers {
         get: request_signer.clone(),
         put: Some(request_signer),
@@ -140,9 +130,7 @@ pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<Configur
     };
 
     Ok(ConfiguredProvider {
-        store: store
-            .compare_token(CompareToken::Generation)
-            .retry_warnings(retry_warnings),
+        store,
         direct_transfers,
     })
 }
@@ -150,7 +138,9 @@ pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<Configur
 impl GcsRequestSigner {
     /// The JSON API path segment naming `key`'s object.
     fn object_name(&self, key: &str) -> Result<String> {
-        scope_object_key(self.key_prefix.as_deref(), key).map(|name| percent_encode_segment(&name))
+        self.key_scope
+            .object_key(key)
+            .map(|name| percent_encode_segment(&name))
     }
 
     /// Sends one JSON API request under the service account's OAuth token
@@ -171,38 +161,78 @@ impl GcsRequestSigner {
         ensure_succeeded(key, &response, None)?;
         Ok(response)
     }
+
+    /// Starts a JSON API resumable upload of `key` whose start includes
+    /// `ifGenerationMatch=0`, because XML API multipart uploads refuse
+    /// preconditions, and returns the upload's session URL.
+    async fn start_resumable_upload(&self, key: &str) -> Result<String> {
+        let url = format!(
+            "{GCS_JSON_UPLOADS}/{}/o?uploadType=resumable&ifGenerationMatch=0&name={}",
+            percent_encode_segment(&self.bucket),
+            self.object_name(key)?,
+        );
+        let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
+        let started = self
+            .send_authorized(key, request, Bytes::from_static(b"{}").into())
+            .await?;
+        started
+            .headers
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| ObjectStoreError::transport(key, "resumable upload returned no session"))
+    }
 }
 
 #[async_trait]
-impl StoredChecksumReader for GcsRequestSigner {
+impl ProviderSigner for GcsRequestSigner {
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        let mut metadata = with_transport_retry(&self.retry_warnings, key, "head", 0, || async {
-            let signed = self
-                .request_signer
-                .presign_head(key, CHECKSUM_HEAD_TTL, wall_now())?;
-            let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-            crate::signed_request::metadata_from_signed_head(
-                key,
-                &response,
-                "x-goog-generation",
-                stored_crc32c_from_headers,
-            )
-        })
-        .await?;
+        let mut metadata = self
+            .retry
+            .run(key, "head", 0, || async {
+                let signed =
+                    self.request_signer
+                        .presign_head(key, INTERNAL_REQUEST_TTL, wall_now())?;
+                let response =
+                    send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+                crate::signed_request::metadata_from_signed_head(
+                    key,
+                    &response,
+                    "x-goog-generation",
+                    stored_crc32c_from_headers,
+                )
+            })
+            .await?;
         if let Some(metadata) = &mut metadata {
             metadata.etag.clone_from(&metadata.version);
         }
         Ok(metadata)
     }
-}
 
-#[async_trait]
-impl MultipartController for GcsRequestSigner {
-    /// Sends the parts through one JSON API resumable upload whose start
-    /// includes `ifGenerationMatch=0`, because XML API multipart uploads
-    /// refuse preconditions. A resumable upload takes its bytes in order, so
-    /// the parts go one at a time whatever the window, and a chunk that fails
-    /// with a retryable transport error is sent again at the same offset.
+    /// Sends one JSON API media upload whose CRC-32C GCS verifies.
+    async fn create_checked(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        checksum: &Checksum,
+    ) -> Result<ObjectMetadata> {
+        let url = format!(
+            "{GCS_JSON_UPLOADS}/{}/o?uploadType=media&ifGenerationMatch=0&name={}",
+            percent_encode_segment(&self.bucket),
+            self.object_name(key)?
+        );
+        let request = http::Request::post(url)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .header(GCS_HASH_HEADER, crc32c_header(checksum));
+        let response = self.send_authorized(key, request, bytes.into()).await?;
+        gcs_object(key, &response.body)
+    }
+
+    /// Sends the parts through one JSON API resumable upload, or a payload
+    /// that ends inside `head` as one media upload. A resumable upload takes
+    /// its bytes in order, so the parts go one at a time whatever the
+    /// window, and a chunk that fails with a retryable transport error is
+    /// sent again at the same offset.
     async fn put_if_absent(
         &self,
         key: &str,
@@ -212,41 +242,15 @@ impl MultipartController for GcsRequestSigner {
     ) -> Result<ObjectMetadata> {
         if rest.exhausted() {
             let checksum = Checksum::crc32c(&head);
-            let url = format!(
-                "{GCS_JSON_UPLOADS}/{}/o?uploadType=media&ifGenerationMatch=0&name={}",
-                percent_encode_segment(&self.bucket),
-                self.object_name(key)?
-            );
-            let request = http::Request::post(url)
-                .header(CONTENT_TYPE, "application/octet-stream")
-                .header(GCS_HASH_HEADER, crc32c_header(&checksum));
-            let response = self.send_authorized(key, request, head.into()).await?;
-            return gcs_object(key, &response.body);
+            return self.create_checked(key, head, &checksum).await;
         }
-        let url = format!(
-            "{GCS_JSON_UPLOADS}/{}/o?uploadType=resumable&ifGenerationMatch=0&name={}",
-            percent_encode_segment(&self.bucket),
-            self.object_name(key)?,
-        );
-        let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
-        let started = match self
-            .send_authorized(key, request, Bytes::from_static(b"{}").into())
-            .await
-        {
+        let session = match self.start_resumable_upload(key).await {
             Err(error @ ObjectStoreError::PreconditionFailed { .. }) => {
                 while rest.next_part().await?.is_some() {}
                 return Err(error);
             }
-            result => result?,
+            session => session?,
         };
-        let session = started
-            .headers
-            .get(LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| {
-                ObjectStoreError::transport(key, "resumable upload returned no session")
-            })?
-            .to_owned();
         let (http, cancelled, cancelled_key) = (self.http.clone(), session.clone(), key.to_owned());
         let cancel = async move {
             let request = http::Request::delete(cancelled);
@@ -257,59 +261,18 @@ impl MultipartController for GcsRequestSigner {
         let mut abort_on_drop =
             AbortUploadOnDrop::new(key, self.io_runtime.clone(), cancel.boxed());
 
-        let mut checksum = ChecksumDigest::new(ChecksumAlgorithm::Crc32c);
-        let mut offset = 0;
+        let mut upload = ResumableUpload {
+            session,
+            offset: 0,
+            checksum: ChecksumDigest::new(ChecksumAlgorithm::Crc32c),
+        };
         let mut chunk = head;
         loop {
-            checksum.update(&chunk);
-            let end = offset + chunk.len() as u64;
             let last = chunk.is_empty() || rest.exhausted();
-            let content_range = match (chunk.is_empty(), last) {
-                (true, _) => format!("bytes */{offset}"),
-                (false, true) => format!("bytes {offset}-{}/{end}", end - 1),
-                (false, false) => format!("bytes {offset}-{}/*", end - 1),
-            };
-            let full_checksum = last.then(|| {
-                std::mem::replace(
-                    &mut checksum,
-                    ChecksumDigest::new(ChecksumAlgorithm::Crc32c),
-                )
-                .finish()
-            });
-            let response = with_transport_retry(
-                &self.retry_warnings,
-                key,
-                "put_chunk",
-                chunk.len() as u64,
-                || {
-                    let mut request = http::Request::put(&session)
-                        .header(CONTENT_LENGTH, chunk.len())
-                        .header(CONTENT_RANGE, &content_range);
-                    if let Some(full) = &full_checksum {
-                        request = request.header(GCS_HASH_HEADER, crc32c_header(full));
-                    }
-                    let chunk = chunk.clone();
-                    async move {
-                        let response = send(&self.http, key, request, chunk.into()).await?;
-                        if response.status.as_u16() != 308 {
-                            ensure_succeeded(key, &response, None)?;
-                        }
-                        Ok(response)
-                    }
-                },
-            )
-            .await?;
-            if response.status.as_u16() != 308 {
+            if let Some(object) = upload.send_chunk(self, key, chunk, last).await? {
                 abort_on_drop.disarm();
-                return gcs_object(key, &response.body);
+                return Ok(object);
             }
-            if last || persisted_bytes(&response.headers) != Some(end) {
-                return Err(ObjectStoreError::transport(
-                    key,
-                    "the resumable upload did not keep every byte sent",
-                ));
-            }
-            offset = end;
             chunk = rest.next_part().await?.unwrap_or_default();
         }
     }
@@ -325,14 +288,69 @@ impl MultipartController for GcsRequestSigner {
     }
 }
 
-/// A write conditioned on a version reads that version's absence as its
-/// precondition failing.
-fn precondition_failed_when_missing(error: ObjectStoreError) -> ObjectStoreError {
-    match error {
-        ObjectStoreError::NotFound { object_key } => {
-            ObjectStoreError::PreconditionFailed { object_key }
+/// One JSON API resumable upload: its session, the bytes GCS has kept, and
+/// the CRC-32C of those bytes.
+struct ResumableUpload {
+    session: String,
+    offset: u64,
+    checksum: ChecksumDigest,
+}
+
+impl ResumableUpload {
+    /// Sends `chunk` at the upload's offset, as the final chunk when `last`
+    /// is set, and returns the object when GCS completed the upload.
+    async fn send_chunk(
+        &mut self,
+        signer: &GcsRequestSigner,
+        key: &str,
+        chunk: Bytes,
+        last: bool,
+    ) -> Result<Option<ObjectMetadata>> {
+        self.checksum.update(&chunk);
+        let offset = self.offset;
+        let end = offset + chunk.len() as u64;
+        let content_range = match (chunk.is_empty(), last) {
+            (true, _) => format!("bytes */{offset}"),
+            (false, true) => format!("bytes {offset}-{}/{end}", end - 1),
+            (false, false) => format!("bytes {offset}-{}/*", end - 1),
+        };
+        let full_checksum = last.then(|| {
+            std::mem::replace(
+                &mut self.checksum,
+                ChecksumDigest::new(ChecksumAlgorithm::Crc32c),
+            )
+            .finish()
+        });
+        let response = signer
+            .retry
+            .run(key, "put_chunk", chunk.len() as u64, || {
+                let mut request = http::Request::put(&self.session)
+                    .header(CONTENT_LENGTH, chunk.len())
+                    .header(CONTENT_RANGE, &content_range);
+                if let Some(full) = &full_checksum {
+                    request = request.header(GCS_HASH_HEADER, crc32c_header(full));
+                }
+                let chunk = chunk.clone();
+                async move {
+                    let response = send(&signer.http, key, request, chunk.into()).await?;
+                    if response.status.as_u16() != 308 {
+                        ensure_succeeded(key, &response, None)?;
+                    }
+                    Ok(response)
+                }
+            })
+            .await?;
+        if response.status.as_u16() != 308 {
+            return gcs_object(key, &response.body).map(Some);
         }
-        error => error,
+        if last || persisted_bytes(&response.headers) != Some(end) {
+            return Err(ObjectStoreError::transport(
+                key,
+                "the resumable upload did not keep every byte sent",
+            ));
+        }
+        self.offset = end;
+        Ok(None)
     }
 }
 
@@ -395,14 +413,14 @@ fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<Checksum> {
 #[cfg(test)]
 mod tests {
     use super::{gcp_gcs, gcs_object, stored_crc32c_from_headers, GcpGcsStoreConfig};
-    use crate::retry::{RetryWarnings, DEFAULT};
+    use crate::retry::{TransportRetry, DEFAULT};
     use crate::test_support::{gcs_fixture_service_account_key_file, time_out, RequestFault};
-    use crate::timing::MonotonicTimer;
     use crate::GcpGcsCredentials;
     use crate::{ObjectStore, ObjectStoreError};
     use bytes::Bytes;
     use loonfs_test_support::clock::TokioClock;
     use loonfs_types::Checksum;
+    use loonfs_types::MonotonicTimer;
     use object_store::client::HttpClient;
     use std::assert_matches;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -508,8 +526,8 @@ mod tests {
                 },
             )),
             bucket: "bucket".to_owned(),
-            key_prefix: None,
-            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(TokioClock::start()))),
+            key_scope: crate::keyspace::KeyScope::default(),
+            retry: Arc::new(TransportRetry::new(Arc::new(TokioClock::start()))),
         }
     }
 
@@ -578,12 +596,8 @@ mod tests {
             let signer = test_signer(&path, HttpClient::new(service.clone()));
             let bytes = Bytes::from_static(b"hello");
             let clock = TokioClock::start();
-            let error = crate::immutable_write::put_with(
-                &store,
-                &signer.retry_warnings,
-                "key",
-                &bytes,
-                || {
+            let error =
+                crate::immutable_write::put_with(&store, &signer.retry, "key", &bytes, || {
                     let mut parts =
                         PartReader::new(stream::iter(vec![Ok(bytes.clone())]).boxed(), 3);
                     let signer = &signer;
@@ -591,10 +605,9 @@ mod tests {
                         let head = parts.next_part().await?.unwrap_or_default();
                         signer.put_if_absent("key", head, parts, 1).await
                     }
-                },
-            )
-            .await
-            .expect_err("every first chunk fails");
+                })
+                .await
+                .expect_err("every first chunk fails");
             let elapsed_ms = clock.monotonic_now_ms();
             assert_eq!(
                 error.kind(),

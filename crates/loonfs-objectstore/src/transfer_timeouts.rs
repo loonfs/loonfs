@@ -11,7 +11,7 @@
 //! can apply its normal retry policy.
 
 use crate::clock::{monotonic_instant, pause};
-use crate::provider_object_store::{request_phase_timeout_for, PROVIDER_RESPONSE_IDLE_TIMEOUT};
+use crate::provider_limits::{request_phase_timeout_for, PROVIDER_RESPONSE_IDLE_TIMEOUT};
 use async_trait::async_trait;
 use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
@@ -202,7 +202,7 @@ impl Body for IdleTimeoutBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider_object_store::{
+    use crate::provider_limits::{
         PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_MIN_TRANSFER_BODY_BYTES,
         PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
     };
@@ -335,9 +335,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     #[allow(clippy::disallowed_methods)]
     async fn a_conditional_payload_put_is_one_request() {
-        use crate::provider_object_store::{
-            provider_retry_config, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_PUBLICATION_REQUEST_BOUND,
+        use crate::provider_limits::{
+            PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_PUBLICATION_REQUEST_BOUND,
         };
+        use crate::retry::provider_retry_config;
         use object_store::ObjectStore;
 
         assert_eq!(

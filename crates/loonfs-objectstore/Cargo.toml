@@ -27,7 +27,6 @@ object_store.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-hmac.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "rt-multi-thread", "sync", "time"] }
 thiserror.workspace = true

@@ -10,7 +10,6 @@ use loonfs_grep::manifest::{
 };
 use loonfs_grep::GrepError;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
@@ -18,6 +17,7 @@ use loonfs_test_support::stores::{
     replace_object, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
     RecordingStore,
 };
+use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{ChangeSeq, ErrorCode, ManifestNo, NamespaceId, RunNo};
 use std::assert_matches;
 use std::sync::Arc;

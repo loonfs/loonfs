@@ -467,9 +467,9 @@ mod shared_cache_tests {
                 force_path_style: false,
                 direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
             },
+            crate::keyspace::KeyScope::default(),
             source.clone(),
-        )
-        .expect("signer");
+        );
         let provider_credentials = bridge.get_credential().await.expect("provider credentials");
         assert_eq!(provider_credentials.key_id, "shared-access");
         let signed = signer

@@ -6,6 +6,7 @@ use crate::common::{collect_checkpoints, start_server};
 use bytes::Bytes;
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
@@ -227,9 +228,12 @@ async fn seed_with_a_departed_writer(
     path: &str,
     bytes: &[u8],
 ) {
-    let store = ConfiguredObjectStore::local_fs(store_root, Some(key_prefix))
-        .expect("construct store")
-        .into_shared();
+    let store = ConfiguredObjectStore::local_fs(LocalFsStoreConfig {
+        root: store_root.display().to_string(),
+        key_prefix: Some(key_prefix.to_owned()),
+    })
+    .expect("construct store")
+    .into_shared();
     let writer = loonfs::LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
         .wall_clock(std::sync::Arc::new(
@@ -657,9 +661,12 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .await
         .expect("warm the first server after checkpoint maintenance");
 
-    let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
-        .expect("construct store")
-        .into_shared();
+    let store = ConfiguredObjectStore::local_fs(LocalFsStoreConfig {
+        root: store_root.display().to_string(),
+        key_prefix: store_key_prefix.clone(),
+    })
+    .expect("construct store")
+    .into_shared();
     let root = loonfs::control::load_namespace_current_manifest(&store, &namespace)
         .await
         .expect("metadata root");
@@ -723,10 +730,15 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
     }
 
     // The probe removes its temporary objects.
-    let store = ConfiguredObjectStore::local_fs(
-        harness.store_root.as_ref().expect("local-fs test store"),
-        harness.store_key_prefix.as_deref(),
-    )
+    let store = ConfiguredObjectStore::local_fs(LocalFsStoreConfig {
+        root: harness
+            .store_root
+            .as_ref()
+            .expect("local-fs test store")
+            .display()
+            .to_string(),
+        key_prefix: harness.store_key_prefix.clone(),
+    })
     .expect("open the test store")
     .into_shared();
     assert!(store

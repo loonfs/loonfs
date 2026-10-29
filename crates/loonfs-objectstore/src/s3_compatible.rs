@@ -4,9 +4,9 @@
 //! AWS S3 and Cloudflare R2 differ by addressing, credentials,
 //! assembly part sizes, and copy preconditions.
 
-#[path = "s3_assembly.rs"]
 mod assembly;
 
+use crate::assembly::ResolvedSource;
 use crate::aws_credentials::{
     aws_credentials_source, cloudflare_r2_credentials_source, ObjectStoreAwsCredentialProvider,
     SharedAwsCredentialsSource,
@@ -15,38 +15,33 @@ use crate::checksum_header::decode_base64_checksum;
 use crate::clock::wall_now;
 use crate::configured::ConfiguredObjectStoreKind;
 use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
-use crate::object_store::Result;
+use crate::keyspace::KeyScope;
+use crate::object_store::{invalid_request, Result};
 use crate::presign::{
     base64_crc64nvme, DirectGetIssuer, DirectMultipartIssuer, DirectTransferIssuers,
-    PresignedGetRequest, PresignedPartRequest, PresignedUrl, S3CompatiblePresigner,
-    S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
-    CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES, S3_CRC64NVME_CHECKSUM_HEADER, S3_IF_MATCH_HEADER,
+    PresignedCopyPartRequest, PresignedGetRequest, PresignedPartRequest, PresignedUrl,
+    S3CompatiblePresigner, S3PresignerConfig, INTERNAL_REQUEST_TTL, S3_CRC64NVME_CHECKSUM_HEADER,
+    S3_IF_MATCH_HEADER,
 };
+use crate::provider_limits::{provider_client_options, PROVIDER_MAX_MULTIPART_PARTS};
 use crate::provider_object_store::{
-    AbortUploadOnDrop, CompareToken, ConfiguredProvider, MultipartController, PartReader,
-    StoredChecksumReader, PROVIDER_MAX_MULTIPART_PARTS,
+    configuration_error, provider_http, ConfiguredProvider, ProviderParts,
 };
-use crate::retry::{with_transport_retry, RetryWarnings};
+use crate::retry::{one_attempt_retry_config, provider_retry_config, TransportRetry};
 use crate::signed_request::{ensure_succeeded, send_signed, SignedResponse};
+use crate::signed_upload::{AbortUploadOnDrop, ClientMultipart, PartReader, ProviderSigner};
 use crate::store_io_runtime::StoreIoRuntime;
-use crate::timing::StdMonotonicTimer;
 use crate::{
-    AssemblySource, ByteRange, MultipartPart, ObjectMetadata, ObjectStoreError,
-    ProviderObjectStore, ProviderObjectStoreConfig,
+    AssemblySource, ByteRange, MultipartPart, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
-use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, StdMonotonicTimer};
 use object_store::aws::AmazonS3Builder;
-use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
+use object_store::client::{HttpClient, HttpRequestBody};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
-
-/// Lifetime of the internally signed multipart control requests. Like the
-/// checksum head, each is issued immediately and never handed out.
-const MULTIPART_CONTROL_TTL: Duration = Duration::from_secs(60);
 
 /// Supplies a credential source, addressing, and key scoping for AWS S3.
 ///
@@ -92,6 +87,18 @@ pub struct CloudflareR2StoreConfig {
     pub key_prefix: Option<String>,
 }
 
+/// The precondition that a part copy puts on the version of its source
+/// object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopySourcePrecondition {
+    /// The copy is signed with `x-amz-copy-source-if-match`, so it fails when
+    /// the source object changed.
+    IfMatch,
+    /// The copy is signed without a precondition, for a provider that
+    /// doesn't support `x-amz-copy-source-if-match`.
+    Unconditional,
+}
+
 #[derive(Debug, Clone)]
 struct S3CompatibleConfig {
     kind: ConfiguredObjectStoreKind,
@@ -101,9 +108,6 @@ struct S3CompatibleConfig {
     credentials: SharedAwsCredentialsSource,
     key_prefix: Option<String>,
     force_path_style: bool,
-    /// This provider's documented maximum for a single PUT, carried through
-    /// to the signer so a direct-put issuer can advertise it.
-    direct_put_max_content_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -112,7 +116,7 @@ struct S3RequestSigner {
     http: HttpClient,
     io_runtime: tokio::runtime::Handle,
     kind: ConfiguredObjectStoreKind,
-    retry_warnings: Arc<RetryWarnings>,
+    retry: Arc<TransportRetry>,
 }
 
 /// Builds an AWS S3 store with bounded retries and native CRC-64/NVME checksums.
@@ -134,7 +138,6 @@ pub(crate) fn aws_s3_with_credentials(
         credentials,
         key_prefix: config.key_prefix,
         force_path_style: config.force_path_style,
-        direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
     })
 }
 
@@ -160,7 +163,6 @@ pub(crate) fn cloudflare_r2_with_credentials(
         // style makes the client append the bucket. Virtual hosting would
         // use the endpoint verbatim and address keys as buckets.
         force_path_style: true,
-        direct_put_max_content_bytes: CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
     })
 }
 
@@ -176,28 +178,30 @@ fn new(config: S3CompatibleConfig) -> Result<ConfiguredProvider> {
             object_store_endpoint_url(&config.bucket, endpoint, config.force_path_style)
         })
         .transpose()?;
+    let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
     let request_signer = Arc::new(S3CompatiblePresigner::with_credentials(
         S3PresignerConfig {
             bucket: config.bucket.clone(),
             region: config.region.clone(),
             endpoint_url: config.endpoint_url.clone(),
-            key_prefix: config.key_prefix.clone(),
+            key_prefix: config.key_prefix,
             force_path_style: config.force_path_style,
-            direct_put_max_content_bytes: config.direct_put_max_content_bytes,
+            direct_put_max_content_bytes: config
+                .kind
+                .direct_put_max_content_bytes()
+                .expect("an S3-compatible store signs direct puts"),
         },
+        key_scope.clone(),
         Arc::clone(&config.credentials),
-    )?);
+    ));
 
     let io_runtime = StoreIoRuntime::new()?;
-    let http = io_runtime
-        .connector()
-        .connect(&crate::provider_object_store::provider_client_options())
-        .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
+    let http = provider_http(&io_runtime)?;
     let mut builder = AmazonS3Builder::new()
         .with_checksum_algorithm(object_store::aws::Checksum::CRC64NVME)
         .with_http_connector(io_runtime.connector())
-        .with_client_options(crate::provider_object_store::provider_client_options())
-        .with_retry(crate::provider_object_store::provider_retry_config())
+        .with_client_options(provider_client_options())
+        .with_retry(provider_retry_config())
         .with_disable_bulk_delete(true)
         .with_bucket_name(config.bucket)
         .with_region(config.region)
@@ -213,41 +217,30 @@ fn new(config: S3CompatibleConfig) -> Result<ConfiguredProvider> {
             .with_allow_http(allow_http);
     }
 
-    let provider = Arc::new(
-        builder
-            .clone()
-            .build()
-            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?,
-    );
+    let provider = Arc::new(builder.clone().build().map_err(configuration_error)?);
     let one_attempt = builder
-        .with_retry(object_store::RetryConfig {
-            max_retries: 0,
-            ..crate::provider_object_store::provider_retry_config()
-        })
+        .with_retry(one_attempt_retry_config())
         .build()
-        .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
-    let retry_warnings = Arc::new(RetryWarnings::new(Arc::new(StdMonotonicTimer::default())));
+        .map_err(configuration_error)?;
+    let retry = Arc::new(TransportRetry::new(Arc::new(StdMonotonicTimer::default())));
     let signer = Arc::new(S3RequestSigner {
         request_signer: Arc::clone(&request_signer),
         http,
         io_runtime: io_runtime.handle(),
         kind: config.kind,
-        retry_warnings: Arc::clone(&retry_warnings),
+        retry: Arc::clone(&retry),
     });
-    let store = ProviderObjectStore::new(
-        Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
-        Arc::new(one_attempt),
+    let store = ProviderObjectStore::new(ProviderParts {
         provider,
-        ProviderObjectStoreConfig {
-            key_prefix: config.key_prefix,
-            location,
-        },
-        config.kind,
-        ChecksumAlgorithm::Crc64nvme,
+        one_attempt: Arc::new(one_attempt),
+        signer: Arc::clone(&signer) as Arc<dyn ProviderSigner>,
+        client_multipart: Some(signer),
+        kind: config.kind,
+        key_scope,
+        location,
         io_runtime,
-        signer.clone(),
-        signer,
-    )?;
+        retry,
+    });
     let direct_transfers = DirectTransferIssuers {
         get: request_signer.clone(),
         put: Some(request_signer.clone()),
@@ -255,9 +248,7 @@ fn new(config: S3CompatibleConfig) -> Result<ConfiguredProvider> {
     };
 
     Ok(ConfiguredProvider {
-        store: store
-            .compare_token(CompareToken::Etag)
-            .retry_warnings(retry_warnings),
+        store,
         direct_transfers,
     })
 }
@@ -293,26 +284,6 @@ impl SignedResponse {
     }
 }
 
-#[async_trait]
-impl StoredChecksumReader for S3RequestSigner {
-    async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        with_transport_retry(&self.retry_warnings, key, "head", 0, || async {
-            let signed = self
-                .request_signer
-                .presign_head(key, CHECKSUM_HEAD_TTL, wall_now())
-                .await?;
-            let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-            crate::signed_request::metadata_from_signed_head(
-                key,
-                &response,
-                "x-amz-version-id",
-                s3_stored_checksum,
-            )
-        })
-        .await
-    }
-}
-
 struct UploadedPart {
     part_number: u32,
     etag: String,
@@ -330,43 +301,52 @@ impl From<&MultipartPart> for UploadedPart {
 }
 
 #[async_trait]
-impl MultipartController for S3RequestSigner {
-    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
-        self.create_upload(key).await
+impl ProviderSigner for S3RequestSigner {
+    async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+        self.retry
+            .run(key, "head", 0, || async {
+                let signed = self
+                    .request_signer
+                    .presign_head(key, INTERNAL_REQUEST_TTL, wall_now())
+                    .await?;
+                let response =
+                    send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+                crate::signed_request::metadata_from_signed_head(
+                    key,
+                    &response,
+                    "x-amz-version-id",
+                    s3_stored_checksum,
+                )
+            })
+            .await
     }
 
-    async fn complete_multipart_upload(
+    /// Sends one create-only PUT whose CRC-64/NVME the provider verifies and
+    /// stores.
+    async fn create_checked(
         &self,
         key: &str,
-        provider_upload_id: &str,
-        parts: &[MultipartPart],
+        bytes: Bytes,
         checksum: &Checksum,
-    ) -> Result<()> {
-        let parts: Vec<_> = parts.iter().map(UploadedPart::from).collect();
-        match self
-            .complete_upload(key, provider_upload_id, &parts, Some(checksum))
-            .await
-        {
-            Ok(_) => Ok(()),
-            // The key is occupied, most often by this upload's own earlier
-            // completion, whose response was lost. The caller's
-            // stored-checksum check decides whether it's the client's object.
-            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
-
-    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+    ) -> Result<ObjectMetadata> {
         let signed = self
             .request_signer
-            .presign_abort_multipart(key, provider_upload_id, MULTIPART_CONTROL_TTL, wall_now())
+            .presign_create_checked(key, checksum, INTERNAL_REQUEST_TTL, wall_now())
             .await?;
-        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-        let code = response.provider_error_code();
-        if is_unknown_upload(code.as_deref()) {
-            return Ok(());
-        }
-        ensure_succeeded(key, &response, code.as_deref())
+        let size_bytes = bytes.len() as u64;
+        let response = self.send_checked(key, signed, bytes.into()).await?;
+        let etag = response
+            .headers
+            .get(http::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        Ok(ObjectMetadata {
+            etag,
+            version: None,
+            size_bytes,
+            last_modified_at_ms: None,
+            checksum: Some(checksum.clone()),
+        })
     }
 
     /// Uploads the parts with up to `part_window` in flight and completes
@@ -435,13 +415,50 @@ impl MultipartController for S3RequestSigner {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
-        let assembled = self.assemble_parts(key, sources, tail, expected).await;
-        assembled.map_err(|error| match error {
-            ObjectStoreError::NotFound { object_key } => {
-                ObjectStoreError::PreconditionFailed { object_key }
-            }
-            error => error,
-        })
+        self.assemble_parts(key, sources, tail, expected)
+            .await
+            .map_err(crate::assembly::precondition_failed_when_missing)
+    }
+}
+
+#[async_trait]
+impl ClientMultipart for S3RequestSigner {
+    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        self.create_upload(key).await
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        checksum: &Checksum,
+    ) -> Result<()> {
+        let parts: Vec<_> = parts.iter().map(UploadedPart::from).collect();
+        match self
+            .complete_upload(key, provider_upload_id, &parts, Some(checksum))
+            .await
+        {
+            Ok(_) => Ok(()),
+            // The key is occupied, most often by this upload's own earlier
+            // completion, whose response was lost. The caller's
+            // stored-checksum check decides whether it's the client's object.
+            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        let signed = self
+            .request_signer
+            .presign_abort_multipart(key, provider_upload_id, INTERNAL_REQUEST_TTL, wall_now())
+            .await?;
+        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        let code = response.provider_error_code();
+        if is_unknown_upload(code.as_deref()) {
+            return Ok(());
+        }
+        ensure_succeeded(key, &response, code.as_deref())
     }
 }
 
@@ -449,7 +466,7 @@ impl S3RequestSigner {
     async fn create_upload(&self, key: &str) -> Result<String> {
         let signed = self
             .request_signer
-            .presign_create_multipart(key, MULTIPART_CONTROL_TTL, wall_now())
+            .presign_create_multipart(key, INTERNAL_REQUEST_TTL, wall_now())
             .await?;
         let response = self
             .send_checked(key, signed, HttpRequestBody::empty())
@@ -467,12 +484,9 @@ impl S3RequestSigner {
         payload: Bytes,
     ) -> Result<UploadedPart> {
         let checksum = Checksum::crc64nvme(&payload);
-        let etag = with_transport_retry(
-            &self.retry_warnings,
-            key,
-            "put_part",
-            payload.len() as u64,
-            || async {
+        let etag = self
+            .retry
+            .run(key, "put_part", payload.len() as u64, || async {
                 let signed = self
                     .request_signer
                     .presign_multipart_part(
@@ -481,7 +495,7 @@ impl S3RequestSigner {
                             provider_upload_id: upload_id,
                             part_number,
                             checksum: &checksum,
-                            ttl: MULTIPART_CONTROL_TTL,
+                            ttl: INTERNAL_REQUEST_TTL,
                         },
                         wall_now(),
                     )
@@ -495,9 +509,8 @@ impl S3RequestSigner {
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_owned)
                     .ok_or_else(|| ObjectStoreError::transport(key, "part upload returned no etag"))
-            },
-        )
-        .await?;
+            })
+            .await?;
         Ok(UploadedPart {
             part_number,
             etag,
@@ -510,36 +523,42 @@ impl S3RequestSigner {
         key: &str,
         upload_id: &str,
         part_number: u32,
-        source_key: &str,
-        source: &ByteRange,
-        source_etag: &str,
+        source: &ResolvedSource<'_>,
+        range: &ByteRange,
     ) -> Result<UploadedPart> {
-        let source_etag =
-            (self.kind != ConfiguredObjectStoreKind::CloudflareR2).then_some(source_etag);
-        let response = with_transport_retry(&self.retry_warnings, key, "copy_part", 0, || async {
-            let signed = self
-                .request_signer
-                .presign_copy_part(
-                    key,
-                    upload_id,
-                    part_number,
-                    source_key,
-                    source,
-                    source_etag,
-                    MULTIPART_CONTROL_TTL,
-                    wall_now(),
-                )
-                .await?;
-            self.send_checked(key, signed, HttpRequestBody::empty())
-                .await
-        })
-        .await?;
+        let source_etag = source.etag()?;
+        let source_etag = match self.kind.copy_source_precondition() {
+            CopySourcePrecondition::IfMatch => Some(source_etag.as_str()),
+            CopySourcePrecondition::Unconditional => None,
+        };
+        let response = self
+            .retry
+            .run(key, "copy_part", 0, || async {
+                let signed = self
+                    .request_signer
+                    .presign_copy_part(
+                        PresignedCopyPartRequest {
+                            object_key: key,
+                            provider_upload_id: upload_id,
+                            part_number,
+                            source_key: &source.source.key,
+                            source_range: range,
+                            source_etag,
+                            ttl: INTERNAL_REQUEST_TTL,
+                        },
+                        wall_now(),
+                    )
+                    .await?;
+                self.send_checked(key, signed, HttpRequestBody::empty())
+                    .await
+            })
+            .await?;
         let text = response.text();
         let etag = xml_etag(&text)
             .ok_or_else(|| ObjectStoreError::transport(key, "part copy returned no etag"))?;
         let checksum = xml_element(&text, "ChecksumCRC64NVME")
             .and_then(|value| decode_base64_checksum(ChecksumAlgorithm::Crc64nvme, &value));
-        if self.kind != ConfiguredObjectStoreKind::CloudflareR2 && checksum.is_none() {
+        if self.kind.copy_part_reports_checksum() && checksum.is_none() {
             return Err(ObjectStoreError::transport(
                 key,
                 "part copy returned no crc64nvme",
@@ -552,26 +571,28 @@ impl S3RequestSigner {
         })
     }
 
-    async fn get_range(&self, key: &str, range: &ByteRange, etag: &str) -> Result<Bytes> {
-        with_transport_retry(&self.retry_warnings, key, "get_range", 0, || async {
-            let mut signed = self
-                .request_signer
-                .presign_get(
-                    PresignedGetRequest {
-                        object_key: key,
-                        range: range.clone(),
-                        ttl: MULTIPART_CONTROL_TTL,
-                    },
-                    wall_now(),
-                )
-                .await?;
-            signed
-                .headers
-                .insert(S3_IF_MATCH_HEADER.to_owned(), etag.to_owned());
-            let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-            checked_data(key, response).map(|response| response.body)
-        })
-        .await
+    async fn get_range(&self, key: &str, range: ByteRange, etag: &str) -> Result<Bytes> {
+        self.retry
+            .run(key, "get_range", 0, || async {
+                let mut signed = self
+                    .request_signer
+                    .presign_get(
+                        PresignedGetRequest {
+                            object_key: key,
+                            range: range.clone(),
+                            ttl: INTERNAL_REQUEST_TTL,
+                        },
+                        wall_now(),
+                    )
+                    .await?;
+                signed
+                    .headers
+                    .insert(S3_IF_MATCH_HEADER.to_owned(), etag.to_owned());
+                let response =
+                    send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+                checked_data(key, response).map(|response| response.body)
+            })
+            .await
     }
 
     /// Sends one signed request and fails on any provider error, including
@@ -599,13 +620,13 @@ impl S3RequestSigner {
     ) -> Result<Option<SignedResponse>> {
         let signed = self
             .request_signer
-            .presign_complete_multipart(key, upload_id, checksum, MULTIPART_CONTROL_TTL, wall_now())
+            .presign_complete_multipart(key, upload_id, checksum, INTERNAL_REQUEST_TTL, wall_now())
             .await?;
         let response = send_signed(
             &self.http,
             key,
             signed,
-            complete_multipart_body(parts)?.into(),
+            complete_multipart_body(key, parts)?.into(),
         )
         .await?;
         let code = response.provider_error_code();
@@ -668,18 +689,6 @@ fn is_unknown_upload(code: Option<&str>) -> bool {
     code == Some("NoSuchUpload")
 }
 
-/// The CRC-64/NVME of the object that parts assemble to, combined in part
-/// order from each part's own checksum and length. `None` when a part's
-/// checksum is not a CRC-64/NVME.
-fn assembled_crc64nvme<'a>(
-    mut parts: impl Iterator<Item = (&'a Checksum, u64)>,
-) -> Option<Checksum> {
-    let (first, _) = parts.next()?;
-    parts.try_fold(first.clone(), |assembled, (next, next_bytes)| {
-        assembled.crc_combine(next, next_bytes)
-    })
-}
-
 fn s3_stored_checksum(headers: &http::HeaderMap) -> Option<Checksum> {
     let value = headers.get(S3_CRC64NVME_CHECKSUM_HEADER)?.to_str().ok()?;
     decode_base64_checksum(ChecksumAlgorithm::Crc64nvme, value)
@@ -717,18 +726,20 @@ fn xml_escape(value: &str) -> String {
 /// The parts are the client's bookkeeping: LoonFS never recorded them, so
 /// this document is the only place they exist on the server side, for
 /// exactly as long as one request.
-fn complete_multipart_body(parts: &[UploadedPart]) -> Result<String> {
+fn complete_multipart_body(key: &str, parts: &[UploadedPart]) -> Result<String> {
     if parts.is_empty() {
-        return Err(ObjectStoreError::InvalidContentRef(
-            "a multipart upload completes with at least one part".to_owned(),
+        return Err(invalid_request(
+            key,
+            "a multipart upload completes with at least one part",
         ));
     }
     let mut body = String::from("<CompleteMultipartUpload>");
     let mut previous = 0;
     for part in parts {
         if part.part_number <= previous {
-            return Err(ObjectStoreError::InvalidContentRef(
-                "multipart parts must be listed once each, in ascending part order".to_owned(),
+            return Err(invalid_request(
+                key,
+                "multipart parts must be listed once each, in ascending part order",
             ));
         }
         previous = part.part_number;
@@ -739,7 +750,7 @@ fn complete_multipart_body(parts: &[UploadedPart]) -> Result<String> {
         body.push_str("</ETag>");
         if let Some(checksum) = &part.checksum {
             body.push_str("<ChecksumCRC64NVME>");
-            body.push_str(&xml_escape(&base64_crc64nvme(checksum)?));
+            body.push_str(&xml_escape(&base64_crc64nvme(key, checksum)?));
             body.push_str("</ChecksumCRC64NVME>");
         }
         body.push_str("</Part>");
@@ -774,19 +785,18 @@ mod tests {
         aws_s3, checked_data, object_store_endpoint_url, AwsS3StoreConfig, S3RequestSigner,
     };
     use crate::aws_credentials::static_aws_credentials_source;
+    use crate::keyspace::KeyScope;
     use crate::presign::{
         base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
     };
-    use crate::provider_object_store::{
-        provider_retry_config, MultipartController, PROVIDER_ATTEMPT_TIMEOUT,
-        PROVIDER_OPERATION_DEADLINE,
-    };
-    use crate::retry::{RetryWarnings, DEFAULT};
+    use crate::provider_limits::{PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE};
+    use crate::provider_object_store::ProviderParts;
+    use crate::retry::{one_attempt_retry_config, provider_retry_config, TransportRetry, DEFAULT};
     use crate::signed_request::{ensure_succeeded, SignedResponse};
+    use crate::signed_upload::ProviderSigner;
     use crate::test_support::{
         aws_environment_lock, isolated_aws_environment, time_out, RequestFault,
     };
-    use crate::timing::MonotonicTimer;
     use crate::ByteRange;
     use crate::{
         AssemblySource, AwsS3Credentials, ConfiguredObjectStoreKind, ObjectStoreError,
@@ -795,6 +805,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use loonfs_test_support::clock::TokioClock;
+    use loonfs_types::MonotonicTimer;
     use loonfs_types::{saturating_duration_ms, Checksum, SecretString};
     use object_store::client::{
         HttpClient, HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
@@ -848,7 +859,7 @@ mod tests {
                             .header(http::header::ETAG, "\"base\"")
                             .header(
                                 "x-amz-checksum-crc64nvme",
-                                base64_crc64nvme(&Checksum::crc64nvme(&bytes)).expect("checksum"),
+                                base64_crc64nvme("key", &Checksum::crc64nvme(&bytes)).expect("checksum"),
                             )
                             .body(Bytes::new()),
                         None => response.status(http::StatusCode::NOT_FOUND).body(Bytes::new()),
@@ -884,7 +895,7 @@ mod tests {
                         })
                         .expect("copy range");
                     let bytes = Bytes::copy_from_slice(&self.base[range]);
-                    let reported = base64_crc64nvme(&Checksum::crc64nvme(&bytes))
+                    let reported = base64_crc64nvme("key", &Checksum::crc64nvme(&bytes))
                         .expect("crc64nvme");
                     self.parts.lock().expect("parts").push(bytes);
                     let checksum = if request.headers().contains_key("x-amz-copy-source-if-match") {
@@ -903,7 +914,7 @@ mod tests {
                     use http_body_util::BodyExt as _;
                     let (parts, body) = request.into_parts();
                     let bytes = body.collect().await?.to_bytes();
-                    let checksum = base64_crc64nvme(&Checksum::crc64nvme(&bytes)).expect("checksum");
+                    let checksum = base64_crc64nvme("key", &Checksum::crc64nvme(&bytes)).expect("checksum");
                     assert_eq!(parts.headers["x-amz-checksum-crc64nvme"], checksum);
                     assert_eq!(parts.headers["if-none-match"], "*");
                     assert!(!parts.headers.keys().any(|name| {
@@ -922,7 +933,7 @@ mod tests {
                     use http_body_util::BodyExt as _;
                     let (parts, body) = request.into_parts();
                     let bytes = body.collect().await?.to_bytes();
-                    let checksum = base64_crc64nvme(&Checksum::crc64nvme(&bytes)).expect("checksum");
+                    let checksum = base64_crc64nvme("key", &Checksum::crc64nvme(&bytes)).expect("checksum");
                     assert_eq!(parts.headers["x-amz-checksum-crc64nvme"], checksum);
                     self.parts.lock().expect("parts").push(bytes);
                     (
@@ -1001,26 +1012,26 @@ mod tests {
                 force_path_style: true,
                 direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
             },
+            KeyScope::default(),
             static_aws_credentials_source(
                 SecretString::new("test-access"),
                 SecretString::new("test-secret"),
                 None,
             ),
-        )
-        .expect("presigner");
+        );
         S3RequestSigner {
             request_signer: Arc::new(request_signer),
             http: HttpClient::new(provider.clone()),
             io_runtime: tokio::runtime::Handle::current(),
             kind,
-            retry_warnings: Arc::new(RetryWarnings::new(Arc::new(TokioClock::start()))),
+            retry: Arc::new(TransportRetry::new(Arc::new(TokioClock::start()))),
         }
     }
 
     /// Builds a store over `provider` as the provider constructor does: a
     /// client that retries under the provider retry configuration, the same
     /// client with no retries for conditional puts, and the signer sharing
-    /// the store's retry warnings and their clock.
+    /// the store's retry state and its clock.
     fn scripted_store<P>(
         kind: ConfiguredObjectStoreKind,
         provider: &P,
@@ -1046,30 +1057,22 @@ mod tests {
                 .expect("client"),
         );
         let one_attempt = builder
-            .with_retry(object_store::RetryConfig {
-                max_retries: 0,
-                ..provider_retry_config()
-            })
+            .with_retry(one_attempt_retry_config())
             .build()
             .expect("client");
         let signer = Arc::new(scripted_signer(kind, provider));
-        let retry_warnings = Arc::clone(&signer.retry_warnings);
-        crate::ProviderObjectStore::new(
-            client.clone(),
-            Arc::new(one_attempt),
-            client,
-            crate::ProviderObjectStoreConfig {
-                key_prefix: None,
-                location: "bucket".to_owned(),
-            },
+        let retry = Arc::clone(&signer.retry);
+        crate::ProviderObjectStore::new(ProviderParts {
+            provider: client,
+            one_attempt: Arc::new(one_attempt),
+            signer: Arc::clone(&signer) as Arc<dyn ProviderSigner>,
+            client_multipart: Some(signer),
             kind,
-            loonfs_types::ChecksumAlgorithm::Crc64nvme,
-            crate::store_io_runtime::StoreIoRuntime::new().expect("runtime"),
-            signer.clone(),
-            signer,
-        )
-        .expect("store")
-        .retry_warnings(retry_warnings)
+            key_scope: KeyScope::default(),
+            location: "bucket".to_owned(),
+            io_runtime: crate::store_io_runtime::StoreIoRuntime::new().expect("runtime"),
+            retry,
+        })
     }
 
     fn scripted_provider(kind: ConfiguredObjectStoreKind) -> ScriptedProvider {

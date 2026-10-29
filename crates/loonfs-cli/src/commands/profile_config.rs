@@ -14,6 +14,7 @@ use crate::profiles::NamedProfile;
 use crate::prompt;
 use crate::resolve::subject_flag_error;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
 use loonfs_types::config::non_blank;
@@ -498,7 +499,7 @@ fn local_store(
     } else {
         root
     };
-    Ok(StoreConfig::LocalFs {
+    Ok(StoreConfig::LocalFs(LocalFsStoreConfig {
         root,
         key_prefix: optional_field(
             args.key_prefix.as_ref(),
@@ -506,7 +507,7 @@ fn local_store(
             "key prefix",
             source,
         )?,
-    })
+    }))
 }
 
 fn s3_store(
@@ -744,7 +745,7 @@ fn profile_provider(profile: &ProfileConfig) -> ProfileProvider {
             ..
         } => ProfileProvider::Gcs,
         ProfileConfig::Embedded {
-            store: StoreConfig::LocalFs { .. },
+            store: StoreConfig::LocalFs(_),
             ..
         } => ProfileProvider::Local,
         ProfileConfig::Remote { .. } => ProfileProvider::Remote,
@@ -782,16 +783,17 @@ pub(super) fn apply_update_flags(
             provider,
         ) => {
             let store = match (&store, provider) {
-                (StoreConfig::LocalFs { root, key_prefix }, CreateProviderSpec::Local(args)) => {
-                    local_store(
-                        Some(LocalFsFields {
-                            root,
-                            key_prefix: key_prefix.as_ref(),
-                        }),
-                        args,
-                        FieldSource::Fail,
-                    )?
-                }
+                (
+                    StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }),
+                    CreateProviderSpec::Local(args),
+                ) => local_store(
+                    Some(LocalFsFields {
+                        root,
+                        key_prefix: key_prefix.as_ref(),
+                    }),
+                    args,
+                    FieldSource::Fail,
+                )?,
                 (
                     StoreConfig::AwsS3(current),
                     CreateProviderSpec::S3 {
@@ -976,7 +978,7 @@ pub(super) fn apply_update_interactive(
             writer_id,
         } => {
             let store = match &store {
-                StoreConfig::LocalFs { root, key_prefix } => local_store(
+                StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }) => local_store(
                     Some(LocalFsFields {
                         root,
                         key_prefix: key_prefix.as_ref(),
@@ -1123,6 +1125,7 @@ mod tests {
     };
     use crate::config::{ProfileConfig, StoreConfig};
     use clap::Parser;
+    use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
     use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
     use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
     use std::assert_matches;
@@ -1378,10 +1381,10 @@ mod tests {
     #[test]
     fn update_rejects_a_provider_that_does_not_match_the_profile() {
         let local_fs = ProfileConfig::Embedded {
-            store: StoreConfig::LocalFs {
+            store: StoreConfig::LocalFs(LocalFsStoreConfig {
                 root: "/tmp/store".to_owned(),
                 key_prefix: None,
-            },
+            }),
             actor_id: None,
             subject_id: None,
             principal_scope: None,
@@ -1434,10 +1437,10 @@ mod tests {
         }
 
         let local_fs = ProfileConfig::Embedded {
-            store: StoreConfig::LocalFs {
+            store: StoreConfig::LocalFs(LocalFsStoreConfig {
                 root: "/tmp/store".to_owned(),
                 key_prefix: None,
-            },
+            }),
             actor_id: None,
             subject_id: None,
             principal_scope: None,
@@ -1454,7 +1457,7 @@ mod tests {
 
         match updated {
             ProfileConfig::Embedded {
-                store: StoreConfig::LocalFs { root, .. },
+                store: StoreConfig::LocalFs(LocalFsStoreConfig { root, .. }),
                 ..
             } => assert_eq!(root, "/tmp/moved"),
             other => panic!("expected local-fs profile, got {other:?}"),

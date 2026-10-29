@@ -1881,7 +1881,7 @@ impl ObjectStore for EarlierManifestView {
         range: Option<loonfs_objectstore::ByteRange>,
     ) -> Result<Option<bytes::Bytes>, loonfs_objectstore::ObjectStoreError> {
         match self.answer(key) {
-            Some(answer) => Ok(answer.map(|body| bytes::Bytes::from(body.bytes))),
+            Some(answer) => Ok(answer.map(|body| body.bytes)),
             None => self.inner.get(key, range).await,
         }
     }

@@ -1,17 +1,22 @@
 //! [`ConfiguredObjectStore`]: one provider client built from configuration,
 //! paired with the direct transfers that provider can authorize.
 
+use crate::assembly::PartSizing;
 use crate::aws_credentials::{aws_credentials_source, cloudflare_r2_credentials_source};
 use crate::gcs::{gcp_gcs_with_issuers, GcpGcsStoreConfig};
-use crate::local_fs_store::LocalFsStore;
+use crate::local_fs_store::{LocalFsStore, LocalFsStoreConfig};
 use crate::object_store::{Result, SharedObjectStore};
-use crate::presign::DirectTransferIssuers;
+use crate::presign::{
+    DirectTransferIssuers, AWS_S3_MAX_DIRECT_PUT_BYTES, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+    GCP_GCS_MAX_DIRECT_PUT_BYTES,
+};
+use crate::provider_object_store::{CompareToken, CreatePath};
 use crate::s3_compatible::{
     aws_s3_with_credentials, cloudflare_r2_with_credentials, AwsS3StoreConfig,
-    CloudflareR2StoreConfig,
+    CloudflareR2StoreConfig, CopySourcePrecondition,
 };
 use http::Uri;
-use std::path::PathBuf;
+use loonfs_types::ChecksumAlgorithm;
 use std::sync::Arc;
 
 /// Provider domains covered by live direct-transfer tests.
@@ -47,11 +52,76 @@ impl ConfiguredObjectStoreKind {
     /// memory at once, which is the part it builds and the source read it
     /// copies into that part.
     pub const fn max_assembly_buffer_bytes(self) -> u64 {
-        let part_bytes = match self {
-            Self::CloudflareR2 => crate::assembly::R2_PART_BYTES,
-            Self::LocalFs | Self::AwsS3 | Self::GcpGcs => crate::assembly::READ_BYTES,
+        let part_bytes = match self.part_sizing() {
+            PartSizing::Equal => crate::assembly::R2_PART_BYTES,
+            PartSizing::Varied => crate::assembly::READ_BYTES,
         };
         part_bytes + crate::assembly::READ_BYTES
+    }
+
+    /// Returns the checksum algorithm that this store verifies on upload and
+    /// reports from `head`.
+    pub(crate) const fn checksum_algorithm(self) -> ChecksumAlgorithm {
+        match self {
+            Self::GcpGcs => ChecksumAlgorithm::Crc32c,
+            Self::LocalFs | Self::AwsS3 | Self::CloudflareR2 => ChecksumAlgorithm::Crc64nvme,
+        }
+    }
+
+    /// Returns the version field that this store's conditional writes compare.
+    pub(crate) const fn compare_token(self) -> CompareToken {
+        match self {
+            Self::GcpGcs => CompareToken::Generation,
+            Self::LocalFs | Self::AwsS3 | Self::CloudflareR2 => CompareToken::Etag,
+        }
+    }
+
+    /// Returns which requests create an object while its key is absent.
+    pub(crate) const fn create_path(self) -> CreatePath {
+        match self {
+            Self::GcpGcs => CreatePath::Signer,
+            Self::LocalFs | Self::AwsS3 | Self::CloudflareR2 => CreatePath::ProviderClient,
+        }
+    }
+
+    /// Returns the largest object that one presigned PUT to this store
+    /// creates, or `None` for a store that signs no direct transfers.
+    pub(crate) const fn direct_put_max_content_bytes(self) -> Option<u64> {
+        match self {
+            Self::LocalFs => None,
+            Self::AwsS3 => Some(AWS_S3_MAX_DIRECT_PUT_BYTES),
+            Self::CloudflareR2 => Some(CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES),
+            Self::GcpGcs => Some(GCP_GCS_MAX_DIRECT_PUT_BYTES),
+        }
+    }
+
+    /// Returns how this store sizes the parts of one multipart upload.
+    pub(crate) const fn part_sizing(self) -> PartSizing {
+        match self {
+            Self::CloudflareR2 => PartSizing::Equal,
+            Self::LocalFs | Self::AwsS3 | Self::GcpGcs => PartSizing::Varied,
+        }
+    }
+
+    /// Returns the precondition that a part copy puts on its source object.
+    pub(crate) const fn copy_source_precondition(self) -> CopySourcePrecondition {
+        match self {
+            Self::CloudflareR2 => CopySourcePrecondition::Unconditional,
+            Self::LocalFs | Self::AwsS3 | Self::GcpGcs => CopySourcePrecondition::IfMatch,
+        }
+    }
+
+    /// Returns whether a part copy's response reports the CRC-64/NVME of the
+    /// copied part.
+    pub(crate) const fn copy_part_reports_checksum(self) -> bool {
+        !matches!(self, Self::CloudflareR2)
+    }
+
+    /// Returns whether a multipart completion is checked by reading the
+    /// object's stored checksum back, because the completion accepts a wrong
+    /// checksum claim.
+    pub(crate) const fn completion_checked_by_head(self) -> bool {
+        matches!(self, Self::CloudflareR2)
     }
 }
 
@@ -70,10 +140,13 @@ impl ConfiguredObjectStore {
     /// Opens a local-filesystem provider with optional logical key scoping.
     ///
     /// Construction fails outside Unix-family platforms, when the root cannot
-    /// be created, or when `key_prefix` is invalid.
-    pub fn local_fs(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
+    /// be created, or when the key prefix is invalid.
+    pub fn local_fs(config: LocalFsStoreConfig) -> Result<Self> {
         Ok(Self {
-            inner: Arc::new(LocalFsStore::with_key_prefix(root, key_prefix)?),
+            inner: Arc::new(LocalFsStore::with_key_prefix(
+                config.root,
+                config.key_prefix.as_deref(),
+            )?),
             direct_transfers: None,
         })
     }
@@ -187,7 +260,7 @@ mod tests {
     use super::ConfiguredObjectStore;
     use crate::gcs::GcpGcsStoreConfig;
     use crate::keys::hint;
-    use crate::local_fs_store::LocalFsStore;
+    use crate::local_fs_store::{LocalFsStore, LocalFsStoreConfig};
     use crate::presign::{
         PresignedPutRequest, AWS_S3_MAX_DIRECT_PUT_BYTES, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
         GCP_GCS_MAX_DIRECT_PUT_BYTES,
@@ -206,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn configured_local_fs_scopes_optional_key_prefix() {
         let temp_dir = unique_temp_dir("configured-store-local");
-        let store = ConfiguredObjectStore::local_fs(temp_dir.path(), Some("tenant-a"))
+        let store = ConfiguredObjectStore::local_fs(local_fs_config(&temp_dir, Some("tenant-a")))
             .expect("construct configured local fs store")
             .into_shared();
         let hint_key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
@@ -282,8 +355,8 @@ mod tests {
     #[test]
     fn configured_object_store_offers_direct_transfers_only_on_proven_endpoints() {
         let temp_dir = unique_temp_dir("configured-store-kind");
-        let local =
-            ConfiguredObjectStore::local_fs(temp_dir.path(), None).expect("construct local store");
+        let local = ConfiguredObjectStore::local_fs(local_fs_config(&temp_dir, None))
+            .expect("construct local store");
         assert!(local.direct_transfers().is_none());
 
         assert!(aws_s3_store(None).direct_transfers().is_some());
@@ -459,7 +532,7 @@ mod tests {
     #[tokio::test]
     async fn configured_local_fs_preserves_invalid_key_errors() {
         let temp_dir = unique_temp_dir("configured-store-invalid-key");
-        let store = ConfiguredObjectStore::local_fs(temp_dir.path(), Some("tenant-a"))
+        let store = ConfiguredObjectStore::local_fs(local_fs_config(&temp_dir, Some("tenant-a")))
             .expect("construct configured local fs store")
             .into_shared();
 
@@ -471,6 +544,13 @@ mod tests {
             error,
             ObjectStoreError::InvalidKey { object_key, .. } if object_key == "../hint.json"
         );
+    }
+
+    fn local_fs_config(root: &tempfile::TempDir, key_prefix: Option<&str>) -> LocalFsStoreConfig {
+        LocalFsStoreConfig {
+            root: root.path().display().to_string(),
+            key_prefix: key_prefix.map(ToOwned::to_owned),
+        }
     }
 
     fn unique_temp_dir(label: &str) -> tempfile::TempDir {

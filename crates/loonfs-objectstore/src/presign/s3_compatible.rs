@@ -1,23 +1,23 @@
 //! Presigner for S3-compatible providers (AWS S3, Cloudflare R2).
 
 use super::{
-    DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, PresignedGetRequest,
-    PresignedPartRequest, PresignedPutRequest, PresignedUrl,
+    DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, PresignedCopyPartRequest,
+    PresignedGetRequest, PresignedPartRequest, PresignedPutRequest, PresignedUrl,
 };
 use crate::aws_credentials::{
     aws_credentials_source, AwsSigningCredentials, SharedAwsCredentialsSource,
 };
 use crate::checksum_header::encode_base64_checksum;
-use crate::crypto::hmac_sha256;
 use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
-use crate::keyspace::{normalize_key_prefix, scope_object_key};
-use crate::object_store::Result;
+use crate::keyspace::KeyScope;
+use crate::object_store::{invalid_request, Result};
 use crate::presign::v4::{
     percent_encode_path, percent_encode_segment, presign_v4, signing_dates, unix_ms, V4Endpoint,
     V4RequestParts, V4Scheme,
 };
-use crate::{ByteRange, ObjectStoreError};
+use crate::ObjectStoreError;
 use async_trait::async_trait;
+use loonfs_types::crypto::hmac_sha256;
 use loonfs_types::format::hex::hex_encode_bytes;
 use loonfs_types::{Checksum, ChecksumAlgorithm};
 use std::collections::BTreeMap;
@@ -80,11 +80,15 @@ pub struct S3PresignerConfig {
 #[derive(Debug, Clone)]
 pub struct S3CompatiblePresigner {
     config: S3PresignerConfig,
+    key_scope: KeyScope,
     credentials: SharedAwsCredentialsSource,
 }
 
-#[derive(Default)]
-struct SigningRequestParts {
+/// One request to sign: its method, its object, the query parameters that
+/// select its operation, and the headers its signature covers.
+struct SigningRequestParts<'a> {
+    method: &'static str,
+    object_key: &'a str,
     operation_query: BTreeMap<String, String>,
     required_headers: BTreeMap<String, String>,
 }
@@ -100,26 +104,24 @@ impl S3CompatiblePresigner {
     /// [`DirectPutIssuer::presign_put`] runs.
     pub fn new(config: S3PresignerConfig, credentials: crate::AwsS3Credentials) -> Result<Self> {
         let source = aws_credentials_source(&credentials, &config.region)?;
-        Self::with_credentials(config, source)
+        let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
+        Ok(Self::with_credentials(config, key_scope, source))
     }
 
+    /// Creates a presigner that scopes keys with `key_scope`, the scope of the
+    /// store it signs for.
     pub(crate) fn with_credentials(
-        mut config: S3PresignerConfig,
+        config: S3PresignerConfig,
+        key_scope: KeyScope,
         credentials: SharedAwsCredentialsSource,
-    ) -> Result<Self> {
-        config.key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             config,
+            key_scope,
             credentials,
-        })
+        }
     }
 
-    /// Signs a `HeadObject` that asks the provider to report the object's
-    /// stored full-object checksum.
-    ///
-    /// `GetObjectAttributes` would answer the same question on AWS S3 and
-    /// return 501 on Cloudflare R2, so the head is the only portable surface
-    /// and the only one this crate signs.
     /// Signs a create-only PUT whose CRC-64/NVME the provider verifies and
     /// stores. The checksum header is signed with the create-only header,
     /// because S3 rejects an `x-amz-` header that is present but unsigned.
@@ -130,38 +132,52 @@ impl S3CompatiblePresigner {
         ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(ttl, now).await?;
+        let required_headers = BTreeMap::from([
+            (S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned()),
+            (
+                S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
+                base64_crc64nvme(key, checksum)?,
+            ),
+        ]);
         self.presign(
-            &credentials,
-            "PUT",
-            key,
-            BTreeMap::from([
-                (S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned()),
-                (
-                    S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
-                    base64_crc64nvme(checksum)?,
-                ),
-            ]),
+            SigningRequestParts {
+                method: "PUT",
+                object_key: key,
+                operation_query: BTreeMap::new(),
+                required_headers,
+            },
             ttl,
             now,
         )
+        .await
     }
 
+    /// Signs a `HeadObject` that asks the provider to report the object's
+    /// stored full-object checksum.
+    ///
+    /// `GetObjectAttributes` would answer the same question on AWS S3 and
+    /// return 501 on Cloudflare R2, so the head is the only portable surface
+    /// and the only one this crate signs.
     pub(crate) async fn presign_head(
         &self,
         object_key: &str,
         ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(ttl, now).await?;
         self.presign(
-            &credentials,
-            "HEAD",
-            object_key,
-            BTreeMap::from([(S3_CHECKSUM_MODE_HEADER.to_owned(), "ENABLED".to_owned())]),
+            SigningRequestParts {
+                method: "HEAD",
+                object_key,
+                operation_query: BTreeMap::new(),
+                required_headers: BTreeMap::from([(
+                    S3_CHECKSUM_MODE_HEADER.to_owned(),
+                    "ENABLED".to_owned(),
+                )]),
+            },
             ttl,
             now,
         )
+        .await
     }
 
     /// Signs `CreateMultipartUpload` for an object whose checksum will cover
@@ -172,7 +188,6 @@ impl S3CompatiblePresigner {
         ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(ttl, now).await?;
         let required_headers = BTreeMap::from([
             (
                 S3_CHECKSUM_ALGORITHM_HEADER.to_owned(),
@@ -183,39 +198,35 @@ impl S3CompatiblePresigner {
                 S3_FULL_OBJECT_CHECKSUM_TYPE.to_owned(),
             ),
         ]);
-
-        self.presign_with_query(
-            &credentials,
-            "POST",
-            object_key,
+        self.presign(
             SigningRequestParts {
+                method: "POST",
+                object_key,
                 operation_query: BTreeMap::from([("uploads".to_owned(), String::new())]),
                 required_headers,
             },
             ttl,
             now,
         )
+        .await
     }
 
-    /// Signs `UploadPartCopy` of `source` of the object at `source_key` into
-    /// part `part_number` of the upload at `object_key`, copied only while
-    /// the source's ETag is `source_etag` when one is given.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "a part copy names its upload, its part, and its source object, range, and version"
-    )]
+    /// Signs `UploadPartCopy` of `request.source_range` of the object at
+    /// `request.source_key` into part `request.part_number` of the upload at
+    /// `request.object_key`, copied only while the source's ETag is
+    /// `request.source_etag` when one is given.
     pub(crate) async fn presign_copy_part(
         &self,
-        object_key: &str,
-        provider_upload_id: &str,
-        part_number: u32,
-        source_key: &str,
-        source: &ByteRange,
-        source_etag: Option<&str>,
-        ttl: Duration,
+        request: PresignedCopyPartRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let scoped_key = scope_object_key(self.config.key_prefix.as_deref(), source_key)?;
+        let scoped_key = self.key_scope.object_key(request.source_key)?;
+        let source_range = request.source_range.http_range_header().ok_or_else(|| {
+            invalid_request(
+                request.object_key,
+                "a part copy needs a nonempty source range",
+            )
+        })?;
         let mut required_headers = BTreeMap::from([
             (
                 S3_COPY_SOURCE_HEADER.to_owned(),
@@ -225,33 +236,25 @@ impl S3CompatiblePresigner {
                     percent_encode_path(&scoped_key)
                 ),
             ),
-            (
-                S3_COPY_SOURCE_RANGE_HEADER.to_owned(),
-                format!(
-                    "bytes={}-{}",
-                    source.start_inclusive,
-                    source.end_exclusive - 1
-                ),
-            ),
+            (S3_COPY_SOURCE_RANGE_HEADER.to_owned(), source_range),
         ]);
-        if let Some(etag) = source_etag {
+        if let Some(etag) = request.source_etag {
             required_headers.insert(S3_COPY_SOURCE_IF_MATCH_HEADER.to_owned(), etag.to_owned());
         }
-        let credentials = self.signing_credentials(ttl, now).await?;
-        self.presign_with_query(
-            &credentials,
-            "PUT",
-            object_key,
+        self.presign(
             SigningRequestParts {
+                method: "PUT",
+                object_key: request.object_key,
                 operation_query: BTreeMap::from([
-                    ("partNumber".to_owned(), part_number.to_string()),
-                    ("uploadId".to_owned(), provider_upload_id.to_owned()),
+                    ("partNumber".to_owned(), request.part_number.to_string()),
+                    ("uploadId".to_owned(), request.provider_upload_id.to_owned()),
                 ]),
                 required_headers,
             },
-            ttl,
+            request.ttl,
             now,
         )
+        .await
     }
 
     /// Signs `AbortMultipartUpload`, the cleanup a terminated session runs.
@@ -262,21 +265,20 @@ impl S3CompatiblePresigner {
         ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(ttl, now).await?;
-        self.presign_with_query(
-            &credentials,
-            "DELETE",
-            object_key,
+        self.presign(
             SigningRequestParts {
+                method: "DELETE",
+                object_key,
                 operation_query: BTreeMap::from([(
                     "uploadId".to_owned(),
                     provider_upload_id.to_owned(),
                 )]),
-                ..SigningRequestParts::default()
+                required_headers: BTreeMap::new(),
             },
             ttl,
             now,
         )
+        .await
     }
 
     /// Signs a create-only `CompleteMultipartUpload` carrying the
@@ -298,16 +300,14 @@ impl S3CompatiblePresigner {
         if let Some(checksum) = checksum {
             required_headers.insert(
                 S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
-                base64_crc64nvme(checksum)?,
+                base64_crc64nvme(object_key, checksum)?,
             );
         }
         required_headers.insert(S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned());
-        let credentials = self.signing_credentials(ttl, now).await?;
-        self.presign_with_query(
-            &credentials,
-            "POST",
-            object_key,
+        self.presign(
             SigningRequestParts {
+                method: "POST",
+                object_key,
                 operation_query: BTreeMap::from([(
                     "uploadId".to_owned(),
                     provider_upload_id.to_owned(),
@@ -317,6 +317,7 @@ impl S3CompatiblePresigner {
             ttl,
             now,
         )
+        .await
     }
 
     async fn signing_credentials(
@@ -332,48 +333,26 @@ impl S3CompatiblePresigner {
         self.credentials.credentials_for(valid_until).await
     }
 
-    fn presign(
-        &self,
-        credentials: &AwsSigningCredentials,
-        method: &str,
-        object_key: &str,
-        required_headers: BTreeMap<String, String>,
-        ttl: Duration,
-        now: SystemTime,
-    ) -> Result<PresignedUrl> {
-        self.presign_with_query(
-            credentials,
-            method,
-            object_key,
-            SigningRequestParts {
-                required_headers,
-                ..SigningRequestParts::default()
-            },
-            ttl,
-            now,
-        )
-    }
-
-    /// Signs one request, with any operation-selecting query parameters
-    /// folded into the canonical query alongside the credential ones.
+    /// Signs one request with credentials that are valid for `ttl` from
+    /// `now`, with any operation-selecting query parameters folded into the
+    /// canonical query alongside the credential ones.
     ///
     /// The multipart operations are addressed by query parameter rather than
     /// by path (`?uploads`, `?uploadId=`, `?partNumber=`), so they have to
     /// participate in the signature or the provider computes a different one.
-    fn presign_with_query(
+    async fn presign(
         &self,
-        credentials: &AwsSigningCredentials,
-        method: &str,
-        object_key: &str,
-        request_parts: SigningRequestParts,
+        request: SigningRequestParts<'_>,
         ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
+        let credentials = self.signing_credentials(ttl, now).await?;
         if credentials.expires_at.is_some_and(|expiry| expiry <= now) {
             return Err(ObjectStoreError::Configuration(
                 "resolved AWS signing credentials have expired".to_owned(),
             ));
         }
+        let object_key = request.object_key;
         let endpoint = self.endpoint(object_key)?;
         let dates = signing_dates(object_key, now)?;
         let credential_scope = format!(
@@ -404,11 +383,11 @@ impl S3CompatiblePresigner {
                 signing_dates: dates,
             },
             endpoint,
-            method,
+            request.method,
             V4RequestParts {
                 object_key,
-                operation_query: request_parts.operation_query,
-                required_headers: request_parts.required_headers,
+                operation_query: request.operation_query,
+                required_headers: request.required_headers,
             },
             ttl,
             now,
@@ -424,7 +403,7 @@ impl S3CompatiblePresigner {
     }
 
     fn endpoint(&self, object_key: &str) -> Result<V4Endpoint> {
-        let scoped_key = scope_object_key(self.config.key_prefix.as_deref(), object_key)?;
+        let scoped_key = self.key_scope.object_key(object_key)?;
         let encoded_key = percent_encode_path(&scoped_key);
 
         match self.config.endpoint_url.as_deref() {
@@ -492,15 +471,20 @@ impl DirectPutIssuer for S3CompatiblePresigner {
         request: PresignedPutRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(request.ttl, now).await?;
         self.presign(
-            &credentials,
-            "PUT",
-            request.object_key,
-            BTreeMap::from([(S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned())]),
+            SigningRequestParts {
+                method: "PUT",
+                object_key: request.object_key,
+                operation_query: BTreeMap::new(),
+                required_headers: BTreeMap::from([(
+                    S3_CREATE_ONLY_HEADER.to_owned(),
+                    "*".to_owned(),
+                )]),
+            },
             request.ttl,
             now,
         )
+        .await
     }
 }
 
@@ -512,29 +496,31 @@ impl DirectMultipartIssuer for S3CompatiblePresigner {
         now: SystemTime,
     ) -> Result<PresignedUrl> {
         if request.part_number == 0 {
-            return Err(invalid_direct_put_content("part numbers start at one"));
+            return Err(invalid_request(
+                request.object_key,
+                "part numbers start at one",
+            ));
         }
         // No create-only header here, deliberately. A part is not the object:
         // re-uploading one is how a client retries a failed transfer, and both
         // providers take the last write and follow it with the checksum.
-        let credentials = self.signing_credentials(request.ttl, now).await?;
-        self.presign_with_query(
-            &credentials,
-            "PUT",
-            request.object_key,
+        self.presign(
             SigningRequestParts {
+                method: "PUT",
+                object_key: request.object_key,
                 operation_query: BTreeMap::from([
                     ("partNumber".to_owned(), request.part_number.to_string()),
                     ("uploadId".to_owned(), request.provider_upload_id.to_owned()),
                 ]),
                 required_headers: BTreeMap::from([(
                     S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
-                    base64_crc64nvme(request.checksum)?,
+                    base64_crc64nvme(request.object_key, request.checksum)?,
                 )]),
             },
             request.ttl,
             now,
         )
+        .await
     }
 }
 
@@ -545,33 +531,32 @@ impl DirectGetIssuer for S3CompatiblePresigner {
         request: PresignedGetRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(request.ttl, now).await?;
         self.presign(
-            &credentials,
-            "GET",
-            request.object_key,
-            request.signed_headers(),
+            SigningRequestParts {
+                method: "GET",
+                object_key: request.object_key,
+                operation_query: BTreeMap::new(),
+                required_headers: request.signed_headers(),
+            },
             request.ttl,
             now,
         )
+        .await
     }
 }
 
 /// Converts a CRC-64/NVME into the base64 spelling the S3 family signs.
-pub(crate) fn base64_crc64nvme(checksum: &Checksum) -> Result<String> {
+pub(crate) fn base64_crc64nvme(key: &str, checksum: &Checksum) -> Result<String> {
     if checksum.algorithm != ChecksumAlgorithm::Crc64nvme {
-        return Err(invalid_direct_put_content(
+        return Err(invalid_request(
+            key,
             "multipart uploads are checksummed with crc64nvme",
         ));
     }
     checksum
         .validate()
-        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
+        .map_err(|error| invalid_request(key, &error.to_string()))?;
     Ok(encode_base64_checksum(checksum))
-}
-
-fn invalid_direct_put_content(message: &str) -> ObjectStoreError {
-    ObjectStoreError::InvalidContentRef(message.to_owned())
 }
 
 fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
@@ -588,9 +573,10 @@ mod tests {
         AwsCredentialsSource, AwsSigningCredentials, ObjectStoreAwsCredentialProvider,
         SharedAwsCredentialsSource,
     };
-    use crate::keyspace::{normalize_key_prefix, scope_object_key};
+    use crate::keyspace::KeyScope;
     use crate::presign::{
-        DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
+        DirectGetIssuer, DirectPutIssuer, PresignedCopyPartRequest, PresignedGetRequest,
+        PresignedPutRequest,
     };
     use crate::{AwsS3Credentials, ByteRange, ObjectStoreError};
     use async_trait::async_trait;
@@ -670,9 +656,9 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let signer = S3CompatiblePresigner::with_credentials(
             presigner_config(),
+            KeyScope::default(),
             Arc::new(LifetimeAwareSource(now + Duration::from_secs(900))),
-        )
-        .expect("signer");
+        );
         signer
             .presign_get(
                 PresignedGetRequest {
@@ -693,9 +679,9 @@ mod tests {
         let expiry = now + Duration::from_secs(300);
         let signer = S3CompatiblePresigner::with_credentials(
             presigner_config(),
+            KeyScope::default(),
             Arc::new(ExpiringCredentialsSource(expiry)),
-        )
-        .expect("signer");
+        );
         let signed = signer
             .presign_get(
                 PresignedGetRequest {
@@ -819,7 +805,11 @@ mod tests {
                 .headers
                 .get("x-amz-checksum-crc64nvme")
                 .map(String::as_str),
-            Some(super::base64_crc64nvme(&checksum).expect("base64").as_str())
+            Some(
+                super::base64_crc64nvme("key", &checksum)
+                    .expect("base64")
+                    .as_str()
+            )
         );
         assert!(signed
             .url
@@ -858,8 +848,11 @@ mod tests {
     async fn one_rotating_source_serves_the_presigner_and_provider_bridge() {
         let source: SharedAwsCredentialsSource = Arc::new(RotatingCredentialsSource::default());
         let bridge = ObjectStoreAwsCredentialProvider::new(Arc::clone(&source));
-        let signer = S3CompatiblePresigner::with_credentials(presigner_config(), source)
-            .expect("construct signer");
+        let signer = S3CompatiblePresigner::with_credentials(
+            presigner_config(),
+            KeyScope::default(),
+            source,
+        );
 
         let first_provider = bridge
             .get_credential()
@@ -986,16 +979,18 @@ mod tests {
         );
         let copied = signer
             .presign_copy_part(
-                CONTENT_KEY,
-                "upload",
-                2,
-                base_key,
-                &ByteRange {
-                    start_inclusive: 0,
-                    end_exclusive: 10,
+                PresignedCopyPartRequest {
+                    object_key: CONTENT_KEY,
+                    provider_upload_id: "upload",
+                    part_number: 2,
+                    source_key: base_key,
+                    source_range: &ByteRange {
+                        start_inclusive: 0,
+                        end_exclusive: 10,
+                    },
+                    source_etag: Some("\"base\""),
+                    ttl,
                 },
-                Some("\"base\""),
-                ttl,
                 now,
             )
             .await
@@ -1103,13 +1098,10 @@ mod tests {
                 .expect("presign get");
 
             // Exactly what `ProviderObjectStore` does with the same value.
-            let store_key = scope_object_key(
-                normalize_key_prefix(raw_prefix)
-                    .expect("store normalizes the prefix")
-                    .as_deref(),
-                CONTENT_KEY,
-            )
-            .expect("store scopes the key");
+            let store_key = KeyScope::new(raw_prefix)
+                .expect("store normalizes the prefix")
+                .object_key(CONTENT_KEY)
+                .expect("store scopes the key");
 
             let signed_path = signed.url.split('?').next().expect("url path");
             assert_eq!(
