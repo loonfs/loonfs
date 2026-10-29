@@ -10,7 +10,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
-const SERVER_GENERATED_ID_BODY_LEN: usize = 32;
+/// The characters of a generated ID body, in the order of the 5-bit values
+/// that they spell.
+const GENERATED_ID_ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+
+/// Length of a generated ID body: two zero bits and a 128-bit UUID, at 5 bits
+/// per ASCII character.
+pub const GENERATED_ID_BODY_BYTES: usize = 26;
 
 validation_error!(
     NamespaceIdValidationError,
@@ -39,23 +45,65 @@ validation_error!(
 
 /// Generates a project-standard opaque durable identifier.
 ///
-/// Generated server-side IDs use an underscore prefix plus a 32-character
-/// lowercase hexadecimal body, such as `cs_<32hex>` or `upl_<32hex>`.
+/// The ID is the prefix, an underscore, and the 26-character lowercase
+/// Crockford base 32 spelling of a random version 4 UUID, such as
+/// `upl_3s0drmj8em84yb4mnetqkz2j0x`.
 ///
 /// Ids in the id inventory generate through their newtype `generate()`
 /// constructors; this helper stays public for free-form generated labels
 /// (for example a server's per-request id) that have no validated id type.
 pub fn generated_id(prefix: &'static str) -> String {
-    format!("{prefix}_{}", hex_encode_bytes(&random_128()))
+    format!(
+        "{prefix}_{}",
+        encode_base_32(random_uuid_v4(), GENERATED_ID_BODY_BYTES)
+    )
 }
 
-/// Draws 128 fresh random bits.
+/// Lists, in order, every string of `width` characters that a generated ID
+/// body can start with.
 ///
-/// Generated ids hex-encode these bytes.
-fn random_128() -> [u8; 16] {
-    let mut bytes = [0_u8; 16];
+/// Every generated ID body starts with exactly one of the strings. Width 0
+/// lists the empty string. The first character takes 8 values, because it
+/// spells the two zero bits and the top three bits of the UUID, and each later
+/// character takes 32.
+pub fn generated_id_body_prefixes(width: usize) -> impl ExactSizeIterator<Item = String> {
+    let count = match width {
+        0 => 1,
+        _ => u32::try_from(width - 1)
+            .ok()
+            .and_then(|later| 32_usize.checked_pow(later))
+            .and_then(|later| later.checked_mul(8))
+            .expect("the prefix count should fit in a `usize`"),
+    };
+    (0..count).map(move |index| encode_base_32(u128::from(crate::u64_from_usize(index)), width))
+}
+
+/// Draws a random version 4 UUID.
+fn random_uuid_v4() -> u128 {
+    let mut bytes = random_bytes::<16>();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    u128::from_be_bytes(bytes)
+}
+
+/// Draws `N` fresh random bytes.
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0_u8; N];
     getrandom::fill(&mut bytes).expect("the system random generator should be available");
     bytes
+}
+
+/// Spells the low `5 * chars` bits of `value`, most significant first, as one
+/// character for each 5 bits.
+fn encode_base_32(value: u128, chars: usize) -> String {
+    (0..chars)
+        .rev()
+        .map(|position| {
+            let digit = u8::try_from((value >> (5 * position)) & 0x1f)
+                .expect("a 5-bit value should fit in a byte");
+            char::from(GENERATED_ID_ALPHABET[usize::from(digit)])
+        })
+        .collect()
 }
 
 fn validate_generated_id(
@@ -69,16 +117,26 @@ fn validate_generated_id(
             format!("must start with `{expected_prefix}`"),
         ));
     };
-    if body.len() != SERVER_GENERATED_ID_BODY_LEN {
+    if body.len() != GENERATED_ID_BODY_BYTES
+        || !body
+            .bytes()
+            .all(|byte| GENERATED_ID_ALPHABET.contains(&byte))
+    {
         return Err(GeneratedIdValidationError::new(
             value,
-            format!("body must be {SERVER_GENERATED_ID_BODY_LEN} lowercase hex characters"),
+            format!(
+                "body must be {GENERATED_ID_BODY_BYTES} characters of the lowercase Crockford \
+                 base 32 alphabet `0123456789abcdefghjkmnpqrstvwxyz`"
+            ),
         ));
     }
-    if !body.bytes().all(is_lower_hex_byte) {
+    // The first character spells the two zero bits and the top three bits of
+    // the UUID, so a character above `7` would spell a value wider than 128
+    // bits.
+    if !body.starts_with(|first: char| first <= '7') {
         return Err(GeneratedIdValidationError::new(
             value,
-            "body must contain only lowercase hex characters".to_owned(),
+            "body must start with a character from `0` through `7`".to_owned(),
         ));
     }
     Ok(())
@@ -190,6 +248,9 @@ string_id! {
     )
 }
 
+/// Most bytes one writer ID may hold.
+pub const MAX_WRITER_ID_BYTES: usize = 256;
+
 string_id! {
     /// A stable writer label that the embedding process supplies.
     WriterId,
@@ -197,6 +258,12 @@ string_id! {
     validate = |value: &str| {
         if value.trim().is_empty() {
             return Err(WriterIdValidationError::new(value, "must not be blank"));
+        }
+        if value.len() > MAX_WRITER_ID_BYTES {
+            return Err(WriterIdValidationError::new(
+                value,
+                format!("must be {MAX_WRITER_ID_BYTES} bytes or fewer"),
+            ));
         }
         Ok(())
     }
@@ -229,14 +296,14 @@ string_id! {
     ///
     /// Reuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase
     /// ASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.
-    /// Generated commit IDs have the form `c_<32 lowercase hex>`, but callers can supply any value
-    /// that follows these rules.
+    /// Generated commit IDs have the form `c_` followed by 26 lowercase Crockford base 32
+    /// characters, but callers can supply any value that follows these rules.
     CommitId,
     error = CommitIdValidationError,
     validate = validate_commit_id,
     schema(
         pattern = r"^[a-z0-9][a-z0-9._-]{0,127}$",
-        example = "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0"
+        example = "c_7kn71d9dq885x91hejz3gvf9p0"
     )
 }
 
@@ -263,8 +330,8 @@ string_id! {
 impl PinId {
     /// Generates a new pin for the given manifest number.
     pub fn generate(manifest_no: ManifestNo) -> Self {
-        let entropy = generated_id("pin");
-        Self::parse(format!("pin_{:020}-{}", manifest_no.0, &entropy[4..20]))
+        let entropy = hex_encode_bytes(&random_bytes::<8>());
+        Self::parse(format!("pin_{:020}-{entropy}", manifest_no.0))
             .expect("the pinned manifest number should be valid")
     }
 
@@ -304,8 +371,8 @@ string_id! {
     UploadId,
     prefix = "upl",
     schema(
-        pattern = r"^upl_[0-9a-f]{32}$",
-        example = "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c"
+        pattern = r"^upl_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        example = "upl_2dhwp939xk9r7srv8t5cz5yw4c"
     )
 }
 
@@ -314,8 +381,8 @@ string_id! {
     ContentId,
     prefix = "con",
     schema(
-        pattern = r"^con_[0-9a-f]{32}$",
-        example = "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41"
+        pattern = r"^con_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        example = "con_4z59p0wjvx9a8b2frdhhf6mat1"
     )
 }
 
@@ -344,8 +411,8 @@ string_id! {
     ProbeRunId,
     prefix = "probe",
     schema(
-        pattern = r"^probe_[0-9a-f]{32}$",
-        example = "probe_7c3e9a1f5b2d4c6e8a0f1b3d5e7c9a2b"
+        pattern = r"^probe_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        example = "probe_3w7td1ypsd9hq8m3rv7nf7s6hb"
     )
 }
 
@@ -591,10 +658,17 @@ mod tests {
     }
 
     #[test]
-    fn writer_id_rejects_blank_text() {
+    fn writer_id_rejects_blank_and_oversized_text() {
         for value in ["", " ", "\n", " \t "] {
             WriterId::parse(value).expect_err(&format!("accepted {value:?}"));
         }
+        WriterId::parse("w".repeat(super::MAX_WRITER_ID_BYTES)).expect("the limit is inclusive");
+        assert_eq!(
+            WriterId::parse("w".repeat(super::MAX_WRITER_ID_BYTES + 1))
+                .expect_err("over the limit")
+                .reason(),
+            "must be 256 bytes or fewer"
+        );
     }
 
     #[test]
@@ -674,8 +748,8 @@ mod tests {
 
     #[test]
     fn generated_upload_wal_metadata_segment_and_pin_ids_reject_hyphenated_ids() {
-        assert!(UploadId::parse("upl_00000000000000000000000000000001").is_ok());
-        assert!(MetadataSegmentId::parse("seg_00000000000000000000000000000001").is_ok());
+        assert!(UploadId::parse("upl_00000000000000000000000001").is_ok());
+        assert!(MetadataSegmentId::parse("seg_00000000000000000000000001").is_ok());
         assert!(PinId::parse("pin_00000000000000000001-0000000000000001").is_ok());
         UploadId::parse(["upl", "123"].join("-"))
             .expect_err("a hyphenated upload ID should be rejected");
@@ -688,13 +762,39 @@ mod tests {
     }
 
     #[test]
-    fn generated_runtime_ids_use_lower_hex_bodies() {
+    fn generated_runtime_ids_spell_version_4_uuids_in_base_32() {
+        assert_eq!(
+            super::encode_base_32(0x7903_7149_21d4_413c_b252_aed5_e7f1_481d, 26),
+            "3s0drmj8em84yb4mnetqkz2j0x"
+        );
+        assert_eq!(
+            super::encode_base_32(u128::MAX, 26),
+            "7zzzzzzzzzzzzzzzzzzzzzzzzz"
+        );
         let upload_id = UploadId::generate();
         let metadata_segment_id = MetadataSegmentId::generate();
         let pin_id = PinId::generate(ManifestNo(1));
 
         assert_generated_id_shape(upload_id.as_str(), "upl");
         assert_generated_id_shape(metadata_segment_id.as_str(), "seg");
+        assert_eq!(
+            super::generated_id_body_prefixes(0).collect::<Vec<_>>(),
+            [""]
+        );
+        assert_eq!(
+            super::generated_id_body_prefixes(1).collect::<Vec<_>>(),
+            ["0", "1", "2", "3", "4", "5", "6", "7"]
+        );
+        let prefixes: Vec<_> = super::generated_id_body_prefixes(2).collect();
+        assert_eq!(prefixes.len(), 256);
+        assert!(prefixes.is_sorted());
+        assert_eq!(
+            prefixes
+                .iter()
+                .filter(|prefix| upload_id.as_str()[4..].starts_with(prefix.as_str()))
+                .count(),
+            1
+        );
         assert_eq!(pin_id.manifest_no(), ManifestNo(1));
         assert!(UploadId::parse(upload_id.as_str()).is_ok());
         assert!(MetadataSegmentId::parse(metadata_segment_id.as_str()).is_ok());
@@ -737,9 +837,24 @@ mod tests {
 
     #[test]
     fn content_id_parse_requires_the_generated_id_shape() {
-        assert!(ContentId::parse("con_0123456789abcdef0123456789abcdef").is_ok());
-        ContentId::parse("upl_0123456789abcdef0123456789abcdef")
-            .expect_err("an upload ID should not parse as a content ID");
+        for valid in [
+            "con_3s0drmj8em84yb4mnetqkz2j0x",
+            "con_7zzzzzzzzzzzzzzzzzzzzzzzzz",
+        ] {
+            assert!(ContentId::parse(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "upl_3s0drmj8em84yb4mnetqkz2j0x",
+            "con_3S0DRMJ8EM84YB4MNETQKZ2J0X",
+            "con_8s0drmj8em84yb4mnetqkz2j0x",
+            "con_3s0drmj8em84yb4mnetqkz2j0",
+            "con_3s0drmj8em84yb4mnetqkz2j0xx",
+            "con_3s0drmj8em84yb4mnetqkz2j0i",
+            "con_3s0drmj8em84yb4mnetqkz2j0u",
+            "con_0123456789abcdef0123456789abcdef",
+        ] {
+            ContentId::parse(invalid).expect_err(invalid);
+        }
     }
 
     fn assert_generated_id_shape(value: &str, prefix: &str) {
@@ -747,12 +862,16 @@ mod tests {
         let body = value
             .strip_prefix(&expected_prefix)
             .expect("generated id prefix");
-        assert_eq!(body.len(), 32);
-        assert!(
-            body.bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            "generated id body must be lowercase hex: {value}"
-        );
+        let uuid = body.bytes().fold(0_u128, |uuid, byte| {
+            let digit = super::GENERATED_ID_ALPHABET
+                .iter()
+                .position(|candidate| *candidate == byte)
+                .expect("a base 32 character");
+            (uuid << 5) | digit as u128
+        });
+        assert_eq!(super::encode_base_32(uuid, 26), body);
+        assert_eq!((uuid >> 76) & 0xf, 4, "version 4: {value}");
+        assert_eq!((uuid >> 62) & 0x3, 0b10, "RFC 9562 variant: {value}");
     }
 
     #[test]

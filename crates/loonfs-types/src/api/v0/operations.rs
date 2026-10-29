@@ -728,7 +728,7 @@ mod tests {
             "content_ref": {
                 "kind": "blob_v1",
                 "owner_namespace_id": "demo",
-                "content_id": "con_0123456789abcdef0123456789abcdef",
+                "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
                 "size_bytes": 1,
                 "checksum": {
                     "algorithm": "crc64nvme",

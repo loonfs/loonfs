@@ -61,7 +61,7 @@ func TestInlinePreparationAndRetry(t *testing.T) {
 			}
 			feature := fixture.Feature == nil || *fixture.Feature
 			session := map[string]any{"namespace_id": "demo", "upload_id": "upl_test", "mode": "service_proxied", "checksum_algorithm": fixture.Algorithm}
-			claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_00000000000000000000000000000001", "size_bytes": len(content), "checksum": mustChecksum(t, fixture.Algorithm, content)}
+			claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_00000000000000000000000001", "size_bytes": len(content), "checksum": mustChecksum(t, fixture.Algorithm, content)}
 			var mu sync.Mutex
 			var paths []string
 			var commits []map[string]any

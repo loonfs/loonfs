@@ -29,8 +29,8 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{
-    sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId, PageRequest,
-    RunNo, MAX_PUBLIC_INTEGER,
+    sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, GrepScope, IndexSegmentId,
+    PageRequest, RunNo, MAX_PUBLIC_INTEGER,
 };
 use std::assert_matches;
 use std::collections::BTreeSet;
@@ -43,8 +43,7 @@ fn request(pattern: &str) -> GrepRequest {
     GrepRequest {
         pattern: pattern.to_owned(),
         case_insensitive: false,
-        path_prefix: None,
-        inode_id: None,
+        scope: GrepScope::Namespace,
         allow_stale: false,
         allow_scan: false,
     }
@@ -1691,7 +1690,7 @@ async fn write_manifest_without_pin_id(
     let payload_bytes =
         serde_json::to_vec(&document["payload"]).expect("encode corrupt manifest payload");
     let payload_checksum = sha256_digest(&payload_bytes);
-    document["payload_checksum"] = serde_json::Value::String(payload_checksum.clone());
+    document["payload_checksum"] = serde_json::Value::String(payload_checksum.to_string());
     let manifest_no = loonfs_types::ManifestNo(22);
     document["payload"]["manifest_no"] = serde_json::json!(manifest_no);
     let payload = serde_json::to_vec(&document["payload"]).expect("payload");
@@ -1876,9 +1875,10 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
     let mut unscoped_scan = request("ee");
     unscoped_scan.allow_scan = true;
     let mut inode_scan = unscoped_scan.clone();
-    inode_scan.inode_id = Some(directory);
+    inode_scan.scope = GrepScope::Inode(directory);
     let mut path_scan = unscoped_scan.clone();
-    path_scan.path_prefix = Some(AbsolutePath::parse(format!("/{}", name(0))).expect("scope path"));
+    path_scan.scope =
+        GrepScope::PathPrefix(AbsolutePath::parse(format!("/{}", name(0))).expect("scope path"));
     let file_path = format!("{directory_path}/leaf.txt");
     for (case, grep_request) in [
         ("unscoped scan", unscoped_scan),
@@ -2057,7 +2057,8 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     assert!(absent.next_cursor.is_none());
 
     let mut missing_scope = request("shared needle");
-    missing_scope.path_prefix = Some(AbsolutePath::parse("/missing").expect("scope path"));
+    missing_scope.scope =
+        GrepScope::PathPrefix(AbsolutePath::parse("/missing").expect("scope path"));
     let error = new_query(&store, &namespace_id, &missing_scope)
         .await
         .expect_err("a missing scope must remain a missing path");
@@ -2065,9 +2066,9 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
 
     let docs_inode_id = namespace.stat("/docs").await.expect("stat docs").inode_id;
     let mut inode_scope = request("needle");
-    inode_scope.inode_id = Some(docs_inode_id);
+    inode_scope.scope = GrepScope::Inode(docs_inode_id);
     let mut path_scope = request("needle");
-    path_scope.path_prefix = Some(AbsolutePath::parse("/docs").expect("scope path"));
+    path_scope.scope = GrepScope::PathPrefix(AbsolutePath::parse("/docs").expect("scope path"));
     let scoped_by_inode = new_query(&store, &namespace_id, &inode_scope)
         .await
         .expect("inode scope query");
@@ -2079,13 +2080,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
             .expect("path scope query")
             .matches
     );
-    let mut both_scopes = inode_scope.clone();
-    both_scopes.path_prefix = path_scope.path_prefix.clone();
-    let error = new_query(&store, &namespace_id, &both_scopes)
-        .await
-        .expect_err("a request names at most one scope");
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    inode_scope.inode_id = Some(loonfs_types::InodeId(MAX_PUBLIC_INTEGER));
+    inode_scope.scope = GrepScope::Inode(loonfs_types::InodeId(MAX_PUBLIC_INTEGER));
     let error = new_query(&store, &namespace_id, &inode_scope)
         .await
         .expect_err("a missing inode scope must remain a missing inode");
@@ -2910,7 +2905,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     }
     let mut scan = request("ee");
     scan.allow_scan = true;
-    scan.path_prefix = Some(AbsolutePath::parse("/team").expect("path"));
+    scan.scope = GrepScope::PathPrefix(AbsolutePath::parse("/team").expect("path"));
     let reads =
         NamespaceReads::new(host.reader.namespace(&namespace_id)).with_subject(subject("viewer"));
     let scanned = host

@@ -312,7 +312,7 @@ async fn rows_of<S: ObjectStore + ?Sized>(
     inode_ids: &[InodeId],
 ) -> BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>> {
     let mut rows = BTreeMap::new();
-    for family in MANIFEST_ROW_FAMILIES {
+    for family in ApiMetadataRowFamily::ALL {
         rows.insert(
             family,
             family_rows(store, namespace_id, family)
@@ -1295,7 +1295,7 @@ async fn a_base_compaction_walks_the_tree_once_the_acknowledged_floor_is_above_z
             delta_index: 0,
             content_ref: loonfs_types::ContentRef::blob_v1(
                 namespace_id.clone(),
-                loonfs_types::ContentId::parse("con_00000000000000000000000000000000")
+                loonfs_types::ContentId::parse("con_00000000000000000000000000")
                     .expect("content id"),
                 b"probe",
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,

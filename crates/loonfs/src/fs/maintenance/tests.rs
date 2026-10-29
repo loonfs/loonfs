@@ -572,12 +572,9 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                     .map(|(index, key)| {
                         let value: String = (0..64)
                             .map(|part| {
-                                loonfs_types::sha256_digest(
+                                loonfs_types::sha256_hex(
                                     format!("{revision}/{index}/{part}").as_bytes(),
                                 )
-                                .strip_prefix("sha256:")
-                                .expect("digest prefix")
-                                .to_owned()
                             })
                             .collect();
                         (key.clone(), attribute_text(&value))

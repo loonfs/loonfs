@@ -16,20 +16,6 @@ pub(super) use loonfs_types::format::segment_blocks::{
 };
 pub use loonfs_types::MetadataFamilyGroup;
 
-pub(super) const MANIFEST_ROW_FAMILIES: [MetadataRowFamily; 11] = [
-    MetadataRowFamily::Inodes,
-    MetadataRowFamily::DirentryBinds,
-    MetadataRowFamily::DirentryChildBinds,
-    MetadataRowFamily::Revisions,
-    MetadataRowFamily::Tombstones,
-    MetadataRowFamily::ActiveDeletions,
-    MetadataRowFamily::CommitReceipts,
-    MetadataRowFamily::Commits,
-    MetadataRowFamily::ContentLayouts,
-    MetadataRowFamily::Attributes,
-    MetadataRowFamily::Access,
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataFamilySegments {
     pub(super) family: MetadataRowFamily,
@@ -178,7 +164,7 @@ fn metadata_run_manifest(run: &MetadataRunRef) -> MetadataRunManifest {
         run_no: run.run_no,
         run_seq: run.run_seq,
         tier: run.tier,
-        segments: MANIFEST_ROW_FAMILIES
+        segments: MetadataRowFamily::ALL
             .into_iter()
             .map(|family| {
                 let segments = run

@@ -1104,8 +1104,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_event_kind_decodes_as_unknown_and_a_known_event_is_unchanged() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let content_id =
-            ContentId::parse("con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").expect("content id");
+        let content_id = ContentId::parse("con_4z59p0wjvx9a8b2frdhhf6mat1").expect("content id");
         let content_ref = ContentRef::blob_v1(
             namespace_id.clone(),
             content_id,

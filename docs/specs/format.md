@@ -304,7 +304,7 @@ Each number refers to exactly one immutable object. A publisher creates the next
 Other objects use generated IDs:
 
 - A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies the pinned manifest, and the random suffix distinguishes separate user and fork pins on the same manifest. The durable record calls it `pin_id`, the API calls it a `checkpoint_id`, and a user pin's ID is also its `snapshot_id`.
-- A content ID is `con_` followed by 32 random lowercase hexadecimal characters.
+- A content ID is `con_` followed by the 26-character lowercase Crockford base 32 spelling of a random version 4 UUID. The spelling adds two zero bits in front of the UUID's 128 bits and writes each group of 5 bits as one character of `0123456789abcdefghjkmnpqrstvwxyz`, so the first character is `0` through `7`.
 - A metadata segment ID is also generated, instead of being derived from the segment's position in publication history.
 
 A collision at a newly generated immutable key MUST NOT overwrite the existing bytes.
@@ -1399,7 +1399,7 @@ A garbage collection pass first establishes the roots. It:
 
 An invalid or unreadable root manifest stops the pass before anything is deleted. An absent namespace has nothing for core garbage collection to delete.
 
-The pass then lists each candidate family completely, from the beginning. Unless its shared base filter would be larger than its limit (see [Content roots](#119-content-roots)), it sweeps content one ID shard at a time, where a shard is the content IDs with a common hex prefix. The exact sets of content roots use read working memory for one shard, plus the tail and session IDs. Shared base keys use a Bloom filter, with its own 64 MiB limit. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin and session listings that establish the roots are separate from the later sweeps that determine which records can be deleted.
+The pass then lists each candidate family completely, from the beginning. Unless its shared base filter would be larger than its limit (see [Content roots](#119-content-roots)), it sweeps content one ID shard at a time, where a shard is the content IDs whose first characters after `con_` are the same. The exact sets of content roots use read working memory for one shard, plus the tail and session IDs. Shared base keys use a Bloom filter, with its own 64 MiB limit. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin and session listings that establish the roots are separate from the later sweeps that determine which records can be deleted.
 
 Every age decision in a pass uses the same `now_ms`, captured when the pass starts. A later pass reads fresh roots and uses its own clock. Concurrent collectors can delete eligible objects independently, and an object that's already gone needs no more cleanup. A failed pass might have deleted some candidates already, but the next pass can safely start over.
 
@@ -1743,7 +1743,7 @@ A `blob_v1` reference contains all of these fields:
 | --- | --- |
 | `kind` | `blob_v1`. |
 | `owner_namespace_id` | The namespace that originally wrote the content. |
-| `content_id` | `con_` followed by 32 random lowercase hexadecimal characters. |
+| `content_id` | `con_` followed by 26 lowercase Crockford base 32 characters that spell a random version 4 UUID. |
 | `size_bytes` | The length of the file, which is the prefix of the chain that the reference identifies. |
 | `checksum` | The algorithm and digest of those bytes. |
 
@@ -1753,7 +1753,7 @@ For example, the 15 UTF-8 bytes `Hello, LoonFS!\n` (ending in a single LF) have 
 {
   "kind": "blob_v1",
   "owner_namespace_id": "demo",
-  "content_id": "con_0123456789abcdef0123456789abcdef",
+  "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
   "size_bytes": 15,
   "checksum": {
     "algorithm": "crc64nvme",
@@ -2133,7 +2133,7 @@ Attribute `set` keys are sorted in lexicographic UTF-8 byte order, and the `remo
 A content reference is represented by exactly these fields, in this order:
 
 ```json
-{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":15}
+{"kind":"blob_v1","content_id":"con_014d2pf2dbsqqg28t5cy4tqkff","size_bytes":15}
 ```
 
 The owner namespace and the checksum aren't included in the preimage, and neither is the delta's `layout`, which records physical placement, not request identity. Every reference a commit can admit is owned by the committing namespace, so the owner would repeat the `namespace_id` that the preimage already includes. The checksum is verification evidence, not a second identity. Both fields are still present and validated on the actual reference (leaving them out of the fingerprint doesn't make them optional on a commit).

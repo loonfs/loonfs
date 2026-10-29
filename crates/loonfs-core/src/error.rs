@@ -503,8 +503,7 @@ impl CoreError {
             }
             CoreError::FailedOperation { error, .. } => error.object_store_public_message(),
             CoreError::DurableContent(
-                DurableContentValidationError::InvalidContentRef(_)
-                | DurableContentValidationError::MissingContentObject { .. }
+                DurableContentValidationError::MissingContentObject { .. }
                 | DurableContentValidationError::ContentLengthMismatch { .. }
                 | DurableContentValidationError::ContentChecksumMismatch { .. },
             )
@@ -847,9 +846,7 @@ mod tests {
         let reuse = CoreError::CommitIdReuseConflict {
             commit_id: "retry-key-1".to_owned(),
             committed_seq: Some(ChangeSeq(9)),
-            committed_fingerprint: Some(
-                serde_json::from_str(r#""v1:sha256:abc""#).expect("fingerprint"),
-            ),
+            committed_fingerprint: Some(loonfs_test_support::ids::commit_fingerprint("abc")),
         };
         let details = reuse.details().expect("reuse details");
         assert_eq!(
@@ -858,11 +855,8 @@ mod tests {
         );
         assert_eq!(details.committed_seq, Some(ChangeSeq(9)));
         assert_eq!(
-            details
-                .committed_fingerprint
-                .as_ref()
-                .map(loonfs_types::CommitFingerprint::as_str),
-            Some("v1:sha256:abc")
+            details.committed_fingerprint,
+            Some(loonfs_test_support::ids::commit_fingerprint("abc"))
         );
 
         // A conflict between two live claims has no landed commit to name,

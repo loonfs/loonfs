@@ -547,15 +547,12 @@ impl DirectGetIssuer for S3CompatiblePresigner {
 
 /// Converts a CRC-64/NVME into the base64 spelling the S3 family signs.
 pub(crate) fn base64_crc64nvme(key: &str, checksum: &Checksum) -> Result<String> {
-    if checksum.algorithm != ChecksumAlgorithm::Crc64nvme {
+    if checksum.algorithm() != ChecksumAlgorithm::Crc64nvme {
         return Err(invalid_request(
             key,
             "multipart uploads are checksummed with crc64nvme",
         ));
     }
-    checksum
-        .validate()
-        .map_err(|error| invalid_request(key, &error.to_string()))?;
     Ok(encode_base64_checksum(checksum))
 }
 

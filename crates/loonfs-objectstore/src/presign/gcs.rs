@@ -632,17 +632,17 @@ mod tests {
     #[test]
     fn stored_crc32c_selects_its_algorithm_out_of_the_hash_header() {
         assert_eq!(
-            stored_crc32c("crc32c=mnG7TA==").map(|checksum| checksum.value.to_string()),
+            stored_crc32c("crc32c=mnG7TA==").map(|checksum| checksum.value().to_string()),
             Some(HELLO_CRC32C_HEX.to_owned())
         );
         assert_eq!(
             stored_crc32c("md5=XUFAKrxLKna5cZ2REBfFkg==,crc32c=mnG7TA==")
-                .map(|checksum| checksum.value.to_string()),
+                .map(|checksum| checksum.value().to_string()),
             Some(HELLO_CRC32C_HEX.to_owned())
         );
         assert_eq!(
             stored_crc32c("crc32c=mnG7TA==, md5=XUFAKrxLKna5cZ2REBfFkg==")
-                .map(|checksum| checksum.algorithm),
+                .map(|checksum| checksum.algorithm()),
             Some(ChecksumAlgorithm::Crc32c)
         );
 

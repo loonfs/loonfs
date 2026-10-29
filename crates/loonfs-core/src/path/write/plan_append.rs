@@ -169,10 +169,11 @@ async fn append_to<S: ObjectStore + ?Sized>(
         ))
     })?;
     let algorithm = store.checksum_algorithm();
-    if base.checksum.algorithm != algorithm {
+    if base.checksum.algorithm() != algorithm {
         return Err(CoreError::NamespaceCorrupt(format!(
             "content `{}` uses `{}`; the store requires `{algorithm}`",
-            base.content_id, base.checksum.algorithm
+            base.content_id,
+            base.checksum.algorithm()
         )));
     }
     let checksum = base

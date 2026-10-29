@@ -892,7 +892,7 @@ mod tests {
                 owner_namespace_id: namespace_id,
                 manifest_no: ManifestNo(manifest_no),
                 head_seq: ChangeSeq(0),
-                payload_checksum: "checksum".to_owned(),
+                payload_checksum: loonfs_types::sha256_digest(b"checksum"),
             }),
             basis_checked: checked.clone(),
             head_confirmed: checked.clone(),

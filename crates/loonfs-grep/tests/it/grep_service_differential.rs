@@ -11,7 +11,7 @@ use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
-use loonfs_types::{AbsolutePath, GrepRequest, GrepResponse, PageRequest};
+use loonfs_types::{AbsolutePath, GrepRequest, GrepResponse, GrepScope, PageRequest};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -20,8 +20,7 @@ fn request(pattern: &str) -> GrepRequest {
     GrepRequest {
         pattern: pattern.to_owned(),
         case_insensitive: false,
-        path_prefix: None,
-        inode_id: None,
+        scope: GrepScope::Namespace,
         allow_stale: false,
         allow_scan: false,
     }

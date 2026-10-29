@@ -22,8 +22,8 @@ use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalI
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,
     Checksum, ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName,
-    InodeId, MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, UploadId,
-    WriterId,
+    InodeId, MetadataSegmentId, NameKey, NamespaceId, PayloadChecksum, PinId, PrincipalId,
+    PrincipalScope, UploadId, WriterId,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
@@ -155,6 +155,7 @@ text_heap_bytes!(
     MetadataSegmentId,
     NameKey,
     NamespaceId,
+    PayloadChecksum,
     PinId,
     PrincipalId,
     PrincipalScope,
@@ -176,7 +177,7 @@ impl HeapBytes for ChangeSeq {
 
 impl HeapBytes for Checksum {
     fn heap_bytes(&self) -> usize {
-        self.value.heap_bytes()
+        self.value().heap_bytes()
     }
 }
 
@@ -393,7 +394,7 @@ impl HeapBytes for WalInlineContent {
 
 impl<T: HeapBytes> HeapBytes for VerifiedEnvelope<T> {
     fn heap_bytes(&self) -> usize {
-        self.payload_checksum().len() + self.payload().heap_bytes()
+        self.payload_checksum().heap_bytes() + self.payload().heap_bytes()
     }
 }
 

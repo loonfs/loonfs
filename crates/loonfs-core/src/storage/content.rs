@@ -17,7 +17,7 @@ use loonfs_objectstore::{
 use loonfs_types::options::ReadRange;
 use loonfs_types::{
     Checksum, ChecksumAlgorithm, ChecksumDigest, ContentId, ContentRef, ContentRefKind,
-    ContentRefValidationError, ContentVerifier, ErrorCode, NamespaceId, PathEntry,
+    ContentVerifier, ErrorCode, NamespaceId, PathEntry,
 };
 use std::future::Future;
 use std::num::NonZeroU64;
@@ -56,8 +56,6 @@ impl StoredContent {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum DurableContentValidationError {
-    #[error("invalid content reference: {0}")]
-    InvalidContentRef(#[from] ContentRefValidationError),
     #[error("missing content object `{object_key}`")]
     MissingContentObject { object_key: String },
     #[error("content length mismatch for `{object_key}`: expected {expected}, actual {actual}")]
@@ -81,8 +79,7 @@ pub enum DurableContentValidationError {
 impl DurableContentValidationError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::InvalidContentRef(_)
-            | Self::MissingContentObject { .. }
+            Self::MissingContentObject { .. }
             | Self::ContentLengthMismatch { .. }
             | Self::ContentChecksumMismatch { .. } => ErrorCode::NamespaceCorrupt,
             Self::Store { .. } => ErrorCode::ServerError,
@@ -95,7 +92,7 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
     content_ref: &ContentRef,
 ) -> std::result::Result<(), DurableContentValidationError> {
-    ContentLocation::whole(content_ref)?
+    ContentLocation::whole(content_ref)
         .read_bytes(store, None, content_ref)
         .await
         .map(drop)
@@ -167,7 +164,7 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
     store: &S,
     content_ref: &ContentRef,
 ) -> std::result::Result<(), DurableContentValidationError> {
-    let object_key = content_object_key_for_ref(content_ref)?;
+    let object_key = content_object_key_for_ref(content_ref);
     let stored = match store.head(&object_key).await {
         Ok(Some(stored)) => stored,
         Ok(None) => return Err(DurableContentValidationError::MissingContentObject { object_key }),
@@ -560,14 +557,8 @@ impl<S> std::fmt::Debug for FileContentStream<S> {
     }
 }
 
-pub(crate) fn content_object_key_for_ref(
-    content_ref: &ContentRef,
-) -> std::result::Result<String, DurableContentValidationError> {
-    content_ref.validate()?;
-    Ok(content_blob(
-        &content_ref.owner_namespace_id,
-        &content_ref.content_id,
-    ))
+pub(crate) fn content_object_key_for_ref(content_ref: &ContentRef) -> String {
+    content_blob(&content_ref.owner_namespace_id, &content_ref.content_id)
 }
 
 /// Checks fetched bytes against everything the reference claims about them.
@@ -590,7 +581,7 @@ pub(crate) fn validate_loaded_content_bytes(
 
     let expected = &content_ref.checksum;
     if !expected.matches(bytes) {
-        let actual = Checksum::compute(expected.algorithm, bytes);
+        let actual = Checksum::compute(expected.algorithm(), bytes);
         return Err(DurableContentValidationError::ContentChecksumMismatch {
             object_key,
             expected: describe_checksum(expected),
@@ -602,7 +593,7 @@ pub(crate) fn validate_loaded_content_bytes(
 }
 
 fn describe_checksum(checksum: &Checksum) -> String {
-    format!("{}:{}", checksum.algorithm, checksum.value)
+    format!("{}:{}", checksum.algorithm(), checksum.value())
 }
 
 /// Plants test content under a fresh identity owned by the current namespace.
@@ -826,7 +817,7 @@ mod tests {
         store: &S,
         content_ref: &ContentRef,
     ) -> std::result::Result<Vec<u8>, DurableContentValidationError> {
-        ContentLocation::whole(content_ref)?
+        ContentLocation::whole(content_ref)
             .read_bytes(store, None, content_ref)
             .await
     }
@@ -1152,7 +1143,7 @@ mod tests {
             .expect("the test opens a range inside the content");
         FileContentStream::open_inner(
             store,
-            super::ContentLocation::whole(content_ref)?,
+            super::ContentLocation::whole(content_ref),
             Some(test_entry()),
             content_ref.clone(),
             test_chunk_bytes(),

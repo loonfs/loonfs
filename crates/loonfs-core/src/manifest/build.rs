@@ -4,7 +4,7 @@
 use super::cache::MetadataSegmentCache;
 use super::index_block_load::{insert_written_segment, SegmentWriter};
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_layouts};
-use super::runs::{MetadataFamilySegments, MetadataRunPolicy, MANIFEST_ROW_FAMILIES};
+use super::runs::{MetadataFamilySegments, MetadataRunPolicy};
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_PENDING_SEGMENT_BYTES;
@@ -115,8 +115,8 @@ where
     RowsForFamily: FnMut(MetadataRowFamily) -> Vec<MetadataRow>,
 {
     let mut puts = MetadataSegmentPuts::new(store, segment_cache, SegmentWriter::Fold);
-    let mut segments_by_family = Vec::with_capacity(MANIFEST_ROW_FAMILIES.len());
-    for family in MANIFEST_ROW_FAMILIES {
+    let mut segments_by_family = Vec::with_capacity(MetadataRowFamily::ALL.len());
+    for family in MetadataRowFamily::ALL {
         let mut writer = MetadataSegmentWriter::new(family, namespace_id);
         for row in rows_for_family(family) {
             writer.push(row, &mut |_| {});

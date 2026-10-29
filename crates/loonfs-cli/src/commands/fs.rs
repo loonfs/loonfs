@@ -313,8 +313,10 @@ pub(crate) async fn run_filesystem_grep(
     let request = loonfs_types::GrepRequest {
         pattern: args.pattern.clone(),
         case_insensitive: args.ignore_case,
-        path_prefix,
-        inode_id: None,
+        scope: path_prefix.map_or(
+            loonfs_types::GrepScope::Namespace,
+            loonfs_types::GrepScope::PathPrefix,
+        ),
         allow_stale: args.allow_stale,
         allow_scan: args.allow_scan,
     };

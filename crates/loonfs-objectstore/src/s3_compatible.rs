@@ -815,8 +815,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
 
-    const KEY: &str = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
-    const BASE_KEY: &str = "namespaces/demo/content/con_fedcba9876543210fedcba9876543210";
+    const KEY: &str = "namespaces/demo/content/con_014d2pf2dbsqqg28t5cy4tqkff";
+    const BASE_KEY: &str = "namespaces/demo/content/con_7yvjx9gxjm688fxq5tk1v58cgg";
 
     #[derive(Debug, Clone)]
     struct ScriptedProvider {

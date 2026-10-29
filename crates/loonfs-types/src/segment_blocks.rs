@@ -820,7 +820,7 @@ mod tests {
     }
 
     fn inode_row(inode_id: u64) -> (String, String, MetadataRow) {
-        let row = MetadataRow::Inode(crate::manifest::InodeRecord {
+        let row = MetadataRow::Inode(crate::metadata_rows::InodeRecord {
             inode_id: InodeId(inode_id),
             inode_kind: InodeKind::File,
             committed_seq: ChangeSeq(inode_id),

@@ -105,8 +105,8 @@ fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadE
         ControlLoadFailure::Decode(EnvelopeCodecError::ChecksumMismatch { expected, actual }) => {
             ControlObjectLoadError::ChecksumMismatch {
                 object_key: object_key.to_owned(),
-                expected,
-                actual,
+                expected: expected.to_string(),
+                actual: actual.to_string(),
             }
         }
         ControlLoadFailure::Decode(error) => ControlObjectLoadError::Codec {

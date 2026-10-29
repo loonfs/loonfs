@@ -98,7 +98,7 @@ mod tests {
     }
 
     fn segment_id() -> IndexSegmentId {
-        IndexSegmentId::parse("idx_00000000000000000000000000000001").expect("valid segment id")
+        IndexSegmentId::parse("idx_00000000000000000000000001").expect("valid segment id")
     }
 
     #[test]
@@ -130,7 +130,7 @@ mod tests {
         );
         assert_eq!(
             segment_key(&namespace_id, &segment_id),
-            "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000000000001.sst.zst"
+            "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000001.sst.zst"
         );
     }
 
@@ -174,10 +174,10 @@ mod tests {
             "namespaces/docs/extensions/grep/manifests/",
             "namespaces/docs/extensions/grep/manifests/not-a-number.json",
             "namespaces/docs/extensions/grep/segments/",
-            "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000000000001.sst",
+            "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000001.sst",
             "namespaces/docs/extensions/grep/segments/not-an-index-id.sst.zst",
-            "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000000000001.sst.zst.tmp",
-            "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000000000001.sst.zst/extra",
+            "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000001.sst.zst.tmp",
+            "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000001.sst.zst/extra",
             "namespaces/docs/extensions/grep/other/object",
             "namespaces/docs/hint.json",
         ];

@@ -315,7 +315,7 @@ mod tests {
     fn an_upload_status_from_a_newer_server_decodes_as_unknown() {
         let session: UploadSession = serde_json::from_value(serde_json::json!({
             "namespace_id": "demo",
-            "upload_id": "upl_00000000000000000000000000000001",
+            "upload_id": "upl_00000000000000000000000001",
             "mode": "service_proxied",
             "status": "expiring",
             "expiring_at_ms": 7
@@ -490,8 +490,7 @@ mod tests {
         ] {
             let session = UploadSession {
                 namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-                upload_id: UploadId::parse("upl_00000000000000000000000000000001")
-                    .expect("upload id"),
+                upload_id: UploadId::parse("upl_00000000000000000000000001").expect("upload id"),
                 mode,
                 status: UploadSessionStatus::Open {
                     expires_at_ms: 1000,
@@ -503,7 +502,7 @@ mod tests {
             };
             let mut expected = serde_json::json!({
                 "namespace_id": "demo",
-                "upload_id": "upl_00000000000000000000000000000001",
+                "upload_id": "upl_00000000000000000000000001",
                 "mode": mode,
                 "status": "open",
                 "expires_at_ms": 1000,
@@ -541,14 +540,14 @@ mod tests {
         );
 
         serde_json::from_str::<UploadContentClaim>(
-                r#"{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"},"content_id":"con_0123456789abcdef0123456789abcdef"}"#
+                r#"{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"},"content_id":"con_014d2pf2dbsqqg28t5cy4tqkff"}"#
             ).expect_err("a client must not be able to name the content object");
     }
 
     #[test]
     fn an_upload_session_is_flat_and_uses_one_status_vocabulary() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
+        let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("upload id");
         let aborted = serde_json::to_value(UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
@@ -592,10 +591,10 @@ mod tests {
     #[test]
     fn completion_status_and_commit_share_the_exact_content_token_shape() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
+        let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("upload id");
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+            ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
         );
@@ -630,7 +629,7 @@ mod tests {
                 "content_ref": {
                     "kind": "blob_v1",
                     "owner_namespace_id": "demo",
-                    "content_id": "con_0123456789abcdef0123456789abcdef",
+                    "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
                     "size_bytes": 5,
                     "checksum": {
                         "algorithm": "crc64nvme",

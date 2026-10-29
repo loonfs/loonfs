@@ -108,7 +108,7 @@ fn compacted_bindings_state(namespace_id: &NamespaceId) -> MetadataState {
             delta_index: 0,
             content_ref: ContentRef::blob_v1(
                 namespace_id.clone(),
-                ContentId::parse("con_00000000000000000000000000000000").expect("content"),
+                ContentId::parse("con_00000000000000000000000000").expect("content"),
                 b"text",
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
             ),

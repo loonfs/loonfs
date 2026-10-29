@@ -434,7 +434,7 @@ mod tests {
                     delta_index: 0,
                     content_ref: loonfs_types::ContentRef::blob_v1(
                         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
-                        loonfs_types::ContentId::parse("con_0123456789abcdef0123456789abcdef")
+                        loonfs_types::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
                             .expect("content id"),
                         b"body",
                         loonfs_types::ChecksumAlgorithm::Crc64nvme,

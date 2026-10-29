@@ -2,7 +2,6 @@
 
 use super::index_block_load::segment_object_bytes;
 use super::publish::manifest_ref_for;
-use super::runs::MANIFEST_ROW_FAMILIES;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{load_current_manifest, LoadedManifest};
 use crate::pin::load_pin_basis;
@@ -85,7 +84,7 @@ fn manifest_statistics(
     // Both loaders validate descriptor uniqueness and byte ranges before this call.
     let mut inode_record_count = 0_u64;
     let mut metadata_stored_bytes = 0_u64;
-    let mut segments_by_family: BTreeMap<_, _> = MANIFEST_ROW_FAMILIES
+    let mut segments_by_family: BTreeMap<_, _> = MetadataRowFamily::ALL
         .into_iter()
         .map(|family| (family, 0))
         .collect();

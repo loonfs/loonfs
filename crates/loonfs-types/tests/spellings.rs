@@ -45,19 +45,7 @@ fn every_hand_written_spelling_matches_serde() {
     for group in MetadataFamilyGroup::ALL {
         assert_spelling(group, group.as_str());
     }
-    for family in [
-        MetadataRowFamily::Inodes,
-        MetadataRowFamily::DirentryBinds,
-        MetadataRowFamily::DirentryChildBinds,
-        MetadataRowFamily::Revisions,
-        MetadataRowFamily::Tombstones,
-        MetadataRowFamily::ActiveDeletions,
-        MetadataRowFamily::CommitReceipts,
-        MetadataRowFamily::Commits,
-        MetadataRowFamily::ContentLayouts,
-        MetadataRowFamily::Attributes,
-        MetadataRowFamily::Access,
-    ] {
+    for family in MetadataRowFamily::ALL {
         assert_spelling(family, family.as_str());
     }
     assert_spelling(

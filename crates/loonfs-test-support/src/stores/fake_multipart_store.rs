@@ -122,7 +122,7 @@ impl<S> FakeMultipartStore<S> {
                 .ok_or_else(|| ObjectStoreError::NotFound {
                     object_key: provider_upload_id.to_owned(),
                 })?;
-        let etag = format!("\"{}\"", Checksum::crc64nvme(bytes).value);
+        let etag = format!("\"{}\"", Checksum::crc64nvme(bytes).value());
         upload.parts.insert(
             part_number,
             StoredPart {
@@ -207,7 +207,7 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             // part whose declared checksum does not match its bytes could
             // never have landed.
             if part.etag != stored.etag
-                || part.checksum != Checksum::compute(part.checksum.algorithm, &stored.bytes)
+                || part.checksum != Checksum::compute(part.checksum.algorithm(), &stored.bytes)
             {
                 return Err(ObjectStoreError::transport(
                     key,
@@ -220,7 +220,7 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             assembled.extend_from_slice(&stored.bytes);
         }
 
-        let stored_checksum = Checksum::compute(full_object_checksum.algorithm, &assembled);
+        let stored_checksum = Checksum::compute(full_object_checksum.algorithm(), &assembled);
         if self.enforcement == MultipartChecksumEnforcement::Precondition
             && stored_checksum != *full_object_checksum
         {

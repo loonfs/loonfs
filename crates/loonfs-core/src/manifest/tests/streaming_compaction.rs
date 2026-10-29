@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
 fn every_family_belongs_to_exactly_one_compaction_group() {
-    for family in MANIFEST_ROW_FAMILIES {
+    for family in ApiMetadataRowFamily::ALL {
         let groups: Vec<_> = MetadataFamilyGroup::ALL
             .into_iter()
             .filter(|group| group.families().contains(&family))
@@ -53,7 +53,7 @@ fn every_family_belongs_to_exactly_one_compaction_group() {
         .sum();
     assert_eq!(
         listed,
-        MANIFEST_ROW_FAMILIES.len(),
+        ApiMetadataRowFamily::ALL.len(),
         "the groups must list every family once and nothing else"
     );
 }
@@ -3704,11 +3704,11 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_even_past_the_filter
     let namespace_id = NamespaceId::parse("layouts").expect("namespace");
     let reference = ContentRef::blob_v1(
         namespace_id.clone(),
-        ContentId::parse("con_00000000000000000000000000000000").expect("content"),
+        ContentId::parse("con_00000000000000000000000000").expect("content"),
         b"four",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
-    let absent = ContentId::parse("con_00000000000000000000000000000001").expect("content");
+    let absent = ContentId::parse("con_00000000000000000000000001").expect("content");
     let mut state = MetadataStateBuilder::default();
     state.push_revision(RevisionRecord {
         inode_id: InodeId(2),

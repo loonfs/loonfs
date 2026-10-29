@@ -15,14 +15,24 @@ use loonfs_objectstore::keys::{content_blob, content_prefix, temporary_object};
 use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::control::{encode_control_state, HintPayload};
 use loonfs_types::format::manifest::{ContentLayoutRecord, NamespaceManifestPayload};
-use loonfs_types::{ChangeSeq, ContentExtent, ContentId, ContentLayout, ExtentObject};
+use loonfs_types::{
+    generated_id_body_prefixes, ChangeSeq, ContentExtent, ContentId, ContentLayout, ExtentObject,
+};
 use std::sync::atomic::AtomicU64;
 
+/// Returns the two-character shard prefix that `index` selects, wrapping
+/// around the 256 prefixes.
+fn shard_prefix(index: usize) -> String {
+    generated_id_body_prefixes(2)
+        .nth(index % 256)
+        .expect("a two-character prefix")
+}
+
 fn shared_layout(namespace_id: &NamespaceId, index: usize) -> ContentLayoutRecord {
-    let shard = index % 16;
-    let content_id = ContentId::parse(format!("con_{shard:x}a{index:030x}")).expect("chain id");
+    let content_id =
+        ContentId::parse(format!("con_{}a{index:023}", shard_prefix(index))).expect("chain id");
     let base_id =
-        ContentId::parse(format!("con_{:x}b{index:030x}", (shard + 1) % 16)).expect("base id");
+        ContentId::parse(format!("con_{}b{index:023}", shard_prefix(index + 1))).expect("base id");
     ContentLayoutRecord {
         owner_namespace_id: namespace_id.clone(),
         content_id: content_id.clone(),
@@ -116,12 +126,12 @@ async fn publish_layout_manifest(store: &impl ObjectStore, manifest: NamespaceMa
         .expect("write hint");
 }
 
-/// The sharded pass fits in 240,918 bytes: the 198,406-byte live set plus one
-/// shard's keys and scan blocks. An exact set of the 2,048 shared base keys
-/// takes 266,256 bytes on its own, so the 256 KiB budget admits the sharded
-/// pass and not the bases held exactly.
+/// The sharded pass peaks at 244,270 bytes: the live set plus one shard's keys
+/// and scan blocks. An exact set of the 2,048 shared base keys takes 253,968
+/// bytes on its own, so the 244 KiB budget admits the sharded pass and not the
+/// bases held exactly.
 #[tokio::test]
-async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shard_are_deleted() {
+async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_across_the_shards_are_deleted() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         MetadataMapStore::aged(
@@ -134,8 +144,8 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shar
     let (manifest, protected) = shared_layout_manifest(&store, &namespace_id, 2_048).await;
     publish_layout_manifest(&store, manifest).await;
     let mut orphans = BTreeSet::new();
-    for shard in 0..16 {
-        let content_id = ContentId::parse(format!("con_{shard:x}f{:030x}", 0)).expect("orphan id");
+    for shard in generated_id_body_prefixes(2).step_by(33) {
+        let content_id = ContentId::parse(format!("con_{shard}f{:023}", 0)).expect("orphan id");
         let key = content_blob(&namespace_id, &content_id);
         store
             .put_if_absent(&key, Bytes::from_static(b"orphan"))
@@ -143,7 +153,7 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shar
             .expect("orphan");
         orphans.insert(key);
     }
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(256 * 1024, None));
+    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(244 * 1024, None));
     let cache = root_scan_cache(Arc::clone(&memory));
     let options = GcOptions {
         content_shard_rows: 128,
@@ -161,7 +171,7 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shar
     )
     .await
     .expect("pass fits the read budget");
-    assert_eq!(report.deleted.content_objects, 16);
+    assert_eq!(report.deleted.content_objects, 8);
     assert_eq!(memory.in_use(), 0);
     let operations = store.snapshot();
     let deleted: BTreeSet<_> = operations
@@ -184,8 +194,8 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shar
         .collect();
     assert_eq!(
         listed,
-        (0..16)
-            .map(|shard| format!("{prefix}con_{shard:x}"))
+        generated_id_body_prefixes(2)
+            .map(|shard| format!("{prefix}con_{shard}"))
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -221,7 +231,7 @@ async fn a_shared_base_false_positive_is_collected_with_a_later_pass_seed() {
         .map(|index| {
             content_blob(
                 &namespace_id,
-                &ContentId::parse(format!("con_f{index:031x}")).expect("orphan id"),
+                &ContentId::parse(format!("con_7{index:025}")).expect("orphan id"),
             )
         })
         .find(|key| first.may_contain(key.as_bytes()) && !second.may_contain(key.as_bytes()))

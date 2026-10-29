@@ -274,32 +274,25 @@ fn claimed_content_ref(
     claim: &UploadContentClaim,
     required_algorithm: ChecksumAlgorithm,
 ) -> Result<ContentRef> {
-    let content_ref = ContentRef {
+    Ok(ContentRef {
         kind: ContentRefKind::BlobV1,
         owner_namespace_id,
         content_id,
         size_bytes: claim.size_bytes,
         checksum: validate_upload_checksum(&claim.checksum, required_algorithm)?.clone(),
-    };
-    content_ref
-        .validate()
-        .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
-    Ok(content_ref)
+    })
 }
 
 fn validate_upload_checksum(
     checksum: &Checksum,
     required_algorithm: ChecksumAlgorithm,
 ) -> Result<&Checksum> {
-    if checksum.algorithm != required_algorithm {
+    if checksum.algorithm() != required_algorithm {
         return Err(CoreError::InvalidUploadContent(format!(
             "checksum algorithm `{}` does not match the session requirement `{required_algorithm}`",
-            checksum.algorithm
+            checksum.algorithm()
         )));
     }
-    checksum
-        .validate()
-        .map_err(|error| CoreError::InvalidUploadContent(error.to_string()))?;
     Ok(checksum)
 }
 
@@ -1774,9 +1767,8 @@ mod tests {
     fn multipart_validation_uses_the_algorithm_frozen_in_the_session() {
         let session = UploadSessionPayload {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            upload_id: UploadId::parse("upl_00000000000000000000000000000001").expect("upload id"),
-            content_id: ContentId::parse("con_00000000000000000000000000000001")
-                .expect("content id"),
+            upload_id: UploadId::parse("upl_00000000000000000000000001").expect("upload id"),
+            content_id: ContentId::parse("con_00000000000000000000000001").expect("content id"),
             subject_id: None,
             mode: UploadSessionMode::DirectMultipart {
                 provider_upload_id: "provider-upload".to_owned(),
@@ -1802,7 +1794,7 @@ mod tests {
             required_algorithm,
         )
         .expect("the stored algorithm accepts the content claim");
-        assert_eq!(content_ref.checksum.algorithm, ChecksumAlgorithm::Crc32c);
+        assert_eq!(content_ref.checksum.algorithm(), ChecksumAlgorithm::Crc32c);
 
         let part = CompletedUploadPart {
             part_number: 1,
@@ -1813,7 +1805,7 @@ mod tests {
             multipart_parts(&[part], required_algorithm)
                 .expect("the stored algorithm accepts the part")[0]
                 .checksum
-                .algorithm,
+                .algorithm(),
             ChecksumAlgorithm::Crc32c
         );
 

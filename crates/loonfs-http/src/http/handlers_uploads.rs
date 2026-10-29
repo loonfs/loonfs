@@ -774,11 +774,11 @@ mod completion_body_tests {
 
     #[test]
     fn maximum_multipart_completion_fits_the_completion_body_cap() {
-        let checksum = Checksum {
-            algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: loonfs_types::ChecksumHex::parse("f".repeat(64))
-                .expect("a lowercase hex checksum"),
-        };
+        let checksum = Checksum::new(
+            ChecksumAlgorithm::Crc64nvme,
+            loonfs_types::ChecksumHex::parse("f".repeat(16)).expect("a lowercase hex checksum"),
+        )
+        .expect("a CRC-64/NVME checksum");
         let quoted_etag = format!("\"{}\"", "e".repeat(254));
         assert_eq!(quoted_etag.len(), 256);
         let request = CompleteUploadBody::DirectMultipart {
@@ -809,11 +809,11 @@ mod completion_body_tests {
 
     #[test]
     fn maximum_part_signing_request_fits_the_control_body_cap() {
-        let checksum = Checksum {
-            algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: loonfs_types::ChecksumHex::parse("f".repeat(64))
-                .expect("a lowercase hex checksum"),
-        };
+        let checksum = Checksum::new(
+            ChecksumAlgorithm::Crc64nvme,
+            loonfs_types::ChecksumHex::parse("f".repeat(16)).expect("a lowercase hex checksum"),
+        )
+        .expect("a CRC-64/NVME checksum");
         let request = SignUploadPartsRequest {
             parts: (1_u32..)
                 .take(loonfs::MAX_SIGNED_PARTS_PER_REQUEST)

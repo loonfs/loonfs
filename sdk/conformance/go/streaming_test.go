@@ -56,7 +56,7 @@ func streamingCases(t *testing.T) []streamCase {
 
 func streamTestClient(t *testing.T, fixture streamCase, direct bool, content func(http.ResponseWriter, *http.Request), requests chan<- string) *http.Client {
 	t.Helper()
-	claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
+	claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_00000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
 	var signed []string
 	if fixture.Range != nil {
 		signed = []string{*fixture.Range}

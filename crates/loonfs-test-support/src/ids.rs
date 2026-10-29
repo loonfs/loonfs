@@ -1,8 +1,8 @@
 //! Small validated-value constructors used throughout tests.
 
 use loonfs_types::{
-    ActorId, AttributeKey, AttributeValue, ContentId, ContentRef, EffectiveLimit, NamespaceId,
-    PageRequest, WriterId, DEFAULT_PAGE_LIMIT,
+    sha256_hex, ActorId, AttributeKey, AttributeValue, CommitFingerprint, ContentId, ContentRef,
+    EffectiveLimit, NamespaceId, PageRequest, WriterId, DEFAULT_PAGE_LIMIT,
 };
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -34,6 +34,13 @@ pub fn attribute_text(value: &str) -> AttributeValue {
 /// Parses a content id that is expected to be valid test data.
 pub fn content_id(value: &str) -> ContentId {
     ContentId::parse(value).expect("valid content id")
+}
+
+/// Builds a valid commit fingerprint from the SHA-256 of `label`, for tests
+/// that need a fingerprint without fingerprinting a request.
+pub fn commit_fingerprint(label: &str) -> CommitFingerprint {
+    CommitFingerprint::parse(format!("v1:sha256:{}", sha256_hex(label.as_bytes())))
+        .expect("a hashed label should be a valid commit fingerprint")
 }
 
 /// Builds a reference to a fresh content object holding `bytes`, the way

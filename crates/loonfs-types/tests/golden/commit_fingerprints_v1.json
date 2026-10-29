@@ -17,7 +17,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
           "algorithm": "crc64nvme",
@@ -27,8 +27,8 @@
       "behavior": "no_replace"
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"no_replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_0123456789abcdef0123456789abcdef\",\"size_bytes\":16},\"expected_inode_id\":null,\"expected_revision_no\":null}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:713de4c58dac816a19e7fb4439074b8103d1bf377f08176027cf39eaa7dc3d2d"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"no_replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_014d2pf2dbsqqg28t5cy4tqkff\",\"size_bytes\":16},\"expected_inode_id\":null,\"expected_revision_no\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:9355b7faba7360d50aad432c2035de5fb34d6106333821f1eedadc6d396b54e3"
   },
   {
     "name": "create_directory_by_inode_2",
@@ -50,7 +50,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
           "algorithm": "crc64nvme",
@@ -59,8 +59,8 @@
       }
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"create_file_by_inode\",\"parent_inode_id\":7,\"display_name\":\"report.txt\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_0123456789abcdef0123456789abcdef\",\"size_bytes\":16}}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:de7e16e889dc011b462c69cd69f2396f7ed198eecf5ff6fc04b14df2e88004af"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"create_file_by_inode\",\"parent_inode_id\":7,\"display_name\":\"report.txt\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_014d2pf2dbsqqg28t5cy4tqkff\",\"size_bytes\":16}}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:1fff54937df7f44a2ec1622b45e310adda668e33b5561c2ac3a4ad2ca20fb99a"
   },
   {
     "name": "put_file_revision_by_inode_4",
@@ -70,7 +70,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
           "algorithm": "crc64nvme",
@@ -80,8 +80,8 @@
       "expected_revision_no": 3
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file_revision_by_inode\",\"inode_id\":42,\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_0123456789abcdef0123456789abcdef\",\"size_bytes\":16},\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:ba74a6d47e2e68b617bc60e38cc56fd4c5112b11f999fcfe1cf9f5e68391c607"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file_revision_by_inode\",\"inode_id\":42,\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_014d2pf2dbsqqg28t5cy4tqkff\",\"size_bytes\":16},\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:d5c447d2071412e7c7e7155309f0234bc929e35def48d04273270e0185293eaa"
   },
   {
     "name": "move_by_inode_5",
@@ -207,7 +207,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
           "algorithm": "crc64nvme",
@@ -219,8 +219,8 @@
       "expected_revision_no": 3
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_0123456789abcdef0123456789abcdef\",\"size_bytes\":16},\"expected_inode_id\":42,\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:2e2646b65562af50bc6489f1c6f4e8fe0052e9732762e500e92d494573ab43b6"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_014d2pf2dbsqqg28t5cy4tqkff\",\"size_bytes\":16},\"expected_inode_id\":42,\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:c8dd7fd26bbc05ccfd021ab09e6bd97a7b1c24ad0afd14cd47585776e7f142c5"
   },
   {
     "name": "move_by_inode_15",
@@ -444,7 +444,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
           "algorithm": "crc64nvme",
@@ -460,8 +460,8 @@
         "expected_access_revision_no": 2
       }
     ],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"no_replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_0123456789abcdef0123456789abcdef\",\"size_bytes\":16},\"expected_inode_id\":null,\"expected_revision_no\":null}],\"message\":null,\"preconditions\":[{\"kind\":\"access_revision\",\"inode_id\":42,\"expected_access_revision_no\":2}]}",
-    "fingerprint": "v1:sha256:3d2bbb29613918a1656abedea0dca1c507b6ded1765d08cb805cb3860288ddb4"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"no_replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_014d2pf2dbsqqg28t5cy4tqkff\",\"size_bytes\":16},\"expected_inode_id\":null,\"expected_revision_no\":null}],\"message\":null,\"preconditions\":[{\"kind\":\"access_revision\",\"inode_id\":42,\"expected_access_revision_no\":2}]}",
+    "fingerprint": "v1:sha256:819069192a4f24133950668a30e77f05aea32c974283c8c3d94b6f1d05202c46"
   },
   {
     "name": "update_access_root_as_subject",
@@ -492,7 +492,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
           "algorithm": "crc64nvme",
@@ -503,7 +503,7 @@
     },
     "preconditions": [],
     "inline_content_ids": [
-      "con_0123456789abcdef0123456789abcdef"
+      "con_014d2pf2dbsqqg28t5cy4tqkff"
     ],
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"no_replace\",\"content_ref\":{\"kind\":\"inline_v1\",\"sha256\":\"b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6\",\"size_bytes\":16},\"expected_inode_id\":null,\"expected_revision_no\":null}],\"message\":null,\"preconditions\":[]}",
     "fingerprint": "v1:sha256:64d40d4323f1123d27cbe9eb825346aada8ce11aa6b99997552191c1cfc869bf"
@@ -517,7 +517,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
           "algorithm": "crc64nvme",
@@ -527,7 +527,7 @@
     },
     "preconditions": [],
     "inline_content_ids": [
-      "con_0123456789abcdef0123456789abcdef"
+      "con_014d2pf2dbsqqg28t5cy4tqkff"
     ],
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"create_file_by_inode\",\"parent_inode_id\":7,\"display_name\":\"report.txt\",\"content_ref\":{\"kind\":\"inline_v1\",\"sha256\":\"b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6\",\"size_bytes\":16}}],\"message\":null,\"preconditions\":[]}",
     "fingerprint": "v1:sha256:58331aee7ced47c702c4d13d0acbb3cabcd3e7d4b3fbdaa52ef5f4281d44d69b"
@@ -540,7 +540,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
           "algorithm": "crc64nvme",
@@ -551,7 +551,7 @@
     },
     "preconditions": [],
     "inline_content_ids": [
-      "con_0123456789abcdef0123456789abcdef"
+      "con_014d2pf2dbsqqg28t5cy4tqkff"
     ],
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file_revision_by_inode\",\"inode_id\":42,\"content_ref\":{\"kind\":\"inline_v1\",\"sha256\":\"b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6\",\"size_bytes\":16},\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
     "fingerprint": "v1:sha256:d8df3f042a42c45809fc3fe6100b002c0d0d52d58bfc2ad7754f816b1cec4fa5"

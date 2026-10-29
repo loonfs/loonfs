@@ -17,7 +17,7 @@ use loonfs_types::api::v0::GrepIndex;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    GrepRequest, GrepResponse, NamespaceId, PageRequest, FEATURE_MAINTENANCE_GREP_INDEX,
+    GrepRequest, GrepResponse, GrepScope, NamespaceId, PageRequest, FEATURE_MAINTENANCE_GREP_INDEX,
     FEATURE_QUERY_GREP,
 };
 use std::sync::Arc;
@@ -108,11 +108,22 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
         })
         .transpose()?;
     let inode_id = query.inode_id.as_deref().map(parse_inode_id).transpose()?;
+    let scope = match (path_prefix, inode_id) {
+        (None, None) => GrepScope::Namespace,
+        (Some(path_prefix), None) => GrepScope::PathPrefix(path_prefix),
+        (None, Some(inode_id)) => GrepScope::Inode(inode_id),
+        (Some(_), Some(_)) => {
+            return Err(ApiResponseError::new(
+                loonfs_types::ErrorCode::InvalidRequest,
+                "`path_prefix` cannot be combined with `inode_id`",
+            )
+            .with_param("inode_id"))
+        }
+    };
     Ok(GrepRequest {
         pattern,
         case_insensitive: parse_optional_boolean(query.case_insensitive, "case_insensitive")?,
-        path_prefix,
-        inode_id,
+        scope,
         allow_stale: parse_optional_boolean(query.allow_stale, "allow_stale")?,
         allow_scan: parse_optional_boolean(query.allow_scan, "allow_scan")?,
     })

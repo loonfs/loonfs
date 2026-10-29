@@ -634,7 +634,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
     let namespace_id = engine.namespace_id.clone();
     let value = InlineContent::new(
         namespace_id.clone(),
-        ContentId::parse("con_10000000000000000000000000000000").expect("base id"),
+        ContentId::parse("con_10000000000000000000000000").expect("base id"),
         Bytes::from_static(b"hello"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
@@ -659,7 +659,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         .expect("base entry")
         .inode_id;
     let original = value.content_ref().clone();
-    let fresh_id = ContentId::parse("con_00000000000000000000000000000000").expect("fresh id");
+    let fresh_id = ContentId::parse("con_00000000000000000000000000").expect("fresh id");
     let fresh = commit_piece(
         &store,
         &namespace_id,
@@ -674,7 +674,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
     let other = crate::storage::content::stage_bytes_under_content_id(
         &store,
         namespace_id.clone(),
-        ContentId::parse("con_80000000000000000000000000000000").expect("other id"),
+        ContentId::parse("con_40000000000000000000000000").expect("other id"),
         b"other",
     )
     .await
@@ -712,7 +712,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         .put_immutable_verified(&superseded_span, Bytes::from_static(b"x"))
         .await
         .expect("old span");
-    let unrooted = ContentId::parse("con_f0000000000000000000000000000000").expect("unrooted id");
+    let unrooted = ContentId::parse("con_70000000000000000000000000").expect("unrooted id");
     let unrooted_keys = [
         content_blob(&namespace_id, &unrooted),
         content_span(&namespace_id, &unrooted, 1, 2),
@@ -757,8 +757,8 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         .collect();
     assert_eq!(
         listed,
-        (0..16)
-            .map(|shard| format!("{prefix}con_{shard:x}"))
+        (0..8)
+            .map(|shard| format!("{prefix}con_{shard}"))
             .collect::<Vec<_>>()
     );
     assert!(store
@@ -784,7 +784,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         &store,
         &namespace_id,
         (inode_id, RevisionNo(3)),
-        &ContentId::parse("con_20000000000000000000000000000000").expect("replacement id"),
+        &ContentId::parse("con_20000000000000000000000000").expect("replacement id"),
         b"replacement",
         0,
         None,
@@ -1319,7 +1319,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 "target",
                 vec![InlineContent::new(
                     namespace_id.clone(),
-                    ContentId::parse("con_00000000000000000000000000000001").expect("content"),
+                    ContentId::parse("con_00000000000000000000000001").expect("content"),
                     Bytes::from_static(b"target"),
                     loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 )],
@@ -1331,7 +1331,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         engine.invalidate_projection();
         let original = InlineContent::new(
             namespace_id.clone(),
-            ContentId::parse("con_00000000000000000000000000000004").expect("content"),
+            ContentId::parse("con_00000000000000000000000004").expect("content"),
             Bytes::from_static(b"hello"),
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
@@ -1417,7 +1417,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         drop(view);
         let replacement = InlineContent::new(
             namespace_id.clone(),
-            ContentId::parse("con_00000000000000000000000000000003").expect("content"),
+            ContentId::parse("con_00000000000000000000000003").expect("content"),
             Bytes::from_static(b"replacement"),
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );

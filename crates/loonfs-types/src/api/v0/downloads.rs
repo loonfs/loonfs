@@ -160,7 +160,7 @@ mod tests {
     fn content_ref() -> ContentRef {
         ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+            ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
         )
@@ -170,7 +170,7 @@ mod tests {
         serde_json::json!({
             "kind": "blob_v1",
             "owner_namespace_id": "demo",
-            "content_id": "con_0123456789abcdef0123456789abcdef",
+            "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
             "size_bytes": 5,
             "checksum": {
                 "algorithm": "crc64nvme",
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(resumed.start_offset, 10);
 
         serde_json::from_str::<CreateDownloadRequest>(
-            r#"{"path":"/docs/report.txt","content_id":"con_0123456789abcdef0123456789abcdef"}"#,
+            r#"{"path":"/docs/report.txt","content_id":"con_014d2pf2dbsqqg28t5cy4tqkff"}"#,
         )
         .expect_err("a client must not be able to name the content object");
     }

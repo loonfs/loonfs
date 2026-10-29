@@ -37,11 +37,14 @@ impl Client {
         ));
         query.push("pattern", &request.pattern);
         query.push("case_insensitive", request.case_insensitive);
-        if let Some(path_prefix) = &request.path_prefix {
-            query.push("path_prefix", path_prefix.as_str());
-        }
-        if let Some(inode_id) = request.inode_id {
-            query.push("inode_id", loonfs_types::public_inode_id::encode(inode_id));
+        match &request.scope {
+            loonfs_types::GrepScope::Namespace => {}
+            loonfs_types::GrepScope::PathPrefix(path_prefix) => {
+                query.push("path_prefix", path_prefix.as_str());
+            }
+            loonfs_types::GrepScope::Inode(inode_id) => {
+                query.push("inode_id", loonfs_types::public_inode_id::encode(*inode_id));
+            }
         }
         query.push("allow_scan", request.allow_scan);
         query.push("allow_stale", request.allow_stale);
@@ -89,8 +92,7 @@ mod tests {
         let request = GrepRequest {
             pattern: "needle".to_owned(),
             case_insensitive: false,
-            path_prefix: None,
-            inode_id: None,
+            scope: loonfs_types::GrepScope::Namespace,
             allow_stale: false,
             allow_scan: false,
         };

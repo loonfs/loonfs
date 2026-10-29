@@ -5,7 +5,7 @@ use super::cache::MetadataSegmentCache;
 use super::compaction_merge::{refill_iterators, SegmentRowIterator};
 use super::error::ManifestLoadError;
 use super::load::{load_segment_filter, SessionBlockMemo};
-use super::runs::{MetadataFamilySegments, MetadataRunManifest, MANIFEST_ROW_FAMILIES};
+use super::runs::{MetadataFamilySegments, MetadataRunManifest};
 use super::scan_load::{ScanDescriptor, ScanLoader};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 #[cfg(test)]
@@ -626,8 +626,8 @@ pub(super) fn ordered_manifest_segments<'a>(
     manifest_object_key: &str,
     segments_by_family: &'a [MetadataFamilySegments],
 ) -> Result<Vec<&'a MetadataFamilySegments>, ManifestLoadError> {
-    let mut ordered = Vec::with_capacity(MANIFEST_ROW_FAMILIES.len());
-    for family in MANIFEST_ROW_FAMILIES {
+    let mut ordered = Vec::with_capacity(MetadataRowFamily::ALL.len());
+    for family in MetadataRowFamily::ALL {
         let mut matching = segments_by_family
             .iter()
             .filter(|family_segments| family_segments.family == family);

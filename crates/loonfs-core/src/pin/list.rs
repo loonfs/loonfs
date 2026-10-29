@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// Resume position for a checkpoint listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckpointPageCursor {
     namespace_id: NamespaceId,
     pub(super) last_key: String,
@@ -28,6 +29,7 @@ impl PageCursor for CheckpointPageCursor {
 /// It records the same position as a [`CheckpointPageCursor`] under its own
 /// kind, so a cursor from one listing can't resume the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotPageCursor {
     namespace_id: NamespaceId,
     last_key: String,
@@ -194,32 +196,43 @@ mod cursor_tests {
     use loonfs_types::{decode_cursor, encode_cursor, DirectoryPageCursor, NameKey};
 
     #[test]
-    fn cursor_decode_tolerates_additive_fields() {
-        let token = loonfs_types::encode_token_bytes(
-            &serde_json::to_vec(&serde_json::json!({
-                "format_version": 1,
-                "kind": "checkpoint_inventory",
+    fn cursor_decode_rejects_unknown_fields() {
+        let token = |extra: Option<(&str, serde_json::Value)>| {
+            let mut cursor = serde_json::json!({
                 "namespace_id": "demo",
                 "last_key": "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json",
-                "future_field": {"ignored": true}
-            }))
-            .expect("encode cursor"),
-        );
+            });
+            if let Some((name, value)) = extra {
+                cursor[name] = value;
+            }
+            loonfs_types::encode_token_bytes(
+                &serde_json::to_vec(&serde_json::json!({
+                    "format_version": 1,
+                    "kind": "checkpoint_inventory",
+                    "token": cursor,
+                }))
+                .expect("encode cursor"),
+            )
+        };
 
-        let cursor = decode_cursor::<CheckpointPageCursor>(&token)
-            .expect("decode cursor with additive field");
+        let cursor = decode_cursor::<CheckpointPageCursor>(&token(None)).expect("decode cursor");
         assert_eq!(
             cursor.last_key,
             "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json"
         );
+        decode_cursor::<CheckpointPageCursor>(&token(Some((
+            "future_field",
+            serde_json::json!({"ignored": true}),
+        ))))
+        .expect_err("a cursor with an unknown field should be rejected");
     }
 
     #[test]
     fn every_cursor_kind_matches_its_golden_bytes() {
         use crate::test_support::assert_matches_golden_token;
         use loonfs_types::{
-            ChangeSeq, FileRevisionsPageCursor, GrepPageCursor, InodeId, RevisionNo,
-            TrashPageCursor,
+            ChangeSeq, FileRevisionsPageCursor, GrepCursorPosition, GrepPageCursor, InodeId,
+            RevisionNo, TrashPageCursor,
         };
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let checkpoint = CheckpointPageCursor {
@@ -260,7 +273,7 @@ mod cursor_tests {
                 encode_cursor(&GrepPageCursor {
                     head_seq: ChangeSeq(12),
                     last_inode_id: InodeId(42),
-                    last_byte_offset: 1024,
+                    resume: GrepCursorPosition::AfterMatch { byte_offset: 1024 },
                     fingerprint: 7,
                 }),
             ),

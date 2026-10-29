@@ -29,8 +29,7 @@ fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -
         committed_seq: ChangeSeq(seq),
         commit_id: CommitId::parse(format!("c_{seq:032x}")).expect("commit id"),
         committed_by: loonfs_test_support::test_actor(),
-        semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:test""#)
-            .expect("fingerprint"),
+        semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
         committed_at_ms: 0,
         message: None,
         deltas: vec![WalCommitDelta {
