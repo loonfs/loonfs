@@ -503,7 +503,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
             &namespace,
             &loonfs_types::RunMaintenanceRequest::Metadata(
                 loonfs_types::MetadataMaintenanceRequest {
-                    max_wal_tail_objects: Some(1),
+                    max_wal_tail_objects: Some(std::num::NonZeroU64::MIN),
                 },
             ),
             None,
@@ -721,12 +721,14 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
         "the serialized report must not repeat check names"
     );
     for check in &probe.checks {
-        assert_ne!(
-            check.outcome,
-            loonfs_types::api::v0::StoreProbeCheckOutcome::Failed,
+        assert!(
+            matches!(
+                check.outcome,
+                loonfs_types::api::v0::StoreProbeCheckOutcome::Passed
+                    | loonfs_types::api::v0::StoreProbeCheckOutcome::Unsupported
+            ),
             "the local filesystem store should honour every contract check: {check:?}"
         );
-        assert_eq!(check.message, None);
     }
 
     // The probe removes its temporary objects.

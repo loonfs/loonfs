@@ -59,7 +59,7 @@ fn a_created_snapshot_is_listed_with_its_expiry() {
     let snapshot = block_on(namespace.create_snapshot(
         "report-run",
         &CreateSnapshotOptions {
-            ttl_ms: Some(60_000),
+            ttl_ms: std::num::NonZeroU64::new(60_000),
         },
     ))
     .expect("create snapshot");
@@ -148,7 +148,7 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
         .create_snapshot(
             "report-run",
             &CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await
@@ -156,7 +156,10 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
     store.fail_next(1);
 
     let extended = namespace
-        .extend_snapshot(&snapshot.snapshot_id, 3_600_000)
+        .extend_snapshot(
+            &snapshot.snapshot_id,
+            std::num::NonZeroU64::new(3_600_000).expect("a nonzero ttl"),
+        )
         .await
         .expect("reconcile the durable snapshot extension");
 
@@ -344,7 +347,7 @@ async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed()
         .create_snapshot(
             "short",
             &CreateSnapshotOptions {
-                ttl_ms: Some(1_000),
+                ttl_ms: std::num::NonZeroU64::new(1_000),
             },
         )
         .await
@@ -384,7 +387,10 @@ async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed()
     );
     assert_core_error_kind(
         namespace
-            .extend_snapshot(&snapshot.snapshot_id, 60_000)
+            .extend_snapshot(
+                &snapshot.snapshot_id,
+                std::num::NonZeroU64::new(60_000).expect("a nonzero ttl"),
+            )
             .await,
         ErrorCode::SnapshotNotFound,
     );

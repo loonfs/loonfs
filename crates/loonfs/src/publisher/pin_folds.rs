@@ -103,7 +103,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
         .create_snapshot(
             "fork-basis",
             &crate::CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await

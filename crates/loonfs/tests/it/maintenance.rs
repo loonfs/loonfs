@@ -80,7 +80,11 @@ async fn namespace_diagnostics_count_unexpired_snapshots_only() {
         .await
         .expect("create namespace");
     let namespace = writer.open_namespace(&source).expect("open namespace");
-    for ttl_ms in [None, Some(1_000), Some(60_000)] {
+    for ttl_ms in [
+        None,
+        std::num::NonZeroU64::new(1_000),
+        std::num::NonZeroU64::new(60_000),
+    ] {
         namespace
             .create_snapshot("counted", &CreateSnapshotOptions { ttl_ms })
             .await

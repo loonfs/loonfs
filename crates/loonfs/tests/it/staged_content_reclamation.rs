@@ -304,7 +304,10 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         .await
         .expect_err("the fresh upload conflicts with the committed request");
     assert_eq!(
-        retry.details().expect("receipt").committed_seq,
+        retry
+            .details()
+            .and_then(|details| details.committed)
+            .map(|committed| committed.committed_seq),
         Some(first.committed_seq),
         "the conflict identifies the original commit"
     );

@@ -1188,9 +1188,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
             &store,
             &crate::test_support::content_writes(),
             &candidate,
-            candidate
-                .semantic_identity(&namespace_id)
-                .expect("identity"),
+            candidate.semantic_identity(&namespace_id),
             view.projected_metadata_view(),
             context.now_ms,
             &mut session.begin_candidate(),
@@ -1391,9 +1389,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 &store,
                 &content_writes,
                 &candidate,
-                candidate
-                    .semantic_identity(&namespace_id)
-                    .expect("identity"),
+                candidate.semantic_identity(&namespace_id),
                 view.projected_metadata_view(),
                 context.now_ms,
                 &mut session.begin_candidate(),
@@ -1428,8 +1424,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse("/file-0").expect("path"),
-                    content_ref: Some(replacement.content_ref().clone()),
-                    inline_content: None,
+                    content: loonfs_types::FileContent::Ref(replacement.content_ref().clone()),
                     behavior: loonfs_types::DestinationBehavior::Replace,
                     expected_inode_id: None,
                     expected_revision_no: None,

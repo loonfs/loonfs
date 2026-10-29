@@ -14,9 +14,11 @@ use crate::storage::content::DurableContentValidationError;
 use crate::wal::WalPublishError;
 use crate::wal::{WalObjectError, WalTailLoadError};
 use loonfs_objectstore::ObjectStoreError;
+use loonfs_types::api::v0::{ActiveWriter, CommittedReceipt};
+use loonfs_types::format::control::WriterBlock;
 use loonfs_types::{
-    BindingVersion, ChangeSeq, CommitFingerprint, CommitId, ErrorDetails, InodeId, InodeKind,
-    NamespaceId, PathError, PrincipalScope, RevisionNo, UploadId, WriterEpoch, WriterId,
+    BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, PathError,
+    PrincipalScope, RevisionNo, UploadId, WriterEpoch,
 };
 use thiserror::Error;
 
@@ -143,14 +145,11 @@ pub enum CoreError {
     #[error("commit id conflict for `{commit_id}`")]
     CommitIdReuseConflict {
         commit_id: String,
-        /// Sequence of the commit that already used this ID, when a durable receipt
-        /// exists. This is `None` when two concurrent requests claim the same ID
-        /// before either one commits.
-        committed_seq: Option<ChangeSeq>,
-        /// Fingerprint of the committed mutation. It is present whenever
-        /// `committed_seq` is present and lets a retry verify that it represents the
-        /// same request.
-        committed_fingerprint: Option<CommitFingerprint>,
+        /// Sequence and fingerprint of the commit that already used this ID,
+        /// when a durable receipt exists. This is `None` when two concurrent
+        /// requests claim the same ID before either one commits. The
+        /// fingerprint lets a retry verify that it represents the same request.
+        committed: Option<CommittedReceipt>,
     },
     #[error(transparent)]
     ContentPreparation(#[from] ContentPreparationError),
@@ -585,18 +584,15 @@ impl CoreError {
             CoreError::WriterFenced(fence) => Some(ErrorDetails {
                 fenced_writer_epoch: Some(fence.fenced_epoch),
                 active_writer_epoch: Some(fence.active_epoch),
-                active_writer_id: fence.active_writer_id.clone(),
-                active_acquired_at_ms: fence.active_acquired_at_ms,
+                active_writer: fence.active_writer.as_ref().map(ActiveWriter::from),
                 ..ErrorDetails::default()
             }),
             CoreError::CommitIdReuseConflict {
                 commit_id,
-                committed_seq,
-                committed_fingerprint,
+                committed,
             } => Some(ErrorDetails {
                 commit_id: CommitId::parse(commit_id).ok(),
-                committed_seq: *committed_seq,
-                committed_fingerprint: committed_fingerprint.clone(),
+                committed: committed.clone(),
                 ..ErrorDetails::default()
             }),
             CoreError::RangeNotSatisfiable { size_bytes, .. } => Some(ErrorDetails {
@@ -687,11 +683,9 @@ pub struct WriterFence {
     pub fenced_epoch: WriterEpoch,
     /// Epoch that owns the namespace now.
     pub active_epoch: WriterEpoch,
-    /// Writer label recorded by the winning acquirer, when known.
-    pub active_writer_id: Option<WriterId>,
-    /// When the winning acquirer took the epoch, in Unix milliseconds, when
-    /// known.
-    pub active_acquired_at_ms: Option<u64>,
+    /// Writer label and acquisition time recorded by the winning acquirer,
+    /// when known.
+    pub active_writer: Option<WriterBlock>,
 }
 
 fn destination_exists_message(path: &str, existing_display_name: Option<&str>) -> String {
@@ -712,15 +706,13 @@ impl std::fmt::Display for WriterFence {
             "epoch {} was fenced by epoch {}",
             self.fenced_epoch, self.active_epoch
         )?;
-        // These fields normally appear together, but format a useful message when
-        // only one is available.
-        match (self.active_writer_id.as_ref(), self.active_acquired_at_ms) {
-            (Some(writer), Some(acquired_at_ms)) => {
-                write!(f, " (writer `{writer}`, acquired at {acquired_at_ms} ms)")
-            }
-            (Some(writer), None) => write!(f, " (writer `{writer}`)"),
-            (None, Some(acquired_at_ms)) => write!(f, " (acquired at {acquired_at_ms} ms)"),
-            (None, None) => Ok(()),
+        match &self.active_writer {
+            Some(writer) => write!(
+                f,
+                " (writer `{}`, acquired at {} ms)",
+                writer.writer_id, writer.acquired_at_ms
+            ),
+            None => Ok(()),
         }
     }
 }
@@ -728,8 +720,9 @@ impl std::fmt::Display for WriterFence {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitValidationError, CoreError, ErrorCode, ErrorKind, ManifestLoadError,
-        MetadataProjectionLoadError, MetadataViewError, ObjectStoreErrorKind, WriterFence,
+        ActiveWriter, CommitValidationError, CommittedReceipt, CoreError, ErrorCode, ErrorKind,
+        ManifestLoadError, MetadataProjectionLoadError, MetadataViewError, ObjectStoreErrorKind,
+        WriterBlock, WriterFence,
     };
     use crate::commit_engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
@@ -813,62 +806,58 @@ mod tests {
         let fenced = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
             active_epoch: WriterEpoch(4),
-            active_writer_id: Some(loonfs_types::WriterId::parse("writer-b").expect("writer id")),
-            active_acquired_at_ms: Some(2_000),
+            active_writer: Some(WriterBlock {
+                writer_id: loonfs_types::WriterId::parse("writer-b").expect("writer id"),
+                acquired_at_ms: 2_000,
+            }),
         });
         let details = fenced.details().expect("fence details");
         assert_eq!(details.fenced_writer_epoch, Some(WriterEpoch(3)));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(
-            details
-                .active_writer_id
-                .as_ref()
-                .map(|writer| writer.as_str()),
-            Some("writer-b")
+            details.active_writer,
+            Some(ActiveWriter {
+                active_writer_id: loonfs_types::WriterId::parse("writer-b").expect("writer id"),
+                active_acquired_at_ms: 2_000,
+            })
         );
-        assert_eq!(details.active_acquired_at_ms, Some(2_000));
 
         let anonymous = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
             active_epoch: WriterEpoch(4),
-            active_writer_id: None,
-            active_acquired_at_ms: None,
+            active_writer: None,
         });
         let details = anonymous.details().expect("fence details");
         assert_eq!(details.fenced_writer_epoch, Some(WriterEpoch(3)));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
-        assert_eq!(details.active_writer_id, None);
-        assert_eq!(details.active_acquired_at_ms, None);
+        assert_eq!(details.active_writer, None);
 
         // A conflict decided against a durable receipt names where the
         // commit id landed and what landed there, which is what a retry
         // reads back and proves itself against.
+        let receipt = CommittedReceipt {
+            committed_seq: ChangeSeq(9),
+            committed_fingerprint: loonfs_test_support::ids::commit_fingerprint("abc"),
+        };
         let reuse = CoreError::CommitIdReuseConflict {
             commit_id: "retry-key-1".to_owned(),
-            committed_seq: Some(ChangeSeq(9)),
-            committed_fingerprint: Some(loonfs_test_support::ids::commit_fingerprint("abc")),
+            committed: Some(receipt.clone()),
         };
         let details = reuse.details().expect("reuse details");
         assert_eq!(
             details.commit_id,
             Some(CommitId::parse("retry-key-1").expect("valid commit id"))
         );
-        assert_eq!(details.committed_seq, Some(ChangeSeq(9)));
-        assert_eq!(
-            details.committed_fingerprint,
-            Some(loonfs_test_support::ids::commit_fingerprint("abc"))
-        );
+        assert_eq!(details.committed, Some(receipt));
 
         // A conflict between two live claims has no landed commit to name,
         // so it carries neither half of the receipt.
         let contended = CoreError::CommitIdReuseConflict {
             commit_id: "retry-key-1".to_owned(),
-            committed_seq: None,
-            committed_fingerprint: None,
+            committed: None,
         };
         let details = contended.details().expect("reuse details");
-        assert_eq!(details.committed_seq, None);
-        assert_eq!(details.committed_fingerprint, None);
+        assert_eq!(details.committed, None);
 
         let stale = CoreError::CommitValidation(CommitValidationError::BaseRevisionMismatch {
             inode_id: InodeId(7),

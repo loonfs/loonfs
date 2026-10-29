@@ -2394,7 +2394,7 @@ where
     let commit_id = candidate.candidate.commit_id().clone();
     let enqueued_at = timer.monotonic_now_ms();
     let mut candidate = candidate;
-    let mut semantic_identity = candidate.candidate.semantic_identity(namespace_id)?;
+    let mut semantic_identity = candidate.candidate.semantic_identity(namespace_id);
     for _ in 0..MAX_CONTENTION_ATTEMPTS {
         let (sender, receiver) = oneshot::channel();
         let admission = admit(
@@ -2419,8 +2419,10 @@ where
                 Ok(response) => {
                     return Err(CoreError::CommitIdReuseConflict {
                         commit_id: commit_id.to_string(),
-                        committed_seq: Some(response.committed_seq),
-                        committed_fingerprint: Some(primary_identity),
+                        committed: Some(loonfs_types::api::v0::CommittedReceipt {
+                            committed_seq: response.committed_seq,
+                            committed_fingerprint: primary_identity,
+                        }),
                     }
                     .into())
                 }
@@ -2433,8 +2435,7 @@ where
     }
     Err(CoreError::CommitIdReuseConflict {
         commit_id: commit_id.to_string(),
-        committed_seq: None,
-        committed_fingerprint: None,
+        committed: None,
     }
     .into())
 }

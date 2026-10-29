@@ -49,9 +49,9 @@ use loonfs_types::{
         UploadSession, UploadSessionStatus,
     },
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, Checksum, ChecksumAlgorithm,
-    ChecksumDigest, CommitId, CommitRequest, ContentRef, CreateNamespaceRequest,
-    DeleteNamespaceResponse, FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse,
-    InodeId, ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    ChecksumDigest, CommitRequest, ContentRef, CreateNamespaceRequest, DeleteNamespaceResponse,
+    FileContent, FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListTrashResponse, NamespaceDiagnostics, NamespaceId,
     NamespaceMetadata, PathEntry, PinId, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse,
     SecretString, UploadId, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
@@ -166,7 +166,9 @@ impl Client {
         S::Future: Send + 'static,
     {
         config.validate()?;
-        let request_timeout = config.request_timeout_ms.map(Duration::from_millis);
+        let request_timeout = config
+            .request_timeout_ms
+            .map(|timeout_ms| Duration::from_millis(timeout_ms.get()));
         Ok(Self {
             subject: None,
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),

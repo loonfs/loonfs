@@ -26,8 +26,8 @@ use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
 use loonfs_types::{
-    CommitId, ContentId, ContentRef, DeleteNamespaceResponse, InlineContentIdentity, ManifestNo,
-    NamespaceId,
+    CommitId, ContentId, ContentRef, DeleteNamespaceResponse, FileContent, InlineContentIdentity,
+    ManifestNo, NamespaceId,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -213,15 +213,15 @@ impl CommitCandidate {
         for operation in &mut self.request.intent_mut().operations {
             match operation {
                 FilesystemOperation::PutFile {
-                    content_ref: Some(content_ref),
+                    content: FileContent::Ref(content_ref),
                     ..
                 }
                 | FilesystemOperation::CreateFileByInode {
-                    content_ref: Some(content_ref),
+                    content: FileContent::Ref(content_ref),
                     ..
                 }
                 | FilesystemOperation::PutFileRevisionByInode {
-                    content_ref: Some(content_ref),
+                    content: FileContent::Ref(content_ref),
                     ..
                 } if &content_ref.content_id == content_id => *content_ref = reference.clone(),
                 _ => {}
@@ -329,7 +329,7 @@ impl CommitCandidate {
     }
 
     /// Computes semantic identity without applying current operational request limits.
-    pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> Result<CommitFingerprint> {
+    pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> CommitFingerprint {
         commit_fingerprint(
             namespace_id,
             self.intent(),

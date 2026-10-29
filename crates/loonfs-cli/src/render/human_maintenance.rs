@@ -28,6 +28,9 @@ pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
         loonfs_types::api::v0::NamespaceAccessMode::Acl { principal_scope } => {
             format!("acl (scope {principal_scope})")
         }
+        loonfs_types::api::v0::NamespaceAccessMode::Unknown => {
+            "access mode unknown to this CLI".to_owned()
+        }
     };
     format!(
         "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}\n\
@@ -180,6 +183,7 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 window.namespace_id
             ),
         },
+        RunMaintenanceResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
     }
 }
 

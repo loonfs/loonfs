@@ -8,20 +8,15 @@ use crate::{
 use loonfs_core::SnapshotPageCursor;
 use loonfs_types::PageRequest;
 use loonfs_types::PinId;
+use std::num::NonZeroU64;
 
 /// A pager over snapshots.
 pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, Error>;
 
 /// Returns the expiry of a snapshot whose lifetime of `ttl_ms` starts at
-/// `now_ms`, rejecting a zero lifetime.
-fn expires_at_ms(now_ms: u64, ttl_ms: u64) -> Result<u64> {
-    if ttl_ms == 0 {
-        return Err(Error::InvalidRequest {
-            message: "ttl_ms must be greater than zero".to_owned(),
-            param: "/ttl_ms",
-        });
-    }
-    Ok(now_ms.saturating_add(ttl_ms))
+/// `now_ms`.
+fn expires_at_ms(now_ms: u64, ttl_ms: NonZeroU64) -> u64 {
+    now_ms.saturating_add(ttl_ms.get())
 }
 
 impl<M: crate::Mode> Namespace<M> {
@@ -130,8 +125,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&tracing::Span::current());
         let expires_at_ms = options
             .ttl_ms
-            .map(|ttl_ms| expires_at_ms(self.core.now_ms(), ttl_ms))
-            .transpose()?;
+            .map(|ttl_ms| expires_at_ms(self.core.now_ms(), ttl_ms));
         self.ensure_administrator().await?;
         let engine = self
             .core
@@ -165,8 +159,12 @@ impl Namespace<Writable> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn extend_snapshot(&self, snapshot_id: &PinId, ttl_ms: u64) -> Result<Snapshot> {
-        let requested_expires_at_ms = expires_at_ms(self.core.now_ms(), ttl_ms)?;
+    pub async fn extend_snapshot(
+        &self,
+        snapshot_id: &PinId,
+        ttl_ms: NonZeroU64,
+    ) -> Result<Snapshot> {
+        let requested_expires_at_ms = expires_at_ms(self.core.now_ms(), ttl_ms);
         self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self

@@ -1861,8 +1861,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
             commit(FilesystemOperation::CreateFileByInode {
                 parent_inode_id: directory,
                 display_name: DisplayName::parse("leaf.txt").expect("display name"),
-                content_ref: Some(content.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
             }),
             vec![content],
         )
@@ -2868,8 +2867,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(path).expect("path"),
-                        content_ref: Some(content.content_ref().clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                         behavior: loonfs::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

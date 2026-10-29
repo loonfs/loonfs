@@ -8,6 +8,7 @@ use loonfs_types::{
     PinId, PrincipalId, PublicOrdinalRangeError, RevisionNo, SubjectId,
 };
 use std::io::IsTerminal;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
@@ -786,7 +787,7 @@ pub(crate) struct NamespaceCreateArgs {
     /// `loonfs maintenance retention window` can change or clear the window
     /// later.
     #[arg(long)]
-    pub retention_window_ms: Option<u64>,
+    pub retention_window_ms: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Args)]
@@ -1271,7 +1272,7 @@ pub(crate) struct SnapshotCreateArgs {
     /// How long the snapshot remains available, in milliseconds. Without
     /// it, the snapshot lasts until it's deleted.
     #[arg(long)]
-    pub ttl_ms: Option<u64>,
+    pub ttl_ms: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Args)]
@@ -1292,7 +1293,7 @@ pub(crate) struct SnapshotExtendArgs {
     /// New lifetime from now, in milliseconds. The expiry never moves
     /// earlier.
     #[arg(long)]
-    pub ttl_ms: u64,
+    pub ttl_ms: NonZeroU64,
 }
 
 #[derive(Debug, Args)]
@@ -1440,7 +1441,7 @@ pub(crate) struct MaintenanceRetentionWindowArgs {
     pub target: TargetSelectorArgs,
     /// The namespace's new retention window, in milliseconds.
     #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
-    pub retention_window_ms: Option<u64>,
+    pub retention_window_ms: Option<NonZeroU64>,
     /// Clear the namespace's window, so that the server's setting applies.
     #[arg(long)]
     pub clear: bool,
@@ -1461,7 +1462,7 @@ pub(crate) struct MaintenanceMetadataArgs {
     /// Fold the visible WAL tail into metadata segments when it reaches this
     /// many WAL objects (server default when omitted).
     #[arg(long)]
-    pub max_wal_tail_objects: Option<u64>,
+    pub max_wal_tail_objects: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Args)]

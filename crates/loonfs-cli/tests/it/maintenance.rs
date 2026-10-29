@@ -57,8 +57,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
         .map(|index| loonfs::publish::FilesystemOperation::PutFile {
             path: loonfs_types::AbsolutePath::parse(format!("/unindexed/{index:04}.txt"))
                 .expect("path"),
-            content_ref: Some(prepared.content_ref().clone()),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(prepared.content_ref().clone()),
             behavior: loonfs_types::DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -249,7 +248,9 @@ fn retention_window_sets_and_clears_the_window_that_namespace_show_reports() {
         "0",
     ]);
     assert_failure(&zero);
-    assert_eq!(json_error(&zero)["code"], "invalid_request");
+    assert_eq!(zero.status.code(), Some(2));
+    assert_eq!(json_error(&zero)["code"], "invalid_usage");
+    assert_eq!(json_error(&zero)["param"], "--retention-window-ms");
 }
 
 #[test]

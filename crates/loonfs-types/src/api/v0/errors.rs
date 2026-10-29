@@ -1,5 +1,6 @@
 //! The error response body for the v0 HTTP API.
 
+use crate::control::WriterBlock;
 use crate::ErrorCode;
 use crate::{
     AccessRevisionNo, AttributesRevisionNo, BindingVersion, ChangeSeq, CommitFingerprint, CommitId,
@@ -61,16 +62,11 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub commit_id: Option<CommitId>,
-    /// The sequence that `commit_id` was already committed at. The server includes it when a
-    /// durable commit receipt records that commit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The commit that already used `commit_id`, when a durable commit receipt records that
+    /// commit.
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub committed_seq: Option<ChangeSeq>,
-    /// The fingerprint of the mutation that was committed under `commit_id`. This field is present
-    /// exactly when `committed_seq` is present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, nullable = false))]
-    pub committed_fingerprint: Option<CommitFingerprint>,
+    pub committed: Option<CommittedReceipt>,
     /// The index of the failed operation in the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -87,15 +83,10 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_writer_epoch: Option<WriterEpoch>,
-    /// The writer of the current epoch. It's present when the current manifest records a writer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The writer of the current epoch, when the current manifest records a writer.
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub active_writer_id: Option<WriterId>,
-    /// The time the current writer acquired its epoch, in Unix milliseconds. It's present when the
-    /// current manifest records a writer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub active_acquired_at_ms: Option<u64>,
+    pub active_writer: Option<ActiveWriter>,
     /// The inode that the failed precondition or operation targeted.
     #[serde(
         default,
@@ -182,4 +173,40 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub size_bytes: Option<u64>,
+}
+
+/// The sequence and fingerprint of the commit that already used a commit ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CommittedReceipt {
+    /// The sequence that `commit_id` was already committed at. The server includes it when a
+    /// durable commit receipt records that commit.
+    #[cfg_attr(feature = "openapi", schema(required = false))]
+    pub committed_seq: ChangeSeq,
+    /// The fingerprint of the mutation that was committed under `commit_id`. This field is present
+    /// exactly when `committed_seq` is present.
+    #[cfg_attr(feature = "openapi", schema(value_type = String, required = false))]
+    pub committed_fingerprint: CommitFingerprint,
+}
+
+/// The writer of the namespace's current epoch, as the current manifest records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ActiveWriter {
+    /// The writer of the current epoch. It's present when the current manifest records a writer.
+    #[cfg_attr(feature = "openapi", schema(required = false))]
+    pub active_writer_id: WriterId,
+    /// The time the current writer acquired its epoch, in Unix milliseconds. It's present when the
+    /// current manifest records a writer.
+    #[cfg_attr(feature = "openapi", schema(required = false))]
+    pub active_acquired_at_ms: u64,
+}
+
+impl From<&WriterBlock> for ActiveWriter {
+    fn from(writer: &WriterBlock) -> Self {
+        Self {
+            active_writer_id: writer.writer_id.clone(),
+            active_acquired_at_ms: writer.acquired_at_ms,
+        }
+    }
 }

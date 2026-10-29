@@ -2,9 +2,14 @@
 
 use crate::config::absolute_env_path;
 use crate::error::CliError;
-use loonfs_client::{MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions};
+use loonfs_client::{
+    CommitOptions, MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions,
+};
 use loonfs_types::api::v0::{CommitRequest, CompletedUploadPart, FilesystemOperation};
-use loonfs_types::{ActorId, ChecksumAlgorithm, Commit, CommitId, ErrorCode, UploadId};
+use loonfs_types::{
+    ActorId, ChecksumAlgorithm, Commit, CommitId, CommitPrecondition, DestinationBehavior,
+    ErrorCode, InodeId, RevisionNo, UploadId,
+};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -19,14 +24,38 @@ enum UploadOutcome {
     Refused,
 }
 
+/// One PUT attempt's inputs and progress, as the journal file records them.
+///
+/// The fields from `commit_id` to `expected_revision_no` are the attempt's
+/// PUT options, with the commit ID chosen when the attempt started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UploadState {
     source: SourceIdentity,
     actor_id: ActorId,
-    options: PutFileOptions,
+    commit_id: CommitId,
+    message: Option<String>,
+    preconditions: Vec<CommitPrecondition>,
+    behavior: DestinationBehavior,
+    expected_inode_id: Option<InodeId>,
+    expected_revision_no: Option<RevisionNo>,
     subject: Option<loonfs_types::Subject>,
     progress: UploadProgress,
+}
+
+impl UploadState {
+    fn options(&self) -> PutFileOptions {
+        PutFileOptions {
+            behavior: self.behavior,
+            commit: CommitOptions {
+                commit_id: Some(self.commit_id.clone()),
+                message: self.message.clone(),
+                preconditions: self.preconditions.clone(),
+            },
+            expected_inode_id: self.expected_inode_id,
+            expected_revision_no: self.expected_revision_no,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,15 +223,12 @@ impl UploadJournal {
                         "source file changed; use a new `--commit-id` or remove this journal to start another attempt",
                     ));
                 }
-                let commit_id = recorded
-                    .options
+                let mut requested = options.clone();
+                requested
                     .commit
                     .commit_id
-                    .clone()
-                    .ok_or_else(|| journal_error(&path, "record has no commit ID"))?;
-                let mut requested = options.clone();
-                requested.commit.commit_id.get_or_insert(commit_id);
-                if requested != recorded.options
+                    .get_or_insert_with(|| recorded.commit_id.clone());
+                if requested != recorded.options()
                     || actor_id != &recorded.actor_id
                     || subject != recorded.subject.as_ref()
                 {
@@ -215,7 +241,7 @@ impl UploadJournal {
                 } = &recorded.progress
                 {
                     if prepared_actor_id != &recorded.actor_id
-                        || !request_matches_options(request, &recorded.options)
+                        || !request_matches_options(request, &recorded.options())
                     {
                         return Err(journal_error(
                             &path,
@@ -225,20 +251,22 @@ impl UploadJournal {
                 }
                 recorded
             }
-            None => {
-                let mut options = options.clone();
-                options
+            None => UploadState {
+                source,
+                actor_id: actor_id.clone(),
+                commit_id: options
                     .commit
                     .commit_id
-                    .get_or_insert_with(CommitId::generate);
-                UploadState {
-                    source,
-                    actor_id: actor_id.clone(),
-                    options,
-                    subject: subject.cloned(),
-                    progress: UploadProgress::Uploading { multipart: None },
-                }
-            }
+                    .clone()
+                    .unwrap_or_else(CommitId::generate),
+                message: options.commit.message.clone(),
+                preconditions: options.commit.preconditions.clone(),
+                behavior: options.behavior,
+                expected_inode_id: options.expected_inode_id,
+                expected_revision_no: options.expected_revision_no,
+                subject: subject.cloned(),
+                progress: UploadProgress::Uploading { multipart: None },
+            },
         };
         let journal = Self {
             path,
@@ -253,7 +281,7 @@ impl UploadJournal {
     }
 
     pub(crate) fn options(&self) -> PutFileOptions {
-        self.lock().options.clone()
+        self.lock().options()
     }
 
     pub(crate) fn actor_id(&self) -> ActorId {
@@ -461,15 +489,22 @@ impl UploadJournal {
     }
 }
 
+/// Reports whether `request` is the request that a PUT with `options` builds
+/// for the path and content that `request` writes.
 fn request_matches_options(request: &CommitRequest, options: &PutFileOptions) -> bool {
-    options.commit.commit_id.as_ref() == Some(&request.commit_id)
-        && options.commit.message == request.message
-        && options.commit.preconditions == request.preconditions
-        && matches!(request.operations.as_slice(), [FilesystemOperation::PutFile {
-            behavior, expected_inode_id, expected_revision_no, ..
-        }] if *behavior == options.behavior
-            && *expected_inode_id == options.expected_inode_id
-            && *expected_revision_no == options.expected_revision_no)
+    let [FilesystemOperation::PutFile { path, content, .. }] = request.operations.as_slice() else {
+        return false;
+    };
+    let mut expected = CommitRequest::with_operations(
+        &options.commit,
+        vec![FilesystemOperation::put_file(
+            path.clone(),
+            content.clone(),
+            options,
+        )],
+    );
+    expected.content_tokens.clone_from(&request.content_tokens);
+    *request == expected
 }
 
 fn journal_error(path: &Path, error: impl std::fmt::Display) -> io::Error {
@@ -655,8 +690,9 @@ mod tests {
             options.commit.message,
             FilesystemOperation::PutFile {
                 path: loonfs_types::AbsolutePath::parse("/file").expect("path"),
-                content_ref: Some(loonfs_test_support::ids::content_ref(b"data")),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(loonfs_test_support::ids::content_ref(
+                    b"data",
+                )),
                 behavior: options.behavior,
                 expected_inode_id: options.expected_inode_id,
                 expected_revision_no: options.expected_revision_no,

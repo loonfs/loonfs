@@ -74,8 +74,7 @@ fn put_candidate(completed: &CompletedUpload) -> CommitCandidate {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/content").expect("path"),
-                content_ref: Some(completed.prepared.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(completed.prepared.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

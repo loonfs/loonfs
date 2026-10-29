@@ -12,6 +12,40 @@ use crate::{
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use thiserror::Error;
+
+/// Why a WAL object can't be encoded or decoded.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum WalCodecError {
+    /// Reports a failure that the shared envelope codec found.
+    #[error(transparent)]
+    Envelope(#[from] EnvelopeCodecError),
+    /// Reports inline content that violates the WAL format rules.
+    #[error(
+        "invalid WAL inline content in commit `{seq}` for `content_id` `{content_id}`: {reason}"
+    )]
+    InvalidWalInlineContent {
+        /// Commit containing the rejected entry.
+        seq: ChangeSeq,
+        /// Content whose entry violates a rule or exceeds the WAL object total.
+        content_id: ContentId,
+        /// Format rule violated by the entry.
+        reason: &'static str,
+    },
+    /// Reports a layout that does not cover its revision's reference.
+    #[error(
+        "invalid WAL revision layout in commit `{seq}` for `content_id` `{content_id}`: {reason}"
+    )]
+    InvalidWalRevisionLayout {
+        /// Commit containing the rejected delta.
+        seq: ChangeSeq,
+        /// Chain the rejected layout names.
+        content_id: ContentId,
+        /// Format rule violated by the layout.
+        reason: &'static str,
+    },
+}
 
 /// Version 1: a zstd-compressed CBOR envelope document carrying the payload as
 /// an opaque CBOR byte string.
@@ -375,7 +409,7 @@ struct WalObjectDocument {
 
 pub(crate) fn encode_wal_payload_cbor(
     payload: &WalObjectPayload,
-) -> Result<Vec<u8>, EnvelopeCodecError> {
+) -> Result<Vec<u8>, WalCodecError> {
     validate_wal_inline_content(payload)?;
     validate_wal_revision_layouts(payload)?;
     let mut encoded = Vec::new();
@@ -387,7 +421,7 @@ pub(crate) fn encode_wal_payload_cbor(
 /// Encodes a WAL payload once, then checksums and compresses its durable document.
 pub fn encode_wal_object_envelope_zstd(
     payload: WalObjectPayload,
-) -> Result<crate::envelope::EncodedEnvelope<WalObjectPayload>, EnvelopeCodecError> {
+) -> Result<crate::envelope::EncodedEnvelope<WalObjectPayload>, WalCodecError> {
     let payload_bytes = encode_wal_payload_cbor(&payload)?;
     let payload_checksum = sha256_digest(&payload_bytes);
     let document = WalObjectDocument {
@@ -415,18 +449,20 @@ pub fn encode_wal_object_envelope_zstd(
 /// Decoding fails for invalid compression or CBOR, the wrong kind or version,
 /// a checksum mismatch, or an invalid payload. See
 /// [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
-pub fn decode_wal_object_envelope_zstd(
-    bytes: &[u8],
-) -> Result<WalObjectEnvelope, EnvelopeCodecError> {
+pub fn decode_wal_object_envelope_zstd(bytes: &[u8]) -> Result<WalObjectEnvelope, WalCodecError> {
     decode_wal_object_envelope_zstd_with_limit(bytes, MAX_WAL_OBJECT_BYTES)
 }
 
 fn decode_wal_object_envelope_zstd_with_limit(
     bytes: &[u8],
     limit: usize,
-) -> Result<WalObjectEnvelope, EnvelopeCodecError> {
+) -> Result<WalObjectEnvelope, WalCodecError> {
     let Some(decompressed) = envelope::decompress_document(bytes, limit)? else {
-        return Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes: limit });
+        return Err(EnvelopeCodecError::DocumentTooLarge {
+            kind: WalEnvelopeKind::WalObject.as_str(),
+            max_bytes: limit,
+        }
+        .into());
     };
     let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
@@ -448,18 +484,17 @@ fn decode_wal_object_envelope_zstd_with_limit(
     })
 }
 
-fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), EnvelopeCodecError> {
+fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
     let mut total_bytes = 0;
     for record in &payload.records {
         if record.inline_content.is_empty() {
             continue;
         }
-        let invalid =
-            |content_id: &ContentId, reason| EnvelopeCodecError::InvalidWalInlineContent {
-                seq: record.committed_seq,
-                content_id: content_id.clone(),
-                reason,
-            };
+        let invalid = |content_id: &ContentId, reason| WalCodecError::InvalidWalInlineContent {
+            seq: record.committed_seq,
+            content_id: content_id.clone(),
+            reason,
+        };
         let mut reference_ends: BTreeMap<&ContentId, u64> = BTreeMap::new();
         for delta in &record.deltas {
             if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
@@ -521,7 +556,7 @@ fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), Envelop
     Ok(())
 }
 
-fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), EnvelopeCodecError> {
+fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
     for record in &payload.records {
         for delta in &record.deltas {
             let WalDelta::AppendFileRevision {
@@ -532,7 +567,7 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), Envel
             else {
                 continue;
             };
-            let invalid = |reason| EnvelopeCodecError::InvalidWalRevisionLayout {
+            let invalid = |reason| WalCodecError::InvalidWalRevisionLayout {
                 seq: record.committed_seq,
                 content_id: content_ref.content_id.clone(),
                 reason,
@@ -720,7 +755,7 @@ mod tests {
                 ),
             );
             match error {
-                EnvelopeCodecError::InvalidWalInlineContent {
+                WalCodecError::InvalidWalInlineContent {
                     seq,
                     content_id,
                     reason,
@@ -895,17 +930,21 @@ mod tests {
         );
         assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(encoded.as_bytes(), document.len() - 1),
-            Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes })
+            Err(WalCodecError::Envelope(EnvelopeCodecError::DocumentTooLarge { max_bytes, .. }))
                 if max_bytes == document.len() - 1
         );
         let invalid = zstd::stream::encode_all(&[0xff; 64][..], 0).expect("compress");
         assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(&invalid, 8),
-            Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes: 8 })
+            Err(WalCodecError::Envelope(
+                EnvelopeCodecError::DocumentTooLarge { max_bytes: 8, .. }
+            ))
         );
         assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(&invalid, 64),
-            Err(EnvelopeCodecError::EnvelopeDecode(_))
+            Err(WalCodecError::Envelope(EnvelopeCodecError::EnvelopeDecode(
+                _
+            )))
         );
     }
 
@@ -959,19 +998,13 @@ mod tests {
                     for error in [decoded.as_ref().err(), encoded.as_ref().err()] {
                         assert_matches!(
                             error,
-                            Some(EnvelopeCodecError::InvalidWalRevisionLayout { reason, .. })
+                            Some(WalCodecError::InvalidWalRevisionLayout { reason, .. })
                             if *reason == "a whole value carries no layout"
                         );
                     }
                 }
-                assert_matches!(
-                    decoded,
-                    Err(EnvelopeCodecError::InvalidWalRevisionLayout { .. })
-                );
-                assert_matches!(
-                    encoded,
-                    Err(EnvelopeCodecError::InvalidWalRevisionLayout { .. })
-                );
+                assert_matches!(decoded, Err(WalCodecError::InvalidWalRevisionLayout { .. }));
+                assert_matches!(encoded, Err(WalCodecError::InvalidWalRevisionLayout { .. }));
             }
         }
     }

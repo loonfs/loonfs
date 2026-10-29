@@ -30,8 +30,8 @@ use loonfs_types::format::manifest::{
     METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::wal::{
-    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, WalCommitDelta,
-    WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
+    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, WalCodecError,
+    WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
 };
 use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
@@ -1403,11 +1403,11 @@ fn wal_decode_rejects_wrong_format_version_cleanly() {
         .expect_err("wrong version must be rejected");
     assert_matches!(
         err,
-        EnvelopeCodecError::UnsupportedFormatVersion {
+        WalCodecError::Envelope(EnvelopeCodecError::UnsupportedFormatVersion {
             found: 7,
             supported: 1,
             ..
-        },
+        }),
         "unexpected error: {err}"
     );
 }
@@ -1427,7 +1427,7 @@ fn wal_decode_rejects_unknown_kind_cleanly() {
         .expect_err("unknown kind must be rejected");
     assert_matches!(
         err,
-        EnvelopeCodecError::KindMismatch { .. },
+        WalCodecError::Envelope(EnvelopeCodecError::KindMismatch { .. }),
         "unexpected error: {err}"
     );
 }
@@ -1452,7 +1452,7 @@ fn wal_decode_rejects_tampered_payload_bytes_as_checksum_mismatch() {
         .expect_err("tampered payload must be rejected");
     assert_matches!(
         err,
-        EnvelopeCodecError::ChecksumMismatch { .. },
+        WalCodecError::Envelope(EnvelopeCodecError::ChecksumMismatch { .. }),
         "unexpected error: {err}"
     );
 }
@@ -1467,7 +1467,7 @@ fn wal_decode_rejects_unknown_payload_fields() {
         .expect_err("unknown durable fields must be rejected");
     assert_matches!(
         error,
-        EnvelopeCodecError::PayloadDecode(message)
+        WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
             if message.contains("unknown field") && message.contains("field_from_the_future")
     );
 }
@@ -1509,7 +1509,7 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
             .expect_err("unknown durable fields must be rejected");
         assert_matches!(
             error,
-            EnvelopeCodecError::PayloadDecode(message)
+            WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
                 if message.contains("unknown field") && message.contains("field_from_the_future"),
             "delta {position}, field `{field}`"
         );
@@ -1527,7 +1527,8 @@ fn wal_decode_rejects_a_version_one_commit_without_committed_by() {
         .expect_err("version-one WAL commits require an actor");
     assert_matches!(
         &error,
-        EnvelopeCodecError::PayloadDecode(message) if message.contains("committed_by"),
+        WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
+            if message.contains("committed_by"),
         "unexpected corruption error: {error}"
     );
 }
@@ -1682,7 +1683,7 @@ fn immutable_envelopes_reject_unknown_fields() {
     ciborium::ser::into_writer(&document, &mut future).expect("encode document");
     assert_matches!(
         decode_wal_object_envelope_zstd(&rezstd(&future)),
-        Err(EnvelopeCodecError::EnvelopeDecode(message))
+        Err(WalCodecError::Envelope(EnvelopeCodecError::EnvelopeDecode(message)))
             if message.contains("field_from_the_future")
     );
 }
@@ -2720,8 +2721,7 @@ fn inline_commit_wire_bytes_match_golden() {
         operations: vec![
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/binary").expect("path"),
-                content_ref: None,
-                inline_content: Some(vec![0, 255, 128, 1]),
+                content: loonfs_types::FileContent::Inline(vec![0, 255, 128, 1]),
                 behavior: loonfs_types::DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -2729,13 +2729,11 @@ fn inline_commit_wire_bytes_match_golden() {
             FilesystemOperation::CreateFileByInode {
                 parent_inode_id: InodeId(1),
                 display_name: loonfs_types::DisplayName::parse("empty").expect("name"),
-                content_ref: None,
-                inline_content: Some(Vec::new()),
+                content: loonfs_types::FileContent::Inline(Vec::new()),
             },
             FilesystemOperation::PutFileRevisionByInode {
                 inode_id: InodeId(2),
-                content_ref: None,
-                inline_content: Some(b"same".to_vec()),
+                content: loonfs_types::FileContent::Inline(b"same".to_vec()),
                 expected_revision_no: RevisionNo(1),
             },
         ],
@@ -2750,49 +2748,39 @@ fn inline_commit_wire_bytes_match_golden() {
     let fingerprint =
         |operations: &[FilesystemOperation],
          ids: &std::collections::BTreeMap<ContentId, loonfs_types::InlineContentIdentity>| {
-            loonfs_types::semantic_commit_fingerprint(
-                &namespace,
-                &loonfs_types::ActorId::loonfs(),
-                None,
-                None,
+            loonfs_types::CommitFingerprintInput {
+                namespace_id: &namespace,
+                actor_id: &loonfs_types::ActorId::loonfs(),
+                subject_id: None,
+                message: None,
                 operations,
-                &[],
-                ids,
-            )
-            .expect("fingerprint")
+                preconditions: &[],
+                inline_content_identities: ids,
+            }
+            .fingerprint()
         };
     let expected = fingerprint(&request.operations, &Default::default());
     let mut resolved = request.operations;
     let mut ids = std::collections::BTreeMap::new();
     for operation in &mut resolved {
-        let (content_ref, inline_content) = match operation {
-            FilesystemOperation::PutFile {
-                content_ref,
-                inline_content,
-                ..
-            }
-            | FilesystemOperation::CreateFileByInode {
-                content_ref,
-                inline_content,
-                ..
-            }
-            | FilesystemOperation::PutFileRevisionByInode {
-                content_ref,
-                inline_content,
-                ..
-            } => (content_ref, inline_content),
+        let content = match operation {
+            FilesystemOperation::PutFile { content, .. }
+            | FilesystemOperation::CreateFileByInode { content, .. }
+            | FilesystemOperation::PutFileRevisionByInode { content, .. } => content,
             _ => panic!("expected content operation"),
         };
+        let loonfs_types::FileContent::Inline(bytes) = content else {
+            panic!("expected inline bytes");
+        };
         let id = ContentId::generate();
-        let bytes = inline_content.take().expect("inline bytes");
         ids.insert(
             id.clone(),
-            loonfs_types::InlineContentIdentity::from_bytes(&bytes),
+            loonfs_types::InlineContentIdentity::from_bytes(bytes),
         );
-        *content_ref = Some(ContentRef::blob_v1(
+        *content = loonfs_types::FileContent::Ref(ContentRef::blob_v1(
             namespace.clone(),
             id,
-            &bytes,
+            bytes,
             crate::ChecksumAlgorithm::Crc64nvme,
         ));
     }

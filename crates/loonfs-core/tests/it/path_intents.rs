@@ -147,8 +147,7 @@ async fn put_file_with_preconditions<S: ObjectStore + ?Sized>(
         CommitId::parse(commit_id).expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse(absolute_path).expect("path"),
-            content_ref: Some(content.into_content_ref()),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(content.into_content_ref()),
             behavior: DestinationBehavior::Replace,
             expected_inode_id: preconditions.inode_id,
             expected_revision_no: preconditions.revision_no,
@@ -1079,9 +1078,8 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     let expected_name_key = NameKey::parse("caf\u{e9}").expect("valid name key");
     // Identity is computed from the request alone, before anything is
     // published, so the committed record must carry exactly this value.
-    let expected_fingerprint = CommitCandidate::new(request.clone())
-        .semantic_identity(&namespace_id)
-        .expect("fingerprint mutation request");
+    let expected_fingerprint =
+        CommitCandidate::new(request.clone()).semantic_identity(&namespace_id);
 
     submit_commit(&store, &namespace_id, request, &context)
         .await
@@ -1138,8 +1136,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: Some(content.into_content_ref()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(content.into_content_ref()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -1666,8 +1663,7 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
         test_commit_id(Some("no-replace-with_preconditions-put")),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/aba.txt").expect("path"),
-            content_ref: Some(rejected_content.into_content_ref()),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(rejected_content.into_content_ref()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: Some(recreated.inode_id),
             expected_revision_no: None,

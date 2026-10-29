@@ -135,8 +135,7 @@ pub(crate) async fn write_files_bytes<S: ObjectStore + ?Sized>(
                 .await?;
         operations.push(FilesystemOperation::PutFile {
             path: parse_mutation_path(absolute_path)?,
-            content_ref: Some(content.content_ref().clone()),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -181,8 +180,7 @@ async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
         normalized_commit_id(commit_id),
         FilesystemOperation::PutFile {
             path: parse_mutation_path(absolute_path)?,
-            content_ref: Some(content_ref),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(content_ref),
             behavior,
             expected_inode_id: None,
             expected_revision_no: None,

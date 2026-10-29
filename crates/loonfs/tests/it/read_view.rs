@@ -3,7 +3,7 @@
 use crate::common::{assert_core_error_kind, metadata_options, open_runtime_async, store};
 use loonfs::{
     CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, LoonFs, NamespaceId,
-    PaginationPolicy, PutFileOptions,
+    PutFileOptions,
 };
 use std::assert_matches;
 use tempfile::tempdir;
@@ -93,7 +93,7 @@ async fn read_during_compaction_and_collection(
                 .create_snapshot(
                     "durable",
                     &CreateSnapshotOptions {
-                        ttl_ms: Some(60_000),
+                        ttl_ms: std::num::NonZeroU64::new(60_000),
                     },
                 )
                 .await
@@ -281,7 +281,7 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         .create_snapshot(
             "durable",
             &CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await
@@ -375,7 +375,7 @@ async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_pin_when
         .create_snapshot(
             "deleted",
             &CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await
@@ -464,7 +464,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .create_snapshot(
             "first",
             &CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await
@@ -473,9 +473,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .read_view_at_snapshot(&first_snapshot.snapshot_id)
         .await
         .expect("view first snapshot");
-    let limit = PaginationPolicy::default()
-        .effective_limit(Some(2))
-        .expect("page limit");
+    let limit = loonfs_types::EffectiveLimit::from_requested(Some(2)).expect("page limit");
     let first_page = first_view
         .list("/")
         .page_limit(limit)
@@ -505,7 +503,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .create_snapshot(
             "second",
             &CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await
@@ -719,7 +717,7 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .create_snapshot(
             "reader",
             &CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await
@@ -844,7 +842,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
         .create_snapshot(
             "clock",
             &CreateSnapshotOptions {
-                ttl_ms: Some(EXPIRES_AT_MS - 1_750_000_000_000),
+                ttl_ms: std::num::NonZeroU64::new(EXPIRES_AT_MS - 1_750_000_000_000),
             },
         )
         .await
@@ -907,9 +905,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         .await
         .expect("view the first snapshot");
     let other = snapshots[1].snapshot_id.clone();
-    let limit = PaginationPolicy::default()
-        .effective_limit(None)
-        .expect("limit");
+    let limit = loonfs_types::EffectiveLimit::DEFAULT;
     let root = view.stat("/").await.expect("root entry").inode_id;
 
     let assert_rejected = |result: loonfs::Result<()>| {

@@ -80,8 +80,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/file").expect("path"),
-                content_ref: Some(prepared.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(prepared.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

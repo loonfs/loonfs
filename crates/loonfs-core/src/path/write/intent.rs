@@ -10,7 +10,7 @@ use loonfs_types::{ActorId, CommitId, CommitPrecondition, Subject};
 /// translates between two versions of the same language. The durable
 /// fingerprint preimage is a separate, frozen spelling, and
 /// `operation_fingerprint_input` in `loonfs-types`, which
-/// [`semantic_commit_fingerprint`](loonfs_types::semantic_commit_fingerprint)
+/// [`CommitFingerprintInput::fingerprint`](loonfs_types::CommitFingerprintInput::fingerprint)
 /// calls, is the only function that renames this spelling into the preimage
 /// spelling.
 pub use loonfs_types::FilesystemOperation;

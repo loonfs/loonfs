@@ -8,8 +8,8 @@
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, PaginationPolicy, PutFileOptions,
-    SharedObjectStore, Writable,
+    LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, PutFileOptions, SharedObjectStore,
+    Writable,
 };
 use loonfs_types::AbsolutePath;
 
@@ -185,8 +185,7 @@ async fn warm_phase_request_accounting() {
                     loonfs::publish::FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
                             .expect("path"),
-                        content_ref: Some(content_ref.clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(content_ref.clone()),
                         behavior: loonfs::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -229,9 +228,7 @@ async fn warm_phase_request_accounting() {
         .await
         .expect("build reader");
     let namespace = reader.namespace(&namespace_id);
-    let limit = PaginationPolicy::default()
-        .effective_limit(Some(1_000))
-        .expect("valid limit");
+    let limit = loonfs_types::EffectiveLimit::from_requested(Some(1_000)).expect("valid limit");
     let mut listed = 0usize;
     let mut cursor = None;
     loop {

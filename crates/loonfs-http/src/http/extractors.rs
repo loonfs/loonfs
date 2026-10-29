@@ -280,8 +280,11 @@ where
 {
     let mut deserializer = serde_json::Deserializer::from_slice(body);
     let decoded = serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
-        let param = json_pointer(error.path())
-            .and_then(|pointer| refine_internally_tagged_path(body, pointer));
+        let param = match json_pointer(error.path()) {
+            Some(pointer) => refine_internally_tagged_path(body, pointer),
+            None => refine_internally_tagged_path(body, String::new())
+                .filter(|pointer| !pointer.is_empty()),
+        };
         let response = ApiResponseError::new(
             ErrorCode::InvalidRequest,
             &format!("invalid JSON request body: {}", error.inner()),
@@ -315,15 +318,20 @@ fn refine_internally_tagged_path(body: &[u8], pointer: String) -> Option<String>
     if !object.contains_key("kind") {
         return Some(pointer);
     }
-    let invalid_path_fields = object
+    let invalid_fields = object
         .iter()
-        .filter(|(name, value)| {
-            matches!(name.as_str(), "path" | "source_path" | "destination_path")
-                && serde_json::from_value::<AbsolutePath>((*value).clone()).is_err()
+        .filter(|(name, value)| match name.as_str() {
+            "path" | "source_path" | "destination_path" => {
+                serde_json::from_value::<AbsolutePath>((*value).clone()).is_err()
+            }
+            "retention_window_ms" | "max_wal_tail_objects" => {
+                serde_json::from_value::<std::num::NonZeroU64>((*value).clone()).is_err()
+            }
+            _ => false,
         })
         .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>();
-    if let [field] = invalid_path_fields.as_slice() {
+    if let [field] = invalid_fields.as_slice() {
         return Some(format!("{pointer}/{}", escape_json_pointer_segment(field)));
     }
     None

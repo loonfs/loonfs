@@ -15,6 +15,7 @@ use super::plan_delete::plan_delete_path;
 use super::plan_restore::{plan_restore_revision, plan_restore_revision_by_inode};
 use super::plan_transfer::{plan_copy_by_inode, plan_copy_file_path, plan_move_path};
 use super::planned_pieces::CommitPieces;
+use super::preconditions::{validate_expected_file_state, PreconditionFields};
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use super::session::PublishPlanningSession;
 use crate::authorize::Authorizer;
@@ -28,35 +29,30 @@ use crate::metadata::MetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
-    next_public_ordinal, ChangeSeq, ContentId, DestinationPrecondition, InlineContentIdentity,
-    NamespaceId, PreconditionFields,
+    next_public_ordinal, ChangeSeq, CommitFingerprintInput, ContentId, FileContent,
+    InlineContentIdentity, NamespaceId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Computes the semantic fingerprint of a mutation request.
 ///
-/// `loonfs-types` owns the fingerprint algorithm so clients and the core use
-/// the same definition. The commit ID is excluded: it identifies the request
-/// record, while the fingerprint identifies the requested mutation.
+/// The commit ID is excluded: it identifies the request record, while the
+/// fingerprint identifies the requested mutation.
 pub(crate) fn commit_fingerprint(
     namespace_id: &NamespaceId,
     request: &CommitIntent,
     inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
-) -> Result<CommitFingerprint> {
-    match loonfs_types::semantic_commit_fingerprint(
+) -> CommitFingerprint {
+    CommitFingerprintInput {
         namespace_id,
-        &request.actor_id,
-        request.subject.as_ref().map(|subject| &subject.subject_id),
-        request.message.as_deref(),
-        &request.operations,
-        &request.preconditions,
+        actor_id: &request.actor_id,
+        subject_id: request.subject.as_ref().map(|subject| &subject.subject_id),
+        message: request.message.as_deref(),
+        operations: &request.operations,
+        preconditions: &request.preconditions,
         inline_content_identities,
-    ) {
-        Err(error @ loonfs_types::SemanticFingerprintError::InvalidContentSource) => {
-            Err(CoreError::InvalidCommitRequest(error.to_string()))
-        }
-        fingerprint => Ok(fingerprint.expect("a mutation fingerprint preimage should encode")),
     }
+    .fingerprint()
 }
 
 /// Compiles and validates a mutation request into one commit in a single
@@ -273,22 +269,21 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         }
         FilesystemOperation::PutFile {
             path,
-            content_ref,
-            inline_content,
+            content,
             behavior,
             expected_inode_id,
             expected_revision_no,
         } => {
             plan_put_file_content_ref(
                 path,
-                prepared_reference(content_ref, inline_content)?.clone(),
+                prepared_reference(content)?.clone(),
                 *behavior,
-                DestinationPrecondition {
-                    behavior: *behavior,
-                    expected_inode_id: *expected_inode_id,
-                    expected_revision_no: *expected_revision_no,
-                }
-                .resolve(PreconditionFields::Put)?,
+                validate_expected_file_state(
+                    *behavior,
+                    *expected_inode_id,
+                    *expected_revision_no,
+                    PreconditionFields::Put,
+                )?,
                 view,
                 allocation,
             )
@@ -310,13 +305,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::CreateFileByInode {
             parent_inode_id,
             display_name,
-            content_ref,
-            inline_content,
+            content,
         } => {
             plan_create_by_inode(
                 *parent_inode_id,
                 display_name,
-                NewChild::File(prepared_reference(content_ref, inline_content)?.clone()),
+                NewChild::File(prepared_reference(content)?.clone()),
                 view,
                 allocation,
             )
@@ -324,13 +318,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         }
         FilesystemOperation::PutFileRevisionByInode {
             inode_id,
-            content_ref,
-            inline_content,
+            content,
             expected_revision_no,
         } => {
             plan_put_file_revision_by_inode(
                 *inode_id,
-                prepared_reference(content_ref, inline_content)?.clone(),
+                prepared_reference(content)?.clone(),
                 *expected_revision_no,
                 view,
             )
@@ -393,7 +386,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 *destination_parent_inode_id,
                 destination_display_name,
                 precondition.behavior,
-                precondition.resolve(PreconditionFields::Destination)?,
+                validate_expected_file_state(
+                    precondition.behavior,
+                    precondition.expected_inode_id,
+                    precondition.expected_revision_no,
+                    PreconditionFields::Destination,
+                )?,
                 view,
             )
             .await
@@ -407,7 +405,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 source_path,
                 destination_path,
                 precondition.behavior,
-                precondition.resolve(PreconditionFields::Destination)?,
+                validate_expected_file_state(
+                    precondition.behavior,
+                    precondition.expected_inode_id,
+                    precondition.expected_revision_no,
+                    PreconditionFields::Destination,
+                )?,
                 view,
             )
             .await
@@ -421,7 +424,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 source_path,
                 destination_path,
                 precondition.behavior,
-                precondition.resolve(PreconditionFields::Destination)?,
+                validate_expected_file_state(
+                    precondition.behavior,
+                    precondition.expected_inode_id,
+                    precondition.expected_revision_no,
+                    PreconditionFields::Destination,
+                )?,
                 view,
                 allocation,
             )
@@ -438,7 +446,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 *destination_parent_inode_id,
                 destination_display_name,
                 precondition.behavior,
-                precondition.resolve(PreconditionFields::Destination)?,
+                validate_expected_file_state(
+                    precondition.behavior,
+                    precondition.expected_inode_id,
+                    precondition.expected_revision_no,
+                    PreconditionFields::Destination,
+                )?,
                 view,
                 allocation,
             )
@@ -533,13 +546,10 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
     }
 }
 
-fn prepared_reference<'a>(
-    content_ref: &'a Option<loonfs_types::ContentRef>,
-    inline_content: &Option<Vec<u8>>,
-) -> Result<&'a loonfs_types::ContentRef> {
-    match (content_ref, inline_content) {
-        (Some(reference), None) => Ok(reference),
-        _ => Err(CoreError::InvalidCommitRequest(
+fn prepared_reference(content: &FileContent) -> Result<&loonfs_types::ContentRef> {
+    match content {
+        FileContent::Ref(reference) => Ok(reference),
+        FileContent::Inline(_) => Err(CoreError::InvalidCommitRequest(
             "content must be prepared before planning".to_owned(),
         )),
     }
@@ -559,8 +569,9 @@ mod tests {
     use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
     use loonfs_types::{
         AbsolutePath, AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue,
-        CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
-        NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo, Subject, SubjectId,
+        CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+        DestinationPrecondition, InodeId, NamespaceAccess, PrincipalId, PrincipalScope,
+        PrincipalSet, RevisionNo, Subject, SubjectId,
     };
     use std::assert_matches;
     use tempfile::tempdir;
@@ -599,8 +610,7 @@ mod tests {
     ) -> FilesystemOperation {
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse(path).expect("path"),
-            content_ref: Some(content_ref.clone()),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(content_ref.clone()),
             behavior,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -665,14 +675,7 @@ mod tests {
         let content = request
             .operations
             .iter()
-            .filter_map(|operation| match operation {
-                FilesystemOperation::PutFile { content_ref, .. }
-                | FilesystemOperation::CreateFileByInode { content_ref, .. }
-                | FilesystemOperation::PutFileRevisionByInode { content_ref, .. } => {
-                    content_ref.as_ref()
-                }
-                _ => None,
-            })
+            .filter_map(FilesystemOperation::content_ref)
             .cloned()
             .map(crate::storage::content_admission::PreparedContent::for_durable_content_write)
             .collect();
@@ -805,8 +808,7 @@ mod tests {
             &namespace_id,
             &request(FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/dead/new.txt").expect("path"),
-                content_ref: Some(staged.into_content_ref()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(staged.into_content_ref()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -835,8 +837,7 @@ mod tests {
                     create_dir("/reports"),
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/reports/a.txt").expect("path"),
-                        content_ref: Some(staged.content_ref().clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -924,8 +925,7 @@ mod tests {
                     },
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
-                        content_ref: Some(staged.content_ref().clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

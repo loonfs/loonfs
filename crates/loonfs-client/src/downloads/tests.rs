@@ -706,7 +706,9 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let mut grant = grant(content_ref, "http://example.invalid/object");
-    let ObjectTransferAccess::PresignedUrl { method, .. } = &mut grant.ranges[0].access;
+    let ObjectTransferAccess::PresignedUrl { method, .. } = &mut grant.ranges[0].access else {
+        panic!("expected a presigned URL");
+    };
     *method = "PUT".to_owned();
 
     let mut sink = Vec::new();
@@ -756,19 +758,25 @@ async fn ranges_verify_the_whole_revision_and_resume_inside_the_second_object() 
     let reference = crc32c_content_ref(payload);
     let mut whole = grant(reference.clone(), "http://example.invalid/first");
     whole.ranges[0].length = 5;
-    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut whole.ranges[0].access;
+    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut whole.ranges[0].access else {
+        panic!("expected a presigned URL");
+    };
     headers.insert("range".to_owned(), "bytes=7-11".to_owned());
     let mut second = grant_from(reference, "http://example.invalid/second", 5)
         .ranges
         .remove(0);
-    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut second.access;
+    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut second.access else {
+        panic!("expected a presigned URL");
+    };
     headers.insert("range".to_owned(), "bytes=0-5".to_owned());
     whole.ranges.push(second);
     let mut resumed = whole.clone();
     resumed.ranges.remove(0);
     resumed.ranges[0].start_offset = 7;
     resumed.ranges[0].length = 4;
-    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut resumed.ranges[0].access;
+    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut resumed.ranges[0].access else {
+        panic!("expected a presigned URL");
+    };
     headers.insert("range".to_owned(), "bytes=2-5".to_owned());
     let transport = scripted_transport::script([
         Outcome::Success(b"first".to_vec()),

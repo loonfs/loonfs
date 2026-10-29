@@ -2,6 +2,7 @@
 
 use super::plan_delete::plan_delete;
 use super::plan_transfer::plan_move;
+use super::preconditions::ExpectedFileState;
 use super::publish_path_planning::{
     classify_replace_destination, ensure_binding_version, resolve_visible_child,
     resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
@@ -12,7 +13,7 @@ use crate::error::{CoreError, Result};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AccessRight, BindingVersion, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-    DisplayName, ExpectedFileState, InodeId, InodeKind, RevisionNo,
+    DisplayName, InodeId, InodeKind, RevisionNo,
 };
 
 pub(super) async fn plan_create_by_inode<S: ObjectStore + ?Sized>(

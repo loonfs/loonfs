@@ -2,6 +2,7 @@
 
 use crate::{ActorId, ChangeSeq, ManifestNo, NamespaceAccess, NamespaceId, PinId, PrincipalScope};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 
 /// A request to create a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,8 +20,11 @@ pub struct CreateNamespaceRequest {
     /// `retention_window_ms` setting. A `retention_window` maintenance run can change or clear the
     /// window later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub retention_window_ms: Option<u64>,
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = Option<u64>, nullable = false, minimum = 1)
+    )]
+    pub retention_window_ms: Option<NonZeroU64>,
 }
 
 /// A request to fork a namespace.
@@ -78,6 +82,9 @@ pub enum NamespaceAccessMode {
         /// The identity domain that the namespace's principal IDs belong to.
         principal_scope: PrincipalScope,
     },
+    /// An access mode from a newer server. This variant doesn't include the mode's own fields.
+    #[serde(other)]
+    Unknown,
 }
 
 impl From<&NamespaceAccess> for NamespaceAccessMode {
@@ -244,7 +251,7 @@ mod tests {
             }))
             .expect("a create body with a retention window decodes")
             .retention_window_ms,
-            Some(86_400_000)
+            NonZeroU64::new(86_400_000)
         );
         serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
             "namespace_id": "demo",

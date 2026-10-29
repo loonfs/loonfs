@@ -80,7 +80,10 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
             // a retry needs, instead of a search of the feed.
             let details = details.expect("structured details");
             assert_eq!(details.commit_id, Some(commit_id));
-            assert_eq!(details.committed_seq, Some(first.committed_seq));
+            assert_eq!(
+                details.committed.map(|committed| committed.committed_seq),
+                Some(first.committed_seq)
+            );
             let request_id = request_id.expect("request id");
             assert!(request_id.starts_with("req_"), "got `{request_id}`");
         }
@@ -125,8 +128,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         content_tokens: vec![token],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/retry.txt").expect("path"),
-            content_ref: Some(content_ref),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(content_ref),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -414,10 +416,9 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
             // The receipt named both halves of what landed, so the client
             // had everything it needed and still refused.
             let details = details.expect("structured details");
-            assert_eq!(details.committed_seq, Some(first.committed_seq));
-            let fingerprint = details
-                .committed_fingerprint
-                .expect("the receipt's semantic identity");
+            let committed = details.committed.expect("the receipt");
+            assert_eq!(committed.committed_seq, first.committed_seq);
+            let fingerprint = committed.committed_fingerprint;
             assert!(
                 fingerprint.as_str().starts_with("v1:sha256:"),
                 "got `{fingerprint:?}`"
@@ -557,8 +558,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
                 operations: vec![
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/batch.txt").expect("path"),
-                        content_ref: Some(staged.content_ref.clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(staged.content_ref.clone()),
                         behavior: DestinationBehavior::Replace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -782,7 +782,10 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
             // The server still knows where the id landed; the feed just
             // cannot answer for that sequence any more.
             let details = details.expect("structured details");
-            assert_eq!(details.committed_seq, Some(first.committed_seq));
+            assert_eq!(
+                details.committed.map(|committed| committed.committed_seq),
+                Some(first.committed_seq)
+            );
         }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
@@ -1044,14 +1047,9 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
             }) => {
                 assert_eq!(code, loonfs_types::ErrorCode::WriterFenced.as_str());
                 let details = details.expect("fenced details");
-                assert_eq!(
-                    details
-                        .active_writer_id
-                        .as_ref()
-                        .map(|writer| writer.as_str()),
-                    Some(winning_writer_id)
-                );
-                let acquired_at_ms = details.active_acquired_at_ms.expect("acquisition stamp");
+                let active_writer = details.active_writer.expect("the active writer");
+                assert_eq!(active_writer.active_writer_id.as_str(), winning_writer_id);
+                let acquired_at_ms = active_writer.active_acquired_at_ms;
                 assert!(message.contains(&format!(
                     "(writer `{winning_writer_id}`, acquired at {acquired_at_ms} ms)"
                 )));

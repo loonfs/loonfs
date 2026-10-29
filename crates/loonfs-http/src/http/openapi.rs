@@ -179,7 +179,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         loonfs_types::api::v0::GrepIndex,
         loonfs_types::api::v0::StoreProbeRequest,
         loonfs_types::api::v0::StoreProbeCheckOutcome,
-        loonfs_types::api::v0::StoreProbeCheckResult,
+        loonfs_types::api::v0::StoreProbeCheck,
         loonfs_types::api::v0::StoreProbeResponse
         ),
         responses(UnavailableResponse)

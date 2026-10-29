@@ -26,7 +26,7 @@ pub use downloads::{
     CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
     CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, DownloadRange,
 };
-pub use errors::{ErrorDetails, ErrorResponse};
+pub use errors::{ActiveWriter, CommittedReceipt, ErrorDetails, ErrorResponse};
 pub use gc::{
     DeletedCheckpointsByOwner, DeletedObjectCounts, ExtensionGcReports, GcRequest, GcResponse,
     GrepGcReport, RetainedCandidates, RetainedReason,
@@ -42,11 +42,8 @@ pub use namespaces::{
     CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceAccessMode,
     NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata,
 };
-pub use operations::{DeleteDirectoryBehavior, FilesystemOperation};
-pub use preconditions::{
-    validate_access_precondition, validate_attributes_precondition, DestinationBehavior,
-    DestinationPrecondition, DestinationPreconditionError, ExpectedFileState, PreconditionFields,
-};
+pub use operations::{DeleteDirectoryBehavior, FileContent, FilesystemOperation};
+pub use preconditions::{DestinationBehavior, DestinationPrecondition};
 pub use reads::{
     AttributesProjection, EntryInodeKind, FileRevision, ListFileRevisionsResponse,
     ListInodeChildrenResponse, ListPathEntriesResponse, ListTrashResponse, PathEntry,
@@ -58,7 +55,7 @@ pub use snapshots::{
     ExtendSnapshotRequest, ListCheckpointsResponse, ListSnapshotsResponse, Snapshot,
 };
 pub use store_probe::{
-    StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse,
+    StoreProbeCheck, StoreProbeCheckOutcome, StoreProbeRequest, StoreProbeResponse,
 };
 pub use uploads::{
     CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransferAccess,

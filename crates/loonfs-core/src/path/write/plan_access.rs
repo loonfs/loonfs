@@ -22,7 +22,7 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
     expected_access_revision_no: Option<AccessRevisionNo>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
-    loonfs_types::api::v0::validate_access_precondition(
+    super::preconditions::validate_access_precondition(
         expected_inode_id,
         expected_access_revision_no,
     )?;

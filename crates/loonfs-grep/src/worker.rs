@@ -46,7 +46,8 @@ use std::sync::Arc;
 /// If the snapshot expires before backfill finishes, reads through it
 /// return `snapshot_not_found` and the worker restarts from a fresh
 /// snapshot. The worker does not extend an old pin.
-pub(crate) const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+pub(crate) const GREP_BACKFILL_CHECKPOINT_TTL_MS: std::num::NonZeroU64 =
+    std::num::NonZeroU64::new(24 * 60 * 60 * 1000).expect("a day is a nonzero lifetime");
 
 const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
 /// Content bytes one backfill step ingests before it checkpoints its cursor.

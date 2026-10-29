@@ -47,14 +47,8 @@ impl Default for MaintainMetadataOptions {
 impl MaintainMetadataOptions {
     /// Resolves a wire-level metadata maintenance request.
     pub fn from_request(request: MetadataMaintenanceRequest) -> Result<Self> {
-        let Some(threshold) = request.max_wal_tail_objects else {
+        let Some(max_wal_tail_objects) = request.max_wal_tail_objects else {
             return Ok(Self::default());
-        };
-        let Some(max_wal_tail_objects) = NonZeroU64::new(threshold) else {
-            return Err(Error::InvalidRequest {
-                message: "`max_wal_tail_objects` must be greater than zero".to_owned(),
-                param: "/max_wal_tail_objects",
-            });
         };
         let reject_writes_at_wal_objects = MAX_UNFOLDED_WAL_OBJECTS;
         if max_wal_tail_objects.get() > reject_writes_at_wal_objects {
@@ -104,7 +98,7 @@ impl AdvanceRetentionFloorOptions {
 pub struct CreateSnapshotOptions {
     /// The snapshot's lifetime in milliseconds, counted from the runtime's
     /// clock. Without it, the snapshot doesn't expire.
-    pub ttl_ms: Option<u64>,
+    pub ttl_ms: Option<NonZeroU64>,
 }
 
 /// Options for a streaming file read.
@@ -152,12 +146,10 @@ mod tests {
 
     #[test]
     fn a_useless_fold_threshold_is_rejected() {
-        for threshold in [0, MAX_UNFOLDED_WAL_OBJECTS + 1] {
-            let error = MaintainMetadataOptions::from_request(MetadataMaintenanceRequest {
-                max_wal_tail_objects: Some(threshold),
-            })
-            .expect_err("the threshold is out of range");
-            assert_eq!(error.code(), crate::ErrorCode::InvalidRequest);
-        }
+        let error = MaintainMetadataOptions::from_request(MetadataMaintenanceRequest {
+            max_wal_tail_objects: NonZeroU64::new(MAX_UNFOLDED_WAL_OBJECTS + 1),
+        })
+        .expect_err("the threshold is out of range");
+        assert_eq!(error.code(), crate::ErrorCode::InvalidRequest);
     }
 }

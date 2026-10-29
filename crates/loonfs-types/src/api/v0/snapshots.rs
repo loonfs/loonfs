@@ -2,6 +2,7 @@
 
 use crate::{ChangeSeq, ManifestNo, NamespaceId, PinId};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 
 /// A request to create a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,8 +14,11 @@ pub struct CreateSnapshotRequest {
     /// The snapshot's lifetime in milliseconds, counted from the server's current time. Omit it to
     /// keep the snapshot until it's deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub ttl_ms: Option<u64>,
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = Option<u64>, nullable = false, minimum = 1)
+    )]
+    pub ttl_ms: Option<NonZeroU64>,
 }
 
 /// A request to extend a snapshot.
@@ -23,7 +27,8 @@ pub struct CreateSnapshotRequest {
 #[serde(deny_unknown_fields)]
 pub struct ExtendSnapshotRequest {
     /// The new lifetime in milliseconds, counted from the server's current time.
-    pub ttl_ms: u64,
+    #[cfg_attr(feature = "openapi", schema(value_type = u64, minimum = 1))]
+    pub ttl_ms: NonZeroU64,
 }
 
 /// The owner of a checkpoint record.

@@ -14,8 +14,8 @@ use loonfs_types::{
     NamespaceId, PrincipalId, PrincipalScope, ROOT_INODE_ID,
 };
 use loonfs_types::{
-    AttributeInclusion, ChangeSeq, ContentRef, Page, PageRequest, PaginationPolicy, RevisionNo,
-    TrashEntry, TrashPageCursor,
+    AttributeInclusion, ChangeSeq, ContentRef, Page, PageRequest, RevisionNo, TrashEntry,
+    TrashPageCursor,
 };
 use std::assert_matches;
 use std::num::NonZeroU64;
@@ -325,8 +325,7 @@ fn create_directory(path: &str) -> FilesystemOperation {
 fn put(path: &str, content_ref: &loonfs_types::ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content_ref: Some(content_ref.clone()),
-        inline_content: None,
+        content: loonfs_types::FileContent::Ref(content_ref.clone()),
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -922,9 +921,7 @@ async fn resolve_path(
 
 fn read_page<C>(limit: u32) -> PageRequest<C> {
     PageRequest {
-        limit: PaginationPolicy::default()
-            .effective_limit(Some(limit))
-            .expect("limit"),
+        limit: loonfs_types::EffectiveLimit::from_requested(Some(limit)).expect("limit"),
         cursor: None,
     }
 }
@@ -1158,8 +1155,7 @@ async fn history_needs_the_history_right() {
         &mutation,
         vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/team/file").expect("path"),
-            content_ref: Some(content),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(content),
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,

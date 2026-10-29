@@ -1,7 +1,9 @@
 //! Publish plans that add bytes to the end of a file.
 
 use super::planned_pieces::CommitPieces;
-use super::preconditions::ensure_expected_inode;
+use super::preconditions::{
+    ensure_expected_inode, validate_expected_file_state, PreconditionFields,
+};
 use super::publish_path_planning::{
     resolve_visible_inode, resolve_visible_path_for_authorization, CompiledFilesystemOperation,
     PublishPathPlanningView,
@@ -16,8 +18,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, Checksum, ContentId, ContentRef, ContentRefKind,
-    DestinationBehavior, DestinationPrecondition, InodeId, InodeKind, PreconditionFields,
-    RevisionNo,
+    DestinationBehavior, InodeId, InodeKind, RevisionNo,
 };
 
 #[allow(
@@ -35,12 +36,12 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
     pieces: &CommitPieces<'_>,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
-    let expected = DestinationPrecondition {
-        behavior: DestinationBehavior::Replace,
+    let expected = validate_expected_file_state(
+        DestinationBehavior::Replace,
         expected_inode_id,
         expected_revision_no,
-    }
-    .resolve(PreconditionFields::Put)?;
+        PreconditionFields::Put,
+    )?;
     let write = AccessRights::from(AccessRight::Write);
     let absence = Absence::Path(absolute_path.as_str());
     let target =

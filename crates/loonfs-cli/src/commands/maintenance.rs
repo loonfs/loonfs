@@ -157,7 +157,7 @@ async fn run_maintenance_fold(
     args: MaintenanceNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let request = RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
-        max_wal_tail_objects: Some(1),
+        max_wal_tail_objects: Some(std::num::NonZeroU64::MIN),
     });
     run_maintenance_job(kind, config_path, &args.target, None, request).await
 }

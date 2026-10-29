@@ -32,7 +32,6 @@ use loonfs_types::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
-use std::num::NonZeroU64;
 
 /// Advertises a feature, or removes the key: an absent key and an
 /// advertised-false key both mean unsupported, and the document stays small.
@@ -50,22 +49,6 @@ pub(super) struct DeleteNamespaceQuery {
     /// Delete only if the head is still at this sequence (`stale_head` on
     /// mismatch).
     expected_head_seq: Option<String>,
-}
-
-/// Reads the `retention_window_ms` field of a request body. A window must be
-/// positive, so zero is an invalid request.
-fn retention_window_ms(value: Option<u64>) -> Result<Option<NonZeroU64>, ApiResponseError> {
-    value
-        .map(|value| {
-            NonZeroU64::new(value).ok_or_else(|| {
-                ApiResponseError::new(
-                    ErrorCode::InvalidRequest,
-                    "`retention_window_ms` must be greater than zero",
-                )
-                .with_param("/retention_window_ms")
-            })
-        })
-        .transpose()
 }
 
 /// The capability value for a transfer limit. The API lists these limits on
@@ -235,7 +218,7 @@ pub(super) async fn create_namespace(
             &actor_id,
             &CreateNamespaceOptions {
                 access: request.access,
-                retention_window_ms: retention_window_ms(request.retention_window_ms)?,
+                retention_window_ms: request.retention_window_ms,
                 ..Default::default()
             },
         )
@@ -788,13 +771,10 @@ pub(super) async fn run_maintenance(
                 .await
                 .map(RunMaintenanceResponse::Retention)
         }
-        RunMaintenanceRequest::RetentionWindow(request) => {
-            let window_ms = retention_window_ms(request.retention_window_ms)?;
-            maintenance
-                .set_retention_window(&namespace_id, window_ms)
-                .await
-                .map(RunMaintenanceResponse::RetentionWindow)
-        }
+        RunMaintenanceRequest::RetentionWindow(request) => maintenance
+            .set_retention_window(&namespace_id, request.retention_window_ms)
+            .await
+            .map(RunMaintenanceResponse::RetentionWindow),
         RunMaintenanceRequest::RecoverAdministrator(request) => {
             let actor_id = actor_id.ok_or_else(missing_actor)?;
             let namespace = state.open_writer(&namespace_id, None).await?;

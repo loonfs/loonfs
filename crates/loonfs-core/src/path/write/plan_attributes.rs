@@ -26,7 +26,7 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     validate_request_shape(set, remove)?;
-    loonfs_types::api::v0::validate_attributes_precondition(
+    super::preconditions::validate_attributes_precondition(
         expected_inode_id,
         expected_attributes_revision_no,
     )?;

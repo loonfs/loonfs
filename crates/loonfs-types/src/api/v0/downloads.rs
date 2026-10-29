@@ -32,7 +32,7 @@ pub struct CreateDownloadRequest {
     /// With `consistency` set to `eventual`, how old the server's last confirmation of the head can
     /// be, in milliseconds. The default is the server's `max_staleness_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false, maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_staleness_ms: Option<u64>,
     /// The first byte that the grant reads. The grant covers the revision's bytes from
     /// `start_offset` up to `size_bytes`, so a client that resumes a download asks for a new grant
@@ -42,7 +42,7 @@ pub struct CreateDownloadRequest {
     pub start_offset: u64,
 }
 
-/// The options for downloading a file inode's current revision.
+/// A request to download a file inode's current revision.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -62,7 +62,7 @@ pub struct CreateDownloadByInodeRequest {
     /// With `consistency` set to `eventual`, how old the server's last confirmation of the head can
     /// be, in milliseconds. The default is the server's `max_staleness_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false, maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_staleness_ms: Option<u64>,
     /// The first byte that the grant reads. It defaults to 0 and must be less than the file's size.
     /// For a file of zero bytes, it must be 0.
@@ -70,7 +70,7 @@ pub struct CreateDownloadByInodeRequest {
     pub start_offset: u64,
 }
 
-/// The options for downloading one retained revision of an inode.
+/// A request to download one retained revision of an inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -85,7 +85,7 @@ pub struct CreateRevisionDownloadByInodeRequest {
     /// With `consistency` set to `eventual`, how old the server's last confirmation of the head can
     /// be, in milliseconds. The default is the server's `max_staleness_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false, maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_staleness_ms: Option<u64>,
     /// The first byte that the grant reads. It defaults to 0 and must be less than the revision's
     /// size. For a revision of zero bytes, it must be 0.

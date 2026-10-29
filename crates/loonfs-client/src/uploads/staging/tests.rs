@@ -10,7 +10,7 @@ use futures::stream::StreamExt;
 use loonfs_test_support::ids::content_ref;
 use loonfs_types::api::v0::UploadMode;
 use loonfs_types::{
-    CapabilityDocument, ContentId, ContentRef, ContentRefKind, API_GROUP_FILESYSTEM_V0,
+    CapabilityDocument, CommitId, ContentId, ContentRef, ContentRefKind, API_GROUP_FILESYSTEM_V0,
     FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 use std::assert_matches;
@@ -1129,8 +1129,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         saved.operations,
         vec![FilesystemOperation::PutFile {
             path: spec().absolute_path().clone(),
-            content_ref: Some(uploaded),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(uploaded),
             behavior: options.behavior,
             expected_inode_id: options.expected_inode_id,
             expected_revision_no: options.expected_revision_no,
@@ -1239,8 +1238,7 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
         assert_matches!(
             &request.operations[0],
             FilesystemOperation::PutFile {
-                content_ref: None,
-                inline_content: Some(content),
+                content: loonfs_types::FileContent::Inline(content),
                 ..
             } if content == bytes
         );

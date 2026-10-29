@@ -29,6 +29,9 @@ pub enum UploadMode {
     DirectPut,
     /// A transport in which the client uploads parts directly to object storage.
     DirectMultipart,
+    /// A transport from a newer server.
+    #[serde(other)]
+    Unknown,
 }
 
 impl UploadMode {
@@ -38,6 +41,7 @@ impl UploadMode {
             Self::ServiceProxied => "service_proxied",
             Self::DirectPut => "direct_put",
             Self::DirectMultipart => "direct_multipart",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -102,6 +106,9 @@ pub enum ObjectTransferAccess {
         /// The time the URL expires, in Unix milliseconds.
         expires_at_ms: u64,
     },
+    /// A capability kind from a newer server. This variant doesn't include the kind's own fields.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One upload part number and its checksum.

@@ -12,7 +12,7 @@ use loonfs::{
 use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_types::{
     AbsolutePath, ChangeSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
-    PaginationPolicy, PathEntry, PinId, RevisionNo, Subject,
+    PathEntry, PinId, RevisionNo, Subject,
 };
 
 /// Filesystem reads for one namespace.
@@ -296,7 +296,7 @@ pub(crate) fn page_limit(limit: usize) -> EffectiveLimit {
 
 fn contract_page_limit(limit: usize) -> std::result::Result<EffectiveLimit, LimitError> {
     let requested = u32::try_from(limit).unwrap_or(u32::MAX);
-    PaginationPolicy::default().effective_limit(Some(requested))
+    EffectiveLimit::from_requested(Some(requested))
 }
 
 #[cfg(test)]

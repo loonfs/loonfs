@@ -16,6 +16,7 @@ mod attributes;
 mod base64_bytes;
 mod capability;
 mod civil_date;
+mod clock;
 mod commit_identity;
 pub mod config;
 mod content;
@@ -29,6 +30,7 @@ mod hex;
 mod id_macros;
 mod ids;
 mod layout;
+pub mod limits;
 mod manifest;
 mod metadata_rows;
 mod name_policy;
@@ -105,6 +107,7 @@ pub use attributes::{
     MAX_ATTRIBUTE_ENTRIES, MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
     RESERVED_ATTRIBUTE_KEY_PREFIX,
 };
+pub use capability::pagination_capability_limits;
 pub use capability::{
     CapabilityDocument, CapabilityDocumentError, ALL_LIMIT_KEYS, API_GROUP_FILESYSTEM_V0,
     API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_COMMIT_INLINE_CONTENT,
@@ -122,9 +125,13 @@ pub use capability::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
 };
 pub use civil_date::{civil_from_days, CivilDate};
+pub use clock::{
+    duration_ms, saturating_duration_ms, MonotonicTimer, StdMonotonicTimer, SystemWallClock,
+    WallClock,
+};
 pub use commit_identity::{
-    semantic_commit_fingerprint, CommitFingerprint, CommitFingerprintValidationError,
-    InlineContentIdentity, SemanticFingerprintError,
+    CommitFingerprint, CommitFingerprintInput, CommitFingerprintValidationError,
+    InlineContentIdentity,
 };
 pub use content::{
     Checksum, ChecksumAlgorithm, ChecksumDigest, ChecksumHex, ChecksumHexValidationError,
@@ -155,17 +162,13 @@ pub use pagination::{
     encode_token_bytes, DirectoryPageCursor, DirectoryTreeFrame, DirectoryTreePageCursor,
     EffectiveLimit, FileRevisionsPageCursor, GrepCursorPosition, GrepPageCursor, LimitError,
     ListPageCursor, OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse,
-    Pager, PaginationPolicy, TrashPageCursor, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
-    PAGE_CURSOR_FORMAT_VERSION,
+    Pager, TrashPageCursor, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, InodeKind, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES,
     MAX_PATH_BYTES, MAX_PATH_DEPTH,
 };
-pub use retry::{
-    saturating_duration_ms, transport_retry_backoff, MonotonicTimer, OperationDeadline,
-    StdMonotonicTimer, SystemWallClock, TransportRetryOutcome, TransportRetryPolicy, WallClock,
-};
+pub use retry::{OperationDeadline, TransportRetryOutcome, TransportRetryPolicy};
 pub use secret::{SecretString, REDACTED};
 pub use widths::{u64_from_usize, usize_from_u64};
 
@@ -176,16 +179,15 @@ pub use api::v0::{
     CheckpointOwner, Commit, CommitPrecondition, CommitRequest, CreateNamespaceRequest,
     CreateSnapshotRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
-    DestinationPrecondition, DestinationPreconditionError, EntryInodeKind, ErrorDetails,
-    ErrorResponse, ExpectedFileState, ExtendSnapshotRequest, ExtensionGcReports, FileRevision,
-    FilesystemOperation, ForkNamespaceRequest, GcRequest, GcResponse, GrepGcReport, GrepMatch,
-    GrepRequest, GrepResponse, GrepScope, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListInodeChildrenResponse, ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse,
-    MetadataCompactionOutcome, MetadataCompactionResponse, MetadataMaintenanceOutcome,
-    MetadataMaintenanceRequest, MetadataMaintenanceResponse, MetadataPassReport,
-    NamespaceAccessMode, NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata, PathEntry,
-    PathEntryKind, PreconditionFields, RecoverAdministratorRequest, RecoverAdministratorResponse,
-    RetainedCandidates, RetainedReason, RunMaintenanceRequest, RunMaintenanceResponse,
-    SetRetentionWindowRequest, SetRetentionWindowResponse, Snapshot, TrashEntry,
-    WalFoldStepOutcome,
+    DestinationPrecondition, EntryInodeKind, ErrorDetails, ErrorResponse, ExtendSnapshotRequest,
+    ExtensionGcReports, FileContent, FileRevision, FilesystemOperation, ForkNamespaceRequest,
+    GcRequest, GcResponse, GrepGcReport, GrepMatch, GrepRequest, GrepResponse, GrepScope,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse, MetadataCompactionOutcome,
+    MetadataCompactionResponse, MetadataMaintenanceOutcome, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, MetadataPassReport, NamespaceAccessMode, NamespaceDiagnostics,
+    NamespaceForkBasis, NamespaceMetadata, PathEntry, PathEntryKind, RecoverAdministratorRequest,
+    RecoverAdministratorResponse, RetainedCandidates, RetainedReason, RunMaintenanceRequest,
+    RunMaintenanceResponse, SetRetentionWindowRequest, SetRetentionWindowResponse, Snapshot,
+    TrashEntry, WalFoldStepOutcome,
 };

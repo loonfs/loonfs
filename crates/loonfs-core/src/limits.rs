@@ -9,6 +9,8 @@
 //! plus a margin for clock error and scheduling delay. Callers may configure
 //! a larger grace window, never a smaller one.
 
+use loonfs_types::duration_ms;
+
 use loonfs_objectstore::{
     PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_MAX_MULTIPART_PARTS, PROVIDER_MAX_MULTIPART_PART_BYTES,
     PROVIDER_MIN_MULTIPART_PART_BYTES, PROVIDER_OPERATION_DEADLINE,
@@ -163,16 +165,6 @@ pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = duration_ms(PROVIDER_ATTEMPT_TIMEOU
 pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
     duration_ms(PROVIDER_PUBLICATION_REQUEST_BOUND);
 
-/// Converts a duration to whole milliseconds at compile time. A value past
-/// `u64::MAX` milliseconds fails the build instead of truncating.
-const fn duration_ms(duration: std::time::Duration) -> u64 {
-    let seconds_ms = duration
-        .as_secs()
-        .checked_mul(1_000)
-        .expect("the duration should fit u64 milliseconds");
-    seconds_ms + duration.subsec_millis() as u64
-}
-
 /// Maximum elapsed time from observing a tip to initiating its next numbered put.
 ///
 /// A writer that commits again within this budget of its previous commit
@@ -220,15 +212,17 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
 ) + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
     + GC_SAFETY_MARGIN_MS;
 
-/// Longest gap a reader may leave between the manifest probe it relies on and
-/// the successor check that confirms it.
-///
-/// A successor published after the probe cannot be collected within this bound:
-/// collection waits the grace window, which reserves this bound plus the clock
-/// allowance.
-pub const READ_REVALIDATION_BOUND_MS: u64 =
-    max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
-        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS;
+pub use loonfs_types::limits::READ_REVALIDATION_BOUND_MS;
+
+/// The revalidation bound is the longest publication budget plus the
+/// provider's request bound. A successor published after the probe cannot be
+/// collected within this bound: collection waits the grace window, which
+/// reserves this bound plus the clock allowance.
+const _: () = assert!(
+    READ_REVALIDATION_BOUND_MS
+        == max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
+            + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+);
 
 const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS);
 
