@@ -21,10 +21,10 @@ use tempfile::tempdir;
 
 /// When the server's clock starts, so every commit a test makes through the
 /// server's runtime is stamped at a known time.
-const START_MS: u64 = 100 * DAY_MS;
+pub(super) const START_MS: u64 = 100 * DAY_MS;
 
 /// The 30-day window from the design note.
-const WINDOW_MS: u64 = 30 * DAY_MS;
+pub(super) const WINDOW_MS: u64 = 30 * DAY_MS;
 
 /// A namespace's own window, shorter than the server's.
 const NAMESPACE_WINDOW_MS: u64 = 15 * DAY_MS;
@@ -34,8 +34,13 @@ const NAMESPACE_WINDOW_MS: u64 = 15 * DAY_MS;
 /// current manifest. The docs quote this number.
 const IDLE_ADVANCE_REQUESTS: usize = 4;
 
+/// Requests the acknowledgment of the floor costs on the visit of a
+/// namespace whose acknowledged floor is at its retention floor: one load
+/// of the current manifest. The docs quote this number.
+const IDLE_ACKNOWLEDGMENT_REQUESTS: usize = 4;
+
 /// A config with every default, and `window_ms` as its retention window.
-fn retention_config(window_ms: Option<u64>) -> ServerConfig {
+pub(super) fn retention_config(window_ms: Option<u64>) -> ServerConfig {
     let mut config = sweep_config(None);
     config.retention_window_ms =
         window_ms.map(|window_ms| NonZeroU64::new(window_ms).expect("a positive window"));
@@ -43,7 +48,7 @@ fn retention_config(window_ms: Option<u64>) -> ServerConfig {
 }
 
 impl SweepServer {
-    async fn diagnostics(&self, namespace_id: &NamespaceId) -> NamespaceDiagnostics {
+    pub(super) async fn diagnostics(&self, namespace_id: &NamespaceId) -> NamespaceDiagnostics {
         self.maintenance
             .diagnostics(namespace_id)
             .await
@@ -75,7 +80,7 @@ impl SweepServer {
 
     /// Writes one file on the server's clock, and returns its commit's
     /// sequence.
-    async fn commit(&self, namespace_id: &NamespaceId, path: &str) -> ChangeSeq {
+    pub(super) async fn commit(&self, namespace_id: &NamespaceId, path: &str) -> ChangeSeq {
         self.runtime
             .open_namespace(namespace_id)
             .expect("open the namespace")
@@ -537,11 +542,12 @@ async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
         )
         .await;
         // The first pass moves the floor to the head when a window applies,
-        // and collects what the seed left behind. The advance's hint raise
-        // runs after the advance returns, so the test waits for the raise,
-        // and the second pass collects the manifest that the advance
-        // replaced.
-        for _ in 0..2 {
+        // and collects what the seed left behind. Nobody writes to the
+        // namespace, so the second pass acknowledges that floor with a fence
+        // and a fold. Each hint raise runs after its publication returns, so
+        // the test waits for the raises, and each pass collects the
+        // manifests that the previous pass replaced.
+        for _ in 0..3 {
             server
                 .sweep
                 .run_pass(GarbageCollection::Collect)
@@ -576,8 +582,23 @@ async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
             requests.push(visit.len());
         }
 
-        // The visit's share is the advance's one load of the current manifest.
+        // The visit's share is one load of the current manifest for the
+        // acknowledgment and one for the advance.
         store.reset();
+        server
+            .maintenance
+            .acknowledge_retention_floor(&namespace_id)
+            .await
+            .expect("acknowledge the floor");
+        let acknowledgment = store.take();
+        assert!(acknowledgment
+            .iter()
+            .all(|operation| operation.key().starts_with(&prefix)));
+        assert_eq!(
+            acknowledgment.len(),
+            IDLE_ACKNOWLEDGMENT_REQUESTS,
+            "{windows}"
+        );
         let target = RetentionTarget::Window {
             default_window_ms: server_window_ms.and_then(NonZeroU64::new),
         };

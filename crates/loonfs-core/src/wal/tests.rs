@@ -223,7 +223,7 @@ async fn a_fence_records_the_floor_of_an_advance_published_after_the_claim() {
     let claim = crate::namespace::control::load_manifest_by_no(
         store.inner(),
         &namespace_id,
-        acquisition.claim_manifest_no,
+        acquisition.claim.manifest.manifest_no,
     )
     .await
     .expect("load the claim")

@@ -888,7 +888,7 @@ impl NamespaceCommitEngine {
         let acquisition =
             acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
         let acquired_writer = acquisition.writer;
-        self.record_published_manifest_no(acquisition.claim_manifest_no);
+        self.record_published_manifest_no(acquisition.claim.manifest.manifest_no);
         self.acquired_anchor = Some(acquisition.anchor);
         let mut session = self.lock_session();
         if let WriterSessionStatus::Fenced(fence) = &*session {

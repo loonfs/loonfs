@@ -1,6 +1,6 @@
 # Retention window
 
-This note describes how the [retention floor](../specs/glossary.md#retention-floor) expires deletions, how the writer's log acknowledges each floor so that a base compaction can remove the rows that an expired deletion hides, what that compaction removes, and how the reference server advances the floor on a schedule.
+This note describes how the [retention floor](../specs/glossary.md#retention-floor) expires deletions, how the writer's log acknowledges each floor so that a base compaction can remove the rows that an expired deletion hides, what that compaction removes, and how the reference server advances and acknowledges the floor on a schedule.
 
 ## History that grows without bound
 
@@ -56,7 +56,7 @@ A base compaction can trust the acknowledged floor for these reasons:
 
 A fork's first manifest acknowledges the fork point without a WAL object, because the fork's log is empty, and every commit in it is validated against a fork manifest, whose floor is at least the fork point. So the fork's log never accepts an undelete of an inherited deletion.
 
-A namespace whose writer commits nothing after an advance never acknowledges the new floor on its own, so its hidden rows stay until a WAL object is written. Any process can acknowledge the floor for it by acquiring the writer epoch and writing a fence, the same way a new writer session starts (see [Writer ownership](../specs/format.md#61-writer-ownership)), and then folding.
+A namespace whose writer commits nothing after an advance never acknowledges the new floor on its own, so its hidden rows stay until a WAL object is written. Any process can acknowledge the floor for it by acquiring the writer epoch and writing a fence, the same way a new writer session starts (see [Writer ownership](../specs/format.md#61-writer-ownership)), and then folding. The reference server does this in its full pass, as described in [Advancing the floor on a schedule](#advancing-the-floor-on-a-schedule).
 
 Why does a base compaction compare a deletion with the acknowledged floor, and not with the retention floor? The retention floor says that the deletion has expired, but it doesn't say that every undelete validated against an older floor has been folded. The acknowledged floor says both, because a WAL object that records the new floor comes after every object validated against an older one.
 
@@ -157,7 +157,7 @@ Why does the compaction find hidden inodes by reachability, and not by a flag on
 
 ## Advancing the floor on a schedule
 
-This section describes how the reference server advances each namespace's floor on a schedule.
+This section describes how the reference server advances each namespace's floor on a schedule, and how it acknowledges a floor that the namespace's writer hasn't.
 
 A retention advance moves the [retention floor](../specs/glossary.md#retention-floor). Without a schedule, an advance runs only when an operator starts one, and a namespace's history keeps growing in between.
 
@@ -167,11 +167,11 @@ The full pass of the maintenance sweep (the pass that lists every namespace, onc
 
 The deletions that an advance passes expire at once, in every view on the new manifest. Their rows can be removed once the writer's log acknowledges the new floor (see [Acknowledging the floor](#acknowledging-the-floor)). When this server has a writer session open for the namespace, the full pass advances the floor in the same process, so the session's position moves onto the advance's manifest, and the session's next WAL object records the new floor. A fold then raises the manifest's acknowledged floor, and the next base compaction of each family group removes the hidden rows.
 
-A namespace that nobody writes to after an advance never acknowledges the new floor on its own, so its hidden rows stay until a commit or a fence records the new floor and is folded.
+A namespace that nobody writes to after an advance never acknowledges the new floor on its own, so the full pass acknowledges it. Before a visit's own advance, the pass compares the current manifest's acknowledged floor with its retention floor. If the acknowledged floor is lower, the pass folds the WAL tail, which raises the acknowledged floor if the writer has committed since the advance. If the acknowledged floor is still lower after the fold, the pass acquires the namespace's writer epoch, writes a fence, and folds again, so the fence's basis floor becomes the acknowledged floor. The pass checks the lag before its own advance, so the floor it acknowledges is the one from the previous pass, and a namespace whose writer committed anything in the day between has already acknowledged that floor. So the pass fences only a namespace that nobody has written to since the previous pass. The check doesn't prevent a race: a request that reaches the namespace's writer session while the pass fences it fails with `writer_fenced`, as the first request after the fence does, and the runtime opens a new session for the request after it, as after any takeover (see [Writer ownership](../specs/format.md#61-writer-ownership)).
 
-If an advance fails, the server keeps no retry state for it, even for a writer session that the server keeps open, and the next full pass tries the advance again. So a failed advance delays the floor move, and the expiry of the deletions that the floor would have reached, until the next full pass (a day later, by default).
+If an advance fails, the server keeps no retry state for it, even for a writer session that the server keeps open, and the next full pass tries the advance again. So a failed advance delays the floor move, and the expiry of the deletions that the floor would have reached, until the next full pass (a day later, by default). A failed fence or fold is tried again the same way.
 
-For example, with a 30-day window (`retention_window_ms = 2592000000`) and the default daily pass, a deletion stays recoverable for at least 30 days. The first full pass after the deletion is 30 days old moves the floor past the deletion, so the deletion expires between 30 and 31 days after the commit that deleted it. If the namespace is being written to, the writer's next commit acknowledges the new floor, and the next fold and base compaction remove the hidden rows. If nobody writes to the namespace, its rows stay until a commit or a fence acknowledges the new floor. The deleted bytes are reclaimed after the next base compaction and garbage collection pass. (A base compaction runs once enough new metadata builds up above a family group's oldest run, so a namespace that stops writing can keep an expired deletion's rows until the namespace is written again or an operator compacts it.)
+For example, with a 30-day window (`retention_window_ms = 2592000000`) and the default daily pass, a deletion stays recoverable for at least 30 days. The first full pass after the deletion is 30 days old moves the floor past the deletion, so the deletion expires between 30 and 31 days after the commit that deleted it. If the namespace is being written to, the writer's next commit acknowledges the new floor, and the next fold and base compaction remove the hidden rows. If nobody writes to the namespace, the following pass, a day later, fences and folds it, and the acknowledged floor follows the floor by about a day. The deleted bytes are reclaimed after the next base compaction and garbage collection pass. (A base compaction runs once enough new metadata builds up above a family group's oldest run, so a namespace that stops writing can keep an expired deletion's rows until the namespace is written again or an operator compacts it.)
 
 These times are measured by commit timestamps, which come from writers' clocks. The cutoff scan stops at the first commit whose timestamp is later than the cutoff, so one commit with a late timestamp keeps the floor below that commit, and the deletions committed after it stay recoverable for longer.
 
@@ -180,6 +180,8 @@ If two servers that maintain one store set different windows, the shorter server
 Why don't the ticks advance the floor on their own schedule? An advance checks that the manifest's segments exist and then publishes a manifest. A window measured in days doesn't need a finer schedule than the daily pass, and the full pass publishes nothing for a namespace whose floor has already reached its cutoff. For the same reason, the ticks don't retry a failed advance.
 
 Why does the full pass leave its advance to a tick that's visiting the namespace? The tick might be running a long compaction, so the pass can't wait for it. If the pass skipped the advance instead, the window would be a day longer for the busiest namespaces.
+
+Why does the pass check the acknowledged floor before its own advance, and not after? Right after an advance, every namespace with new history has an acknowledged floor below its retention floor, because no WAL object has been written against the new floor yet. Fencing every such namespace would fence every active writer once a day. Checking the previous pass's floor instead leaves a day for the writer's own commits to acknowledge it, so the pass fences only namespaces that were idle for a day, and a request that arrives during the fence fails once, as after any takeover.
 
 ## Expired deletions in the API
 
@@ -219,9 +221,9 @@ These sections of the specs and guides describe this design.
 | API, [`GET /filesystem/trash`](../specs/api.md#66-get-filesystemtrash) | The listing starts its scan above the floor. |
 | API, [`GET /filesystem/content` and `GET /inodes/{inode_id}/content`](../specs/api.md#67-get-filesystemcontent-and-get-inodesinode_idcontent) and [Download transport](../specs/api.md#610-download-transport) | The inode-addressed read and download routes return `inode_not_found` for an inode that an expired deletion hides, even while its revision rows are kept. |
 | API, [Authorization in ACL namespaces](../specs/api.md#authorization-in-acl-namespaces) | A snapshot read of an inode that an expired deletion hides at the head requires an administrator. |
-| API, [Deleting, retaining, and reclaiming](../specs/api.md#deleting-retaining-and-reclaiming) | The reference server's sweep advances floors under `retention_window_ms`, and deleting a tree reclaims its content once the deletion expires. |
+| API, [Deleting, retaining, and reclaiming](../specs/api.md#deleting-retaining-and-reclaiming) | The reference server's sweep advances and acknowledges floors under `retention_window_ms`, and deleting a tree reclaims its content once the deletion expires. |
 | The [self-hosting guide](../../crates/loonfs-server/docs/self-hosting.md#background-maintenance) and the example configs | The `retention_window_ms` setting, and how the full pass advances floors and tries a failed advance again. |
-| [Maintenance hosting](maintenance-hosting.md#tick-and-daily-pass) | The full pass's retention advance, and the visit that makes the advance when the pass finds the namespace busy. |
+| [Maintenance hosting](maintenance-hosting.md#tick-and-daily-pass) | The full pass's retention advance and acknowledgment, and the visit that makes the advance when the pass finds the namespace busy. |
 
 ## Alternatives considered
 
