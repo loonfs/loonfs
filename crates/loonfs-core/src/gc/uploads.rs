@@ -29,11 +29,10 @@ pub(super) struct ListedUpload {
 
 /// The records in one [`ListedUpload`].
 pub(super) enum ListedUploadKind {
-    /// A session record, followed in the listing by its outcome record when
-    /// `outcome_listed` is true.
+    /// A session record, and whether the listing returned its outcome record.
     Session {
         upload_id: UploadId,
-        outcome_listed: bool,
+        outcome_listing: OutcomeListing,
     },
     /// An outcome record listed without its session record, with the
     /// listing's modification time. It's usually left over from a deletion
@@ -44,6 +43,14 @@ pub(super) enum ListedUploadKind {
     OrphanOutcome { entry: ListedObject },
     /// A key under the uploads prefix that isn't an upload record.
     Unrecognized,
+}
+
+/// Whether a listing of the uploads prefix returned a session's outcome key
+/// after its session key.
+#[derive(Clone, Copy)]
+pub(super) enum OutcomeListing {
+    Listed,
+    Absent,
 }
 
 /// Lists the uploads prefix and pairs each session record with its outcome
@@ -74,10 +81,16 @@ pub(super) fn list_uploads<S: ObjectStore + ?Sized>(
                 })
                 .await
                 .transpose()?;
-            size_bytes += outcome.as_ref().map_or(0, |outcome| outcome.size_bytes);
+            let outcome_listing = match outcome {
+                Some(outcome) => {
+                    size_bytes += outcome.size_bytes;
+                    OutcomeListing::Listed
+                }
+                None => OutcomeListing::Absent,
+            };
             ListedUploadKind::Session {
                 upload_id,
-                outcome_listed: outcome.is_some(),
+                outcome_listing,
             }
         } else if upload_outcome_id_of(&entry.key).is_some() {
             ListedUploadKind::OrphanOutcome { entry }
@@ -126,18 +139,18 @@ pub(super) async fn load_upload_sessions<S: ObjectStore + ?Sized>(
         .try_filter_map(|listed| future::ok(match listed.kind {
             ListedUploadKind::Session {
                 upload_id,
-                outcome_listed,
-            } => Some((upload_id, outcome_listed)),
+                outcome_listing,
+            } => Some((upload_id, outcome_listing)),
             ListedUploadKind::OrphanOutcome { .. } | ListedUploadKind::Unrecognized => None,
         }))
-        .map_ok(|(upload_id, outcome_listed)| async move {
+        .map_ok(|(upload_id, outcome_listing)| async move {
             if let Some(session) = session_cache.and_then(|cache| cache.get(&upload_id)) {
                 return Ok(SessionLookup::Cached(ListedUploadSession::Completed {
                     upload_id,
                     session,
                 }));
             }
-            load_listed_session(store, namespace_id, upload_id, outcome_listed)
+            load_listed_session(store, namespace_id, upload_id, outcome_listing)
                 .await
                 .map(SessionLookup::Read)
         })
@@ -175,9 +188,9 @@ async fn load_listed_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: UploadId,
-    outcome_listed: bool,
+    outcome_listing: OutcomeListing,
 ) -> Result<Option<ListedUploadSession>> {
-    if outcome_listed {
+    if let OutcomeListing::Listed = outcome_listing {
         if let Some(UploadOutcome::Completed {
             completed_at_ms,
             content_ref,
@@ -210,12 +223,11 @@ pub(super) async fn load_swept_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    outcome_listed: bool,
+    outcome_listing: OutcomeListing,
 ) -> Result<Option<UploadSessionState>> {
-    let outcome = if outcome_listed {
-        load_upload_outcome(store, namespace_id, upload_id).await?
-    } else {
-        None
+    let outcome = match outcome_listing {
+        OutcomeListing::Listed => load_upload_outcome(store, namespace_id, upload_id).await?,
+        OutcomeListing::Absent => None,
     };
     Ok(load_upload_session_record(store, namespace_id, upload_id)
         .await?

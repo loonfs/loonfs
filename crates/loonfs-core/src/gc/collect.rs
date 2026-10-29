@@ -56,18 +56,9 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         RetirementStatus::Retained { reclaimable_at_ms } => reclaimable_at_ms,
         _ => None,
     };
-    let content = ContentSweep::load(
-        store,
-        segment_cache,
-        namespace_id,
-        &live,
-        options.content_shard_rows,
-        context.now_ms,
-        MAX_BLOOM_FILTER_BYTES,
-    )
-    .await?;
     let sweep = Sweep {
         store,
+        segment_cache,
         namespace_id,
         grace_window_ms: options.grace_window_ms,
         mutation: context,
@@ -75,10 +66,12 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         session_cache,
         listed_bytes: AtomicU64::new(0),
     };
+    let content =
+        ContentSweep::load(&sweep, options.content_shard_rows, MAX_BLOOM_FILTER_BYTES).await?;
     for family in CandidateFamily::ALL {
         if family == CandidateFamily::Content {
             if let Some(content) = &content {
-                content.sweep(&sweep, &mut report, segment_cache).await?;
+                content.sweep(&sweep, &mut report).await?;
             }
             continue;
         }

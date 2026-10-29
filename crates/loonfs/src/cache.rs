@@ -188,8 +188,7 @@ impl RuntimeCore {
                 self.store(),
                 Some(self.inner.metadata_segment_cache.as_ref()),
                 &loaded,
-            )
-            .await?;
+            )?;
             self.inner.head_and_wal_tail_cache.insert_tail(
                 WalTailCacheKey {
                     namespace_id: namespace_id.clone(),

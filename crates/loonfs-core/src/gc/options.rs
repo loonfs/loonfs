@@ -3,7 +3,6 @@
 use crate::error::{CoreError, Result};
 use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
 use loonfs_types::GcRequest;
-use serde::{Deserialize, Serialize};
 
 /// Default layout rows one content shard covers. A pass picks the shard width
 /// that splits its layout rows into shards of about this many, so it holds the
@@ -11,8 +10,7 @@ use serde::{Deserialize, Serialize};
 const GC_CONTENT_SHARD_ROWS: usize = 65_536;
 
 /// Limits for one namespace collection pass.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct GcOptions {
     pub grace_window_ms: u64,
     pub content_shard_rows: usize,

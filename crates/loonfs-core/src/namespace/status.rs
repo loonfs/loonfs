@@ -66,30 +66,6 @@ pub struct NamespaceStorageDiagnostics {
     pub wal_tail_newest_commit_at_ms: Option<u64>,
 }
 
-impl NamespaceStorageDiagnostics {
-    fn new(
-        head: NamespaceReadState,
-        retention_floor_seq: ChangeSeq,
-        acknowledged_floor_seq: ChangeSeq,
-        current_manifest_no: ManifestNo,
-        wal_tail_objects: u64,
-        wal_tail_newest_commit_at_ms: Option<u64>,
-    ) -> Self {
-        Self {
-            created_at_ms: head.created_at_ms,
-            created_by: head.created_by,
-            fork_basis: fork_basis(head.fork_basis),
-            namespace_id: head.namespace_id,
-            head_seq: head.seq,
-            retention_floor_seq,
-            acknowledged_floor_seq,
-            current_manifest_no,
-            wal_tail_objects,
-            wal_tail_newest_commit_at_ms,
-        }
-    }
-}
-
 fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
     basis.map(|basis| NamespaceForkBasis {
         source_namespace_id: basis.manifest.owner_namespace_id,
@@ -136,19 +112,24 @@ fn namespace_metadata(
 
 impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {
     fn from(anchor: &NamespaceReadAnchor) -> Self {
-        Self::new(
-            anchor.read_state.clone(),
-            anchor.retention_floor_seq(),
-            anchor
+        let head = &anchor.read_state;
+        Self {
+            namespace_id: head.namespace_id.clone(),
+            created_at_ms: head.created_at_ms,
+            created_by: head.created_by.clone(),
+            fork_basis: fork_basis(head.fork_basis.clone()),
+            head_seq: head.seq,
+            retention_floor_seq: anchor.retention_floor_seq(),
+            acknowledged_floor_seq: anchor
                 .manifest
                 .state
                 .envelope
                 .payload()
                 .acknowledged_floor_seq,
-            anchor.manifest.state.manifest().manifest_no,
-            anchor.read_state.unfolded_wal_objects(),
-            anchor.tail.newest_commit_at_ms(),
-        )
+            current_manifest_no: anchor.manifest.state.manifest().manifest_no,
+            wal_tail_objects: head.unfolded_wal_objects(),
+            wal_tail_newest_commit_at_ms: anchor.tail.newest_commit_at_ms(),
+        }
     }
 }
 

@@ -73,9 +73,8 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
     )
     .await
     .expect("anchor");
-    let tail = crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor)
-        .await
-        .expect("tail");
+    let tail =
+        crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor).expect("tail");
     assert_eq!(tail.revisions().count(), 3);
     let rows: Vec<_> = tail.content_layouts().collect();
     assert_eq!(rows.len(), 3);
@@ -296,9 +295,8 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
     )
     .await
     .expect("anchor");
-    let tail = crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor)
-        .await
-        .expect("tail");
+    let tail =
+        crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor).expect("tail");
     let content = tail.content(&reference).expect("pieces");
     let first = write_tail_content(
         &store,
@@ -338,9 +336,8 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     )
     .await
     .expect("anchor");
-    let tail = crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor)
-        .await
-        .expect("tail");
+    let tail =
+        crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor).expect("tail");
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("view");

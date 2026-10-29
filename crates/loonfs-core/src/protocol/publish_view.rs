@@ -20,12 +20,11 @@ use loonfs_types::{ChangeSeq, CommitId, NamespaceId};
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
-    pub(super) head: NamespaceReadState,
     pub(super) acquired_writer: AcquiredWriter,
     /// The tip observation starts with this load rather than a retained view.
     pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
-    position: PublishTailPosition,
+    pub(super) position: PublishTailPosition,
     /// The WAL tail length when it has reached the write-stop bound, so the
     /// tail this publish would extend stays inside it. New commits are refused
     /// with that count; a commit id the namespace already knows is still
@@ -34,8 +33,12 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
+    pub(super) fn head(&self) -> &NamespaceReadState {
+        &self.position.head
+    }
+
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.position.tail)
+        MetadataView::from_loaded_head(self.head(), &self.manifest_segments, &self.position.tail)
     }
 
     pub(crate) fn wal_tail(&self) -> &ProjectedWalTail {
@@ -182,15 +185,15 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         ViewSource::Cached(cached) => {
             let basis = cached.basis().clone();
             let loaded_basis = load_basis_metadata_segments(store, segment_cache, &basis).await?;
-            (basis, loaded_basis, cached.head.clone())
+            (basis, loaded_basis, &cached.head)
         }
         ViewSource::Cold(anchor) => (
             anchor.basis(),
             metadata_basis_from_manifest(store, segment_cache, &anchor.manifest),
-            anchor.read_state.clone(),
+            &anchor.read_state,
         ),
     };
-    ensure_writer_not_fenced(&head, &acquired_writer)?;
+    ensure_writer_not_fenced(head, &acquired_writer)?;
     if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -202,7 +205,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     let position = match source {
         ViewSource::Cached(cached) => *cached,
         ViewSource::Cold(anchor) => {
-            load_publish_tail_position(&head, basis, &loaded_basis, &anchor.tail)?
+            load_publish_tail_position(&anchor.read_state, basis, &loaded_basis, &anchor.tail)?
         }
     };
 
@@ -210,7 +213,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     let wal_tail_objects = position.head.unfolded_wal_objects();
     let write_stop = (wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS).then_some(wal_tail_objects);
     Ok(PublishMetadataView {
-        head,
         acquired_writer,
         tail_discovered,
         manifest_segments,

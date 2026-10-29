@@ -133,7 +133,10 @@ pub fn current_time_ms() -> u64 {
 /// A runtime builder checks this once and refuses to start otherwise, so
 /// [`current_time_ms`] can stay infallible: LoonFS stamps unix milliseconds
 /// into durable state and can't run on a clock that reads before 1970.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the startup check reads the system clock once"
+)]
 pub fn system_clock_reads_after_epoch() -> bool {
     reads_after_epoch(SystemTime::now())
 }

@@ -370,7 +370,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             run_policy: crate::manifest::MetadataRunPolicy::default(),
             segment_cache: None,
             #[cfg(any(test, feature = "test-support"))]
-            #[cfg(any(test, feature = "test-support"))]
             segment_row_budget: None,
         }
     }

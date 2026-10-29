@@ -102,7 +102,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     assert_eq!(
-        view.head.namespace_id, *namespace_id,
+        view.head().namespace_id,
+        *namespace_id,
         "a batch should publish against its own namespace's view"
     );
     let elapsed_before_attempt_ms = clock.batch.elapsed_at(&clock.attempt);
@@ -111,9 +112,9 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         .checked_add(elapsed_before_attempt_ms)
         .expect("the admission time should fit in `u64` milliseconds");
     let mut slots = Vec::with_capacity(candidates.len());
-    let mut session = PublishPlanningSession::new(&view.head, view.wal_tail());
+    let mut session = PublishPlanningSession::new(view.head(), view.wal_tail());
     let mut accepted_payloads = Vec::new();
-    let mut next_inode_id = view.head.next_inode_id;
+    let mut next_inode_id = view.head().next_inode_id;
     let mut wal_bytes = WAL_OBJECT_OVERHEAD_BYTES;
     let mut wal_inline_bytes = 0_usize;
     let mut dedup = BatchDedup::default();
@@ -230,7 +231,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     let wal = match prepare_wal_object_from_payloads(
         namespace_id.clone(),
         view.acquired_writer.writer_epoch,
-        &view.head,
+        view.head(),
         view.retention_floor_seq(),
         next_inode_id,
         accepted_payloads,
@@ -238,7 +239,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         Ok(wal) => wal,
         Err(error) => return abort_batch(slots, &error),
     };
-    let resulting_head = view.head.after_wal_object(wal.envelope().payload());
+    let resulting_head = view.head().after_wal_object(wal.envelope().payload());
     let elapsed_ms = clock.batch.elapsed_ms();
     let publication_now_ms = context
         .now_ms
@@ -504,7 +505,7 @@ mod tests {
 
         // Change only the in-memory head so this exercises the sequence limit
         // without modifying the stored metadata.
-        view.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
+        view.position.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
         let candidate = CommitCandidate::new(CommitIntent::single(
             CommitId::parse("past-sequence-limit").expect("commit id"),
             loonfs_test_support::test_actor(),

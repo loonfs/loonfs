@@ -109,7 +109,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     dedup: &mut BatchDedup,
 ) -> CandidateAdmission {
     if let Err(error) =
-        Authorizer::for_request(namespace_id, &view.head.access, candidate.authority())
+        Authorizer::for_request(namespace_id, &view.head().access, candidate.authority())
     {
         return CandidateAdmission::independent(Err(error));
     }
@@ -244,7 +244,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
             committed_fingerprint: Some(commit.semantic_commit_fingerprint.clone()),
         });
     }
-    super::changes::committed_change_from_wal_record(&view.head.namespace_id, &commit)
+    super::changes::committed_change_from_wal_record(&view.head().namespace_id, &commit)
 }
 
 pub(crate) fn validate_inline_content_references<'a>(

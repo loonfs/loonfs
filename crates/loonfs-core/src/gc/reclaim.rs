@@ -1,8 +1,8 @@
 //! Content and source-pin cleanup for an eligible tombstone.
 
 use super::deletes::apply_decisions;
-use super::fork_pins::delete_source_pin;
 use super::live_set::{LiveSet, RetirementStatus};
+use super::pins::delete_source_pin;
 use super::sweep::Decision;
 use crate::error::{CoreError, Result};
 use futures::TryStreamExt;

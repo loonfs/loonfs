@@ -4,10 +4,10 @@
 use super::charged_set::{Charge, ChargedSet};
 use super::deletes::apply_decisions;
 use super::live_set::LiveSet;
-use super::sweep::Sweep;
+use super::sweep::{ContentReference, Sweep};
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
-use crate::manifest::{visit_segment_rows, MetadataSegmentCache, ScanDescriptor};
+use crate::manifest::{visit_segment_rows, ScanDescriptor};
 use crate::metadata::row_decode::content_layout_from_manifest_row;
 use crate::storage::content_location::extent_object_key;
 use futures::TryStreamExt;
@@ -16,7 +16,7 @@ use loonfs_objectstore::layout::content_id_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ContentLayoutRecord, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
-use loonfs_types::{ContentExtent, GcResponse, NamespaceId};
+use loonfs_types::{ContentExtent, GcResponse};
 use std::ops::ControlFlow;
 
 /// Values one hex digit of a content ID takes, so each digit of shard width
@@ -53,14 +53,12 @@ pub(super) struct ContentSweep<'a> {
 
 impl<'a> ContentSweep<'a> {
     pub(super) async fn load<S: ObjectStore + ?Sized>(
-        store: &S,
-        cache: Option<&MetadataSegmentCache>,
-        namespace_id: &NamespaceId,
-        live: &'a LiveSet,
+        sweep: &Sweep<'a, S>,
         shard_rows: usize,
-        seed: u64,
         max_bytes: usize,
     ) -> Result<Option<Self>> {
+        let live = sweep.live;
+        let namespace_id = sweep.namespace_id;
         if live.current_tombstone.is_some() {
             tracing::info!(namespace_id = %namespace_id, shard_width = 0,
                 layout_segments = 0, "collecting namespace");
@@ -79,21 +77,23 @@ impl<'a> ContentSweep<'a> {
                 "shared base filter exceeded its byte limit; skipped content sweep");
             return Ok(None);
         }
-        let mut shared = BloomFilter::with_max_bytes(expected_entries, seed, max_bytes);
+        // The pass time seeds the filter, so a false match on an unreferenced
+        // object in one pass is unlikely to repeat in the next pass.
+        let mut shared =
+            BloomFilter::with_max_bytes(expected_entries, sweep.mutation.now_ms, max_bytes);
         tracing::info!(namespace_id = %namespace_id, shard_width,
             layout_segments = segments.len(), "collecting namespace");
-        let scanned =
-            scan_layout_extents(store, cache, namespace_id, &segments, "", |row, extent| {
-                if extent.content_id != row.content_id
-                    && shared
-                        .insert(extent_object_key(extent).as_bytes())
-                        .is_none()
-                {
-                    return Ok(ControlFlow::Break(()));
-                }
-                Ok(ControlFlow::Continue(()))
-            })
-            .await?;
+        let scanned = scan_layout_extents(sweep, &segments, "", |row, extent| {
+            if extent.content_id != row.content_id
+                && shared
+                    .insert(extent_object_key(extent).as_bytes())
+                    .is_none()
+            {
+                return Ok(ControlFlow::Break(()));
+            }
+            Ok(ControlFlow::Continue(()))
+        })
+        .await?;
         if scanned.is_break() {
             tracing::info!(namespace_id = %namespace_id, shard_width, layout_segments = segments.len(), expected_entries,
                 "shared base filter exceeded its byte limit; skipped content sweep");
@@ -111,7 +111,6 @@ impl<'a> ContentSweep<'a> {
         &self,
         sweep: &Sweep<'_, S>,
         report: &mut GcResponse,
-        cache: Option<&MetadataSegmentCache>,
     ) -> Result<()> {
         for shard in 0..SHARDS_PER_HEX_DIGIT.pow(self.shard_width) {
             let id_prefix = if self.shard_width == 0 {
@@ -120,19 +119,12 @@ impl<'a> ContentSweep<'a> {
                 format!("con_{shard:0width$x}", width = self.shard_width as usize)
             };
             let mut keys = ChargedSet::new(&sweep.live.memory);
-            let _ = scan_layout_extents(
-                sweep.store,
-                cache,
-                sweep.namespace_id,
-                &self.segments,
-                &id_prefix,
-                |_, extent| {
-                    if extent.content_id.as_str().starts_with(&id_prefix) {
-                        keys.insert(extent_object_key(extent))?;
-                    }
-                    Ok(ControlFlow::Continue(()))
-                },
-            )
+            let _ = scan_layout_extents(sweep, &self.segments, &id_prefix, |_, extent| {
+                if extent.content_id.as_str().starts_with(&id_prefix) {
+                    keys.insert(extent_object_key(extent))?;
+                }
+                Ok(ControlFlow::Continue(()))
+            })
             .await?;
             let prefix = format!("{}{id_prefix}", content_prefix(sweep.namespace_id));
             let decisions = sweep
@@ -140,11 +132,16 @@ impl<'a> ContentSweep<'a> {
                 .list_entries_from_stream(&prefix, None)
                 .map_err(|error| CoreError::store(&prefix, &error))
                 .map_ok(|entry| {
-                    let protected = keys.contains(entry.key.as_str())
+                    let reference = if keys.contains(entry.key.as_str())
                         || self.shared.may_contain(entry.key.as_bytes())
                         || content_id_of(&entry.key)
-                            .is_some_and(|id| sweep.live.content_ids.contains(&id));
-                    sweep.content_candidate(entry, protected)
+                            .is_some_and(|id| sweep.live.content_ids.contains(&id))
+                    {
+                        ContentReference::Referenced
+                    } else {
+                        ContentReference::Unreferenced
+                    };
+                    sweep.content_candidate(entry, reference)
                 });
             apply_decisions(sweep.store, decisions, report).await?;
         }
@@ -183,9 +180,7 @@ fn distinct_layout_segments(live: &LiveSet) -> Result<(Vec<ScanDescriptor<'_>>, 
 }
 
 async fn scan_layout_extents<S: ObjectStore + ?Sized>(
-    store: &S,
-    cache: Option<&MetadataSegmentCache>,
-    namespace_id: &NamespaceId,
+    sweep: &Sweep<'_, S>,
     segments: &[ScanDescriptor<'_>],
     id_prefix: &str,
     mut visit: impl FnMut(&ContentLayoutRecord, &ContentExtent) -> Result<ControlFlow<()>>,
@@ -196,15 +191,17 @@ async fn scan_layout_extents<S: ObjectStore + ?Sized>(
     );
     let upper_bound = string_prefix_upper_bound(&prefix);
     visit_segment_rows(
-        store,
-        cache,
+        sweep.store,
+        sweep.segment_cache,
         segments,
         &prefix,
         upper_bound.as_deref(),
         |row| {
             let row = content_layout_from_manifest_row(row)?;
             for extent in &row.layout.extents {
-                if extent.owner_namespace_id == *namespace_id && visit(&row, extent)?.is_break() {
+                if extent.owner_namespace_id == *sweep.namespace_id
+                    && visit(&row, extent)?.is_break()
+                {
                     return Ok(ControlFlow::Break(()));
                 }
             }

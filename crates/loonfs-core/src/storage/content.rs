@@ -27,7 +27,10 @@ use tokio::sync::oneshot;
 
 /// Confirms that LoonFS durably stored the content described by this
 /// reference.
-#[allow(unreachable_pub)]
+#[allow(
+    unreachable_pub,
+    reason = "`crate::content` re-exports the type only in test and test-support builds"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContent {
     #[cfg(any(test, feature = "test-support"))]
@@ -35,7 +38,7 @@ pub struct StoredContent {
     pub(crate) content_ref: ContentRef,
 }
 
-#[allow(dead_code, unreachable_pub)]
+#[cfg(any(test, feature = "test-support"))]
 impl StoredContent {
     pub fn content_ref(&self) -> &ContentRef {
         &self.content_ref
@@ -45,7 +48,6 @@ impl StoredContent {
         self.content_ref
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn object_key(&self) -> &str {
         &self.object_key
     }
