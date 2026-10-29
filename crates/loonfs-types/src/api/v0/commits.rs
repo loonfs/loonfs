@@ -1,8 +1,9 @@
-//! Commit responses and change-feed shapes for the v0 HTTP API.
+//! Commit requests, commit responses, and change-feed shapes for the v0 HTTP API.
 
+use super::{ContentToken, FilesystemOperation};
 use crate::{
-    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, BindingVersion, ChangeSeq,
-    CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
+    AbsolutePath, AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, BindingVersion,
+    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -209,13 +210,157 @@ pub struct ListChangesResponse {
     pub changes: Vec<Commit>,
 }
 
+/// A condition that a commit must meet before its operations run.
+///
+/// The server checks each condition against the state before the commit. When several commits are
+/// applied as one batch, that state's head sequence is the sequence of the last commit admitted
+/// earlier in the batch, or the batch's starting head sequence if no earlier commit was admitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CommitPrecondition {
+    /// A requirement that the head sequence before the commit equals `expected_head_seq`.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionNamespaceHead"))]
+    NamespaceHead {
+        /// The head sequence that the caller observed when it read its inputs.
+        expected_head_seq: ChangeSeq,
+    },
+    /// A requirement that the inode is visible and has the content revision that the caller read.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionFileRevision"))]
+    FileRevision {
+        /// The inode whose state the caller read.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// The content revision that the caller observed.
+        expected_revision_no: RevisionNo,
+    },
+    /// A requirement that the path still has the binding that the caller read.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionPathBinding"))]
+    PathBinding {
+        /// The absolute path to check, which can be the root.
+        path: AbsolutePath,
+        /// The inode that the path must be bound to.
+        #[serde(with = "crate::public_inode_id")]
+        expected_inode_id: InodeId,
+        /// The binding version that the path must also have, if set. This check detects an inode
+        /// that was moved away from the path and then back.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_binding_version: Option<BindingVersion>,
+    },
+    /// A requirement that a visible inode still has the binding that the caller read.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionInodeBinding"))]
+    InodeBinding {
+        /// The inode whose binding the caller read.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// The binding version that the caller observed.
+        expected_binding_version: BindingVersion,
+    },
+    /// A requirement that the inode is visible and has the attribute revision that the caller read.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CommitPreconditionAttributesRevision")
+    )]
+    AttributesRevision {
+        /// The inode whose state the caller read.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// The attribute revision that the caller observed.
+        expected_attributes_revision_no: AttributesRevisionNo,
+    },
+    /// A requirement that the inode is visible and has the access revision that the caller read.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CommitPreconditionAccessRevision")
+    )]
+    AccessRevision {
+        /// The inode whose state the caller read.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// The access revision that the caller observed.
+        expected_access_revision_no: AccessRevisionNo,
+    },
+    /// A requirement that no visible entry exists at the full path.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionPathAbsence"))]
+    PathAbsence {
+        /// The absolute path to check, which can be the root.
+        path: AbsolutePath,
+    },
+    /// A requirement that no visible entry with this name exists under the parent inode.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionNameAbsence"))]
+    NameAbsence {
+        /// The directory to check.
+        #[serde(with = "crate::public_inode_id")]
+        parent_inode_id: InodeId,
+        /// The name to check.
+        display_name: DisplayName,
+    },
+}
+
+/// A request to commit one or more filesystem operations atomically, in order.
+///
+/// The server rejects unknown fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CommitRequest {
+    /// The caller's idempotency key for the whole request.
+    pub commit_id: CommitId,
+    /// An annotation from the caller. The message is part of the commit's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub message: Option<String>,
+    /// One content token for each uploaded `content_ref` that the request uses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_tokens: Vec<ContentToken>,
+    /// The conditions that the server checks, in order, before it runs any operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preconditions: Vec<CommitPrecondition>,
+    /// The operations to commit atomically, in order. The list can't be empty.
+    pub operations: Vec<FilesystemOperation>,
+}
+
+impl CommitRequest {
+    /// Sets the admission conditions in caller order.
+    pub fn preconditions(mut self, preconditions: Vec<CommitPrecondition>) -> Self {
+        self.preconditions = preconditions;
+        self
+    }
+
+    /// Builds a request with exactly one operation.
+    pub fn single(
+        commit_id: CommitId,
+        message: Option<String>,
+        operation: FilesystemOperation,
+    ) -> Self {
+        Self {
+            commit_id,
+            message,
+            content_tokens: Vec::new(),
+            preconditions: Vec::new(),
+            operations: vec![operation],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Commit, FilesystemChange};
-    use crate::{AccessRevisionNo, InodeId};
+    use super::{Commit, CommitPrecondition, CommitRequest, FilesystemChange, FilesystemOperation};
+    use crate::{AccessRevisionNo, ContentId, ContentRef, InodeId, RevisionNo};
+    use std::assert_matches;
 
     fn binding_version() -> crate::BindingVersion {
         crate::BindingVersion::parse("abcdef").expect("binding version")
+    }
+
+    fn sample_content_ref() -> ContentRef {
+        ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id"),
+            b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
+        )
     }
 
     #[test]
@@ -457,5 +602,145 @@ mod tests {
             serde_json::to_string(&access_changed).expect("serialize access event"),
             r#"{"kind":"access_changed","inode_id":"ino_2","access_revision_no":3,"boundary":true,"grants":{"prn_ada":["read","write"]}}"#
         );
+    }
+
+    #[test]
+    fn path_preconditions_reject_ambiguous_shapes() {
+        let missing = serde_json::from_value::<CommitPrecondition>(
+            serde_json::json!({"kind": "path_binding", "path": "/docs/input"}),
+        )
+        .expect_err("binding requires an inode");
+        assert!(
+            missing.to_string().contains("expected_inode_id"),
+            "{missing}"
+        );
+        serde_json::from_value::<CommitPrecondition>(serde_json::json!({
+            "kind": "path_binding", "path": "/docs/input", "expected_inode_id": null
+        }))
+        .expect_err("a null inode is not an absence check");
+        let error = serde_json::from_value::<CommitPrecondition>(serde_json::json!({
+            "kind": "path_absence", "path": "/docs/input", "expected_inode_id": "ino_42"
+        }))
+        .expect_err("absence accepts only a path");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `expected_inode_id`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_precondition_does_not_decode() {
+        let put = |precondition: &str| {
+            let mut operation = serde_json::json!({
+                "kind": "put_file",
+                "path": "/docs/a.txt",
+                "content_ref": sample_content_ref(),
+                "behavior": "replace",
+                "expected_inode_id": "ino_7"
+            });
+            operation[precondition] = serde_json::json!(3);
+            serde_json::json!({
+                "commit_id": "with_preconditions-put",
+                "operations": [operation]
+            })
+        };
+
+        let spelled: CommitRequest = serde_json::from_value(put("expected_revision_no"))
+            .expect("the precondition spelled correctly decodes");
+        assert_matches!(
+            spelled.operations.as_slice(),
+            [FilesystemOperation::PutFile {
+                expected_revision_no: Some(RevisionNo(3)),
+                ..
+            }]
+        );
+
+        for misspelling in ["expected_revsion_no", "expectedRevisionNo"] {
+            serde_json::from_value::<CommitRequest>(put(misspelling)).expect_err(&format!(
+                "`{misspelling}` decoded instead of failing the request"
+            ));
+        }
+    }
+
+    #[test]
+    fn expected_revision_no_must_fit_the_public_integer_range() {
+        let body = |expected_revision_no: u64| {
+            serde_json::json!({
+                "commit_id": "bounded-revision-precondition",
+                "operations": [{
+                    "kind": "put_file",
+                    "path": "/docs/a.txt",
+                    "content_ref": sample_content_ref(),
+                    "behavior": "replace",
+                    "expected_inode_id": "ino_7",
+                    "expected_revision_no": expected_revision_no
+                }]
+            })
+        };
+
+        let request: CommitRequest = serde_json::from_value(body(crate::MAX_PUBLIC_INTEGER))
+            .expect("deserialize the maximum revision number");
+        assert_matches!(
+            request.operations.as_slice(),
+            [FilesystemOperation::PutFile {
+                expected_revision_no: Some(RevisionNo(value)),
+                ..
+            }] if *value == crate::MAX_PUBLIC_INTEGER
+        );
+
+        let error = serde_json::from_value::<CommitRequest>(body(crate::MAX_PUBLIC_INTEGER + 1))
+            .expect_err("reject a revision number above the public limit");
+        assert!(
+            error
+                .to_string()
+                .contains("must be an integer from 0 through 9007199254740991"),
+            "unexpected range error: {error}"
+        );
+    }
+
+    #[test]
+    fn a_commit_request_rejects_unknown_fields_at_every_level() {
+        let valid = || {
+            serde_json::json!({
+                "commit_id": "strict-commit",
+                "content_tokens": [{
+                    "content_ref": sample_content_ref(),
+                    "token": "opaque-proof"
+                }],
+                "operations": [{
+                    "kind": "update_attributes",
+                    "path": "/docs/a.txt",
+                    "set": {"owner": "ada"},
+                    "expected_inode_id": "ino_7"
+                }]
+            })
+        };
+        serde_json::from_value::<CommitRequest>(valid())
+            .expect("the same body without a typo decodes");
+
+        let mut at_root = valid();
+        at_root["mesage"] = serde_json::json!("a note");
+
+        let mut in_operation = valid();
+        in_operation["operations"][0]["expectedAttributesRevisionNo"] = serde_json::json!(3);
+
+        let mut in_content_token = valid();
+        in_content_token["content_tokens"][0]["expires_at_ms"] = serde_json::json!(1);
+
+        let mut in_content_ref = valid();
+        in_content_ref["content_tokens"][0]["content_ref"]["sizeBytes"] = serde_json::json!(5);
+
+        for (level, body) in [
+            ("the request root", at_root),
+            ("an operation variant", in_operation),
+            ("a nested content token", in_content_token),
+            ("a content ref below that", in_content_ref),
+        ] {
+            serde_json::from_value::<CommitRequest>(body).expect_err(&format!(
+                "an unknown field in {level} decoded instead of failing the request"
+            ));
+        }
     }
 }

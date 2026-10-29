@@ -1,6 +1,6 @@
-//! The absolute-path grammar: parsing, components, and display names.
+//! The absolute-path grammar: parsing, components, display names, and inode kinds.
 
-use crate::ids::string_id;
+use crate::id_macros::string_id;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
@@ -496,6 +496,36 @@ impl PathError {
             | Self::PathTooLong { .. }
             | Self::PathTooDeep { .. } => "",
         }
+    }
+}
+
+/// The kind of a filesystem item, which is a file or a directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum InodeKind {
+    /// A file, which has a revision history.
+    File,
+    /// A directory, which has child bindings.
+    ///
+    /// The wire value is always `"dir"`, and only the Rust variant name spells out the whole word.
+    #[serde(rename = "dir")]
+    Directory,
+}
+
+impl InodeKind {
+    /// Returns the serialized value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "dir",
+        }
+    }
+}
+
+impl fmt::Display for InodeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

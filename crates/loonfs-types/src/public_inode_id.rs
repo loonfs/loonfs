@@ -3,7 +3,7 @@
 //! Public IDs use the form `ino_<number>`. They are scoped to a namespace and
 //! should be treated as identifiers rather than numbers.
 
-use crate::ids::validation_error;
+use crate::id_macros::validation_error;
 use crate::InodeId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;

@@ -3,7 +3,7 @@
 //! Use a stable ID such as `usr_8f3c`, rather than an email address or display
 //! name. Profile changes should not change the actor recorded in file history.
 
-use crate::ids::{string_id, validation_error};
+use crate::id_macros::{string_id, validation_error};
 use thiserror::Error;
 
 /// Most bytes one actor id may hold.

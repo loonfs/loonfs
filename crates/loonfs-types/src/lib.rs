@@ -25,6 +25,7 @@ pub mod env;
 mod envelope;
 mod error;
 mod hex;
+mod id_macros;
 mod ids;
 mod layout;
 mod manifest;
@@ -129,8 +130,8 @@ pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, next_public_ordinal, BindingVersion, BindingVersionValidationError, ChangeSeq,
     CommitId, CommitIdValidationError, CompactorEpoch, ContentId, GeneratedIdValidationError,
-    IndexSegmentId, InodeId, InodeKind, ManifestNo, MetadataCompactionId, MetadataSegmentId,
-    NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PinId, ProbeRunId,
+    IndexSegmentId, InodeId, ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey,
+    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PinId, ProbeRunId,
     PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch, WriterId,
     WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
     MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
@@ -148,8 +149,8 @@ pub use pagination::{
     PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
-    AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES, MAX_PATH_BYTES,
-    MAX_PATH_DEPTH,
+    AbsolutePath, DisplayName, InodeKind, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES,
+    MAX_PATH_BYTES, MAX_PATH_DEPTH,
 };
 pub use retry::{
     saturating_duration_ms, transport_retry_backoff, MonotonicTimer, OperationDeadline,

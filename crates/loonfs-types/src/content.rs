@@ -1,7 +1,8 @@
 //! Immutable content references and their checksums.
 
 use crate::hex::{hex_encode_bytes, is_lower_hex_byte, HexDecodeError};
-use crate::ids::{string_id, validation_error, ContentId, NamespaceId};
+use crate::id_macros::{string_id, validation_error};
+use crate::ids::{ContentId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
