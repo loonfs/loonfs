@@ -189,8 +189,8 @@ pub(crate) fn canonical_query_string(query: &BTreeMap<String, String>) -> String
         .map(|(key, value)| {
             format!(
                 "{}={}",
-                percent_encode_query(key),
-                percent_encode_query(value)
+                percent_encode_segment(key),
+                percent_encode_segment(value)
             )
         })
         .collect::<Vec<_>>()
@@ -211,10 +211,6 @@ pub(crate) fn percent_encode_segment(value: &str) -> String {
 
 pub(crate) fn normalize_header_value(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn percent_encode_query(value: &str) -> String {
-    percent_encode_bytes(value.as_bytes())
 }
 
 fn percent_encode_bytes(bytes: &[u8]) -> String {

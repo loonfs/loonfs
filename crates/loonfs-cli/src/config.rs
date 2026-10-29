@@ -2,6 +2,7 @@
 
 use crate::error::CliError;
 use loonfs_client::ClientConfig;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_types::config::{validate_non_empty, ConfigFieldError};
 use loonfs_types::env::AUTH_TOKEN_ENV;
 use loonfs_types::{
@@ -242,7 +243,7 @@ impl ProfileConfig {
 
     pub(crate) fn ensure_store_usable(&self, name: &str) -> Result<(), CliError> {
         if let Self::Embedded {
-            store: StoreConfig::LocalFs { root, .. },
+            store: StoreConfig::LocalFs(LocalFsStoreConfig { root, .. }),
             ..
         } = self
         {

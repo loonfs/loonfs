@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{BoxStream, TryStreamExt};
+use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm, EffectiveLimit, Page};
 use std::borrow::Cow;
 use std::fmt::Debug;
@@ -108,7 +108,7 @@ pub struct ObjectBody {
     /// Identity, size, and modification metadata observed with these exact bytes.
     pub metadata: ObjectMetadata,
     /// Complete object payload from the same read as `metadata`.
-    pub bytes: Vec<u8>,
+    pub bytes: Bytes,
 }
 
 /// Controls the write semantics of a `put` call.
@@ -132,12 +132,29 @@ pub struct ByteRange {
     pub end_exclusive: u64,
 }
 
+impl ByteRange {
+    /// Returns the number of bytes the range selects, which is zero for a
+    /// descending range.
+    pub(crate) fn len_bytes(&self) -> u64 {
+        self.end_exclusive.saturating_sub(self.start_inclusive)
+    }
+
+    /// Returns the HTTP `Range` header value that selects this range,
+    /// `bytes={first}-{last}`, or `None` for an empty range, which HTTP can't
+    /// express.
+    pub(crate) fn http_range_header(&self) -> Option<String> {
+        (self.start_inclusive < self.end_exclusive)
+            .then(|| format!("bytes={}-{}", self.start_inclusive, self.end_exclusive - 1))
+    }
+}
+
 /// Failure of one object-store operation.
 ///
 /// Every object-scoped variant names the object it is about via `object_key`
 /// (for list operations, the listed prefix). The exceptions are deliberate:
-/// `InvalidContentRef` fails before a key exists, `Unsupported` is about a
-/// store capability, and `Configuration` is about store construction.
+/// `BodyAborted` comes from a body's producer, which doesn't know the key the
+/// body is written to, `Unsupported` is about a store capability, and
+/// `Configuration` is about store construction.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ObjectStoreError {
@@ -155,9 +172,20 @@ pub enum ObjectStoreError {
         /// Specific key-validation failure.
         message: String,
     },
-    /// Not object-scoped: the content ref never resolved to an object key.
-    #[error("invalid content ref: {0}")]
-    InvalidContentRef(String),
+    /// Reports input that the store refuses before it sends a request, such
+    /// as an empty multipart part list or a part checksum in another
+    /// algorithm.
+    #[error("invalid request for `{object_key}`: {message}")]
+    InvalidRequest {
+        /// Object the refused request targeted.
+        object_key: String,
+        /// Specific input-validation failure.
+        message: String,
+    },
+    /// Not object-scoped: the producer of a streamed body ended the body with
+    /// this failure, so the write stored nothing.
+    #[error("body aborted by its producer: {0}")]
+    BodyAborted(String),
     /// Reports a byte range whose bounds cannot select a valid position in the object.
     #[error("invalid byte range for `{object_key}`")]
     InvalidRange {
@@ -238,7 +266,8 @@ pub fn required_etag(object_key: &str, etag: Option<String>) -> Result<String> {
 pub enum ObjectStoreErrorKind {
     /// A required object was absent.
     NotFound,
-    /// A content reference or byte range was invalid.
+    /// The store refused the request's input, such as a byte range or a part
+    /// list, or the body's producer aborted the body.
     InvalidRequest,
     /// An object key or listing prefix was invalid.
     InvalidKey,
@@ -333,7 +362,7 @@ impl ObjectStoreError {
         match self {
             Self::NotFound { .. } => ObjectStoreErrorKind::NotFound,
             Self::InvalidKey { .. } => ObjectStoreErrorKind::InvalidKey,
-            Self::InvalidContentRef(_) | Self::InvalidRange { .. } => {
+            Self::InvalidRequest { .. } | Self::BodyAborted(_) | Self::InvalidRange { .. } => {
                 ObjectStoreErrorKind::InvalidRequest
             }
             Self::PreconditionFailed { .. } | Self::DifferentObject { .. } => {
@@ -364,6 +393,7 @@ impl ObjectStoreError {
         match self {
             Self::NotFound { object_key }
             | Self::InvalidKey { object_key, .. }
+            | Self::InvalidRequest { object_key, .. }
             | Self::InvalidRange { object_key }
             | Self::PreconditionFailed { object_key }
             | Self::PermissionDenied { object_key, .. }
@@ -371,7 +401,7 @@ impl ObjectStoreError {
             | Self::ChecksumMismatch { object_key }
             | Self::DifferentObject { object_key }
             | Self::Transport { object_key, .. } => Some(object_key),
-            Self::InvalidContentRef(_) | Self::Unsupported(_) | Self::Configuration(_) => None,
+            Self::BodyAborted(_) | Self::Unsupported(_) | Self::Configuration(_) => None,
         }
     }
 }
@@ -387,6 +417,21 @@ const CLIENT_MULTIPART_UPLOAD: &str = "client-driven multipart upload";
 /// upload.
 pub(crate) fn unsupported_multipart() -> ObjectStoreError {
     ObjectStoreError::Unsupported(CLIENT_MULTIPART_UPLOAD)
+}
+
+/// Returns a listing stream that reports `error` as its only item.
+pub(crate) fn error_stream<T: Send + 'static>(
+    error: ObjectStoreError,
+) -> BoxStream<'static, Result<T>> {
+    stream::once(std::future::ready(Err(error))).boxed()
+}
+
+/// Returns the error for input that the store refuses to send to `key`.
+pub(crate) fn invalid_request(key: &str, message: &str) -> ObjectStoreError {
+    ObjectStoreError::InvalidRequest {
+        object_key: key.to_owned(),
+        message: message.to_owned(),
+    }
 }
 
 /// Defines the provider-independent durability and consistency boundary LoonFS relies on.
@@ -586,17 +631,16 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Creates an immutable object and accepts an occupied key only when its stored
     /// checksum equals the checksum of `bytes`.
     ///
-    /// Retryable transport failures retry under one operation deadline. When
-    /// the key is occupied, the write fails with
+    /// The default sends one create. A provider store sends it again after a
+    /// retryable transport failure, under one operation deadline. When the
+    /// key is occupied, the write fails with
     /// [`ObjectStoreError::DifferentObject`] if the stored checksum differs,
     /// and with [`ObjectStoreError::StoredChecksumMissing`] if there's no
     /// stored checksum.
     async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
-        // A store without a limiter of its own spaces the retry warnings of
-        // this one write only.
-        let warnings =
-            crate::retry::RetryWarnings::new(Arc::new(crate::timing::StdMonotonicTimer::default()));
-        crate::immutable_write::put(self, &warnings, key, bytes).await
+        let expected = Checksum::compute(self.checksum_algorithm(), &bytes);
+        let created = self.put(key, bytes, PutMode::CreateIfAbsent).await;
+        crate::immutable_write::verify_created(self, key, &expected, created).await
     }
 
     /// Creates `key` from `sources` in order followed by the pieces in `tail`.

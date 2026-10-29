@@ -38,13 +38,7 @@ impl PresignedGetRequest<'_> {
     /// Returns the `Range` header value the capability signs,
     /// `bytes={first}-{last}`, or `None` for an empty range.
     pub fn range_header(&self) -> Option<String> {
-        (self.range.start_inclusive < self.range.end_exclusive).then(|| {
-            format!(
-                "bytes={}-{}",
-                self.range.start_inclusive,
-                self.range.end_exclusive - 1
-            )
-        })
+        self.range.http_range_header()
     }
 
     pub(crate) fn signed_headers(&self) -> BTreeMap<String, String> {
@@ -69,6 +63,27 @@ pub struct PresignedPartRequest<'a> {
     /// Requested lifetime measured from the supplied signing time. Temporary
     /// credentials can impose an earlier expiry, reported by the issued URL.
     pub ttl: Duration,
+}
+
+/// Describes one `UploadPartCopy` of a source object's range into part
+/// `part_number` of an open multipart upload, signed for LoonFS's own use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PresignedCopyPartRequest<'a> {
+    /// Logical unscoped object key the finished upload assembles into.
+    pub(crate) object_key: &'a str,
+    /// Provider-side upload the part belongs to.
+    pub(crate) provider_upload_id: &'a str,
+    /// One-based part number.
+    pub(crate) part_number: u32,
+    /// Logical unscoped key of the object the part is copied from.
+    pub(crate) source_key: &'a str,
+    /// The bytes of the source object that the part copies.
+    pub(crate) source_range: &'a ByteRange,
+    /// The ETag the source object must still have, or `None` to copy it
+    /// unconditionally.
+    pub(crate) source_etag: Option<&'a str>,
+    /// Requested lifetime measured from the supplied signing time.
+    pub(crate) ttl: Duration,
 }
 
 /// Carries a short-lived HTTP capability and every request header covered by its signature.

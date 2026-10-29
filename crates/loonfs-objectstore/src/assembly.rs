@@ -6,8 +6,9 @@ use crate::{
     PROVIDER_MIN_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use bytes::Bytes;
-use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
+use futures::stream::{self, BoxStream, Stream, StreamExt, TryStreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest};
+use std::future::Future;
 
 pub(crate) const READ_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const R2_PART_BYTES: u64 = 64 * 1024 * 1024;
@@ -22,6 +23,40 @@ pub(crate) const R2_PART_BYTES: u64 = 64 * 1024 * 1024;
 const _: () = assert!(PROVIDER_MULTIPART_THRESHOLD_BYTES <= READ_BYTES);
 const _: () = assert!(PROVIDER_MIN_MULTIPART_PART_BYTES <= READ_BYTES);
 const _: () = assert!(PROVIDER_MULTIPART_THRESHOLD_BYTES <= R2_PART_BYTES);
+
+/// One assembly source, with its byte range resolved against the metadata
+/// its caller observed.
+pub(crate) struct ResolvedSource<'a> {
+    pub(crate) source: &'a AssemblySource,
+    pub(crate) range: ByteRange,
+}
+
+impl ResolvedSource<'_> {
+    /// Returns the version of the source that its caller observed, which a
+    /// read or a copy of the source is conditioned on.
+    pub(crate) fn etag(&self) -> Result<String> {
+        crate::required_etag(&self.source.key, self.source.metadata.etag.clone())
+    }
+}
+
+/// Resolves the byte range of every source, and fails when a range doesn't
+/// fit its object.
+pub(crate) fn resolve_sources(sources: &[AssemblySource]) -> Result<Vec<ResolvedSource<'_>>> {
+    sources
+        .iter()
+        .map(|source| {
+            Ok(ResolvedSource {
+                source,
+                range: source_range(source, source.metadata.size_bytes)?,
+            })
+        })
+        .collect()
+}
+
+/// Returns the length of an assembly's tail.
+pub(crate) fn tail_bytes(tail: &[Bytes]) -> u64 {
+    tail.iter().map(|piece| piece.len() as u64).sum()
+}
 
 pub(crate) fn source_range(source: &AssemblySource, size_bytes: u64) -> Result<ByteRange> {
     let range = source.range.clone().unwrap_or(ByteRange {
@@ -50,13 +85,91 @@ pub(crate) fn assembled_size_bytes(sources: &[AssemblySource], tail: &[Bytes]) -
                 })
         })
         .sum::<u64>()
-        + tail.iter().map(|piece| piece.len() as u64).sum::<u64>()
+        + tail_bytes(tail)
 }
 
 pub(crate) fn missing_source(key: &str) -> ObjectStoreError {
     ObjectStoreError::PreconditionFailed {
         object_key: key.to_owned(),
     }
+}
+
+/// A write conditioned on a version reads that version's absence as its
+/// precondition failing.
+pub(crate) fn precondition_failed_when_missing(error: ObjectStoreError) -> ObjectStoreError {
+    match error {
+        ObjectStoreError::NotFound { object_key } => {
+            ObjectStoreError::PreconditionFailed { object_key }
+        }
+        error => error,
+    }
+}
+
+/// Streams `range` of the object at `key` in reads of at most
+/// [`READ_BYTES`], sent through `read_chunk`, and fails when a read returns
+/// fewer bytes than it asked for.
+pub(crate) fn read_chunks<'a, F, Fut>(
+    key: &'a str,
+    range: ByteRange,
+    read_chunk: F,
+) -> impl Stream<Item = Result<Bytes>> + 'a
+where
+    F: FnMut(ByteRange) -> Fut + Send + 'a,
+    Fut: Future<Output = Result<Bytes>> + Send + 'a,
+{
+    stream::try_unfold(
+        (range.start_inclusive, read_chunk),
+        move |(offset, mut read_chunk)| async move {
+            if offset >= range.end_exclusive {
+                return Ok(None);
+            }
+            let end = (offset + READ_BYTES).min(range.end_exclusive);
+            let chunk = read_chunk(ByteRange {
+                start_inclusive: offset,
+                end_exclusive: end,
+            })
+            .await?;
+            if chunk.len() as u64 != end - offset {
+                return Err(missing_source(key));
+            }
+            Ok(Some((chunk, (end, read_chunk))))
+        },
+    )
+}
+
+/// Streams the resolved range of `source` as [`read_chunks`] does, and fails
+/// at the end when the bytes don't match the source's checksum.
+pub(crate) fn read_verified<'a, F, Fut>(
+    source: &ResolvedSource<'a>,
+    read_chunk: F,
+) -> impl Stream<Item = Result<Bytes>> + 'a
+where
+    F: FnMut(ByteRange) -> Fut + Send + 'a,
+    Fut: Future<Output = Result<Bytes>> + Send + 'a,
+{
+    let range = source.range.clone();
+    let source = source.source;
+    let chunks = read_chunks(&source.key, range, read_chunk).boxed();
+    let digest = ChecksumDigest::new(source.checksum.algorithm);
+    stream::try_unfold(
+        (chunks, Some(digest)),
+        move |(mut chunks, digest)| async move {
+            let Some(mut digest) = digest else {
+                return Ok(None);
+            };
+            match chunks.next().await {
+                Some(chunk) => {
+                    let chunk = chunk?;
+                    digest.update(&chunk);
+                    Ok(Some((chunk, (chunks, Some(digest)))))
+                }
+                None => {
+                    verify_expected(&source.key, &source.checksum, &digest.finish())?;
+                    Ok(None)
+                }
+            }
+        },
+    )
 }
 
 pub(crate) fn validate_algorithms(
@@ -126,42 +239,17 @@ fn source_stream<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     source: &'a AssemblySource,
 ) -> Result<BoxStream<'a, Result<Bytes>>> {
-    let range = source_range(source, source.metadata.size_bytes)?;
-    let checksum = ChecksumDigest::new(source.checksum.algorithm);
-    Ok(stream::try_unfold(
-        (range.start_inclusive, Some(checksum)),
-        move |(offset, checksum)| async move {
-            let Some(mut checksum) = checksum else {
-                return Ok(None);
-            };
-            if offset == range.end_exclusive {
-                verify_expected(&source.key, &source.checksum, &checksum.finish())?;
-                return Ok(None);
-            }
-            let end = (offset + READ_BYTES).min(range.end_exclusive);
-            let chunk = store
-                .get(
-                    &source.key,
-                    Some(ByteRange {
-                        start_inclusive: offset,
-                        end_exclusive: end,
-                    }),
-                )
-                .await?
-                .ok_or_else(|| missing_source(&source.key))?;
-            if chunk.len() as u64 != end - offset {
-                return Err(missing_source(&source.key));
-            }
-            checksum.update(&chunk);
-            let checksum = if end == range.end_exclusive {
-                verify_expected(&source.key, &source.checksum, &checksum.finish())?;
-                None
-            } else {
-                Some(checksum)
-            };
-            Ok(Some((chunk, (end, checksum))))
-        },
-    )
+    let resolved = ResolvedSource {
+        source,
+        range: source_range(source, source.metadata.size_bytes)?,
+    };
+    let key = source.key.as_str();
+    Ok(read_verified(&resolved, move |range| async move {
+        store
+            .get(key, Some(range))
+            .await?
+            .ok_or_else(|| missing_source(key))
+    })
     .boxed())
 }
 

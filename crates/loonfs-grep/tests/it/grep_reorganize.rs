@@ -14,13 +14,13 @@ use loonfs_grep::{
     DecodedGrepBlock, GramIndexBuildPolicy, GrepBlockCacheKey, GrepReorganizeOutcome,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{ConcurrencyWatchStore, KeyPredicate, RecordingStore};
 use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, BuiltSegmentBlocks, SegmentBlocksBuilder,
 };
+use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, RevisionNo, RunNo,
 };

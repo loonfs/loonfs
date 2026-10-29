@@ -45,7 +45,7 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
 
 pub(crate) mod commit_split_support {
     use loonfs_core::time::Deadline;
-    use loonfs_objectstore::timing::StdMonotonicTimer;
+    use loonfs_types::StdMonotonicTimer;
 
     use super::{namespace_engine, read_context};
     use loonfs_types::{

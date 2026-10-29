@@ -83,10 +83,11 @@ impl ObjectStore for MemoryStore {
                 let end = loonfs_types::usize_from_u64(
                     range.end_exclusive.min(object.bytes.len() as u64),
                 );
-                Bytes::from(object.bytes)
+                object
+                    .bytes
                     .slice(loonfs_types::usize_from_u64(range.start_inclusive)..end)
             }
-            None => Bytes::from(object.bytes),
+            None => object.bytes,
         };
         Ok(Some(bytes))
     }
@@ -119,7 +120,7 @@ impl ObjectStore for MemoryStore {
         objects.entries.insert(
             key.to_owned(),
             ObjectBody {
-                bytes: bytes.to_vec(),
+                bytes,
                 metadata: metadata.clone(),
             },
         );

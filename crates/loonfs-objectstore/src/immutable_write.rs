@@ -1,27 +1,18 @@
 //! Verified writes for objects whose keys name immutable bytes.
 
 use crate::object_store::Result;
-use crate::retry::{with_transport_retry, RetryWarnings};
-use crate::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use crate::retry::TransportRetry;
+use crate::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use bytes::Bytes;
 use loonfs_types::Checksum;
 use std::future::Future;
 
-pub(crate) async fn put<S: ObjectStore + ?Sized>(
-    store: &S,
-    warnings: &RetryWarnings,
-    key: &str,
-    bytes: Bytes,
-) -> Result<ObjectMetadata> {
-    put_with(store, warnings, key, &bytes, || {
-        store.put(key, bytes.clone(), PutMode::CreateIfAbsent)
-    })
-    .await
-}
-
+/// Creates an immutable object through `create`, sent again under `retry`
+/// while it fails with a retryable transport error, and accepts an occupied
+/// key only when its stored checksum equals the checksum of `bytes`.
 pub(crate) async fn put_with<S, F, Fut>(
     store: &S,
-    warnings: &RetryWarnings,
+    retry: &TransportRetry,
     key: &str,
     bytes: &Bytes,
     create: F,
@@ -31,14 +22,9 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<ObjectMetadata>>,
 {
-    let written = with_transport_retry(
-        warnings,
-        key,
-        "put_immutable_verified",
-        bytes.len() as u64,
-        create,
-    )
-    .await;
+    let written = retry
+        .run(key, "put_immutable_verified", bytes.len() as u64, create)
+        .await;
     match written {
         Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => {
             verify_occupied(

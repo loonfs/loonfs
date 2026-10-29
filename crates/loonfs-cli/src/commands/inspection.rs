@@ -14,6 +14,7 @@ use crate::resolve::{resolve_namespace, ResolvedTarget};
 use futures::TryStreamExt;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::keys::probe_runs_prefix;
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_types::api::v0::StoreProbeResponse;
 use loonfs_types::{CapabilityDocument, PROTOCOL_VERSION};
@@ -344,7 +345,7 @@ async fn embedded_health_check(
     {
         Ok(_) => {
             let key_prefix = match store_config {
-                StoreConfig::LocalFs { key_prefix, .. }
+                StoreConfig::LocalFs(LocalFsStoreConfig { key_prefix, .. })
                 | StoreConfig::AwsS3(AwsS3StoreConfig { key_prefix, .. })
                 | StoreConfig::CloudflareR2(CloudflareR2StoreConfig { key_prefix, .. })
                 | StoreConfig::GcpGcs(GcpGcsStoreConfig { key_prefix, .. }) => key_prefix,
@@ -492,7 +493,7 @@ fn local_root_is_missing(profile: &ProfileConfig) -> bool {
     matches!(
         profile,
         ProfileConfig::Embedded {
-            store: StoreConfig::LocalFs { root, .. },
+            store: StoreConfig::LocalFs(LocalFsStoreConfig { root, .. }),
             ..
         } if !Path::new(root).exists()
     )
@@ -620,10 +621,10 @@ mod tests {
             let probe_root = directory.path().join("tenant").join(PROBE_RUN_PREFIX);
             std::fs::create_dir_all(&probe_root).expect("create probe prefix");
             std::fs::write(probe_root.join("key"), b"unchanged").expect("write existing object");
-            let config = StoreConfig::LocalFs {
+            let config = StoreConfig::LocalFs(LocalFsStoreConfig {
                 root: directory.path().to_str().expect("utf-8 root").to_owned(),
                 key_prefix: Some("tenant".to_owned()),
-            };
+            });
             let failure = FailStore::new(
                 LocalFsStore::with_key_prefix(directory.path(), Some("tenant"))
                     .expect("open scoped store"),

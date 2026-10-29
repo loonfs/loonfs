@@ -17,8 +17,9 @@ pub use s3_compatible::{
     CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
 };
 
-pub(crate) use gcs::stored_crc32c;
-pub(crate) use limits::CHECKSUM_HEAD_TTL;
+pub(crate) use gcs::{read_service_account_key, stored_crc32c};
+pub(crate) use issuer::PresignedCopyPartRequest;
+pub(crate) use limits::INTERNAL_REQUEST_TTL;
 pub(crate) use s3_compatible::{
     base64_crc64nvme, S3_CRC64NVME_CHECKSUM_HEADER, S3_IF_MATCH_HEADER,
 };

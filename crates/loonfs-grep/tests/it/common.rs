@@ -241,9 +241,7 @@ pub(crate) async fn grep_with(
 }
 
 pub(crate) fn observation() -> loonfs::engine::Observation {
-    loonfs::engine::Observation::now(Arc::new(
-        loonfs_objectstore::timing::StdMonotonicTimer::default(),
-    ))
+    loonfs::engine::Observation::now(Arc::new(loonfs_types::StdMonotonicTimer::default()))
 }
 
 /// Returns the page of at most `matches` matches at `cursor`, or the first

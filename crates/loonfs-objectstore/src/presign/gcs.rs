@@ -9,7 +9,7 @@ use super::{
 };
 use crate::checksum_header::decode_base64_checksum;
 use crate::gcs::GcpGcsStoreConfig;
-use crate::keyspace::{normalize_key_prefix, scope_object_key};
+use crate::keyspace::KeyScope;
 use crate::object_store::Result;
 use crate::presign::v4::{
     percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
@@ -50,7 +50,7 @@ pub const GCP_GCS_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 /// Creates native GCS V4 signed URLs.
 pub struct GcsV4Presigner {
     bucket: String,
-    key_prefix: Option<String>,
+    key_scope: KeyScope,
     /// The service account named in the credential parameter, which is also
     /// the identity GCS resolves the signing key from.
     client_email: String,
@@ -73,7 +73,7 @@ impl fmt::Debug for GcsV4Presigner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GcsV4Presigner")
             .field("bucket", &self.bucket)
-            .field("key_prefix", &self.key_prefix)
+            .field("key_prefix", &self.key_scope.prefix())
             .field("client_email", &REDACTED)
             .field("signing_key", &REDACTED)
             .finish()
@@ -83,23 +83,29 @@ impl fmt::Debug for GcsV4Presigner {
 impl GcsV4Presigner {
     /// Creates a presigner, reading and parsing the service-account key once.
     ///
-    /// The key prefix is normalized here, through the same helper the
-    /// provider client uses. That is not tidiness: the two have to resolve
-    /// an object key to the same string or a signed write lands somewhere
-    /// the store's own reads, listings, and collection never look — an
-    /// object committed, invisible, and unreclaimable.
-    ///
     /// Construction fails for an unusable key prefix, an unreadable or
     /// malformed key file, or a private key that is not an RSA key in PKCS#8
     /// form.
     pub fn new(config: &GcpGcsStoreConfig) -> Result<Self> {
-        let GcpGcsCredentials::ServiceAccountFile { path } = &config.credentials;
-        let raw = std::fs::read(path).map_err(|err| {
-            ObjectStoreError::Configuration(format!("service account key is unreadable: {err}"))
-        })?;
+        let key_json = read_service_account_key(config)?;
+        let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
+        Self::with_service_account_key(config.bucket.clone(), key_scope, &key_json)
+    }
+
+    /// Creates a presigner that signs as the service account in `key_json`
+    /// and scopes keys with `key_scope`, the scope of the store it signs for.
+    ///
+    /// The store and the presigner have to resolve an object key to the same
+    /// string, or a signed write is stored where the store's own reads,
+    /// listings, and collection never look.
+    pub(crate) fn with_service_account_key(
+        bucket: String,
+        key_scope: KeyScope,
+        key_json: &str,
+    ) -> Result<Self> {
         // The parse error is not quoted: a malformed key file's contents are
         // key material as often as not.
-        let key: ServiceAccountKey = serde_json::from_slice(&raw).map_err(|_| {
+        let key: ServiceAccountKey = serde_json::from_str(key_json).map_err(|_| {
             ObjectStoreError::Configuration(
                 "service account key must be JSON carrying `client_email` and `private_key`"
                     .to_owned(),
@@ -119,8 +125,8 @@ impl GcsV4Presigner {
         })?;
 
         Ok(Self {
-            bucket: config.bucket.clone(),
-            key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
+            bucket,
+            key_scope,
             client_email: key.client_email,
             signing_key,
         })
@@ -148,7 +154,7 @@ impl GcsV4Presigner {
         ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let scoped_key = scope_object_key(self.key_prefix.as_deref(), object_key)?;
+        let scoped_key = self.key_scope.object_key(object_key)?;
         let canonical_uri = format!(
             "/{}/{}",
             percent_encode_segment(&self.bucket),
@@ -245,6 +251,14 @@ impl DirectGetIssuer for GcsV4Presigner {
     }
 }
 
+/// Reads the service-account JSON that a GCS configuration points to.
+pub(crate) fn read_service_account_key(config: &GcpGcsStoreConfig) -> Result<String> {
+    let GcpGcsCredentials::ServiceAccountFile { path } = &config.credentials;
+    std::fs::read_to_string(path).map_err(|err| {
+        ObjectStoreError::Configuration(format!("service account key is unreadable: {err}"))
+    })
+}
+
 /// Reads the stored CRC-32C out of a GCS `x-goog-hash` header value.
 ///
 /// The header lists one or more `<algorithm>=<base64>` pairs in an
@@ -295,7 +309,7 @@ fn pkcs8_der(private_key_pem: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::{stored_crc32c, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
     use crate::gcs::GcpGcsStoreConfig;
-    use crate::keyspace::{normalize_key_prefix, scope_object_key};
+    use crate::keyspace::KeyScope;
     use crate::presign::{
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
     };
@@ -471,13 +485,10 @@ mod tests {
                 .expect("presign get");
 
             // Exactly what `ProviderObjectStore` does with the same value.
-            let store_key = scope_object_key(
-                normalize_key_prefix(raw_prefix)
-                    .expect("store normalizes the prefix")
-                    .as_deref(),
-                CONTENT_KEY,
-            )
-            .expect("store scopes the key");
+            let store_key = KeyScope::new(raw_prefix)
+                .expect("store normalizes the prefix")
+                .object_key(CONTENT_KEY)
+                .expect("store scopes the key");
 
             let signed_path = signed.url.split('?').next().expect("url path");
             assert_eq!(

@@ -1,22 +1,25 @@
-//! The one retry loop of the store layer, and the warnings it logs.
+//! The one retry policy of the store layer: the provider client's retries,
+//! LoonFS's own retry loop, and the warnings that loop logs.
 //!
 //! The retrying provider client retries the requests it sends. LoonFS
 //! retries the requests it signs itself, verified immutable writes, and a
-//! delete whose attempt timed out, through [`with_transport_retry`]. A
+//! delete whose attempt timed out, through [`TransportRetry::run`]. A
 //! conditional publication is one attempt.
 
 use crate::attempts::count_retry_attempt;
-use crate::timing::MonotonicTimer;
 use crate::{
     ObjectStoreError, ObjectStoreErrorKind, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_OPERATION_DEADLINE,
 };
-use loonfs_types::{OperationDeadline, TransportRetryOutcome, TransportRetryPolicy};
+use loonfs_types::{
+    MonotonicTimer, OperationDeadline, TransportRetryOutcome, TransportRetryPolicy,
+};
+use object_store::{BackoffConfig, RetryConfig};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// The retry count, backoff and operation deadline of every LoonFS retry,
-/// which match the provider client's own retry configuration.
+/// The retry count, backoff and operation deadline of every LoonFS retry
+/// and of the provider client's retries.
 pub(crate) const DEFAULT: TransportRetryPolicy = TransportRetryPolicy {
     max_retries: 10,
     initial_backoff: Duration::from_millis(100),
@@ -28,17 +31,42 @@ pub(crate) const DEFAULT: TransportRetryPolicy = TransportRetryPolicy {
 /// log at `debug!`, and the next logged warning reports how many there were.
 const RETRY_WARNING_INTERVAL_MS: u64 = 60_000;
 
-/// The retry warnings of one store, which a provider outage would otherwise
-/// log once per retry, and the clock that times its retries.
+/// Returns the retry configuration every provider builder applies: the
+/// client's retries of each request it sends follow [`DEFAULT`], and share
+/// its operation deadline as one budget.
+pub(crate) fn provider_retry_config() -> RetryConfig {
+    RetryConfig {
+        backoff: BackoffConfig {
+            init_backoff: DEFAULT.initial_backoff,
+            max_backoff: DEFAULT.max_backoff,
+            ..Default::default()
+        },
+        max_retries: loonfs_types::usize_from_u64(u64::from(DEFAULT.max_retries)),
+        retry_timeout: DEFAULT.operation_deadline,
+    }
+}
+
+/// Returns the retry configuration of the provider client that sends each
+/// request once.
+pub(crate) fn one_attempt_retry_config() -> RetryConfig {
+    RetryConfig {
+        max_retries: 0,
+        ..provider_retry_config()
+    }
+}
+
+/// The retry clock of one store, and the warnings its retries log, which a
+/// provider outage would otherwise log once per retry.
 ///
-/// Logs the first retry warning, and then at most one per
-/// [`RETRY_WARNING_INTERVAL_MS`], with the count suppressed since the last
-/// and the time since the last. The same timer measures each retry loop's
-/// operation deadline.
+/// The store and its signer share one value, so a bucket keeps one limiter
+/// and one retry clock. The limiter logs the first retry warning, and then at
+/// most one per [`RETRY_WARNING_INTERVAL_MS`], with the count suppressed since
+/// the last and the time since the last. The same timer measures each retry
+/// loop's operation deadline.
 #[derive(Debug)]
-pub(crate) struct RetryWarnings {
+pub(crate) struct TransportRetry {
     timer: Arc<dyn MonotonicTimer>,
-    state: Mutex<RetryWarningState>,
+    warnings: Mutex<RetryWarningState>,
 }
 
 #[derive(Debug, Default)]
@@ -60,18 +88,62 @@ enum RetryWarning {
     Suppress,
 }
 
-impl RetryWarnings {
-    /// Creates the limiter of a store that reads time from `timer`.
+impl TransportRetry {
+    /// Creates the retry state of a store that reads time from `timer`.
     pub(crate) fn new(timer: Arc<dyn MonotonicTimer>) -> Self {
         Self {
             timer,
-            state: Mutex::new(RetryWarningState::default()),
+            warnings: Mutex::new(RetryWarningState::default()),
         }
     }
 
-    fn next(&self) -> RetryWarning {
+    /// Sends a replay-safe request again while it fails with a retryable
+    /// transport error, under [`DEFAULT`]'s retry count and operation deadline.
+    ///
+    /// An error of any other kind (a refused request, a failed precondition,
+    /// or a permission failure) returns at once. When the count or the
+    /// deadline runs out, the last error returns as a non-retryable transport
+    /// failure, so an outer loop (a verified write around its parts) doesn't
+    /// spend a second budget on the same request. A provider client error is
+    /// retryable only from the client that sends each request once (see
+    /// [`crate::provider_error::map_provider_error`]), so a request
+    /// that the retrying client already retried isn't retried here again.
+    pub(crate) async fn run<T, F, Fut>(
+        &self,
+        key: &str,
+        operation: &'static str,
+        payload_bytes: u64,
+        mut attempt: F,
+    ) -> Result<T, ObjectStoreError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, ObjectStoreError>>,
+    {
+        let mut retry_loop = RetryLoop {
+            key,
+            operation,
+            payload_bytes,
+            retries: 0,
+            deadline: OperationDeadline::start(self.timer.as_ref(), DEFAULT.operation_deadline),
+        };
+        loop {
+            let error = match attempt().await {
+                Ok(value) => return Ok(value),
+                Err(error) => error,
+            };
+            if error.kind() != ObjectStoreErrorKind::RetryableTransport {
+                return Err(error);
+            }
+            let Some(backoff) = retry_loop.next_backoff(self) else {
+                return Err(error.exhausted());
+            };
+            crate::clock::pause(backoff).await;
+        }
+    }
+
+    fn next_warning(&self) -> RetryWarning {
         let now_ms = self.timer.monotonic_now_ms();
-        self.state
+        self.warnings
             .lock()
             .expect("the retry warning lock should not be poisoned")
             .next(now_ms)
@@ -95,115 +167,99 @@ impl RetryWarningState {
     }
 }
 
-/// Grants one retry under the shared count and deadline budgets.
-fn next_retry_backoff(
-    warnings: &RetryWarnings,
-    key: &str,
+/// One retry loop: the request it sends again, and the retries and the time
+/// it has used.
+struct RetryLoop<'a> {
+    key: &'a str,
     operation: &'static str,
     payload_bytes: u64,
-    retries: &mut u32,
-    deadline: &OperationDeadline<'_>,
-) -> Option<Duration> {
-    let backoff = match DEFAULT.next_backoff(retries, Some(deadline)) {
-        TransportRetryOutcome::Wait { backoff } => backoff,
-        TransportRetryOutcome::RetriesExhausted => {
-            tracing::warn!(
-                object_key = key,
-                operation,
-                retry = *retries,
-                payload_bytes,
-                "object store retry budget exhausted; not retrying",
-            );
-            return None;
-        }
-        TransportRetryOutcome::DeadlinePassed => {
-            tracing::warn!(
-                object_key = key,
-                operation,
-                retry = *retries,
-                payload_bytes,
-                "object store operation deadline exhausted; not retrying",
-            );
-            return None;
-        }
-    };
-    count_retry_attempt();
-    let backoff_ms = loonfs_types::saturating_duration_ms(backoff);
-    match warnings.next() {
-        RetryWarning::Log {
-            suppressed,
-            since_ms,
-        } => tracing::warn!(
-            object_key = key,
-            operation,
-            retry = *retries,
-            max_retries = DEFAULT.max_retries,
-            backoff_ms,
-            suppressed,
-            since_ms,
-            "transient object store failure, backing off before retry",
-        ),
-        RetryWarning::Suppress => tracing::debug!(
-            object_key = key,
-            operation,
-            retry = *retries,
-            max_retries = DEFAULT.max_retries,
-            backoff_ms,
-            "transient object store failure, backing off before retry",
-        ),
-    }
-    Some(backoff)
+    retries: u32,
+    deadline: OperationDeadline<'a>,
 }
 
-/// Sends a replay-safe request again while it fails with a retryable
-/// transport error, under [`DEFAULT`]'s retry count and operation deadline.
-///
-/// An error of any other kind (a refused request, a failed precondition, or
-/// a permission failure) returns at once. When the count or the deadline runs
-/// out, the last error returns as a non-retryable transport failure, so an
-/// outer loop (a verified write around its parts) doesn't spend a second
-/// budget on the same request. A provider client error is retryable only
-/// from the client that sends each request once (see
-/// [`crate::provider_object_store::map_provider_error`]), so a request that
-/// the retrying client already retried isn't retried here again.
-pub(crate) async fn with_transport_retry<T, F, Fut>(
-    warnings: &RetryWarnings,
-    key: &str,
-    operation: &'static str,
-    payload_bytes: u64,
-    mut attempt: F,
-) -> Result<T, ObjectStoreError>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, ObjectStoreError>>,
-{
-    let deadline = OperationDeadline::start(warnings.timer.as_ref(), DEFAULT.operation_deadline);
-    let mut retries = 0;
-    loop {
-        let error = match attempt().await {
-            Ok(value) => return Ok(value),
-            Err(error) => error,
+impl RetryLoop<'_> {
+    /// Grants one retry under the shared count and deadline budgets.
+    fn next_backoff(&mut self, retry: &TransportRetry) -> Option<Duration> {
+        let (key, operation, payload_bytes) = (self.key, self.operation, self.payload_bytes);
+        let backoff = match DEFAULT.next_backoff(&mut self.retries, Some(&self.deadline)) {
+            TransportRetryOutcome::Wait { backoff } => backoff,
+            TransportRetryOutcome::RetriesExhausted => {
+                tracing::warn!(
+                    object_key = key,
+                    operation,
+                    retry = self.retries,
+                    payload_bytes,
+                    "object store retry budget exhausted; not retrying",
+                );
+                return None;
+            }
+            TransportRetryOutcome::DeadlinePassed => {
+                tracing::warn!(
+                    object_key = key,
+                    operation,
+                    retry = self.retries,
+                    payload_bytes,
+                    "object store operation deadline exhausted; not retrying",
+                );
+                return None;
+            }
         };
-        if error.kind() != ObjectStoreErrorKind::RetryableTransport {
-            return Err(error);
+        count_retry_attempt();
+        let backoff_ms = loonfs_types::saturating_duration_ms(backoff);
+        match retry.next_warning() {
+            RetryWarning::Log {
+                suppressed,
+                since_ms,
+            } => tracing::warn!(
+                object_key = key,
+                operation,
+                retry = self.retries,
+                max_retries = DEFAULT.max_retries,
+                backoff_ms,
+                suppressed,
+                since_ms,
+                "transient object store failure, backing off before retry",
+            ),
+            RetryWarning::Suppress => tracing::debug!(
+                object_key = key,
+                operation,
+                retry = self.retries,
+                max_retries = DEFAULT.max_retries,
+                backoff_ms,
+                "transient object store failure, backing off before retry",
+            ),
         }
-        let Some(backoff) = next_retry_backoff(
-            warnings,
-            key,
-            operation,
-            payload_bytes,
-            &mut retries,
-            &deadline,
-        ) else {
-            return Err(error.exhausted());
-        };
-        crate::clock::pause(backoff).await;
+        Some(backoff)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RetryWarning, RetryWarningState, RETRY_WARNING_INTERVAL_MS};
+    use super::{RetryWarning, RetryWarningState, DEFAULT, RETRY_WARNING_INTERVAL_MS};
+    use loonfs_types::transport_retry_backoff;
+    use std::time::Duration;
+
+    #[test]
+    fn transport_retry_backoff_doubles_and_caps() {
+        let policy = DEFAULT;
+        assert_eq!(
+            transport_retry_backoff(&policy, 1),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            transport_retry_backoff(&policy, 2),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            transport_retry_backoff(&policy, 8),
+            Duration::from_millis(12_800)
+        );
+        assert_eq!(transport_retry_backoff(&policy, 9), Duration::from_secs(15));
+        assert_eq!(
+            transport_retry_backoff(&policy, 10),
+            Duration::from_secs(15)
+        );
+    }
 
     #[test]
     fn retry_warnings_log_the_first_and_then_one_count_per_interval() {

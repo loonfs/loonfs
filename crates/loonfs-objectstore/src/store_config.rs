@@ -12,6 +12,7 @@ use crate::configured::{
     endpoint_host_is_proven, AWS_S3_PROVEN_DOMAINS, CLOUDFLARE_R2_PROVEN_DOMAINS,
 };
 use crate::gcs::GcpGcsStoreConfig;
+use crate::local_fs_store::LocalFsStoreConfig;
 use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use crate::{ConfiguredObjectStore, ConfiguredObjectStoreKind, ObjectStoreError};
 use http::Uri;
@@ -76,45 +77,16 @@ pub enum GcpGcsCredentials {
 /// real credentials; only serialize a [`StoreConfig::redacted`] copy into
 /// display output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "snake_case",
-    deny_unknown_fields,
-    remote = "Self"
-)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreConfig {
     /// Stores objects beneath a Unix-family directory using atomic filesystem replacement.
-    LocalFs {
-        /// Directory created or opened as the physical store root.
-        root: String,
-        /// Logical prefix applied inside `root`, or `None` to expose it directly.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-    },
+    LocalFs(LocalFsStoreConfig),
     /// Connects to AWS S3 or an explicitly configured S3-compatible endpoint.
     AwsS3(AwsS3StoreConfig),
     /// Connects to Cloudflare R2 through its S3-compatible endpoint.
     CloudflareR2(CloudflareR2StoreConfig),
     /// Connects to Google Cloud Storage through its native generation-aware API.
     GcpGcs(GcpGcsStoreConfig),
-}
-
-impl serde::Serialize for StoreConfig {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        Self::serialize(self, serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for StoreConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if value.get("kind").and_then(serde_json::Value::as_str) == Some("azure-abs") {
-            return Err(serde::de::Error::custom(
-                "Azure Blob Storage is not supported yet: it stores no full-object checksum",
-            ));
-        }
-        Self::deserialize(value).map_err(serde::de::Error::custom)
-    }
 }
 
 impl StoreConfig {
@@ -154,9 +126,7 @@ impl StoreConfig {
         self.validate()
             .map_err(|error| ObjectStoreError::Configuration(error.to_string()))?;
         match self {
-            StoreConfig::LocalFs { root, key_prefix } => {
-                ConfiguredObjectStore::local_fs(root, key_prefix.as_deref())
-            }
+            StoreConfig::LocalFs(config) => ConfiguredObjectStore::local_fs(config.clone()),
             StoreConfig::AwsS3(config) => ConfiguredObjectStore::aws_s3(config.clone()),
             StoreConfig::CloudflareR2(config) => {
                 ConfiguredObjectStore::cloudflare_r2(config.clone())
@@ -169,7 +139,7 @@ impl StoreConfig {
     /// paths.
     pub fn validate(&self) -> Result<(), ConfigFieldError> {
         match self {
-            StoreConfig::LocalFs { root, .. } => {
+            StoreConfig::LocalFs(LocalFsStoreConfig { root, .. }) => {
                 validate_non_empty("store.root", root)?;
             }
             StoreConfig::AwsS3(AwsS3StoreConfig {
@@ -560,15 +530,6 @@ secret_access_key = "secret"
             }
             other => panic!("expected invalid endpoint_url, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn azure_configuration_is_rejected_with_the_missing_checksum_reason() {
-        let error = toml::from_str::<StoreConfig>(r#"kind = "azure-abs""#)
-            .expect_err("unsupported provider");
-        assert!(error.to_string().contains(
-            "Azure Blob Storage is not supported yet: it stores no full-object checksum"
-        ));
     }
 
     #[test]

@@ -7,6 +7,7 @@ use crate::common::{advance_retention_past_the_grace_window, start_server};
 use loonfs::publish::CommitIntent;
 use loonfs::{LoonFs, StoreConfig};
 use loonfs_client::{ClientError, NamespacePath};
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     api::v0::{Commit, FilesystemChange},
@@ -149,10 +150,10 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
 
     // The same batch, submitted embedded against the same store.
     let embedded_ns = namespace_id("embedded");
-    let writer = LoonFs::builder(StoreConfig::LocalFs {
+    let writer = LoonFs::builder(StoreConfig::LocalFs(LocalFsStoreConfig {
         root: store_root.display().to_string(),
         key_prefix: Some("http-commits".to_owned()),
-    })
+    }))
     .writer_id(loonfs_test_support::ids::writer_id("loonfs-embedded-batch"))
     .build()
     .await
@@ -941,10 +942,10 @@ async fn a_commit_id_used_embedded_replays_over_http() {
     // Committed embedded first, then the writer goes away: the served
     // writer acquires its own epoch afterward and finds the receipt.
     let embedded_receipt = {
-        let writer = LoonFs::builder(StoreConfig::LocalFs {
+        let writer = LoonFs::builder(StoreConfig::LocalFs(LocalFsStoreConfig {
             root: store_root.display().to_string(),
             key_prefix: Some("http-cross-transport".to_owned()),
-        })
+        }))
         .writer_id(loonfs_test_support::ids::writer_id("loonfs-embedded-cross"))
         .build()
         .await

@@ -19,7 +19,6 @@ use futures::future::join_all;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs::engine::{Observation, SegmentBlockKind};
 use loonfs::{CoreError, CurrentFile, CurrentFileState};
-use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::hex::hex_decode_bytes;
 use loonfs_types::format::segment_blocks::{
@@ -31,6 +30,7 @@ use loonfs_types::{
     GrepPageCursor, GrepRequest, GrepResponse, InodeId, NamespaceId, PageRequest, PathEntry,
     RevisionNo, MAX_PAGE_LIMIT, ROOT_INODE_ID,
 };
+use loonfs_types::{MonotonicTimer, StdMonotonicTimer};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 

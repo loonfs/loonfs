@@ -355,7 +355,7 @@ async fn sign_parts(
 }
 
 pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError {
-    if let ObjectStoreError::InvalidContentRef(_) = &error {
+    if let ObjectStoreError::InvalidRequest { .. } = &error {
         return ApiResponseError::new(ErrorCode::InvalidRequest, &error.public_message())
             .with_param("/content");
     }

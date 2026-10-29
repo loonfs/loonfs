@@ -40,6 +40,7 @@ mod tests {
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
     use loonfs_client::ClientError;
+    use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
     use loonfs_test_support::provider_detail::{
         assert_provider_markers_absent, POISON_PROVIDER_DETAIL,
     };
@@ -388,10 +389,10 @@ mod tests {
             mode: Some("embedded".to_owned()),
             data: CommandData::Profile {
                 profile: ProfileConfig::Embedded {
-                    store: StoreConfig::LocalFs {
+                    store: StoreConfig::LocalFs(LocalFsStoreConfig {
                         root: "/tmp/store".to_owned(),
                         key_prefix: None,
-                    },
+                    }),
                     actor_id: None,
                     subject_id: None,
                     principal_scope: None,

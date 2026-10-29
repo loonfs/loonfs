@@ -593,10 +593,12 @@ async fn provider_failure_is_projected_in_the_presign_api_envelope() {
 async fn invalid_presign_content_is_a_bad_request() {
     use axum::response::IntoResponse;
 
-    let response = super::handlers_uploads::presign_issuer_error(
-        ObjectStoreError::InvalidContentRef("invalid checksum".to_owned()),
-    )
-    .into_response();
+    let response =
+        super::handlers_uploads::presign_issuer_error(ObjectStoreError::InvalidRequest {
+            object_key: "namespaces/demo/content/con_1".to_owned(),
+            message: "invalid checksum".to_owned(),
+        })
+        .into_response();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await

@@ -9,6 +9,7 @@ use loonfs::{
     ListCheckpointFilesOptions, LoonFs, NamespaceId, PutFileOptions, ReadOnly, RevisionNo,
     SharedObjectStore, StoreConfig,
 };
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{
     replace_object, KeyPredicate, OperationSelector, RecordingStore,
@@ -20,10 +21,10 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn store_config(root: &Path) -> StoreConfig {
-    StoreConfig::LocalFs {
+    StoreConfig::LocalFs(LocalFsStoreConfig {
         root: root.to_string_lossy().into_owned(),
         key_prefix: None,
-    }
+    })
 }
 
 /// One file as the ordinary read surface sees it, for comparing an

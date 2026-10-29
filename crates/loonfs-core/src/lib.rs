@@ -19,7 +19,7 @@
 //!     FilesystemOperation, CommitIntent, NamespaceCommitEngine, CommitCandidate,
 //! };
 //! use loonfs_core::time::Deadline;
-//! use loonfs_objectstore::timing::StdMonotonicTimer;
+//! use loonfs_types::StdMonotonicTimer;
 //! use std::sync::Arc;
 //! use loonfs_core::{CreateNamespaceOptions, MutationContext, NamespaceEngine};
 //! use loonfs_types::WriterId;

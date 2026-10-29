@@ -10,6 +10,7 @@
 )]
 
 use loonfs_client::{Client, ClientConfig, ClientError, ListOptions, NamespacePath};
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_server::{
     app, serve_with_shutdown, AppConfig, JobMode, ServeError, ServerConfig, StoreConfig,
     TlsServerConfig,
@@ -139,7 +140,7 @@ pub(crate) async fn advance_retention_past_the_grace_window(
     let clock = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::at_system_time());
     clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
     let writer_id = loonfs_test_support::ids::writer_id("retention-maintenance");
-    loonfs::LoonFs::builder(loonfs::StoreConfig::LocalFs {
+    loonfs::LoonFs::builder(loonfs::StoreConfig::LocalFs(LocalFsStoreConfig {
         root: server
             .store_root
             .as_ref()
@@ -147,7 +148,7 @@ pub(crate) async fn advance_retention_past_the_grace_window(
             .display()
             .to_string(),
         key_prefix: server.store_key_prefix.clone(),
-    })
+    }))
     .writer_id(writer_id.clone())
     .wall_clock(clock)
     .build()
@@ -165,7 +166,7 @@ pub(crate) async fn advance_retention_past_the_grace_window(
 // with `flavor = "multi_thread"` to give the server a second worker.
 pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
     let (store_root, store_key_prefix) = match &config.store {
-        StoreConfig::LocalFs { root, key_prefix } => {
+        StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }) => {
             (Some(PathBuf::from(root)), key_prefix.clone())
         }
         _ => (None, None),
@@ -395,6 +396,7 @@ pub(crate) mod http_split_support {
         CommitRequest, ContentRef, DestinationBehavior, NamespaceId,
     };
 
+    use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
     use loonfs_server::{ServerConfig, StoreConfig};
 
     use loonfs_test_support::http::raw_agent;
@@ -414,10 +416,10 @@ pub(crate) mod http_split_support {
         key_prefix: &str,
     ) -> ServerConfig {
         super::test_config(
-            StoreConfig::LocalFs {
+            StoreConfig::LocalFs(LocalFsStoreConfig {
                 root: store_root.display().to_string(),
                 key_prefix: Some(key_prefix.to_owned()),
-            },
+            }),
             "test-token",
             TEST_CONTENT_TOKEN_SECRET,
             writer_id,

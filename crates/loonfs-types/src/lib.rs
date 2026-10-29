@@ -20,6 +20,7 @@ mod commit_identity;
 pub mod config;
 mod content;
 mod control;
+pub mod crypto;
 mod digest;
 pub mod env;
 mod envelope;

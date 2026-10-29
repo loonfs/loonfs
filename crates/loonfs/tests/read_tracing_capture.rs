@@ -11,6 +11,7 @@
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 use loonfs::{LoonFs, StoreConfig, Writable};
+use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
@@ -19,10 +20,10 @@ use tempfile::tempdir;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 fn store_config(root: &Path) -> StoreConfig {
-    StoreConfig::LocalFs {
+    StoreConfig::LocalFs(LocalFsStoreConfig {
         root: root.to_string_lossy().into_owned(),
         key_prefix: None,
-    }
+    })
 }
 
 async fn writer(root: &Path) -> LoonFs<Writable> {

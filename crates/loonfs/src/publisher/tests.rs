@@ -2366,9 +2366,7 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
         None,
         &namespace_id,
         None,
-        &Deadline::start(Arc::new(
-            loonfs_objectstore::timing::StdMonotonicTimer::default(),
-        )),
+        &Deadline::start(Arc::new(loonfs_types::StdMonotonicTimer::default())),
         loonfs_core::MetadataRunPolicy::default(),
         &loonfs_core::test_support::content_writes(),
     )

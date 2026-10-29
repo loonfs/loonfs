@@ -7,11 +7,8 @@
 //! are deliberately relaxed (content-hash etags, whole-file reads,
 //! whole-tree listings) and are not optimization targets.
 
-use crate::keyspace::{
-    normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
-    unscope_listed_key, validate_segments, TrailingSeparator,
-};
-use crate::object_store::Result;
+use crate::keyspace::{validate_segments, KeyScope, ScopedListing, TrailingSeparator};
+use crate::object_store::{error_stream, Result};
 use crate::ListedObject;
 use crate::{
     AssemblySource, ByteRange, ByteStream, ConfiguredObjectStoreKind, ObjectBody, ObjectMetadata,
@@ -21,6 +18,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, EffectiveLimit, Page};
+use serde::{Deserialize, Serialize};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -32,6 +30,19 @@ use tokio::sync::Mutex;
 /// Held only for the duration of each write; the OS releases it if the
 /// holding process dies. Never listed as an object (see `is_scratch_name`).
 const STORE_LOCK_FILE_NAME: &str = ".loonfs-store.lock";
+
+/// Supplies the root directory and key scoping for the local filesystem store.
+///
+/// Config files spell this as a store table with `kind = "local_fs"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalFsStoreConfig {
+    /// Directory created or opened as the physical store root.
+    pub root: String,
+    /// Logical prefix applied inside `root`, or `None` to expose it directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_prefix: Option<String>,
+}
 
 /// Implements the object-store contract on a Unix-family local directory.
 ///
@@ -45,8 +56,7 @@ pub struct LocalFsStore {
     /// process that opens the same root and prefix finds the same.
     identity: StoreIdentity,
     checksum_algorithm: ChecksumAlgorithm,
-    /// Logical prefix every key is confined beneath, or `None` for the root.
-    key_prefix: Option<String>,
+    key_scope: KeyScope,
     /// A Tokio mutex, because a write holds it across the awaits that take
     /// the cross-process lock and then check and move the staged file.
     write_lock: Mutex<()>,
@@ -92,16 +102,16 @@ impl LocalFsStore {
                 root.display()
             ))
         })?;
-        let key_prefix = normalize_key_prefix(key_prefix)?;
+        let key_scope = KeyScope::new(key_prefix)?;
         Ok(Self {
             root,
             identity: StoreIdentity {
                 provider: ConfiguredObjectStoreKind::LocalFs.as_str(),
                 location: absolute_root.to_string_lossy().into_owned(),
-                key_prefix: key_prefix.clone(),
+                key_prefix: key_scope.prefix().map(str::to_owned),
             },
             checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-            key_prefix,
+            key_scope,
             write_lock: Mutex::new(()),
             #[cfg(test)]
             largest_staged_chunk: std::sync::atomic::AtomicU64::new(0),
@@ -134,8 +144,10 @@ impl LocalFsStore {
         &self.root
     }
 
+    /// Returns the file that stores `key`, beneath the key prefix.
     fn resolve_key(&self, key: &str) -> Result<PathBuf> {
-        let segments = validate_segments(key, TrailingSeparator::Refused)?;
+        let scoped = self.key_scope.object_key(key)?;
+        let segments = validate_segments(&scoped, TrailingSeparator::Refused)?;
         // Scratch-shaped names are reserved by this store: they are hidden
         // from listings, so accepting them as keys would create objects a
         // listing can never report.
@@ -216,62 +228,26 @@ impl LocalFsStore {
         })
     }
 
-    async fn create_new_object(key: &str, root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
-        // Stage to a temp file and link into place, like `replace_object`:
-        // the bytes become visible at the final key atomically, so a reader
-        // never observes a partial object and a crash never leaves a torn
-        // file wedging the key. `hard_link` fails if the key exists, which
-        // is exactly the create-if-absent precondition.
-        let created_dirs = create_parent_directory(key, path).await?;
-        let temp_path = temp_path(path);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .await
-            .map_err(|err| io_error(key, err))?;
-
-        let staged: Result<()> = async {
-            file.write_all(bytes)
-                .await
-                .map_err(|err| io_error(key, err))?;
-            file.sync_all().await.map_err(|err| io_error(key, err))
-        }
-        .await;
-        if staged.is_err() {
-            let _ = fs::remove_file(&temp_path).await;
-            return staged;
-        }
-
-        let linked = fs::hard_link(&temp_path, path)
-            .await
-            .map_err(|err| map_create_error(key, err));
-        let _ = fs::remove_file(&temp_path).await;
-        linked?;
-
-        if created_dirs {
-            sync_directory_chain(key, path, root).await?;
-        }
-        sync_parent_directory(key, path).await
-    }
-
-    /// Writes a streamed payload to a sibling staging file, then links or
-    /// renames it into place exactly as the buffered writes do.
+    /// Writes a payload to a sibling staging file, then links or renames it
+    /// to `path` under `mode`'s precondition.
     ///
-    /// Nothing but the current chunk is ever held: the staging file is the
-    /// buffer. The payload is fully written and fsynced before the mode's
-    /// precondition is evaluated, which is the contract a caller folding a
-    /// digest over the same stream depends on.
+    /// A hard link or a rename makes the bytes visible at the final key
+    /// atomically, so a reader never observes a partial object and a crash
+    /// never leaves a torn file at the key. Nothing but the current chunk is
+    /// ever held: the staging file is the buffer. The payload is fully
+    /// written and fsynced before the mode's precondition is evaluated, which
+    /// is the contract a caller folding a digest over the same stream
+    /// depends on.
     async fn put_streamed_object(
         &self,
         key: &str,
+        path: &Path,
         mut body: BoxStream<'_, Result<Bytes>>,
         mode: PutMode,
         expected: Option<&Checksum>,
     ) -> Result<u64> {
-        let path = self.resolve_key(key)?;
-        let created_dirs = create_parent_directory(key, &path).await?;
-        let temp_path = temp_path(&path);
+        let created_dirs = create_parent_directory(key, path).await?;
+        let temp_path = temp_path(path);
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -311,15 +287,15 @@ impl LocalFsStore {
         };
 
         let published = self
-            .publish_staged_object(key, &path, &temp_path, mode)
+            .publish_staged_object(key, path, &temp_path, mode)
             .await;
         let _ = fs::remove_file(&temp_path).await;
         published?;
 
         if created_dirs {
-            sync_directory_chain(key, &path, &self.root).await?;
+            sync_directory_chain(key, path, &self.root).await?;
         }
-        sync_parent_directory(key, &path).await?;
+        sync_parent_directory(key, path).await?;
         Ok(size_bytes)
     }
 
@@ -358,47 +334,49 @@ impl LocalFsStore {
         }
     }
 
-    async fn replace_object(key: &str, root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
-        let created_dirs = create_parent_directory(key, path).await?;
-        let temp_path = temp_path(path);
-
-        let result: Result<()> = async {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp_path)
-                .await
-                .map_err(|err| io_error(key, err))?;
-            file.write_all(bytes)
-                .await
-                .map_err(|err| io_error(key, err))?;
-            file.sync_all().await.map_err(|err| io_error(key, err))?;
-
-            fs::rename(&temp_path, path)
-                .await
-                .map_err(|err| io_error(key, err))
-        }
-        .await;
-
-        if result.is_err() {
-            let _ = fs::remove_file(&temp_path).await;
-            return result;
-        }
-
-        if created_dirs {
-            sync_directory_chain(key, path, root).await?;
-        }
-        sync_parent_directory(key, path).await
+    fn list_scoped_entries(
+        &self,
+        listing: ScopedListing,
+    ) -> BoxStream<'static, Result<ListedObject>> {
+        let root = self.root.clone();
+        let key_scope = self.key_scope.clone();
+        stream::once(async move {
+            list_prefix_for_root(root, listing.prefix, listing.start_after.as_deref()).await
+        })
+        .flat_map(|result| match result {
+            Ok(keys) => stream::iter(keys.into_iter().map(Ok)).boxed(),
+            Err(err) => error_stream(err),
+        })
+        .filter_map(move |result| {
+            let unscoped = match result {
+                Ok(mut entry) => key_scope.unscope(&entry.key).map(|key| {
+                    entry.key = key;
+                    Ok(entry)
+                }),
+                Err(err) => Some(Err(err)),
+            };
+            std::future::ready(unscoped)
+        })
+        .boxed()
     }
 }
 
-impl LocalFsStore {
-    async fn head_object(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+#[async_trait]
+impl ObjectStore for LocalFsStore {
+    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+        self.checksum_algorithm
+    }
+
+    fn identity(&self) -> Option<StoreIdentity> {
+        Some(self.identity.clone())
+    }
+
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let path = self.resolve_key(key)?;
         self.metadata_for_path(key, &path).await
     }
 
-    async fn get_with_metadata_object(&self, key: &str) -> Result<Option<ObjectBody>> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         let path = self.resolve_key(key)?;
         let mut file = match File::open(&path).await {
             Ok(file) => file,
@@ -418,7 +396,10 @@ impl LocalFsStore {
             Checksum::compute(self.checksum_algorithm, &bytes),
             &path,
         )?;
-        Ok(Some(ObjectBody { metadata, bytes }))
+        Ok(Some(ObjectBody {
+            metadata,
+            bytes: bytes.into(),
+        }))
     }
 
     /// Reads the whole object, or exactly one range of it.
@@ -428,7 +409,7 @@ impl LocalFsStore {
     /// large object in bounded chunks is promised, and a store that
     /// materialized the whole object to answer each chunk would break the
     /// promise on this provider alone.
-    async fn get_object(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         let path = self.resolve_key(key)?;
         let invalid_range = || ObjectStoreError::InvalidRange {
             object_key: key.to_owned(),
@@ -451,7 +432,7 @@ impl LocalFsStore {
             file.read_to_end(&mut bytes)
                 .await
                 .map_err(|err| io_error(key, err))?;
-            return Ok(Some(bytes));
+            return Ok(Some(bytes.into()));
         };
 
         let size_bytes = file
@@ -472,39 +453,15 @@ impl LocalFsStore {
             .read_to_end(&mut bytes)
             .await
             .map_err(|err| io_error(key, err))?;
-        Ok(Some(bytes))
+        Ok(Some(bytes.into()))
     }
 
-    async fn put_object(&self, key: &str, bytes: &[u8], mode: PutMode) -> Result<ObjectMetadata> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         let path = self.resolve_key(key)?;
-        let _guard = self.write_lock.lock().await;
-        let _cross_process_guard = self.acquire_cross_process_write_lock(key).await?;
-        let precondition_failed = || ObjectStoreError::PreconditionFailed {
-            object_key: key.to_owned(),
-        };
-
-        match mode {
-            PutMode::CreateIfAbsent => {
-                if fs::try_exists(&path)
-                    .await
-                    .map_err(|err| io_error(key, err))?
-                {
-                    return Err(precondition_failed());
-                }
-                Self::create_new_object(key, &self.root, &path, bytes).await?;
-            }
-            PutMode::CompareAndSwap { expected_etag } => {
-                let current = self
-                    .metadata_for_path(key, &path)
-                    .await?
-                    .ok_or_else(precondition_failed)?;
-                if current.etag.as_deref() != Some(expected_etag.as_str()) {
-                    return Err(precondition_failed());
-                }
-                Self::replace_object(key, &self.root, &path, bytes).await?;
-            }
-        }
-
+        let checksum = Checksum::compute(self.checksum_algorithm, &bytes);
+        let body = stream::once(std::future::ready(Ok(bytes))).boxed();
+        self.put_streamed_object(key, &path, body, mode, None)
+            .await?;
         let metadata = match fs::metadata(&path).await {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -515,69 +472,12 @@ impl LocalFsStore {
             }
             Err(err) => return Err(io_error(key, err)),
         };
-        Self::metadata_from_fs_metadata(
-            key,
-            &metadata,
-            Checksum::compute(self.checksum_algorithm, bytes),
-            &path,
-        )
-    }
-
-    async fn delete_object(&self, key: &str) -> Result<()> {
-        let path = self.resolve_key(key)?;
-        let _guard = self.write_lock.lock().await;
-        let _cross_process_guard = self.acquire_cross_process_write_lock(key).await?;
-
-        match fs::remove_file(&path).await {
-            Ok(()) => {
-                sync_parent_directory(key, &path).await?;
-                prune_empty_parent_directories(key, path.parent(), &self.root).await?;
-                Ok(())
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(io_error(key, err)),
-        }
-    }
-}
-
-impl LocalFsStore {
-    /// Confines one caller key beneath the configured prefix.
-    fn scoped(&self, key: &str) -> Result<String> {
-        scope_object_key(self.key_prefix.as_deref(), key)
-    }
-}
-
-#[async_trait]
-impl ObjectStore for LocalFsStore {
-    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
-        self.checksum_algorithm
-    }
-
-    fn identity(&self) -> Option<StoreIdentity> {
-        Some(self.identity.clone())
-    }
-
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        self.head_object(&self.scoped(key)?).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
-        self.get_with_metadata_object(&self.scoped(key)?).await
-    }
-
-    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
-        self.get_object(&self.scoped(key)?, range)
-            .await
-            .map(|maybe| maybe.map(Bytes::from))
-    }
-
-    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        self.put_object(&self.scoped(key)?, &bytes, mode).await
+        Self::metadata_from_fs_metadata(key, &metadata, checksum, &path)
     }
 
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
-        self.put_streamed_object(&self.scoped(key)?, body, mode, None)
-            .await
+        let path = self.resolve_key(key)?;
+        self.put_streamed_object(key, &path, body, mode, None).await
     }
 
     async fn assemble(
@@ -595,16 +495,16 @@ impl ObjectStore for LocalFsStore {
                 sources,
                 expected,
             )?;
-            let scoped = self.scoped(key)?;
+            let path = self.resolve_key(key)?;
             let body = crate::assembly::stream_sources(self, sources, tail)
                 .chain(stream::once(async {
                     complete = true;
                     Ok(Bytes::new())
                 }))
                 .boxed();
-            self.put_streamed_object(&scoped, body, PutMode::CreateIfAbsent, Some(expected))
+            self.put_streamed_object(key, &path, body, PutMode::CreateIfAbsent, Some(expected))
                 .await?;
-            self.head_object(&scoped)
+            self.metadata_for_path(key, &path)
                 .await?
                 .ok_or_else(|| ObjectStoreError::transport(key, "object disappeared after write"))
         }
@@ -616,7 +516,19 @@ impl ObjectStore for LocalFsStore {
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        self.delete_object(&self.scoped(key)?).await
+        let path = self.resolve_key(key)?;
+        let _guard = self.write_lock.lock().await;
+        let _cross_process_guard = self.acquire_cross_process_write_lock(key).await?;
+
+        match fs::remove_file(&path).await {
+            Ok(()) => {
+                sync_parent_directory(key, &path).await?;
+                prune_empty_parent_directories(key, path.parent(), &self.root).await?;
+                Ok(())
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(io_error(key, err)),
+        }
     }
 
     fn list_entries_from_stream(
@@ -624,42 +536,10 @@ impl ObjectStore for LocalFsStore {
         prefix: &str,
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<ListedObject>> {
-        let scoped = match scope_list_prefix(self.key_prefix.as_deref(), prefix) {
-            Ok(scoped) => scoped,
-            Err(err) => return stream::once(async { Err(err) }).boxed(),
-        };
-        let scoped_start_after = match start_after
-            .map(|key| scope_object_key(self.key_prefix.as_deref(), key))
-            .transpose()
-        {
-            Ok(start_after) => start_after,
-            Err(err) => return stream::once(async { Err(err) }).boxed(),
-        };
-        let root = self.root.clone();
-        let key_prefix = self.key_prefix.clone();
-        Box::pin(
-            stream::once(async move {
-                list_prefix_for_root(root, scoped, scoped_start_after.as_deref()).await
-            })
-            .flat_map(|result| match result {
-                Ok(keys) => stream::iter(keys.into_iter().map(Ok)).boxed(),
-                Err(err) => stream::once(async { Err(err) }).boxed(),
-            })
-            .filter_map(move |result| {
-                let key_prefix = key_prefix.clone();
-                async move {
-                    match result {
-                        Ok(mut entry) => {
-                            if let Some(prefix) = key_prefix.as_deref() {
-                                entry.key = unscope_listed_key(Some(prefix), &entry.key)?;
-                            }
-                            Some(Ok(entry))
-                        }
-                        Err(err) => Some(Err(err)),
-                    }
-                }
-            }),
-        )
+        match self.key_scope.listing(prefix, start_after) {
+            Ok(listing) => self.list_scoped_entries(listing),
+            Err(err) => error_stream(err),
+        }
     }
 
     async fn list_child_prefixes(
@@ -668,7 +548,7 @@ impl ObjectStore for LocalFsStore {
         start_after: Option<&str>,
         limit: EffectiveLimit,
     ) -> Result<Page<String, String>> {
-        let scoped = scope_child_listing_prefix(self.key_prefix.as_deref(), prefix)?;
+        let scoped = self.key_scope.child_listing_prefix(prefix)?;
         let mut directory = self.root.clone();
         for segment in validate_segments(&scoped, TrailingSeparator::Allowed)? {
             directory.push(segment);
@@ -729,9 +609,7 @@ async fn list_prefix_for_root(
         return Ok(Vec::new());
     }
 
-    let mut keys = collect_keys(&prefix, start_after, root).await?;
-    keys.sort_by(|left, right| left.key.cmp(&right.key));
-    Ok(keys)
+    collect_keys(&prefix, start_after, root).await
 }
 
 /// Creates the parent directory chain. Returns whether anything was created,
@@ -816,33 +694,7 @@ async fn collect_keys(
         // An entry that vanishes between enumeration and inspection is an
         // absent key, not a listing failure — exactly what a cloud
         // provider's list reports for it.
-        let mut reader = match fs::read_dir(&current).await {
-            Ok(reader) => reader,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(io_error(prefix, err)),
-        };
-        let mut entries = Vec::new();
-        loop {
-            match reader.next_entry().await {
-                Ok(Some(entry)) => entries.push(entry.path()),
-                Ok(None) => break,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
-                Err(err) => return Err(io_error(prefix, err)),
-            }
-        }
-        entries.sort();
-
-        for path in entries.into_iter().rev() {
-            // Filter in-flight scratch names before the stat: a scratch
-            // file is renamed away mid-publish, so inspecting it first
-            // would turn the normal rename race into a listing error.
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(is_scratch_name)
-            {
-                continue;
-            }
+        for path in directory_entries(prefix, &current).await? {
             let metadata = match fs::metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -886,6 +738,10 @@ fn last_modified_at_ms(metadata: &std::fs::Metadata) -> Option<u64> {
 
 /// Lists the entries of `directory` that are not scratch files. A directory
 /// that is gone, or that is an object, has none.
+///
+/// Scratch names are filtered before any stat, because a scratch file is
+/// renamed away mid-publish, and inspecting it first would turn the normal
+/// rename race into a listing error.
 async fn directory_entries(prefix: &str, directory: &Path) -> Result<Vec<PathBuf>> {
     let mut reader = match fs::read_dir(directory).await {
         Ok(reader) => reader,

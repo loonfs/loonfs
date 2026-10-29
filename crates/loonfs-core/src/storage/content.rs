@@ -128,7 +128,7 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
             match source.next_verified_chunk().await {
                 Ok(chunk) => Ok(chunk.map(|bytes| (bytes, source))),
                 Err(error @ DurableContentValidationError::ContentChecksumMismatch { .. }) => {
-                    Err(ObjectStoreError::InvalidContentRef(error.to_string()))
+                    Err(ObjectStoreError::BodyAborted(error.to_string()))
                 }
                 Err(error) => Err(ObjectStoreError::transport(stream_key, error.to_string())),
             }
@@ -727,7 +727,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
         Ok(_) => false,
         // The caller compares the stored checksum with the bytes it sent.
         Err(ObjectStoreError::PreconditionFailed { .. }) => true,
-        Err(ObjectStoreError::InvalidContentRef(message))
+        Err(ObjectStoreError::BodyAborted(message))
             if payload_kind == StreamedPayloadKind::ContentImport =>
         {
             return Err(CoreError::NamespaceCorrupt(message));

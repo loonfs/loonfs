@@ -63,12 +63,19 @@ pub(crate) async fn send(
     })
 }
 
+/// The object length and ETag that a signed `HEAD` reports.
+#[derive(Debug, PartialEq, Eq)]
+struct HeadLength {
+    size_bytes: u64,
+    etag: String,
+}
+
 /// The object length and ETag a signed `HEAD` reports, or `None` when the
 /// object is absent.
-pub(crate) fn object_length_from_signed_head(
+fn object_length_from_signed_head(
     key: &str,
     response: &SignedResponse,
-) -> Result<Option<(u64, String)>> {
+) -> Result<Option<HeadLength>> {
     if !response.status.is_success() {
         return match request_error(key, response.status, None) {
             ObjectStoreError::NotFound { .. } => Ok(None),
@@ -87,7 +94,7 @@ pub(crate) fn object_length_from_signed_head(
         .ok_or_else(|| ObjectStoreError::transport(key, "head reported no content length"))?;
     let etag = header(http::header::ETAG)
         .ok_or_else(|| ObjectStoreError::transport(key, "head reported no etag"))?;
-    Ok(Some((size_bytes, etag)))
+    Ok(Some(HeadLength { size_bytes, etag }))
 }
 
 pub(crate) fn metadata_from_signed_head(
@@ -96,7 +103,8 @@ pub(crate) fn metadata_from_signed_head(
     version_header: &str,
     stored_checksum: impl FnOnce(&http::HeaderMap) -> Option<Checksum>,
 ) -> Result<Option<crate::ObjectMetadata>> {
-    let Some((size_bytes, etag)) = object_length_from_signed_head(key, response)? else {
+    let Some(HeadLength { size_bytes, etag }) = object_length_from_signed_head(key, response)?
+    else {
         return Ok(None);
     };
     let header = |name: &str| {
@@ -247,7 +255,10 @@ mod tests {
                 &head(200, &[("content-length", "12"), ("etag", "\"v1\"")]),
             )
             .expect("present"),
-            Some((12, "\"v1\"".to_owned()))
+            Some(HeadLength {
+                size_bytes: 12,
+                etag: "\"v1\"".to_owned()
+            })
         );
         assert_eq!(
             object_length_from_signed_head(key, &head(404, &[])).expect("absent"),
