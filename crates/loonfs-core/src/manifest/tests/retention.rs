@@ -2122,6 +2122,8 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     // The basis manifest's acknowledged floor is 0, so the unit builds no
     // kept inode filter and reads none of the basis's slot index for one.
     let reads = store.count(OperationSelector::Read);
+    // The namespace's floor is still 0, so the base unit builds no kept inode
+    // filter and walks nothing.
     assert!(
         reads <= input_runs * group.families().len() * 2,
         "the unit should read index and data sections only for selected-run family segments: \

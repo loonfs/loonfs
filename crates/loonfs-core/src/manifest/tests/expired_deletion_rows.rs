@@ -13,7 +13,6 @@ use loonfs_types::{
     ROOT_INODE_ID,
 };
 use std::assert_matches;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const PRINCIPAL_SCOPE: &str = "org_demo";
 
@@ -868,53 +867,6 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
     }
 }
 
-/// Counts the events with one message on the thread that installs it.
-struct MessageCounter {
-    message: &'static str,
-    count: Arc<AtomicUsize>,
-}
-
-impl tracing::Subscriber for MessageCounter {
-    fn register_callsite(
-        &self,
-        _: &'static tracing::Metadata<'static>,
-    ) -> tracing::subscriber::Interest {
-        tracing::subscriber::Interest::sometimes()
-    }
-
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        struct Message(Option<String>);
-        impl tracing::field::Visit for Message {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    self.0 = Some(format!("{value:?}"));
-                }
-            }
-        }
-        let mut message = Message(None);
-        event.record(&mut message);
-        if message.0.as_deref() == Some(self.message) {
-            self.count.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    fn enter(&self, _: &tracing::span::Id) {}
-
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
 /// The rows of the segments a merge wrote.
 async fn merged_rows<S: ObjectStore + ?Sized>(
     store: &S,
@@ -957,27 +909,31 @@ fn reads_of(gets: &[loonfs_test_support::stores::RecordedGet], keys: &BTreeSet<S
     gets.iter().filter(|(key, _)| keys.contains(key)).count()
 }
 
-/// Checks that a base compaction whose kept inode filter would be over its
-/// byte limit keeps every row it would have tested, reads none of the slot
-/// index for the walk, and logs that once, and that the same compaction
-/// under the limit removes the expired deletion's rows.
+/// Checks that a capped filter still removes hidden rows and walks each
+/// small slot-index segment once.
 #[tokio::test]
-async fn a_kept_inode_filter_over_its_byte_limit_keeps_every_row_and_logs_once() {
+async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
     let namespace_id = NamespaceId::parse("filter-limit").expect("namespace id");
     let context = mutation_context("writer-1", 5_000);
     let (_, a) = expire_old(&store, &namespace_id, &context).await;
+    assert_eq!(
+        rows_of(&store, &namespace_id, &[a]).await[&ApiMetadataRowFamily::Revisions].len(),
+        1,
+        "the basis has the hidden revision"
+    );
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("load the current manifest");
     let policy = MetadataRunPolicy::default();
     let group = MetadataFamilyGroup::Revisions;
-    for over_limit in [true, false] {
+    // 200 million rows take the whole 64 MiB at about 2.7 bits per row.
+    for inode_rows in [None, Some(200_000_000)] {
         let mut basis =
             crate::manifest::metadata_basis_from_manifest(&store, None, &current).segments;
         let mut runs = (*basis.scan_runs).clone();
-        if over_limit {
+        if let Some(inode_rows) = inode_rows {
             let inodes = runs
                 .iter_mut()
                 .flat_map(|run| &mut run.segments)
@@ -985,8 +941,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_keeps_every_row_and_logs_once()
                     family.family == ApiMetadataRowFamily::Inodes && !family.segments.is_empty()
                 })
                 .expect("an inodes segment");
-            inodes.segments[0].row_count =
-                crate::limits::MAX_BLOOM_FILTER_BYTES as u64 * 8 / 10 + 1;
+            inodes.segments[0].row_count = inode_rows;
         }
         basis.scan_runs = Arc::new(runs.clone());
         let spec = compaction_step::plan_group(
@@ -998,11 +953,6 @@ async fn a_kept_inode_filter_over_its_byte_limit_keeps_every_row_and_logs_once()
         )
         .expect("plan the group");
         assert_matches!(spec.placement(), MergePlacement::Base { .. });
-        let logged = Arc::new(AtomicUsize::new(0));
-        let guard = tracing::subscriber::set_default(MessageCounter {
-            message: "kept inode filter exceeded its byte limit; kept every row",
-            count: Arc::clone(&logged),
-        });
         store.reset();
         let merged = run_metadata_compaction(
             &basis,
@@ -1015,36 +965,23 @@ async fn a_kept_inode_filter_over_its_byte_limit_keeps_every_row_and_logs_once()
         .await
         .expect("merge")
         .expect("not cancelled");
-        drop(guard);
-        let gets = store.take_gets();
-        let slot_index = segment_keys(&runs, ApiMetadataRowFamily::DirentryBinds);
-        let trash = segment_keys(&runs, ApiMetadataRowFamily::ActiveDeletions);
-        let rows = merged_rows(&store, &merged.output_segments).await;
-        let hidden_rows = rows
+        let walked = segment_keys(&runs, ApiMetadataRowFamily::DirentryBinds);
+        let walk_reads = store
+            .take_gets()
+            .iter()
+            .filter(|(key, _)| walked.contains(key))
+            .count();
+        let hidden_rows = merged_rows(&store, &merged.output_segments)
+            .await
             .iter()
             .filter(|row| matches!(row, MetadataRow::FileRevision(record) if record.inode_id == a))
             .count();
-        if over_limit {
-            assert_eq!(hidden_rows, 1, "the hidden revision stays");
-            assert_eq!(
-                reads_of(&gets, &slot_index) + reads_of(&gets, &trash),
-                0,
-                "an over-limit filter walks nothing"
-            );
-            assert_eq!(logged.load(Ordering::SeqCst), 1, "the compaction logs once");
-        } else {
-            assert_eq!(hidden_rows, 0, "the hidden revision goes");
-            assert_eq!(
-                reads_of(&gets, &slot_index),
-                slot_index.len(),
-                "the walk reads each small segment once, whole"
-            );
-            assert!(
-                reads_of(&gets, &trash) <= trash.len(),
-                "the walk reads each small trash segment at most once"
-            );
-            assert_eq!(logged.load(Ordering::SeqCst), 0);
-        }
+        assert_eq!(hidden_rows, 0, "{inode_rows:?}: the hidden revision goes");
+        assert_eq!(
+            walk_reads,
+            walked.len(),
+            "{inode_rows:?}: the walk reads each small segment once, whole"
+        );
     }
 }
 
@@ -1110,6 +1047,18 @@ async fn seed_keeps<S: ObjectStore + ?Sized>(
     seed: RunNo,
     row: &MetadataRow,
 ) -> bool {
+    seeded_kept_inode_filter(store, namespace_id, seed)
+        .await
+        .keeps(row)
+}
+
+/// The kept inode filter of a base compaction of the inodes group over the
+/// current manifest, seeded by `seed`.
+async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    seed: RunNo,
+) -> KeptInodeFilter {
     let current = load_current_manifest(store, namespace_id)
         .await
         .expect("load the current manifest");
@@ -1127,7 +1076,6 @@ async fn seed_keeps<S: ObjectStore + ?Sized>(
     .await
     .expect("build the filter")
     .expect("not cancelled")
-    .keeps(row)
 }
 
 /// Checks that a false positive in the kept inode filter keeps a hidden

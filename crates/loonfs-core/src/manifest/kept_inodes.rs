@@ -17,7 +17,7 @@ use super::runs::MetadataFamilyGroup;
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::MetadataCompactionCancellation;
 use crate::bloom_filter::BloomFilter;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::limits::MAX_KEPT_INODE_WALK_DEPTH;
 use crate::metadata::row_decode::{
     active_deletion_from_manifest_row, direntry_binding_from_manifest_row,
@@ -40,8 +40,7 @@ const KEPT_INODE_SCAN_ROWS: usize = DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 pub(super) enum KeptInodeFilter {
     /// The merge keeps every row, because it isn't a base merge of a group
     /// that stores rows by inode, because the basis manifest's acknowledged
-    /// floor is 0, or because the filter or the walk that builds it would be
-    /// over its limit.
+    /// floor is 0, or because the walk would exceed its depth limit.
     EveryInode,
     /// The inodes that the walk reached. The filter can also match an inode
     /// that the walk didn't reach, which keeps that inode's rows for one
@@ -108,11 +107,9 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
 /// tell from that family whether they still store rows that the deletion
 /// hides.
 ///
-/// The filter is sized for the basis's `inodes` rows at ten bits each, and
-/// its seed is the output run number, so the next compaction of the group
-/// uses another seed. A filter that would be larger than
-/// `MAX_BLOOM_FILTER_BYTES`, or a walk that would need more than
-/// `MAX_KEPT_INODE_WALK_DEPTH` frames, keeps every row.
+/// The filter uses ten bits per expected inode, capped at
+/// `MAX_BLOOM_FILTER_BYTES`. Its seed is the output run number. A walk
+/// deeper than `MAX_KEPT_INODE_WALK_DEPTH` keeps every row.
 pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     basis: &VerifiedMetadataSegments<'_, S>,
     namespace_id: &NamespaceId,
@@ -139,11 +136,7 @@ pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
         .fold(0_u64, |count, segment| {
             count.saturating_add(segment.row_count)
         });
-    let Some(filter) = BloomFilter::new(expected_inodes, manifest.next_run_no.0) else {
-        tracing::info!(namespace_id = %namespace_id, expected_inodes,
-            "kept inode filter exceeded its byte limit; kept every row");
-        return Ok(Ok(KeptInodeFilter::EveryInode));
-    };
+    let filter = BloomFilter::new(expected_inodes, manifest.next_run_no.0);
     let mut walk = KeptInodeWalk {
         segments: basis.with_empty_block_memo(),
         filter,
@@ -153,11 +146,6 @@ pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     match walk.reach_kept_inodes().await? {
         ControlFlow::Continue(()) => Ok(Ok(KeptInodeFilter::Reached(walk.filter))),
         ControlFlow::Break(WalkStop::Cancelled) => Ok(Err(CompactionUnitOutcome::Cancelled)),
-        ControlFlow::Break(WalkStop::FilterFull) => {
-            tracing::info!(namespace_id = %namespace_id, expected_inodes,
-                "kept inode filter exceeded its byte limit; kept every row");
-            Ok(Ok(KeptInodeFilter::EveryInode))
-        }
         ControlFlow::Break(WalkStop::TooDeep) => {
             tracing::info!(namespace_id = %namespace_id, max_depth = MAX_KEPT_INODE_WALK_DEPTH,
                 "kept inode walk exceeded its depth limit; kept every row");
@@ -169,8 +157,6 @@ pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
 /// Why a walk stopped before it reached every inode it keeps.
 enum WalkStop {
     Cancelled,
-    /// The filter would grow past `MAX_BLOOM_FILTER_BYTES`.
-    FilterFull,
     /// The walk would hold more than `MAX_KEPT_INODE_WALK_DEPTH` directories.
     TooDeep,
 }
@@ -316,13 +302,19 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
 
     /// Inserts `inode_id` unless the filter already matches it, because
     /// inserting a key that the filter matches only grows the filter.
-    fn insert(&mut self, inode_id: InodeId) -> ControlFlow<WalkStop> {
+    ///
+    /// The filter is sized for the basis's `inodes` rows, and every inode the
+    /// walk reaches has such a row, so a filter that refuses the insert has
+    /// found a basis with more reachable inodes than inode rows, which is
+    /// corruption.
+    fn insert(&mut self, inode_id: InodeId) -> Result<()> {
         let key = filter_key(inode_id);
         if self.filter.may_contain(&key) || self.filter.insert(&key).is_some() {
-            ControlFlow::Continue(())
-        } else {
-            ControlFlow::Break(WalkStop::FilterFull)
+            return Ok(());
         }
+        Err(CoreError::NamespaceCorrupt(format!(
+            "the kept inode walk reached inode {inode_id} beyond the basis's `inodes` row count"
+        )))
     }
 
     /// Inserts `inode_id`, and every inode below it when it's a directory.
@@ -331,9 +323,7 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
         inode_id: InodeId,
         inode_kind: InodeKind,
     ) -> Result<ControlFlow<WalkStop>> {
-        if let ControlFlow::Break(stop) = self.insert(inode_id) {
-            return Ok(ControlFlow::Break(stop));
-        }
+        self.insert(inode_id)?;
         if inode_kind != InodeKind::Directory {
             return Ok(ControlFlow::Continue(()));
         }
@@ -393,9 +383,7 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
             if !last.is_bound() {
                 continue;
             }
-            if let ControlFlow::Break(stop) = self.insert(last.child_inode_id) {
-                return Ok(ControlFlow::Break(stop));
-            }
+            self.insert(last.child_inode_id)?;
             if last.child_kind != InodeKind::Directory {
                 continue;
             }
