@@ -181,8 +181,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                     "recreate-cycled",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
-                        content_ref: Some(staged.into_content_ref()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(staged.into_content_ref()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -353,8 +352,7 @@ async fn an_ack_lost_wal_put_commits_once_and_the_one_shot_publish_returns_the_c
             "ack-lost-put",
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/ack.txt").expect("path"),
-                content_ref: Some(content.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -473,8 +471,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     "accept-a",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: Some(content.content_ref().clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -489,8 +486,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     "reject-speculative",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: Some(content.content_ref().clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -513,8 +509,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     "accept-a",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: Some(content.content_ref().clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -712,8 +707,7 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
         "over-proof-replay",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/proof-replay.txt").expect("path"),
-            content_ref: Some(stored.into_content_ref()),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(stored.into_content_ref()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -828,8 +822,7 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
         "over-proof-duplicate",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/batch-proof.txt").expect("path"),
-            content_ref: Some(stored.into_content_ref()),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(stored.into_content_ref()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -882,9 +875,7 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
 
     // A later release may lower the operation limit below a durable request;
     // identity must remain available so receipt resolution can win first.
-    candidate
-        .semantic_identity(&namespace_id)
-        .expect("current request limits must not affect identity");
+    candidate.semantic_identity(&namespace_id);
     let error = publish_namespace_commits_batch(&store, &namespace_id, vec![candidate], &context)
         .await
         .remove(0)
@@ -1001,8 +992,10 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
         error,
         CoreError::CommitIdReuseConflict {
             commit_id,
-            committed_seq: Some(committed_seq),
-            committed_fingerprint: Some(fingerprint),
+            committed: Some(loonfs_types::api::v0::CommittedReceipt {
+                committed_seq,
+                committed_fingerprint: fingerprint,
+            }),
         } if commit_id == "attributed-receipt"
             && committed_seq == first.committed_seq
             && fingerprint.as_str().starts_with("v1:sha256:")
@@ -1051,8 +1044,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         error,
         CoreError::CommitIdReuseConflict {
             commit_id,
-            committed_seq: None,
-            committed_fingerprint: None,
+            committed: None,
         } if commit_id == "req-conflict"
     );
 
@@ -1093,8 +1085,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         "same-path-request",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/same/path.txt").expect("path"),
-            content_ref: Some(content.content_ref().clone()),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1130,10 +1121,12 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         conflict,
         CoreError::CommitIdReuseConflict {
             commit_id,
-            committed_seq,
-            committed_fingerprint: Some(fingerprint),
+            committed: Some(loonfs_types::api::v0::CommittedReceipt {
+                committed_seq,
+                committed_fingerprint: fingerprint,
+            }),
         } if commit_id == "same-path-request"
-            && committed_seq == Some(first.committed_seq)
+            && committed_seq == first.committed_seq
             && fingerprint.as_str().starts_with("v1:sha256:")
     );
 
@@ -1254,8 +1247,7 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
             error,
             CoreError::CommitIdReuseConflict {
                 commit_id: reused,
-                committed_seq: Some(_),
-                committed_fingerprint: Some(_),
+                committed: Some(_),
             } if reused == commit_id
         );
     }
@@ -1383,8 +1375,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
-                        content_ref: Some(content.content_ref().clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -1417,8 +1408,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
-                content_ref: Some(content.into_content_ref()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(content.into_content_ref()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1590,8 +1580,7 @@ async fn file_revision_preconditions_ignore_unrelated_commits_and_reject_rewrite
     };
     let put = |path: &str| FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content_ref: Some(content.content_ref().clone()),
-        inline_content: None,
+        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
         behavior: DestinationBehavior::Replace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -1800,8 +1789,7 @@ async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_u
                 "rewrite",
                 FilesystemOperation::PutFileRevisionByInode {
                     inode_id,
-                    content_ref: Some(content.content_ref().clone()),
-                    inline_content: None,
+                    content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                     expected_revision_no: loonfs_types::RevisionNo(1),
                 },
             ),

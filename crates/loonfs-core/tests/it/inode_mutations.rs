@@ -180,8 +180,7 @@ async fn creates_entries_under_a_parent_inode() {
                 FilesystemOperation::CreateFileByInode {
                     parent_inode_id: docs_inode_id,
                     display_name: display_name("january.txt"),
-                    content_ref: Some(content_ref),
-                    inline_content: None,
+                    content: loonfs_types::FileContent::Ref(content_ref),
                 },
             ],
         },
@@ -232,8 +231,7 @@ async fn creating_by_inode_rejects_a_bound_name() {
         FilesystemOperation::CreateFileByInode {
             parent_inode_id: docs_inode_id,
             display_name: display_name("taken.txt"),
-            content_ref: Some(content_ref),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(content_ref),
         },
         &context,
     )
@@ -725,8 +723,7 @@ async fn put_revision_by_inode<S: loonfs_objectstore::ObjectStore + ?Sized>(
         .into_content_ref();
     FilesystemOperation::PutFileRevisionByInode {
         inode_id,
-        content_ref: Some(content_ref),
-        inline_content: None,
+        content: loonfs_types::FileContent::Ref(content_ref),
         expected_revision_no,
     }
 }

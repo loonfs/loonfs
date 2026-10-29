@@ -155,14 +155,13 @@ impl Maintenance {
 
     async fn count_live_snapshots(&self, namespace_id: &NamespaceId) -> Result<u64> {
         let now_ms = self.core.now_ms();
-        let page_limit = loonfs_types::PaginationPolicy::default().max_limit();
         let mut cursor = None;
         let mut live_snapshots = 0_u64;
         loop {
             let page = self
                 .engine(namespace_id)
                 .list_snapshots_page(PageRequest {
-                    limit: loonfs_types::EffectiveLimit::new(page_limit),
+                    limit: loonfs_types::EffectiveLimit::MAX,
                     cursor,
                 })
                 .await

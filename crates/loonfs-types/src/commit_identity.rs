@@ -14,8 +14,8 @@ use crate::id_macros::{string_id, validation_error};
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, AttributesRevisionNo, ChangeSeq, CommitPrecondition, ContentId, ContentRef,
-    ContentRefKind, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId,
-    NamespaceId, RevisionNo, SubjectId,
+    ContentRefKind, DeleteDirectoryBehavior, DestinationBehavior, FileContent, FilesystemOperation,
+    InodeId, NamespaceId, RevisionNo, SubjectId,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -65,18 +65,6 @@ fn validate_commit_fingerprint(value: &str) -> Result<(), CommitFingerprintValid
         echoed,
         format!("must be `{FINGERPRINT_SCHEME}:` followed by 64 lowercase hex characters"),
     ))
-}
-
-/// A request cannot be represented by the version 1 fingerprint scheme.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum SemanticFingerprintError {
-    /// An operation supplies both content sources or neither.
-    #[error("exactly one of `content_ref` and `inline_content` is required")]
-    InvalidContentSource,
-    /// Canonical JSON encoding failed.
-    #[error("failed to encode the commit fingerprint preimage: {0}")]
-    Encode(#[from] serde_json::Error),
 }
 
 fn fingerprint_bytes(bytes: &[u8]) -> CommitFingerprint {
@@ -401,20 +389,14 @@ fn content_ref_fingerprint_input<'a>(
 }
 
 fn content_fingerprint_input<'a>(
-    content_ref: Option<&'a ContentRef>,
-    inline_content: Option<&[u8]>,
+    content: &'a FileContent,
     inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
-) -> Result<ContentRefFingerprintInput<'a>, SemanticFingerprintError> {
-    match (content_ref, inline_content) {
-        (Some(reference), None) => Ok(content_ref_fingerprint_input(
-            reference,
-            inline_content_identities,
-        )),
-        (None, Some(bytes)) => Ok(ContentRefFingerprintInput::InlineV1 {
-            sha256: crate::hex::hex_encode_bytes(&Sha256::digest(bytes)),
-            size_bytes: bytes.len() as u64,
-        }),
-        _ => Err(SemanticFingerprintError::InvalidContentSource),
+) -> ContentRefFingerprintInput<'a> {
+    match content {
+        FileContent::Ref(reference) => {
+            content_ref_fingerprint_input(reference, inline_content_identities)
+        }
+        FileContent::Inline(bytes) => InlineContentIdentity::from_bytes(bytes).preimage(),
     }
 }
 
@@ -424,8 +406,8 @@ fn content_fingerprint_input<'a>(
 fn operation_fingerprint_input<'a>(
     operation: &'a FilesystemOperation,
     inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
-) -> Result<OperationFingerprintInput<'a>, SemanticFingerprintError> {
-    Ok(match operation {
+) -> OperationFingerprintInput<'a> {
+    match operation {
         FilesystemOperation::CreateDirectory { path, parents } => {
             OperationFingerprintInput::CreateDirectory {
                 path: path.as_str(),
@@ -434,19 +416,14 @@ fn operation_fingerprint_input<'a>(
         }
         FilesystemOperation::PutFile {
             path,
-            content_ref,
-            inline_content,
+            content,
             behavior,
             expected_inode_id,
             expected_revision_no,
         } => OperationFingerprintInput::PutFile {
             path: path.as_str(),
             behavior: *behavior,
-            content_ref: content_fingerprint_input(
-                content_ref.as_ref(),
-                inline_content.as_deref(),
-                inline_content_identities,
-            )?,
+            content_ref: content_fingerprint_input(content, inline_content_identities),
             expected_inode_id: *expected_inode_id,
             expected_revision_no: *expected_revision_no,
         },
@@ -460,29 +437,19 @@ fn operation_fingerprint_input<'a>(
         FilesystemOperation::CreateFileByInode {
             parent_inode_id,
             display_name,
-            content_ref,
-            inline_content,
+            content,
         } => OperationFingerprintInput::CreateFileByInode {
             parent_inode_id: *parent_inode_id,
             display_name: display_name.as_str(),
-            content_ref: content_fingerprint_input(
-                content_ref.as_ref(),
-                inline_content.as_deref(),
-                inline_content_identities,
-            )?,
+            content_ref: content_fingerprint_input(content, inline_content_identities),
         },
         FilesystemOperation::PutFileRevisionByInode {
             inode_id,
-            content_ref,
-            inline_content,
+            content,
             expected_revision_no,
         } => OperationFingerprintInput::PutFileRevisionByInode {
             inode_id: *inode_id,
-            content_ref: content_fingerprint_input(
-                content_ref.as_ref(),
-                inline_content.as_deref(),
-                inline_content_identities,
-            )?,
+            content_ref: content_fingerprint_input(content, inline_content_identities),
             expected_revision_no: *expected_revision_no,
         },
         FilesystemOperation::AppendFile {
@@ -648,7 +615,7 @@ fn operation_fingerprint_input<'a>(
             grants: grants_fingerprint_input(grants),
             expected_access_revision_no: *expected_access_revision_no,
         },
-    })
+    }
 }
 
 fn attribute_set_fingerprint_input(
@@ -682,69 +649,70 @@ fn grants_fingerprint_input(grants: &AccessGrants) -> BTreeMap<&str, Vec<&'stati
         .collect()
 }
 
-/// Computes the semantic fingerprint used to validate a reused commit ID.
+/// The inputs of one request's semantic fingerprint, which validates a reused
+/// commit ID.
 ///
 /// A single-operation helper and a one-item batch produce the same input and
-/// therefore the same fingerprint.
-///
-/// Inline identities hash the original request bytes. Other references keep
-/// their object identity.
-pub fn semantic_commit_fingerprint(
-    namespace_id: &NamespaceId,
-    actor: &ActorId,
-    subject_id: Option<&SubjectId>,
-    message: Option<&str>,
-    operations: &[FilesystemOperation],
-    preconditions: &[CommitPrecondition],
-    inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
-) -> Result<CommitFingerprint, SemanticFingerprintError> {
-    Ok(fingerprint_bytes(&canonical_commit_bytes(
-        namespace_id,
-        actor,
-        subject_id,
-        message,
-        operations,
-        preconditions,
-        inline_content_identities,
-    )?))
+/// therefore the same fingerprint. Inline identities hash the original request
+/// bytes. Other references keep their object identity.
+#[derive(Debug, Clone, Copy)]
+pub struct CommitFingerprintInput<'a> {
+    /// The namespace that the request commits to.
+    pub namespace_id: &'a NamespaceId,
+    /// The actor responsible for the request.
+    pub actor_id: &'a ActorId,
+    /// The subject whose rights authorize the request, if any.
+    pub subject_id: Option<&'a SubjectId>,
+    /// The request's commit message.
+    pub message: Option<&'a str>,
+    /// The request's operations, in order.
+    pub operations: &'a [FilesystemOperation],
+    /// The request's preconditions, in order.
+    pub preconditions: &'a [CommitPrecondition],
+    /// The request-byte identities of inline content that was staged as a reference.
+    pub inline_content_identities: &'a BTreeMap<ContentId, InlineContentIdentity>,
 }
 
-fn canonical_commit_bytes(
-    namespace_id: &NamespaceId,
-    actor: &ActorId,
-    subject_id: Option<&SubjectId>,
-    message: Option<&str>,
-    operations: &[FilesystemOperation],
-    preconditions: &[CommitPrecondition],
-    inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
-) -> Result<Vec<u8>, SemanticFingerprintError> {
-    /// The preimage in the member order Appendix B specifies.
-    #[derive(Serialize)]
-    struct CanonicalCommit<'a> {
-        domain: &'static str,
-        namespace_id: &'a str,
-        actor_id: &'a str,
-        subject_id: Option<&'a str>,
-        operations: Vec<OperationFingerprintInput<'a>>,
-        message: Option<&'a str>,
-        preconditions: Vec<PreconditionFingerprintInput<'a>>,
+impl CommitFingerprintInput<'_> {
+    /// Computes the semantic fingerprint of the request.
+    pub fn fingerprint(&self) -> CommitFingerprint {
+        fingerprint_bytes(&self.canonical_bytes())
     }
 
-    Ok(serde_json::to_vec(&CanonicalCommit {
-        domain: COMMIT_FINGERPRINT_DOMAIN,
-        namespace_id: namespace_id.as_str(),
-        actor_id: actor.as_str(),
-        subject_id: subject_id.map(SubjectId::as_str),
-        operations: operations
-            .iter()
-            .map(|operation| operation_fingerprint_input(operation, inline_content_identities))
-            .collect::<Result<_, _>>()?,
-        message,
-        preconditions: preconditions
-            .iter()
-            .map(precondition_fingerprint_input)
-            .collect(),
-    })?)
+    fn canonical_bytes(&self) -> Vec<u8> {
+        /// The preimage in the member order Appendix B specifies.
+        #[derive(Serialize)]
+        struct CanonicalCommit<'a> {
+            domain: &'static str,
+            namespace_id: &'a str,
+            actor_id: &'a str,
+            subject_id: Option<&'a str>,
+            operations: Vec<OperationFingerprintInput<'a>>,
+            message: Option<&'a str>,
+            preconditions: Vec<PreconditionFingerprintInput<'a>>,
+        }
+
+        serde_json::to_vec(&CanonicalCommit {
+            domain: COMMIT_FINGERPRINT_DOMAIN,
+            namespace_id: self.namespace_id.as_str(),
+            actor_id: self.actor_id.as_str(),
+            subject_id: self.subject_id.map(SubjectId::as_str),
+            operations: self
+                .operations
+                .iter()
+                .map(|operation| {
+                    operation_fingerprint_input(operation, self.inline_content_identities)
+                })
+                .collect(),
+            message: self.message,
+            preconditions: self
+                .preconditions
+                .iter()
+                .map(precondition_fingerprint_input)
+                .collect(),
+        })
+        .expect("a fingerprint preimage of strings and integers should encode as JSON")
+    }
 }
 
 #[cfg(test)]
@@ -790,16 +758,16 @@ mod tests {
                     )
                 })
                 .collect();
-            let bytes = canonical_commit_bytes(
-                &namespace,
-                &test_actor(),
-                vector.subject_id.as_ref(),
-                None,
-                &operations,
-                &vector.preconditions,
-                &identities,
-            )
-            .expect("canonical bytes");
+            let bytes = CommitFingerprintInput {
+                namespace_id: &namespace,
+                actor_id: &test_actor(),
+                subject_id: vector.subject_id.as_ref(),
+                message: None,
+                operations: &operations,
+                preconditions: &vector.preconditions,
+                inline_content_identities: &identities,
+            }
+            .canonical_bytes();
             if update {
                 vector.canonical_json = String::from_utf8(bytes.clone()).expect("canonical UTF-8");
                 vector.fingerprint = fingerprint_bytes(&bytes).as_str().to_owned();
@@ -810,16 +778,16 @@ mod tests {
                 "{} canonical bytes",
                 vector.name
             );
-            let fingerprint = semantic_commit_fingerprint(
-                &namespace,
-                &test_actor(),
-                vector.subject_id.as_ref(),
-                None,
-                &operations,
-                &vector.preconditions,
-                &identities,
-            )
-            .expect("fingerprint");
+            let fingerprint = CommitFingerprintInput {
+                namespace_id: &namespace,
+                actor_id: &test_actor(),
+                subject_id: vector.subject_id.as_ref(),
+                message: None,
+                operations: &operations,
+                preconditions: &vector.preconditions,
+                inline_content_identities: &identities,
+            }
+            .fingerprint();
             assert_eq!(
                 fingerprint.as_str(),
                 vector.fingerprint,
@@ -838,21 +806,20 @@ mod tests {
     fn inline_fingerprints_keep_the_request_byte_digest_for_both_store_algorithms() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
         let fingerprint = |operation, identities: &BTreeMap<ContentId, InlineContentIdentity>| {
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                None,
-                &[operation],
-                &[],
-                identities,
-            )
-            .expect("fingerprint")
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &test_actor(),
+                subject_id: None,
+                message: None,
+                operations: &[operation],
+                preconditions: &[],
+                inline_content_identities: identities,
+            }
+            .fingerprint()
         };
         let inline = FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/file").expect("path"),
-            content_ref: None,
-            inline_content: Some(b"hello".to_vec()),
+            content: FileContent::Inline(b"hello".to_vec()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -894,16 +861,16 @@ mod tests {
     }
 
     fn fingerprint(operation: FilesystemOperation) -> String {
-        semantic_commit_fingerprint(
-            &NamespaceId::parse("demo").expect("valid namespace id"),
-            &test_actor(),
-            None,
-            None,
-            &[operation],
-            &[],
-            &BTreeMap::new(),
-        )
-        .expect("fingerprint")
+        CommitFingerprintInput {
+            namespace_id: &NamespaceId::parse("demo").expect("valid namespace id"),
+            actor_id: &test_actor(),
+            subject_id: None,
+            message: None,
+            operations: &[operation],
+            preconditions: &[],
+            inline_content_identities: &BTreeMap::new(),
+        }
+        .fingerprint()
         .as_str()
         .to_owned()
     }
@@ -941,55 +908,55 @@ mod tests {
         .expect("reversed operation");
 
         assert_eq!(
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                None,
-                &[forward],
-                &[],
-                &BTreeMap::new()
-            )
-            .expect("forward"),
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                None,
-                &[reversed],
-                &[],
-                &BTreeMap::new()
-            )
-            .expect("reversed")
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &test_actor(),
+                subject_id: None,
+                message: None,
+                operations: &[forward],
+                preconditions: &[],
+                inline_content_identities: &BTreeMap::new(),
+            }
+            .fingerprint(),
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &test_actor(),
+                subject_id: None,
+                message: None,
+                operations: &[reversed],
+                preconditions: &[],
+                inline_content_identities: &BTreeMap::new(),
+            }
+            .fingerprint()
         );
     }
 
     #[test]
     fn remove_order_and_repeats_do_not_change_attribute_update_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let baseline = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            None,
-            &[update_attributes([], ["a", "b"], None, None)],
-            &[],
-            &BTreeMap::new(),
-        )
-        .expect("baseline");
+        let baseline = CommitFingerprintInput {
+            namespace_id: &namespace_id,
+            actor_id: &test_actor(),
+            subject_id: None,
+            message: None,
+            operations: &[update_attributes([], ["a", "b"], None, None)],
+            preconditions: &[],
+            inline_content_identities: &BTreeMap::new(),
+        }
+        .fingerprint();
 
         for spelling in [vec!["b", "a"], vec!["a", "b", "a"]] {
             assert_eq!(
-                semantic_commit_fingerprint(
-                    &namespace_id,
-                    &test_actor(),
-                    None,
-                    None,
-                    &[update_attributes([], spelling, None, None)],
-                    &[],
-                    &BTreeMap::new()
-                )
-                .expect("variant"),
+                CommitFingerprintInput {
+                    namespace_id: &namespace_id,
+                    actor_id: &test_actor(),
+                    subject_id: None,
+                    message: None,
+                    operations: &[update_attributes([], spelling, None, None)],
+                    preconditions: &[],
+                    inline_content_identities: &BTreeMap::new(),
+                }
+                .fingerprint(),
                 baseline
             );
         }
@@ -998,21 +965,21 @@ mod tests {
     #[test]
     fn attribute_update_fingerprint_changes_with_every_request_field() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let baseline = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            None,
-            &[update_attributes(
+        let baseline = CommitFingerprintInput {
+            namespace_id: &namespace_id,
+            actor_id: &test_actor(),
+            subject_id: None,
+            message: None,
+            operations: &[update_attributes(
                 [("owner", text("ada"))],
                 ["draft"],
                 None,
                 None,
             )],
-            &[],
-            &BTreeMap::new(),
-        )
-        .expect("baseline");
+            preconditions: &[],
+            inline_content_identities: &BTreeMap::new(),
+        }
+        .fingerprint();
 
         for (label, variant) in [
             (
@@ -1039,16 +1006,16 @@ mod tests {
         ] {
             assert_ne!(
                 baseline,
-                semantic_commit_fingerprint(
-                    &namespace_id,
-                    &test_actor(),
-                    None,
-                    None,
-                    &[variant],
-                    &[],
-                    &BTreeMap::new()
-                )
-                .expect("variant fingerprint"),
+                CommitFingerprintInput {
+                    namespace_id: &namespace_id,
+                    actor_id: &test_actor(),
+                    subject_id: None,
+                    message: None,
+                    operations: &[variant],
+                    preconditions: &[],
+                    inline_content_identities: &BTreeMap::new(),
+                }
+                .fingerprint(),
                 "a changed {label} must change the fingerprint"
             );
         }
@@ -1192,16 +1159,16 @@ mod tests {
         };
 
         let fingerprint = |version| {
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                None,
-                &[operation(version)],
-                &[],
-                &BTreeMap::new(),
-            )
-            .expect("fingerprint")
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &test_actor(),
+                subject_id: None,
+                message: None,
+                operations: &[operation(version)],
+                preconditions: &[],
+                inline_content_identities: &BTreeMap::new(),
+            }
+            .fingerprint()
         };
 
         assert_ne!(fingerprint("aaaa"), fingerprint("bbbb"));
@@ -1215,16 +1182,16 @@ mod tests {
         let actor_y = ActorId::parse("y").expect("actor id");
 
         let fingerprint = |actor: &ActorId| {
-            semantic_commit_fingerprint(
-                &namespace_id,
-                actor,
-                None,
-                None,
-                std::slice::from_ref(&operation),
-                &[],
-                &BTreeMap::new(),
-            )
-            .expect("fingerprint")
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: actor,
+                subject_id: None,
+                message: None,
+                operations: std::slice::from_ref(&operation),
+                preconditions: &[],
+                inline_content_identities: &BTreeMap::new(),
+            }
+            .fingerprint()
         };
         assert_ne!(fingerprint(&actor_x), fingerprint(&actor_y));
     }
@@ -1236,16 +1203,16 @@ mod tests {
         let subject_x = SubjectId::parse("x").expect("subject id");
         let subject_y = SubjectId::parse("y").expect("subject id");
         let fingerprint = |subject_id| {
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &test_actor(),
                 subject_id,
-                None,
-                std::slice::from_ref(&operation),
-                &[],
-                &BTreeMap::new(),
-            )
-            .expect("fingerprint")
+                message: None,
+                operations: std::slice::from_ref(&operation),
+                preconditions: &[],
+                inline_content_identities: &BTreeMap::new(),
+            }
+            .fingerprint()
         };
         assert_ne!(fingerprint(Some(&subject_x)), fingerprint(Some(&subject_y)));
         assert_ne!(fingerprint(None), fingerprint(Some(&subject_x)));
@@ -1261,8 +1228,7 @@ mod tests {
         );
         let operation = |expected_inode_id, expected_revision_no| FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-            content_ref: Some(content_ref.clone()),
-            inline_content: None,
+            content: FileContent::Ref(content_ref.clone()),
             behavior: DestinationBehavior::Replace,
             expected_inode_id,
             expected_revision_no,
@@ -1349,16 +1315,16 @@ mod tests {
             },
         ] {
             assert_eq!(
-                semantic_commit_fingerprint(
-                    &namespace_id,
-                    &test_actor(),
-                    None,
-                    None,
-                    &[put("/docs/report.txt", content_ref)],
-                    &[],
-                    &BTreeMap::new()
-                )
-                .expect("retry fingerprint")
+                CommitFingerprintInput {
+                    namespace_id: &namespace_id,
+                    actor_id: &test_actor(),
+                    subject_id: None,
+                    message: None,
+                    operations: &[put("/docs/report.txt", content_ref)],
+                    preconditions: &[],
+                    inline_content_identities: &BTreeMap::new(),
+                }
+                .fingerprint()
                 .as_str(),
                 "v1:sha256:9355b7faba7360d50aad432c2035de5fb34d6106333821f1eedadc6d396b54e3"
             );
@@ -1375,8 +1341,7 @@ mod tests {
     fn put(path: &str, content_ref: ContentRef) -> FilesystemOperation {
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse(path).expect("path"),
-            content_ref: Some(content_ref),
-            inline_content: None,
+            content: FileContent::Ref(content_ref),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1401,26 +1366,26 @@ mod tests {
         );
 
         assert_ne!(
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                None,
-                &[put("/docs/report.txt", first)],
-                &[],
-                &BTreeMap::new()
-            )
-            .expect("fingerprint"),
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                None,
-                &[put("/docs/report.txt", second)],
-                &[],
-                &BTreeMap::new()
-            )
-            .expect("fingerprint")
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &test_actor(),
+                subject_id: None,
+                message: None,
+                operations: &[put("/docs/report.txt", first)],
+                preconditions: &[],
+                inline_content_identities: &BTreeMap::new(),
+            }
+            .fingerprint(),
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &test_actor(),
+                subject_id: None,
+                message: None,
+                operations: &[put("/docs/report.txt", second)],
+                preconditions: &[],
+                inline_content_identities: &BTreeMap::new(),
+            }
+            .fingerprint()
         );
     }
 
@@ -1430,26 +1395,26 @@ mod tests {
         // commit id with a different message must conflict, so the message
         // joins the preimage.
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let without = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            None,
-            &[create_dir("/docs")],
-            &[],
-            &BTreeMap::new(),
-        )
-        .expect("fingerprint");
-        let with = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            Some("import batch"),
-            &[create_dir("/docs")],
-            &[],
-            &BTreeMap::new(),
-        )
-        .expect("fingerprint");
+        let without = CommitFingerprintInput {
+            namespace_id: &namespace_id,
+            actor_id: &test_actor(),
+            subject_id: None,
+            message: None,
+            operations: &[create_dir("/docs")],
+            preconditions: &[],
+            inline_content_identities: &BTreeMap::new(),
+        }
+        .fingerprint();
+        let with = CommitFingerprintInput {
+            namespace_id: &namespace_id,
+            actor_id: &test_actor(),
+            subject_id: None,
+            message: Some("import batch"),
+            operations: &[create_dir("/docs")],
+            preconditions: &[],
+            inline_content_identities: &BTreeMap::new(),
+        }
+        .fingerprint();
 
         assert_ne!(without, with);
     }
@@ -1459,26 +1424,26 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 
         assert_ne!(
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                None,
-                &[create_dir("/a"), create_dir("/b")],
-                &[],
-                &BTreeMap::new()
-            )
-            .expect("forward fingerprint"),
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &test_actor(),
-                None,
-                None,
-                &[create_dir("/b"), create_dir("/a")],
-                &[],
-                &BTreeMap::new()
-            )
-            .expect("reversed fingerprint")
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &test_actor(),
+                subject_id: None,
+                message: None,
+                operations: &[create_dir("/a"), create_dir("/b")],
+                preconditions: &[],
+                inline_content_identities: &BTreeMap::new(),
+            }
+            .fingerprint(),
+            CommitFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &test_actor(),
+                subject_id: None,
+                message: None,
+                operations: &[create_dir("/b"), create_dir("/a")],
+                preconditions: &[],
+                inline_content_identities: &BTreeMap::new(),
+            }
+            .fingerprint()
         );
     }
 
@@ -1498,23 +1463,22 @@ mod tests {
         };
         let fingerprint =
             |namespace_id: &NamespaceId, path: &AbsolutePath, options: &PutFileOptions| {
-                semantic_commit_fingerprint(
+                CommitFingerprintInput {
                     namespace_id,
-                    &test_actor(),
-                    None,
-                    options.commit.message.as_deref(),
-                    &[FilesystemOperation::PutFile {
+                    actor_id: &test_actor(),
+                    subject_id: None,
+                    message: options.commit.message.as_deref(),
+                    operations: &[FilesystemOperation::PutFile {
                         path: path.clone(),
-                        content_ref: Some(content_ref.clone()),
-                        inline_content: None,
+                        content: FileContent::Ref(content_ref.clone()),
                         behavior: options.behavior,
                         expected_inode_id: options.expected_inode_id,
                         expected_revision_no: options.expected_revision_no,
                     }],
-                    &[],
-                    &BTreeMap::new(),
-                )
-                .expect("retry fingerprint")
+                    preconditions: &[],
+                    inline_content_identities: &BTreeMap::new(),
+                }
+                .fingerprint()
             };
         let baseline = fingerprint(&namespace_id, &path, &options);
 

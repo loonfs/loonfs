@@ -2,7 +2,7 @@
 
 use crate::args::PageLimitArgs;
 use crate::error::CliError;
-use loonfs_types::{usize_from_u64, LimitError, PagedResponse, Pager, PaginationPolicy};
+use loonfs_types::{usize_from_u64, EffectiveLimit, LimitError, PagedResponse, Pager};
 
 pub(super) enum PagedListing<P> {
     Streamed,
@@ -27,9 +27,7 @@ where
     // Both flags meet the pagination contract here, with the error the
     // server gives for an invalid `limit`.
     if let Some(page_size) = args.page_size {
-        let page_limit = PaginationPolicy::default()
-            .effective_limit(Some(page_size))
-            .map_err(invalid_limit)?;
+        let page_limit = EffectiveLimit::from_requested(Some(page_size)).map_err(invalid_limit)?;
         pager = pager.page_limit(page_limit);
     }
     if let Some(limit) = args.limit {

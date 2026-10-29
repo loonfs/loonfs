@@ -709,8 +709,7 @@ mod tests {
         let z_files = usize::try_from(DEFAULT_PAGE_LIMIT).expect("a page limit fits a usize") - 3;
         let file = |path: String| FilesystemOperation::PutFile {
             path: remote(&path),
-            content_ref: None,
-            inline_content: Some(b"file".to_vec()),
+            content: loonfs_types::FileContent::Inline(b"file".to_vec()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

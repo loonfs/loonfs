@@ -208,8 +208,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
             content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {
                 path: target.absolute_path().clone(),
-                content_ref: Some(content_ref),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(content_ref),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -244,7 +243,9 @@ async fn assert_direct_get_returns_the_written_bytes(
         .create_download(target)
         .await
         .expect("begin download");
-    let ObjectTransferAccess::PresignedUrl { method, .. } = &grant.ranges[0].access;
+    let ObjectTransferAccess::PresignedUrl { method, .. } = &grant.ranges[0].access else {
+        panic!("expected a presigned URL");
+    };
     assert_eq!(method, "GET");
     assert_eq!(grant.content_ref.size_bytes, bytes.len() as u64);
 
@@ -273,7 +274,9 @@ async fn assert_direct_get_capability_serves_only_its_range(
         .create_download(target)
         .await
         .expect("begin download");
-    let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.ranges[0].access;
+    let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.ranges[0].access else {
+        panic!("expected a presigned URL");
+    };
     let whole = format!("bytes=0-{}", bytes.len() - 1);
     assert_eq!(headers.get("range"), Some(&whole));
     assert_eq!(fetch_range(url, 0, bytes.len() - 1), bytes);
@@ -294,7 +297,9 @@ async fn assert_direct_get_capability_serves_only_its_range(
         )
         .await
         .expect("a grant from the resume offset");
-    let ObjectTransferAccess::PresignedUrl { url, .. } = &rest.ranges[0].access;
+    let ObjectTransferAccess::PresignedUrl { url, .. } = &rest.ranges[0].access else {
+        panic!("expected a presigned URL");
+    };
     assert_eq!(fetch_range(url, split, bytes.len() - 1), &bytes[split..]);
 }
 
@@ -463,7 +468,10 @@ impl Meddle {
             url,
             headers,
             expires_at_ms,
-        } = access;
+        } = access
+        else {
+            panic!("expected a presigned URL");
+        };
         let mut headers = headers.clone();
         match self {
             Self::Remove(header) => {
@@ -832,7 +840,9 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
-    let ObjectTransferAccess::PresignedUrl { url, .. } = access;
+    let ObjectTransferAccess::PresignedUrl { url, .. } = access else {
+        panic!("expected a presigned URL");
+    };
     let StoreConfig::GcpGcs(GcpGcsStoreConfig {
         bucket, key_prefix, ..
     }) = store_config
@@ -880,7 +890,9 @@ async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id:
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
-    let ObjectTransferAccess::PresignedUrl { url, .. } = access;
+    let ObjectTransferAccess::PresignedUrl { url, .. } = access else {
+        panic!("expected a presigned URL");
+    };
 
     // Rewrite the capability's own lifetime to one already spent. The
     // signature covered the original, so this is refused twice over — which
@@ -1156,8 +1168,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {
                 path: target.absolute_path().clone(),
-                content_ref: Some(content_ref),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(content_ref),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

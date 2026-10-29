@@ -8,6 +8,7 @@ use loonfs_types::options::{
     ReadFileOptions,
 };
 use loonfs_types::{headers, PageRequest};
+use std::num::NonZeroU64;
 
 /// Options for creating a namespace.
 ///
@@ -19,7 +20,7 @@ pub struct CreateNamespaceOptions {
     pub access: loonfs_types::NamespaceAccess,
     /// The namespace's retention window in milliseconds, or `None` when the
     /// namespace has no window of its own and the server's window applies.
-    pub retention_window_ms: Option<u64>,
+    pub retention_window_ms: Option<NonZeroU64>,
 }
 
 impl Default for CreateNamespaceOptions {
@@ -82,7 +83,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         name: &str,
-        ttl_ms: Option<u64>,
+        ttl_ms: Option<NonZeroU64>,
     ) -> Result<Snapshot> {
         let url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
         self.request_json(
@@ -151,7 +152,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         snapshot_id: &PinId,
-        ttl_ms: u64,
+        ttl_ms: NonZeroU64,
     ) -> Result<Snapshot> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",

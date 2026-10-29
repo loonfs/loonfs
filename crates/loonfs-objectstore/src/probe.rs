@@ -15,7 +15,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_types::api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse};
+use loonfs_types::api::v0;
 use loonfs_types::{Checksum, ProbeRunId};
 
 /// Results from one store probe.
@@ -27,28 +27,22 @@ pub struct StoreProbeReport {
     pub checks: Vec<StoreProbeCheck>,
 }
 
-impl From<StoreProbeReport> for StoreProbeResponse {
+impl From<StoreProbeReport> for v0::StoreProbeResponse {
     fn from(report: StoreProbeReport) -> Self {
         Self {
             run_id: report.run_id,
             checks: report
                 .checks
                 .into_iter()
-                .map(|check| {
-                    let (outcome, message) = match check.outcome {
-                        StoreProbeOutcome::Passed => (StoreProbeCheckOutcome::Passed, None),
-                        StoreProbeOutcome::Unsupported => {
-                            (StoreProbeCheckOutcome::Unsupported, None)
-                        }
+                .map(|check| v0::StoreProbeCheck {
+                    name: check.name.to_owned(),
+                    outcome: match check.outcome {
+                        StoreProbeOutcome::Passed => v0::StoreProbeCheckOutcome::Passed,
+                        StoreProbeOutcome::Unsupported => v0::StoreProbeCheckOutcome::Unsupported,
                         StoreProbeOutcome::Failed { message } => {
-                            (StoreProbeCheckOutcome::Failed, Some(message))
+                            v0::StoreProbeCheckOutcome::Failed { message }
                         }
-                    };
-                    StoreProbeCheckResult {
-                        name: check.name.to_owned(),
-                        outcome,
-                        message,
-                    }
+                    },
                 })
                 .collect(),
         }
@@ -741,6 +735,7 @@ mod tests {
     use crate::{ListedObject, ObjectBody, ObjectMetadata, PutMode};
     use async_trait::async_trait;
     use futures::stream::BoxStream;
+    use loonfs_types::api::v0::StoreProbeResponse;
     use loonfs_types::{EffectiveLimit, Page};
     use std::assert_matches;
     use std::sync::atomic::{AtomicBool, Ordering};

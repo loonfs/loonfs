@@ -491,7 +491,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
         .expect("first write");
     let snapshot = harness
         .client
-        .create_snapshot(&source, "basis", Some(60_000))
+        .create_snapshot(&source, "basis", std::num::NonZeroU64::new(60_000))
         .await
         .expect("snapshot");
     harness

@@ -1,6 +1,7 @@
 //! Commit requests, commit responses, and change-feed shapes for the v0 HTTP API.
 
 use super::{ContentToken, FilesystemOperation};
+use crate::options::CommitOptions;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, BindingVersion,
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
@@ -322,6 +323,19 @@ pub struct CommitRequest {
 }
 
 impl CommitRequest {
+    /// Builds a request for `operations` under the commit ID, message, and
+    /// preconditions of `commit`, with a generated commit ID when `commit`
+    /// has none.
+    pub fn with_operations(commit: &CommitOptions, operations: Vec<FilesystemOperation>) -> Self {
+        Self {
+            commit_id: commit.commit_id.clone().unwrap_or_else(CommitId::generate),
+            message: commit.message.clone(),
+            content_tokens: Vec::new(),
+            preconditions: commit.preconditions.clone(),
+            operations,
+        }
+    }
+
     /// Sets the admission conditions in caller order.
     pub fn preconditions(mut self, preconditions: Vec<CommitPrecondition>) -> Self {
         self.preconditions = preconditions;

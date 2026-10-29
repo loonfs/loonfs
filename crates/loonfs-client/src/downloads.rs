@@ -461,7 +461,9 @@ impl Client {
         if range.length == 0 {
             return Ok(futures::stream::empty().boxed());
         }
-        let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &range.access;
+        let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &range.access else {
+            return Err(unsupported_download_access());
+        };
         let mut request = WireRequest::presigned(http::Method::GET, url);
         for (name, value) in headers {
             request = request.header(name, value);
@@ -508,6 +510,10 @@ impl Client {
     }
 }
 
+fn unsupported_download_access() -> ClientError {
+    ClientError::Protocol("unsupported download access kind".to_owned())
+}
+
 fn granted_start(ranges: &[DownloadRange], content_ref: &ContentRef, target: &str) -> Result<u64> {
     let invalid = || ClientError::Protocol(format!("the grant for `{target}` has invalid ranges"));
     let first = ranges.first().ok_or_else(invalid)?;
@@ -519,7 +525,9 @@ fn granted_start(ranges: &[DownloadRange], content_ref: &ContentRef, target: &st
     }
     let mut offset = start;
     for range in ranges {
-        let ObjectTransferAccess::PresignedUrl { method, .. } = &range.access;
+        let ObjectTransferAccess::PresignedUrl { method, .. } = &range.access else {
+            return Err(unsupported_download_access());
+        };
         if method != "GET" {
             return Err(ClientError::Protocol(format!(
                 "unsupported presigned download method `{method}`"

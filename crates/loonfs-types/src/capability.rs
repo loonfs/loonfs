@@ -1,5 +1,6 @@
 //! API groups, features, and limits advertised by a deployment.
 
+use crate::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -212,6 +213,20 @@ fn api_group_names(api_groups: &[String]) -> Vec<&str> {
         .collect()
 }
 
+/// Returns the advisory capability limits of the pagination contract.
+pub fn pagination_capability_limits() -> BTreeMap<String, u64> {
+    BTreeMap::from([
+        (
+            LIMIT_PAGINATION_DEFAULT_LIMIT.to_owned(),
+            u64::from(DEFAULT_PAGE_LIMIT),
+        ),
+        (
+            LIMIT_PAGINATION_MAX_LIMIT.to_owned(),
+            u64::from(MAX_PAGE_LIMIT),
+        ),
+    ])
+}
+
 /// The group name of a versioned API group: `filesystem/v0` has group `filesystem`.
 fn api_group_name(api_group: &str) -> &str {
     api_group.split('/').next().unwrap_or(api_group)
@@ -234,6 +249,20 @@ mod tests {
             ]),
             limits: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn pagination_limits_are_advertised() {
+        let limits = pagination_capability_limits();
+
+        assert_eq!(
+            limits.get("pagination.default_limit"),
+            Some(&u64::from(DEFAULT_PAGE_LIMIT))
+        );
+        assert_eq!(
+            limits.get("pagination.max_limit"),
+            Some(&u64::from(MAX_PAGE_LIMIT))
+        );
     }
 
     #[test]

@@ -222,7 +222,10 @@ async fn reuploading_identical_bytes_above_the_inline_threshold_conflicts() {
 
     assert_eq!(rerun.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        rerun.details().expect("receipt").committed_seq,
+        rerun
+            .details()
+            .and_then(|details| details.committed)
+            .map(|committed| committed.committed_seq),
         Some(first.committed_seq)
     );
     assert_eq!(
@@ -422,8 +425,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
                 operations: vec![
                     FilesystemOperation::PutFile {
                         path: parse_mutation_path(PATH).expect("path"),
-                        content_ref: Some(content_ref),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(content_ref),
                         behavior: DestinationBehavior::Replace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -943,7 +945,10 @@ async fn reuploading_an_identical_stream_under_the_same_commit_id_conflicts() {
 
     assert_eq!(rerun.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        rerun.details().expect("receipt").committed_seq,
+        rerun
+            .details()
+            .and_then(|details| details.committed)
+            .map(|committed| committed.committed_seq),
         Some(first.committed_seq)
     );
     assert_eq!(
@@ -986,7 +991,10 @@ async fn a_streamed_reupload_conflicts_with_a_buffered_first_run() {
 
     assert_eq!(rerun.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        rerun.details().expect("receipt").committed_seq,
+        rerun
+            .details()
+            .and_then(|details| details.committed)
+            .map(|committed| committed.committed_seq),
         Some(first.committed_seq)
     );
 }

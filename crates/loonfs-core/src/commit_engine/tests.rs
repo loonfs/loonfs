@@ -118,8 +118,8 @@ fn semantic_identity_excludes_content_preparation() {
     );
 
     assert_eq!(
-        ready.semantic_identity(&namespace_id).expect("identity"),
-        rejected.semantic_identity(&namespace_id).expect("identity")
+        ready.semantic_identity(&namespace_id),
+        rejected.semantic_identity(&namespace_id)
     );
 }
 
@@ -140,9 +140,7 @@ fn semantic_identity_ignores_current_request_limits() {
             })
             .collect(),
     });
-    oversized_ops
-        .semantic_identity(&namespace_id)
-        .expect("operation limits must not affect identity");
+    oversized_ops.semantic_identity(&namespace_id);
 
     let content_ref = ContentRef::blob_v1(
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
@@ -155,9 +153,7 @@ fn semantic_identity_ignores_current_request_limits() {
         create_dir_request("too-many-proofs", "docs"),
         vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
     );
-    oversized_proofs
-        .semantic_identity(&namespace_id)
-        .expect("prepared proof limits must not affect identity");
+    oversized_proofs.semantic_identity(&namespace_id);
 
     let oversized_message = CommitCandidate::new(CommitIntent {
         preconditions: Vec::new(),
@@ -170,9 +166,7 @@ fn semantic_identity_ignores_current_request_limits() {
             parents: false,
         }],
     });
-    oversized_message
-        .semantic_identity(&namespace_id)
-        .expect("message limits must not affect identity");
+    oversized_message.semantic_identity(&namespace_id);
 }
 
 #[test]

@@ -554,7 +554,7 @@ fn try_admit_prepared_candidate(
     let permit = publisher
         .admission
         .acquire_candidate(namespace_id, &candidate)?;
-    let semantic_identity = candidate.candidate.semantic_identity(namespace_id)?;
+    let semantic_identity = candidate.candidate.semantic_identity(namespace_id);
     let (sender, receiver) = oneshot::channel();
     let admission = publisher.admit(
         commit_id,
@@ -696,8 +696,7 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
                     .enumerate()
                     .map(|(index, value)| FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/{name}-{index}")).expect("path"),
-                        content_ref: Some(value.content_ref().clone()),
-                        inline_content: None,
+                        content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -883,9 +882,8 @@ async fn publisher_contender_waits_for_active_request_receipt() {
 
     store.block_next();
     let active_request = create_directory_request("active", "active");
-    let active_identity = CommitCandidate::new(active_request.clone())
-        .semantic_identity(&namespace_id)
-        .expect("active identity");
+    let active_identity =
+        CommitCandidate::new(active_request.clone()).semantic_identity(&namespace_id);
     let active = admit_commit(&publisher, &namespace_id, active_request);
     store.wait_until_blocked().await;
 
@@ -915,8 +913,10 @@ async fn publisher_contender_waits_for_active_request_receipt() {
         conflict,
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
-            committed_seq: Some(ChangeSeq(1)),
-            committed_fingerprint: Some(fingerprint),
+            committed: Some(loonfs_types::api::v0::CommittedReceipt {
+                committed_seq: ChangeSeq(1),
+                committed_fingerprint: fingerprint,
+            }),
         }) if commit_id == "active" && fingerprint == active_identity
     );
 }
@@ -937,8 +937,7 @@ async fn publisher_contender_retries_after_active_request_fails() {
     ));
     let commit_id = CommitId::parse("handoff").expect("valid commit id");
     let primary_identity = CommitCandidate::new(create_directory_request("handoff", "first"))
-        .semantic_identity(&namespace_id)
-        .expect("primary identity");
+        .semantic_identity(&namespace_id);
     publisher_state(&publisher).in_flight.insert(
         commit_id.clone(),
         InFlightRequest {
@@ -986,8 +985,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
     let commit_id = CommitId::parse("bounded-handoff").expect("valid commit id");
     let primary_identity =
         CommitCandidate::new(create_directory_request("bounded-handoff", "first"))
-            .semantic_identity(&namespace_id)
-            .expect("primary identity");
+            .semantic_identity(&namespace_id);
     publisher_state(&publisher).in_flight.insert(
         commit_id.clone(),
         InFlightRequest {
@@ -1027,8 +1025,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
         error,
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id: conflicting_id,
-            committed_seq: None,
-            committed_fingerprint: None,
+            committed: None,
         }) if conflicting_id == commit_id.as_str()
     );
 }
@@ -1120,8 +1117,10 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
         conflict,
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
-            committed_seq: Some(ChangeSeq(2)),
-            committed_fingerprint: Some(_),
+            committed: Some(loonfs_types::api::v0::CommittedReceipt {
+                committed_seq: ChangeSeq(2),
+                ..
+            }),
         }) if commit_id == "pending-0"
     );
 }
@@ -1888,8 +1887,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         None,
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/file.txt").expect("path"),
-            content_ref: Some(prepared_content.content_ref().clone()),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(prepared_content.content_ref().clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -2220,8 +2218,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/inline").expect("path"),
-                content_ref: Some(value.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

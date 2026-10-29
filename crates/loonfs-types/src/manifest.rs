@@ -497,7 +497,10 @@ fn decode_namespace_manifest_json_with_limit(
     limit: usize,
 ) -> Result<NamespaceManifestEnvelope, EnvelopeCodecError> {
     let Some(document) = crate::envelope::decompress_document(bytes, limit)? else {
-        return Err(EnvelopeCodecError::ManifestTooLarge { max_bytes: limit });
+        return Err(EnvelopeCodecError::DocumentTooLarge {
+            kind: NamespaceManifestKind::Manifest.as_str(),
+            max_bytes: limit,
+        });
     };
     let expected_kind = NamespaceManifestKind::Manifest;
     crate::envelope::decode_json_envelope(&document, NAMESPACE_MANIFEST_FORMAT_VERSION, |found| {
@@ -900,7 +903,7 @@ mod tests {
         );
         assert_matches!(
             decode_namespace_manifest_json_with_limit(encoded.as_bytes(), document.len() - 1),
-            Err(crate::envelope::EnvelopeCodecError::ManifestTooLarge { max_bytes })
+            Err(crate::envelope::EnvelopeCodecError::DocumentTooLarge { max_bytes, .. })
                 if max_bytes == document.len() - 1
         );
         assert_matches!(

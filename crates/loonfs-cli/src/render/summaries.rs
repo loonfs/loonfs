@@ -17,17 +17,22 @@ pub(crate) enum StoreProbeRunOutcome {
 pub(crate) fn store_probe_run_outcome(
     response: &loonfs_types::api::v0::StoreProbeResponse,
 ) -> StoreProbeRunOutcome {
-    let counted = |outcome: StoreProbeCheckOutcome| {
-        response
-            .checks
-            .iter()
-            .filter(|check| check.outcome == outcome)
-            .count()
-    };
-    match (
-        counted(StoreProbeCheckOutcome::Failed),
-        counted(StoreProbeCheckOutcome::Unsupported),
-    ) {
+    let unsupported = response
+        .checks
+        .iter()
+        .filter(|check| check.outcome == StoreProbeCheckOutcome::Unsupported)
+        .count();
+    let failed = response
+        .checks
+        .iter()
+        .filter(|check| {
+            !matches!(
+                check.outcome,
+                StoreProbeCheckOutcome::Passed | StoreProbeCheckOutcome::Unsupported
+            )
+        })
+        .count();
+    match (failed, unsupported) {
         (0, 0) => StoreProbeRunOutcome::Passed,
         (0, checks) => StoreProbeRunOutcome::Unsupported { checks },
         (checks, _) => StoreProbeRunOutcome::Failed { checks },
@@ -56,7 +61,7 @@ pub(super) fn store_probe_report_lines(
     let mut lines: Vec<String> = response
         .checks
         .iter()
-        .map(StoreProbeCheckResult::check_line)
+        .map(StoreProbeCheck::check_line)
         .collect();
     lines.push(store_probe_summary_line(response));
     lines
@@ -68,13 +73,10 @@ pub(super) fn store_probe_failure_group_lines(
 ) -> Vec<String> {
     let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
     for check in &response.checks {
-        if check.outcome != StoreProbeCheckOutcome::Failed {
+        let StoreProbeCheckOutcome::Failed { message } = &check.outcome else {
             continue;
-        }
-        let message = check
-            .message
-            .as_deref()
-            .map(normalize_probe_message)
+        };
+        let message = Some(normalize_probe_message(message))
             .filter(|message| !message.is_empty())
             .unwrap_or_else(|| "object-store check failed".to_owned());
         match groups.iter_mut().find(|(existing, _)| *existing == message) {

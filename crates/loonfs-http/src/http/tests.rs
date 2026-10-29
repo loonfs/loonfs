@@ -390,13 +390,17 @@ fn error_detail_fields_match_the_api_spec_table() {
         namespace_id: Some(NamespaceId::parse("deleted").expect("namespace id")),
         precondition_index: Some(0),
         commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
-        committed_seq: Some(ChangeSeq::from(1)),
-        committed_fingerprint: Some(loonfs_test_support::ids::commit_fingerprint("fingerprint")),
+        committed: Some(loonfs_types::api::v0::CommittedReceipt {
+            committed_seq: ChangeSeq::from(1),
+            committed_fingerprint: loonfs_test_support::ids::commit_fingerprint("fingerprint"),
+        }),
         operation_index: Some(0),
         fenced_writer_epoch: Some(WriterEpoch::from(1)),
         active_writer_epoch: Some(WriterEpoch::from(2)),
-        active_writer_id: Some(loonfs_types::WriterId::parse("writer").expect("writer id")),
-        active_acquired_at_ms: Some(1),
+        active_writer: Some(loonfs_types::api::v0::ActiveWriter {
+            active_writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
+            active_acquired_at_ms: 1,
+        }),
         inode_id: Some(InodeId(1)),
         expected_inode_id: Some(InodeId(2)),
         actual_inode_id: Some(InodeId(3)),
@@ -3036,7 +3040,10 @@ mod direct_download {
                     url,
                     headers,
                     ..
-                } = access;
+                } = access
+                else {
+                    panic!("expected a presigned URL");
+                };
                 assert_eq!(method, "GET");
                 let mut request = axum::http::Request::builder()
                     .method(method.as_str())
@@ -3717,7 +3724,9 @@ mod direct_download {
     }
 
     fn signed_headers(access: &ObjectTransferAccess) -> &BTreeMap<String, String> {
-        let ObjectTransferAccess::PresignedUrl { headers, .. } = access;
+        let ObjectTransferAccess::PresignedUrl { headers, .. } = access else {
+            panic!("expected a presigned URL");
+        };
         headers
     }
 

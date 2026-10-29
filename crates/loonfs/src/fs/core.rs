@@ -16,12 +16,11 @@ use loonfs_core::cache::{
 use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use loonfs_types::{
     decode_cursor, encode_cursor, CapabilityDocument, CompactorEpoch, FileRevision,
-    FileRevisionsPageCursor, ListPageCursor, Page, PageCursor, PageRequest, PaginationPolicy,
-    Subject, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
-    LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
-    LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
+    FileRevisionsPageCursor, ListPageCursor, Page, PageCursor, PageRequest, Subject, WriterId,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST,
+    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
+    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
+    LIMIT_GC_MIN_GRACE_WINDOW_MS, MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, Weak};
@@ -206,7 +205,7 @@ impl RuntimeCore {
             ],
             features: BTreeMap::new(),
             limits: {
-                let mut limits = PaginationPolicy::default().capability_limits();
+                let mut limits = loonfs_types::pagination_capability_limits();
                 limits.insert(
                     LIMIT_GC_MIN_GRACE_WINDOW_MS.to_owned(),
                     loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,

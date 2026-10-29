@@ -1,9 +1,10 @@
-//! Validates wire content sources and prepares inline values for planning.
+//! Prepares the inline content of a commit request for planning.
 
 use super::error::ApiResponseError;
 use loonfs::publish::InlineContent;
 use loonfs_types::{
-    ContentId, ErrorCode, FilesystemOperation, NamespaceId, FEATURE_COMMIT_INLINE_CONTENT,
+    ContentId, ErrorCode, FileContent, FilesystemOperation, NamespaceId,
+    FEATURE_COMMIT_INLINE_CONTENT,
 };
 
 pub(super) fn prepare_inline_content(
@@ -14,32 +15,13 @@ pub(super) fn prepare_inline_content(
 ) -> Result<Vec<InlineContent>, ApiResponseError> {
     let mut values = Vec::new();
     for (index, operation) in operations.iter_mut().enumerate() {
-        let (content_ref, inline_content) = match operation {
-            FilesystemOperation::PutFile {
-                content_ref,
-                inline_content,
-                ..
-            }
-            | FilesystemOperation::CreateFileByInode {
-                content_ref,
-                inline_content,
-                ..
-            }
-            | FilesystemOperation::PutFileRevisionByInode {
-                content_ref,
-                inline_content,
-                ..
-            } => (content_ref, inline_content),
+        let content = match operation {
+            FilesystemOperation::PutFile { content, .. }
+            | FilesystemOperation::CreateFileByInode { content, .. }
+            | FilesystemOperation::PutFileRevisionByInode { content, .. } => content,
             _ => continue,
         };
-        if content_ref.is_some() == inline_content.is_some() {
-            return Err(ApiResponseError::new(
-                ErrorCode::InvalidRequest,
-                "exactly one of `content_ref` and `inline_content` is required",
-            )
-            .with_param(format!("/operations/{index}")));
-        }
-        let Some(bytes) = inline_content.take() else {
+        let FileContent::Inline(bytes) = content else {
             continue;
         };
         let threshold = threshold.ok_or_else(|| {
@@ -61,10 +43,10 @@ pub(super) fn prepare_inline_content(
         let value = InlineContent::new(
             namespace_id.clone(),
             ContentId::generate(),
-            bytes.into(),
+            std::mem::take(bytes).into(),
             algorithm,
         );
-        *content_ref = Some(value.content_ref().clone());
+        *content = FileContent::Ref(value.content_ref().clone());
         values.push(value);
     }
     Ok(values)

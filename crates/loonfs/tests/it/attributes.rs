@@ -6,7 +6,6 @@ use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::AttributeChanges;
 use loonfs::{AttributesRevisionNo, CommitId, ListOptions, StatOptions, UpdateAttributesOptions};
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
-use loonfs_types::semantic_commit_fingerprint;
 use std::assert_matches;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
@@ -166,16 +165,16 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
             expected_attributes_revision_no: options.expected_attributes_revision_no,
         },
     );
-    let explicit_fingerprint = semantic_commit_fingerprint(
-        &namespace_id,
-        &explicit.actor_id,
-        None,
-        explicit.message.as_deref(),
-        &explicit.operations,
-        &[],
-        &BTreeMap::new(),
-    )
-    .expect("explicit fingerprint");
+    let explicit_fingerprint = loonfs_types::CommitFingerprintInput {
+        namespace_id: &namespace_id,
+        actor_id: &explicit.actor_id,
+        subject_id: None,
+        message: explicit.message.as_deref(),
+        operations: &explicit.operations,
+        preconditions: &[],
+        inline_content_identities: &BTreeMap::new(),
+    }
+    .fingerprint();
 
     // The convenience call lands the commit; resubmitting the explicit
     // request under the same id replays it instead of committing twice.
@@ -210,16 +209,16 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
         },
     );
     assert_ne!(
-        semantic_commit_fingerprint(
-            &namespace_id,
-            &different.actor_id,
-            None,
-            different.message.as_deref(),
-            &different.operations,
-            &[],
-            &BTreeMap::new()
-        )
-        .expect("different fingerprint"),
+        loonfs_types::CommitFingerprintInput {
+            namespace_id: &namespace_id,
+            actor_id: &different.actor_id,
+            subject_id: None,
+            message: different.message.as_deref(),
+            operations: &different.operations,
+            preconditions: &[],
+            inline_content_identities: &BTreeMap::new(),
+        }
+        .fingerprint(),
         explicit_fingerprint
     );
     let conflict = fs

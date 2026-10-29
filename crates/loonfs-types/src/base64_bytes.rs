@@ -4,7 +4,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub(crate) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-    STANDARD.encode(bytes).serialize(serializer)
+    encode(bytes).serialize(serializer)
+}
+
+pub(crate) fn encode(bytes: &[u8]) -> String {
+    STANDARD.encode(bytes)
 }
 
 pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
@@ -16,17 +20,7 @@ pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<
 pub(crate) mod option {
     use super::STANDARD;
     use base64::Engine as _;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub(crate) fn serialize<S: Serializer>(
-        bytes: &Option<Vec<u8>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        bytes
-            .as_ref()
-            .map(|bytes| STANDARD.encode(bytes))
-            .serialize(serializer)
-    }
+    use serde::{Deserialize, Deserializer};
 
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,

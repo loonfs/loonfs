@@ -79,8 +79,7 @@ fn inline(id: &str, who: &str, bytes: &'static [u8]) -> CommitCandidate {
             who,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/team/file").expect("path"),
-                content_ref: Some(value.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,

@@ -70,8 +70,7 @@ async fn seed<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId, pa
             },
             None => FilesystemOperation::PutFile {
                 path: AbsolutePath::parse(*path).expect("path"),
-                content_ref: Some(content_ref.clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(content_ref.clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

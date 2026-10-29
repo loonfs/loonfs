@@ -149,7 +149,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         .create_snapshot(
             "pinned",
             &CreateSnapshotOptions {
-                ttl_ms: Some(1_000),
+                ttl_ms: std::num::NonZeroU64::new(1_000),
             },
         )
         .await

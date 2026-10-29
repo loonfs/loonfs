@@ -58,9 +58,9 @@ fn deadline_client(transport: &crate::scripted_transport::ScriptedTransport) -> 
     .expect("valid client config");
     client.transport_retry = TransportRetryPolicy {
         max_retries: 1,
-        initial_backoff: Duration::ZERO,
-        max_backoff: Duration::ZERO,
-        operation_deadline: Duration::from_millis(100),
+        initial_backoff_ms: 0,
+        max_backoff_ms: 0,
+        operation_deadline_ms: 100,
     };
     client.timer = Arc::new(ExpiredAfterFirstRead::default());
     client
@@ -120,8 +120,8 @@ async fn store_contention_is_not_retried_by_the_client() {
         let transport = scripted_transport::refusals(code, 4);
         let mut client = deadline_client(&transport);
         client.transport_retry = TransportRetryPolicy {
-            initial_backoff: Duration::ZERO,
-            max_backoff: Duration::ZERO,
+            initial_backoff_ms: 0,
+            max_backoff_ms: 0,
             ..DEFAULT
         };
         client.timer = Arc::new(StdMonotonicTimer::default());
@@ -182,7 +182,7 @@ where
         ClientConfig {
             server_url: "http://127.0.0.1".to_owned(),
             auth_token: Some("test-token".into()),
-            request_timeout_ms,
+            request_timeout_ms: request_timeout_ms.and_then(std::num::NonZeroU64::new),
             disable_transient_retry: true,
             ca_cert_path: None,
         },
@@ -226,8 +226,8 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
         .expect("principals"),
     });
     client.transport_retry_enabled = true;
-    client.transport_retry.initial_backoff = Duration::ZERO;
-    client.transport_retry.max_backoff = Duration::ZERO;
+    client.transport_retry.initial_backoff_ms = 0;
+    client.transport_retry.max_backoff_ms = 0;
     let request = client
         .post("http://127.0.0.1/commits")
         .header("Loonfs-Actor", "actor");

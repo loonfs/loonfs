@@ -120,7 +120,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
             .create_snapshot(
                 "snapshot",
                 &CreateSnapshotOptions {
-                    ttl_ms: Some(60_000),
+                    ttl_ms: std::num::NonZeroU64::new(60_000),
                 },
             )
             .await
@@ -132,7 +132,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
         .create_snapshot(
             "snapshot",
             &CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await
@@ -339,7 +339,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         .create_snapshot(
             "protected",
             &CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await
@@ -468,7 +468,7 @@ async fn snapshot_after_administrator_change() -> (
         .create_snapshot(
             "old-admin",
             &CreateSnapshotOptions {
-                ttl_ms: Some(60_000),
+                ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )
         .await

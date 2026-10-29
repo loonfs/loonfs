@@ -1,6 +1,6 @@
 //! Publish plans that move or copy visible paths.
 
-use super::preconditions::ensure_expected_inode;
+use super::preconditions::{ensure_expected_inode, ExpectedFileState};
 use super::publish_path_planning::ReplaceDestination;
 use super::publish_path_planning::{
     classify_replace_destination, ensure_mutation_inode, is_missing_visible_path,
@@ -15,8 +15,8 @@ use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AbsolutePath, AccessRight, AttributesRevisionNo, DestinationBehavior, DisplayName,
-    ExpectedFileState, InodeId, InodeKind,
+    AbsolutePath, AccessRight, AttributesRevisionNo, DestinationBehavior, DisplayName, InodeId,
+    InodeKind,
 };
 
 pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(

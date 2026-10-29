@@ -8,6 +8,7 @@ use crate::{
     RevisionNo, UpdateAccessByInodeOptions, UpdateAttributesByInodeOptions,
 };
 use crate::{Namespace, Writable};
+use loonfs_types::FileContent;
 
 impl Namespace<Writable> {
     /// Writes file bytes to a new name under a parent directory inode,
@@ -62,12 +63,11 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         let prepared_content = self.prepare_content_inner(bytes).await?;
-        let operation = FilesystemOperation::CreateFileByInode {
+        let operation = FilesystemOperation::create_file_by_inode(
             parent_inode_id,
-            display_name: display_name.clone(),
-            content_ref: Some(prepared_content.content_ref().clone()),
-            inline_content: None,
-        };
+            display_name.clone(),
+            FileContent::Ref(prepared_content.content_ref().clone()),
+        );
         self.commit_prepared_one(actor, options, operation, prepared_content)
             .await
     }
@@ -124,12 +124,11 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         let prepared_content = self.prepare_content_inner(bytes).await?;
-        let operation = FilesystemOperation::PutFileRevisionByInode {
+        let operation = FilesystemOperation::put_file_revision_by_inode(
             inode_id,
-            content_ref: Some(prepared_content.content_ref().clone()),
-            inline_content: None,
+            FileContent::Ref(prepared_content.content_ref().clone()),
             expected_revision_no,
-        };
+        );
         self.commit_prepared_one(actor, options, operation, prepared_content)
             .await
     }
@@ -179,11 +178,7 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::AppendFileByInode {
-                inode_id,
-                inline_content: bytes.to_vec(),
-                expected_revision_no: options.expected_revision_no,
-            },
+            FilesystemOperation::append_file_by_inode(inode_id, bytes.to_vec(), options),
         )
         .await
     }
@@ -229,10 +224,7 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             options,
-            FilesystemOperation::CreateDirectoryByInode {
-                parent_inode_id,
-                display_name: display_name.clone(),
-            },
+            FilesystemOperation::create_directory_by_inode(parent_inode_id, display_name.clone()),
         )
         .await
     }
@@ -280,11 +272,11 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::DeleteByInode {
+            FilesystemOperation::delete_by_inode(
                 inode_id,
-                expected_binding_version: expected_binding_version.clone(),
-                behavior: options.behavior,
-            },
+                expected_binding_version.clone(),
+                options,
+            ),
         )
         .await
     }
@@ -338,17 +330,13 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::MoveByInode {
+            FilesystemOperation::move_by_inode(
                 inode_id,
-                expected_binding_version: expected_binding_version.clone(),
+                expected_binding_version.clone(),
                 destination_parent_inode_id,
-                destination_display_name: destination_display_name.clone(),
-                precondition: loonfs_types::DestinationPrecondition {
-                    behavior: options.behavior,
-                    expected_inode_id: options.expected_destination_inode_id,
-                    expected_revision_no: options.expected_destination_revision_no,
-                },
-            },
+                destination_display_name.clone(),
+                options,
+            ),
         )
         .await
     }
@@ -398,16 +386,12 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::CopyByInode {
+            FilesystemOperation::copy_by_inode(
                 inode_id,
                 destination_parent_inode_id,
-                destination_display_name: destination_display_name.clone(),
-                precondition: loonfs_types::DestinationPrecondition {
-                    behavior: options.behavior,
-                    expected_inode_id: options.expected_destination_inode_id,
-                    expected_revision_no: options.expected_destination_revision_no,
-                },
-            },
+                destination_display_name.clone(),
+                options,
+            ),
         )
         .await
     }
@@ -454,10 +438,7 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             options,
-            FilesystemOperation::RestoreRevisionByInode {
-                inode_id,
-                source_revision_no,
-            },
+            FilesystemOperation::restore_revision_by_inode(inode_id, source_revision_no),
         )
         .await
     }
@@ -503,12 +484,7 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::UpdateAttributesByInode {
-                inode_id,
-                set: changes.set,
-                remove: changes.remove,
-                expected_attributes_revision_no: options.expected_attributes_revision_no,
-            },
+            FilesystemOperation::update_attributes_by_inode(inode_id, changes, options),
         )
         .await
     }
@@ -554,12 +530,7 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::UpdateAccessByInode {
-                inode_id,
-                boundary: access.boundary,
-                grants: access.grants,
-                expected_access_revision_no: options.expected_access_revision_no,
-            },
+            FilesystemOperation::update_access_by_inode(inode_id, access, options),
         )
         .await
     }

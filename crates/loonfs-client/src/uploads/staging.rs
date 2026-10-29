@@ -207,7 +207,12 @@ pub(super) fn presigned_put_request(access: &ObjectTransferAccess) -> Result<Wir
         url,
         headers,
         ..
-    } = access;
+    } = access
+    else {
+        return Err(ClientError::Protocol(
+            "unsupported upload access kind".to_owned(),
+        ));
+    };
     if method != "PUT" {
         return Err(ClientError::Protocol(format!(
             "unsupported presigned upload method `{method}`"

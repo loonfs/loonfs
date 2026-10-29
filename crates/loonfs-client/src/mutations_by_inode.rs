@@ -1,7 +1,6 @@
 //! Filesystem mutations addressed by inode ID.
 
 use super::*;
-use crate::mutations::single_operation;
 use loonfs_types::{ActorId, BindingVersion, DisplayName};
 
 impl Client {
@@ -48,11 +47,12 @@ impl Client {
             actor,
             options,
             None,
-            |content_ref, inline_content| FilesystemOperation::CreateFileByInode {
-                parent_inode_id,
-                display_name: display_name.clone(),
-                content_ref,
-                inline_content,
+            |content| {
+                FilesystemOperation::create_file_by_inode(
+                    parent_inode_id,
+                    display_name.clone(),
+                    content,
+                )
             },
         )
         .await
@@ -101,11 +101,12 @@ impl Client {
             actor,
             options,
             None,
-            |content_ref, inline_content| FilesystemOperation::PutFileRevisionByInode {
-                inode_id,
-                content_ref,
-                inline_content,
-                expected_revision_no,
+            |content| {
+                FilesystemOperation::put_file_revision_by_inode(
+                    inode_id,
+                    content,
+                    expected_revision_no,
+                )
             },
         )
         .await
@@ -143,13 +144,13 @@ impl Client {
         self.commit(
             namespace_id,
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::AppendFileByInode {
+                vec![FilesystemOperation::append_file_by_inode(
                     inode_id,
-                    inline_content: bytes.to_vec(),
-                    expected_revision_no: options.expected_revision_no,
-                },
+                    bytes.to_vec(),
+                    options,
+                )],
             ),
         )
         .await
@@ -186,12 +187,12 @@ impl Client {
         self.commit(
             namespace_id,
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 options,
-                FilesystemOperation::CreateDirectoryByInode {
+                vec![FilesystemOperation::create_directory_by_inode(
                     parent_inode_id,
-                    display_name: display_name.clone(),
-                },
+                    display_name.clone(),
+                )],
             ),
         )
         .await
@@ -229,13 +230,13 @@ impl Client {
         self.commit(
             namespace_id,
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::DeleteByInode {
+                vec![FilesystemOperation::delete_by_inode(
                     inode_id,
-                    expected_binding_version: expected_binding_version.clone(),
-                    behavior: options.behavior,
-                },
+                    expected_binding_version.clone(),
+                    options,
+                )],
             ),
         )
         .await
@@ -272,14 +273,11 @@ impl Client {
         self.commit(
             namespace_id,
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::UpdateAttributesByInode {
-                    inode_id,
-                    set: changes.set,
-                    remove: changes.remove,
-                    expected_attributes_revision_no: options.expected_attributes_revision_no,
-                },
+                vec![FilesystemOperation::update_attributes_by_inode(
+                    inode_id, changes, options,
+                )],
             ),
         )
         .await
@@ -316,14 +314,11 @@ impl Client {
         self.commit(
             namespace_id,
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::UpdateAccessByInode {
-                    inode_id,
-                    boundary: access.boundary,
-                    grants: access.grants,
-                    expected_access_revision_no: options.expected_access_revision_no,
-                },
+                vec![FilesystemOperation::update_access_by_inode(
+                    inode_id, access, options,
+                )],
             ),
         )
         .await
@@ -372,19 +367,15 @@ impl Client {
         self.commit(
             namespace_id,
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::MoveByInode {
+                vec![FilesystemOperation::move_by_inode(
                     inode_id,
-                    expected_binding_version: expected_binding_version.clone(),
+                    expected_binding_version.clone(),
                     destination_parent_inode_id,
-                    destination_display_name: destination_display_name.clone(),
-                    precondition: loonfs_types::DestinationPrecondition {
-                        behavior: options.behavior,
-                        expected_inode_id: options.expected_destination_inode_id,
-                        expected_revision_no: options.expected_destination_revision_no,
-                    },
-                },
+                    destination_display_name.clone(),
+                    options,
+                )],
             ),
         )
         .await
@@ -424,18 +415,14 @@ impl Client {
         self.commit(
             namespace_id,
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::CopyByInode {
+                vec![FilesystemOperation::copy_by_inode(
                     inode_id,
                     destination_parent_inode_id,
-                    destination_display_name: destination_display_name.clone(),
-                    precondition: loonfs_types::DestinationPrecondition {
-                        behavior: options.behavior,
-                        expected_inode_id: options.expected_destination_inode_id,
-                        expected_revision_no: options.expected_destination_revision_no,
-                    },
-                },
+                    destination_display_name.clone(),
+                    options,
+                )],
             ),
         )
         .await
@@ -472,12 +459,12 @@ impl Client {
         self.commit(
             namespace_id,
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 options,
-                FilesystemOperation::RestoreRevisionByInode {
+                vec![FilesystemOperation::restore_revision_by_inode(
                     inode_id,
                     source_revision_no,
-                },
+                )],
             ),
         )
         .await

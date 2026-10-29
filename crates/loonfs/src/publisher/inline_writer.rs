@@ -675,8 +675,7 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
 fn put_operation(path: &str, prepared: &crate::publish::PreparedContent) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content_ref: Some(prepared.content_ref().clone()),
-        inline_content: None,
+        content: loonfs_types::FileContent::Ref(prepared.content_ref().clone()),
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -776,7 +775,7 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
         put_operation("/fallback", &prepared),
     );
     let candidate = CommitCandidate::prepared(request, vec![prepared.clone()]);
-    let fingerprint = candidate.semantic_identity(&namespace).expect("identity");
+    let fingerprint = candidate.semantic_identity(&namespace);
     store.reset();
     let first = namespace_writer
         .put_file_prepared_with_options(
@@ -997,7 +996,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
     let expected_inline_id = prepared[0].content_ref().content_id.clone();
     prepared.reverse();
     let candidate = CommitCandidate::prepared(request, prepared);
-    let fingerprint = candidate.semantic_identity(&namespace).expect("identity");
+    let fingerprint = candidate.semantic_identity(&namespace);
     let published = namespace_writer
         .commit_candidate(candidate.clone())
         .await

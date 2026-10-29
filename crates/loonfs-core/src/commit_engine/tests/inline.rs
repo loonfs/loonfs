@@ -68,8 +68,7 @@ fn inline(namespace_id: &NamespaceId, bytes: Bytes) -> InlineContent {
 fn put(path: &str, content_ref: &ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content_ref: Some(content_ref.clone()),
-        inline_content: None,
+        content: loonfs_types::FileContent::Ref(content_ref.clone()),
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -421,7 +420,7 @@ async fn invalid_inline_candidates_write_nothing() {
         )]);
     let mut wrong_checksum = mismatched.clone();
     if let FilesystemOperation::PutFile {
-        content_ref: Some(content_ref),
+        content: loonfs_types::FileContent::Ref(content_ref),
         ..
     } = &mut wrong_checksum.intent_mut().operations[0]
     {

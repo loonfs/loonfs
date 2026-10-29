@@ -1025,8 +1025,7 @@ async fn planned_appends_match_the_model() {
         vec![
             FilesystemOperation::PutFile {
                 path: path("/log"),
-                content_ref: Some(value.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
                 behavior: loonfs_types::DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1147,8 +1146,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
     let operations = [
         FilesystemOperation::PutFile {
             path: path(),
-            content_ref: Some(upload),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(upload),
             behavior: loonfs_types::DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

@@ -19,9 +19,9 @@ use tower::ServiceExt as _;
 /// Retry limits for a request that is safe to send more than once.
 pub(crate) const DEFAULT: TransportRetryPolicy = TransportRetryPolicy {
     max_retries: 3,
-    initial_backoff: Duration::from_millis(250),
-    max_backoff: Duration::from_secs(2),
-    operation_deadline: Duration::from_secs(90),
+    initial_backoff_ms: 250,
+    max_backoff_ms: 2_000,
+    operation_deadline_ms: 90_000,
 };
 
 pub(crate) const IO_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -213,7 +213,7 @@ impl Client {
             SendPolicy::Retry => {
                 let deadline = OperationDeadline::start(
                     self.timer.as_ref(),
-                    self.transport_retry.operation_deadline,
+                    self.transport_retry.operation_deadline_ms,
                 );
                 self.send_with_retry(request, body, Some(deadline)).await
             }
@@ -228,7 +228,9 @@ impl Client {
         deadline: Option<OperationDeadline<'_>>,
     ) -> Result<BufferedResponse> {
         let mut retries = 0;
-        let mut attempt_timeout = deadline.as_ref().map(OperationDeadline::deadline);
+        let mut attempt_timeout = deadline
+            .as_ref()
+            .map(|deadline| Duration::from_millis(deadline.deadline_ms()));
         loop {
             let attempt = match self.send_buffered(request, body, attempt_timeout).await {
                 Ok(response) => return Ok(response),
@@ -238,16 +240,16 @@ impl Client {
             if !self.transport_retry_enabled || !retryable {
                 return Err(attempt.error);
             }
-            let TransportRetryOutcome::Wait { backoff } = self
+            let TransportRetryOutcome::Wait { backoff_ms } = self
                 .transport_retry
                 .next_backoff(&mut retries, deadline.as_ref())
             else {
                 return Err(attempt.error);
             };
-            transport_delay(backoff).await;
+            transport_delay(Duration::from_millis(backoff_ms)).await;
             attempt_timeout = match deadline.as_ref() {
-                Some(deadline) => match deadline.remaining() {
-                    Some(remaining) => Some(remaining),
+                Some(deadline) => match deadline.remaining_ms() {
+                    Some(remaining_ms) => Some(Duration::from_millis(remaining_ms)),
                     None => return Err(attempt.error),
                 },
                 None => None,

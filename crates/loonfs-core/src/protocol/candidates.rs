@@ -14,7 +14,7 @@ use crate::path::write::{CommitIntent, FilesystemOperation, PublishPlanningSessi
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::api::v0::Commit;
+use loonfs_types::api::v0::{Commit, CommittedReceipt};
 use loonfs_types::{CommitId, ContentId, NamespaceId};
 use std::collections::{HashMap, HashSet};
 
@@ -81,8 +81,7 @@ impl BatchDedup {
             return Some(CandidateAdmission::independent(Err(
                 CoreError::CommitIdReuseConflict {
                     commit_id: commit_id.to_string(),
-                    committed_seq: None,
-                    committed_fingerprint: None,
+                    committed: None,
                 },
             )));
         }
@@ -116,10 +115,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     if let Err(error) = candidate.validate_request_has_operations() {
         return CandidateAdmission::independent(Err(error));
     }
-    let semantic_identity = match candidate.semantic_identity(namespace_id) {
-        Ok(semantic_identity) => semantic_identity,
-        Err(error) => return CandidateAdmission::independent(Err(error)),
-    };
+    let semantic_identity = candidate.semantic_identity(namespace_id);
     match resolve_commit_id_reuse(
         view,
         dedup,
@@ -240,8 +236,10 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     if commit.semantic_commit_fingerprint != *semantic_identity {
         return Err(CoreError::CommitIdReuseConflict {
             commit_id: record.commit_id.to_string(),
-            committed_seq: Some(record.committed_seq),
-            committed_fingerprint: Some(commit.semantic_commit_fingerprint.clone()),
+            committed: Some(CommittedReceipt {
+                committed_seq: record.committed_seq,
+                committed_fingerprint: commit.semantic_commit_fingerprint.clone(),
+            }),
         });
     }
     super::changes::committed_change_from_wal_record(&view.head().namespace_id, &commit)

@@ -1267,6 +1267,14 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "GrepIndexStatusActive",
             ][..],
         ),
+        (
+            "StoreProbeCheck",
+            &[
+                "StoreProbeCheckPassed",
+                "StoreProbeCheckUnsupported",
+                "StoreProbeCheckFailed",
+            ][..],
+        ),
     ] {
         let names = one_of_schema_names(schemas, schema_name);
         for name in &names {
@@ -1308,6 +1316,7 @@ const UNION_COMPOSITE_ENVELOPES: &[(&str, &[&str])] = &[
         "GrepIndex",
         &["namespace_id", "next_run_no", "reorganize_pending"],
     ),
+    ("StoreProbeCheck", &["name"]),
 ];
 
 #[test]

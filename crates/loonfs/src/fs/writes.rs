@@ -13,6 +13,7 @@ use crate::{
 use crate::{LoonFs, Namespace, Writable};
 use futures::StreamExt;
 use loonfs_core::NamespaceWriterEngine;
+use loonfs_types::FileContent;
 
 fn single_operation(
     actor: &ActorId,
@@ -320,14 +321,11 @@ impl Namespace<Writable> {
         actor: &ActorId,
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        let operation = FilesystemOperation::PutFile {
-            path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-            content_ref: Some(prepared_content.content_ref().clone()),
-            inline_content: None,
-            behavior: options.behavior,
-            expected_inode_id: options.expected_inode_id,
-            expected_revision_no: options.expected_revision_no,
-        };
+        let operation = FilesystemOperation::put_file(
+            loonfs_core::path::parse_mutation_path(absolute_path)?,
+            FileContent::Ref(prepared_content.content_ref().clone()),
+            options,
+        );
         self.commit_prepared_one(actor, &options.commit, operation, prepared_content)
             .await
     }
@@ -540,12 +538,11 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::AppendFile {
-                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                inline_content: bytes.to_vec(),
-                expected_inode_id: options.expected_inode_id,
-                expected_revision_no: options.expected_revision_no,
-            },
+            FilesystemOperation::append_file(
+                loonfs_core::path::parse_mutation_path(absolute_path)?,
+                bytes.to_vec(),
+                options,
+            ),
         )
         .await
     }
@@ -579,10 +576,10 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::CreateDirectory {
-                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                parents: options.parents,
-            },
+            FilesystemOperation::create_directory(
+                loonfs_core::path::parse_mutation_path(absolute_path)?,
+                options,
+            ),
         )
         .await
     }
@@ -621,11 +618,10 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::DeletePath {
-                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                behavior: options.behavior,
-                expected_inode_id: options.expected_inode_id,
-            },
+            FilesystemOperation::delete_path(
+                loonfs_core::path::parse_mutation_path(absolute_path)?,
+                options,
+            ),
         )
         .await
     }
@@ -671,15 +667,11 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::MovePath {
-                source_path: loonfs_core::path::parse_mutation_path(source_path)?,
-                destination_path: loonfs_core::path::parse_mutation_path(destination_path)?,
-                precondition: loonfs_types::DestinationPrecondition {
-                    behavior: options.behavior,
-                    expected_inode_id: options.expected_destination_inode_id,
-                    expected_revision_no: options.expected_destination_revision_no,
-                },
-            },
+            FilesystemOperation::move_path(
+                loonfs_core::path::parse_mutation_path(source_path)?,
+                loonfs_core::path::parse_mutation_path(destination_path)?,
+                options,
+            ),
         )
         .await
     }
@@ -726,15 +718,11 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::CopyPath {
-                source_path: loonfs_core::path::parse_mutation_path(source_path)?,
-                destination_path: loonfs_core::path::parse_mutation_path(destination_path)?,
-                precondition: loonfs_types::DestinationPrecondition {
-                    behavior: options.behavior,
-                    expected_inode_id: options.expected_destination_inode_id,
-                    expected_revision_no: options.expected_destination_revision_no,
-                },
-            },
+            FilesystemOperation::copy_path(
+                loonfs_core::path::parse_mutation_path(source_path)?,
+                loonfs_core::path::parse_mutation_path(destination_path)?,
+                options,
+            ),
         )
         .await
     }
@@ -780,10 +768,10 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             options,
-            FilesystemOperation::RestoreRevision {
-                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+            FilesystemOperation::restore_revision(
+                loonfs_core::path::parse_mutation_path(absolute_path)?,
                 source_revision_no,
-            },
+            ),
         )
         .await
     }
@@ -833,13 +821,11 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::UpdateAttributes {
-                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                set: changes.set,
-                remove: changes.remove,
-                expected_inode_id: options.expected_inode_id,
-                expected_attributes_revision_no: options.expected_attributes_revision_no,
-            },
+            FilesystemOperation::update_attributes(
+                loonfs_core::path::parse_mutation_path(absolute_path)?,
+                changes,
+                options,
+            ),
         )
         .await
     }
@@ -884,14 +870,12 @@ impl Namespace<Writable> {
         self.commit_one(
             actor,
             &options.commit,
-            FilesystemOperation::UpdateAccess {
-                path: loonfs_types::AbsolutePath::parse(absolute_path)
+            FilesystemOperation::update_access(
+                loonfs_types::AbsolutePath::parse(absolute_path)
                     .map_err(loonfs_core::CoreError::from)?,
-                boundary: access.boundary,
-                grants: access.grants,
-                expected_inode_id: options.expected_inode_id,
-                expected_access_revision_no: options.expected_access_revision_no,
-            },
+                access,
+                options,
+            ),
         )
         .await
     }

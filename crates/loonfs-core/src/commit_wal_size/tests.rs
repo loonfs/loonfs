@@ -203,12 +203,11 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                             "d/".repeat(loonfs_types::MAX_PATH_DEPTH - 1)
                         ))
                         .expect("path"),
-                        content_ref: Some(if kind == "inline" {
+                        content: loonfs_types::FileContent::Ref(if kind == "inline" {
                             inline.content_ref().clone()
                         } else {
                             content_ref.clone()
                         }),
-                        inline_content: None,
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -247,9 +246,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 &store,
                 &crate::test_support::content_writes(),
                 &candidate,
-                candidate
-                    .semantic_identity(&namespace_id)
-                    .expect("fingerprint"),
+                candidate.semantic_identity(&namespace_id),
                 InMemoryMetadataView::in_memory(&base, None, head.seq),
                 u64::MAX,
                 &mut allocation,

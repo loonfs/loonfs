@@ -6,22 +6,6 @@ use crate::uploads::staging::{PreparedContent, PreparedContentKind, UploadContin
 use loonfs_types::options::{AccessState, AttributeChanges};
 use loonfs_types::{headers, ActorId};
 
-fn commit_id_or_generated(commit: &CommitOptions) -> CommitId {
-    commit.commit_id.clone().unwrap_or_else(CommitId::generate)
-}
-
-pub(crate) fn single_operation(
-    commit: &CommitOptions,
-    operation: FilesystemOperation,
-) -> CommitRequest {
-    CommitRequest::single(
-        commit_id_or_generated(commit),
-        commit.message.clone(),
-        operation,
-    )
-    .preconditions(commit.preconditions.clone())
-}
-
 impl Client {
     /// Applies a commit atomically, preserving operation order.
     ///
@@ -267,14 +251,7 @@ impl Client {
             actor,
             &options.commit,
             journal,
-            |content_ref, inline_content| FilesystemOperation::PutFile {
-                path: spec.absolute_path().clone(),
-                content_ref,
-                inline_content,
-                behavior: options.behavior,
-                expected_inode_id: options.expected_inode_id,
-                expected_revision_no: options.expected_revision_no,
-            },
+            |content| FilesystemOperation::put_file(spec.absolute_path().clone(), content, options),
         )
         .await
     }
@@ -288,30 +265,25 @@ impl Client {
         actor: &ActorId,
         commit: &CommitOptions,
         journal: Option<&dyn PutFileJournal>,
-        operation: impl FnOnce(Option<ContentRef>, Option<Vec<u8>>) -> FilesystemOperation,
+        operation: impl FnOnce(FileContent) -> FilesystemOperation,
     ) -> Result<Commit> {
-        let commit_id = commit_id_or_generated(commit);
-        let (content_ref, inline_content, content_token, upload_id) = match prepared_content.kind {
-            PreparedContentKind::Inline(bytes) => (None, Some(bytes), None, None),
+        let (content, content_token, upload_id) = match prepared_content.kind {
+            PreparedContentKind::Inline(bytes) => (FileContent::Inline(bytes), None, None),
             PreparedContentKind::Staged {
                 upload_id,
                 content_ref,
                 content_token,
-            } => (Some(content_ref), None, content_token, upload_id),
+            } => (FileContent::Ref(content_ref), content_token, upload_id),
         };
-        let request = CommitRequest {
-            preconditions: commit.preconditions.clone(),
-            commit_id: commit_id.clone(),
-            message: commit.message.clone(),
-            content_tokens: content_token.into_iter().collect(),
-            operations: vec![operation(content_ref, inline_content)],
-        };
+        let mut request = CommitRequest::with_operations(commit, vec![operation(content)]);
+        request.content_tokens = content_token.into_iter().collect();
         if let Some(journal) = journal {
             journal
                 .commit_prepared(&request, actor, upload_id.as_ref())
                 .map_err(|error| {
                     ClientError::Io(format!(
-                        "could not record file commit `{commit_id}` before submission: {error}"
+                        "could not record file commit `{}` before submission: {error}",
+                        request.commit_id
                     ))
                 })?;
         }
@@ -343,14 +315,13 @@ impl Client {
         self.commit(
             spec.namespace(),
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::AppendFile {
-                    path: spec.absolute_path().clone(),
-                    inline_content: bytes.to_vec(),
-                    expected_inode_id: options.expected_inode_id,
-                    expected_revision_no: options.expected_revision_no,
-                },
+                vec![FilesystemOperation::append_file(
+                    spec.absolute_path().clone(),
+                    bytes.to_vec(),
+                    options,
+                )],
             ),
         )
         .await
@@ -373,12 +344,12 @@ impl Client {
         self.commit(
             spec.namespace(),
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::CreateDirectory {
-                    path: spec.absolute_path().clone(),
-                    parents: options.parents,
-                },
+                vec![FilesystemOperation::create_directory(
+                    spec.absolute_path().clone(),
+                    options,
+                )],
             ),
         )
         .await
@@ -400,13 +371,12 @@ impl Client {
         self.commit(
             spec.namespace(),
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::DeletePath {
-                    path: spec.absolute_path().clone(),
-                    behavior: options.behavior,
-                    expected_inode_id: options.expected_inode_id,
-                },
+                vec![FilesystemOperation::delete_path(
+                    spec.absolute_path().clone(),
+                    options,
+                )],
             ),
         )
         .await
@@ -441,15 +411,13 @@ impl Client {
         self.commit(
             spec.namespace(),
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::UpdateAttributes {
-                    path: spec.absolute_path().clone(),
-                    set: changes.set,
-                    remove: changes.remove,
-                    expected_inode_id: options.expected_inode_id,
-                    expected_attributes_revision_no: options.expected_attributes_revision_no,
-                },
+                vec![FilesystemOperation::update_attributes(
+                    spec.absolute_path().clone(),
+                    changes,
+                    options,
+                )],
             ),
         )
         .await
@@ -477,15 +445,13 @@ impl Client {
         self.commit(
             spec.namespace(),
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::UpdateAccess {
-                    path: spec.absolute_path().clone(),
-                    boundary: access.boundary,
-                    grants: access.grants,
-                    expected_inode_id: options.expected_inode_id,
-                    expected_access_revision_no: options.expected_access_revision_no,
-                },
+                vec![FilesystemOperation::update_access(
+                    spec.absolute_path().clone(),
+                    access,
+                    options,
+                )],
             ),
         )
         .await
@@ -525,17 +491,13 @@ impl Client {
         self.commit(
             source_path.namespace(),
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::MovePath {
-                    source_path: source_path.absolute_path().clone(),
-                    destination_path: destination_path.absolute_path().clone(),
-                    precondition: loonfs_types::DestinationPrecondition {
-                        behavior: options.behavior,
-                        expected_inode_id: options.expected_destination_inode_id,
-                        expected_revision_no: options.expected_destination_revision_no,
-                    },
-                },
+                vec![FilesystemOperation::move_path(
+                    source_path.absolute_path().clone(),
+                    destination_path.absolute_path().clone(),
+                    options,
+                )],
             ),
         )
         .await
@@ -575,17 +537,13 @@ impl Client {
         self.commit(
             source_path.namespace(),
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::CopyPath {
-                    source_path: source_path.absolute_path().clone(),
-                    destination_path: destination_path.absolute_path().clone(),
-                    precondition: loonfs_types::DestinationPrecondition {
-                        behavior: options.behavior,
-                        expected_inode_id: options.expected_destination_inode_id,
-                        expected_revision_no: options.expected_destination_revision_no,
-                    },
-                },
+                vec![FilesystemOperation::copy_path(
+                    source_path.absolute_path().clone(),
+                    destination_path.absolute_path().clone(),
+                    options,
+                )],
             ),
         )
         .await
@@ -622,9 +580,13 @@ impl Client {
         self.commit(
             namespace_id,
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 &options.commit,
-                FilesystemOperation::undelete(inode_id, deletion_seq, &options.destination),
+                vec![FilesystemOperation::undelete(
+                    inode_id,
+                    deletion_seq,
+                    &options.destination,
+                )],
             ),
         )
         .await
@@ -658,12 +620,12 @@ impl Client {
         self.commit(
             spec.namespace(),
             actor,
-            &single_operation(
+            &CommitRequest::with_operations(
                 options,
-                FilesystemOperation::RestoreRevision {
-                    path: spec.absolute_path().clone(),
+                vec![FilesystemOperation::restore_revision(
+                    spec.absolute_path().clone(),
                     source_revision_no,
-                },
+                )],
             ),
         )
         .await
@@ -674,7 +636,7 @@ impl Client {
 mod tests {
     use super::*;
     use crate::transport::{retryable_transport_failure, FailureSource, DEFAULT};
-    use loonfs_types::{ContentId, ErrorCode};
+    use loonfs_types::{CommitId, ContentId, ErrorCode};
     use std::assert_matches;
     use std::fs;
     use tempfile::tempdir;
@@ -938,7 +900,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .create_snapshot(&namespace_id, "backup", Some(10_000))
+                .create_snapshot(&namespace_id, "backup", std::num::NonZeroU64::new(10_000))
                 .await,
             &transport,
         );

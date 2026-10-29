@@ -754,6 +754,7 @@ fn upload_mode_name(mode: UploadMode) -> &'static str {
         UploadMode::ServiceProxied => "service_proxied",
         UploadMode::DirectPut => "direct_put",
         UploadMode::DirectMultipart => "direct_multipart",
+        UploadMode::Unknown => "unknown",
     }
 }
 
@@ -1046,7 +1047,9 @@ fn append_options(id: &str) -> AppendFileOptions {
 }
 
 fn signed_range(access: &ObjectTransferAccess) -> Option<&str> {
-    let ObjectTransferAccess::PresignedUrl { headers, .. } = access;
+    let ObjectTransferAccess::PresignedUrl { headers, .. } = access else {
+        panic!("expected a presigned URL");
+    };
     headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("range"))
@@ -1467,8 +1470,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 operations: vec![FilesystemOperation::CreateFileByInode {
                     parent_inode_id,
                     display_name: display_name(&request.inode_file_name),
-                    content_ref: Some(content_ref),
-                    inline_content: None,
+                    content: loonfs_types::FileContent::Ref(content_ref),
                 }],
             },
         )
@@ -1534,8 +1536,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 content_tokens,
                 operations: vec![FilesystemOperation::PutFileRevisionByInode {
                     inode_id: file_inode_id,
-                    content_ref: Some(content_ref),
-                    inline_content: None,
+                    content: loonfs_types::FileContent::Ref(content_ref),
                     expected_revision_no,
                 }],
             },
@@ -2073,8 +2074,8 @@ struct SnapshotsRequest {
     current_content_utf8: String,
     deleted_content_utf8: String,
     added_content_utf8: String,
-    create_ttl_ms: u64,
-    extend_ttl_ms: u64,
+    create_ttl_ms: std::num::NonZeroU64,
+    extend_ttl_ms: std::num::NonZeroU64,
     unknown_snapshot_id: String,
 }
 
@@ -2437,10 +2438,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         .raw_client
         .post(&snapshots_url)
         .bearer_auth(AUTH_TOKEN)
-        .json(&CreateSnapshotRequest {
-            name: request.snapshot_name,
-            ttl_ms: Some(0),
-        })
+        .json(&serde_json::json!({"name": request.snapshot_name, "ttl_ms": 0}))
         .send()
         .await
         .expect("send zero-ttl snapshot create");

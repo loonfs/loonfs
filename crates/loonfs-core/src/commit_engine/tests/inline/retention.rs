@@ -22,8 +22,7 @@ fn replace(namespace_id: &NamespaceId, bytes: &'static [u8]) -> CommitCandidate 
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/file").expect("path"),
-                content_ref: Some(value.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -130,9 +129,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
 
     // Staging changes the object ID but must preserve the inline request identity.
     let mut staged_retry = replace(&namespace_id, b"before");
-    let identity = staged_retry
-        .semantic_identity(&namespace_id)
-        .expect("identity");
+    let identity = staged_retry.semantic_identity(&namespace_id);
     let inline_id = staged_retry.inline_content()[0]
         .content_ref()
         .content_id
@@ -144,12 +141,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         &inline_id,
         PreparedContent::for_durable_content_write(stored.content_ref().clone()),
     );
-    assert_eq!(
-        staged_retry
-            .semantic_identity(&namespace_id)
-            .expect("staged identity"),
-        identity
-    );
+    assert_eq!(staged_retry.semantic_identity(&namespace_id), identity);
     engine.invalidate_projection();
     store.reset();
     assert_eq!(
@@ -269,7 +261,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     assert_matches!(
         publish(&mut engine, &store, &context, replace(&namespace_id, b"before")).await,
         Err(CoreError::CommitIdReuseConflict {
-            committed_seq: Some(seq),
+            committed: Some(loonfs_types::api::v0::CommittedReceipt { committed_seq: seq, .. }),
             ..
         }) if seq == reused.committed_seq
     );

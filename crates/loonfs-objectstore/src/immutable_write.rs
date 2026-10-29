@@ -87,7 +87,6 @@ mod tests {
     use loonfs_test_support::clock::ManualClock;
     use loonfs_types::OperationDeadline;
     use std::assert_matches;
-    use std::time::Duration;
 
     #[test]
     fn occupied_keys_require_an_equal_stored_checksum_in_the_same_algorithm() {
@@ -115,8 +114,8 @@ mod tests {
     #[test]
     fn immutable_retry_deadline_is_one_budget_across_attempts() {
         let timer = ManualClock::stepping(70_000);
-        let deadline = OperationDeadline::start(&timer, Duration::from_secs(120));
-        assert_eq!(deadline.remaining(), Some(Duration::from_secs(50)));
-        assert_eq!(deadline.remaining(), None);
+        let deadline = OperationDeadline::start(&timer, 120_000);
+        assert_eq!(deadline.remaining_ms(), Some(50_000));
+        assert_eq!(deadline.remaining_ms(), None);
     }
 }

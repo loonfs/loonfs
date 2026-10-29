@@ -13,9 +13,7 @@ use loonfs_grep::{
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_types::api::v0::{self, GrepIndex};
-use loonfs_types::{
-    ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest, PaginationPolicy,
-};
+use loonfs_types::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
 use std::sync::Arc;
 
 pub(crate) struct GrepHost {
@@ -248,8 +246,7 @@ pub(crate) fn observation() -> loonfs::engine::Observation {
 /// such page when `cursor` is `None`.
 pub(crate) fn page_request(cursor: Option<String>, matches: u32) -> PageRequest<String> {
     PageRequest {
-        limit: PaginationPolicy::default()
-            .effective_limit(Some(matches))
+        limit: loonfs_types::EffectiveLimit::from_requested(Some(matches))
             .expect("test page limits should be within the pagination policy"),
         cursor,
     }

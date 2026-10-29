@@ -1457,9 +1457,7 @@ mod tests {
         let changes = reader
             .list_changes_after(
                 ChangeSeq(0),
-                loonfs_types::PaginationPolicy::default()
-                    .effective_limit(None)
-                    .expect("default limit"),
+                loonfs_types::EffectiveLimit::DEFAULT,
                 &context,
             )
             .await

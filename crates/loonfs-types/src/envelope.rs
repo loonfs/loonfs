@@ -20,11 +20,11 @@ use thiserror::Error;
 /// error instead of a generic decode error. `kind` is deliberately a string
 /// (not an enum) so future kinds remain reportable.
 #[derive(Debug, Deserialize)]
-pub struct EnvelopeProbe {
+pub(crate) struct EnvelopeProbe {
     /// Durable family declared by the stored object.
-    pub kind: String,
+    pub(crate) kind: String,
     /// Family-independent version gate declared by the stored object.
-    pub format_version: u32,
+    pub(crate) format_version: u32,
 }
 
 /// Failure vocabulary shared by every envelope codec.
@@ -52,41 +52,13 @@ pub enum EnvelopeCodecError {
     /// Reports stored bytes that the configured transport codec could not decompress.
     #[error("failed to decompress envelope: {0}")]
     Decompress(String),
-    /// Reports a WAL document that exceeds the decompressed format limit.
-    #[error("decompressed WAL document exceeds the {max_bytes}-byte limit")]
-    WalObjectTooLarge {
+    /// Reports a document that exceeds its family's decompressed format limit.
+    #[error("decompressed `{kind}` document exceeds the {max_bytes}-byte limit")]
+    DocumentTooLarge {
+        /// Durable family of the rejected document.
+        kind: &'static str,
         /// Largest accepted decompressed document.
         max_bytes: usize,
-    },
-    /// Reports a manifest document that exceeds the decompressed format limit.
-    #[error("decompressed manifest document exceeds the {max_bytes}-byte limit")]
-    ManifestTooLarge {
-        /// Largest accepted decompressed document.
-        max_bytes: usize,
-    },
-    /// Reports inline content that violates the WAL format rules.
-    #[error(
-        "invalid WAL inline content in commit `{seq}` for `content_id` `{content_id}`: {reason}"
-    )]
-    InvalidWalInlineContent {
-        /// Commit containing the rejected entry.
-        seq: crate::ChangeSeq,
-        /// Content whose entry violates a rule or exceeds the WAL object total.
-        content_id: crate::ContentId,
-        /// Format rule violated by the entry.
-        reason: &'static str,
-    },
-    /// Reports a layout that does not cover its revision's reference.
-    #[error(
-        "invalid WAL revision layout in commit `{seq}` for `content_id` `{content_id}`: {reason}"
-    )]
-    InvalidWalRevisionLayout {
-        /// Commit containing the rejected delta.
-        seq: crate::ChangeSeq,
-        /// Chain the rejected layout names.
-        content_id: crate::ContentId,
-        /// Format rule violated by the layout.
-        reason: &'static str,
     },
     /// Reports an unrecognized durable-family discriminator found during the envelope probe.
     #[error("unknown envelope kind `{found}`")]
@@ -138,7 +110,11 @@ pub fn ensure_kind(expected: &str, found: &str) -> Result<(), EnvelopeCodecError
 
 /// Requires the probed format version to be exactly what this build writes
 /// for `kind` — no envelope family tolerates version skew.
-pub fn ensure_version(kind: &str, found: u32, supported: u32) -> Result<(), EnvelopeCodecError> {
+pub(crate) fn ensure_version(
+    kind: &str,
+    found: u32,
+    supported: u32,
+) -> Result<(), EnvelopeCodecError> {
     if found != supported {
         return Err(EnvelopeCodecError::UnsupportedFormatVersion {
             kind: kind.to_owned(),
@@ -150,7 +126,7 @@ pub fn ensure_version(kind: &str, found: u32, supported: u32) -> Result<(), Enve
 }
 
 /// Requires the stored checksum to match the payload bytes as stored.
-pub fn verify_payload_checksum(
+pub(crate) fn verify_payload_checksum(
     expected: &PayloadChecksum,
     payload_bytes: &[u8],
 ) -> Result<(), EnvelopeCodecError> {

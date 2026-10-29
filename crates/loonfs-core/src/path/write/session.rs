@@ -189,8 +189,7 @@ mod tests {
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(absolute_path).expect("path"),
-                    content_ref: Some(content_ref.clone()),
-                    inline_content: None,
+                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -280,8 +279,7 @@ mod tests {
                     &store,
                     &crate::test_support::content_writes(),
                     &CommitCandidate::new(request.clone()),
-                    commit_fingerprint(&namespace_id, &request, &std::collections::BTreeMap::new())
-                        .expect("fingerprint"),
+                    commit_fingerprint(&namespace_id, &request, &std::collections::BTreeMap::new()),
                     view.projected_metadata_view(),
                     1,
                     &mut allocation,
@@ -337,8 +335,7 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content_ref: Some(staged.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -365,8 +362,7 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                content_ref: Some(staged.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

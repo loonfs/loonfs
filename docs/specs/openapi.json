@@ -816,7 +816,7 @@
       },
       "CreateDownloadByInodeRequest": {
         "additionalProperties": false,
-        "description": "The options for downloading a file inode's current revision.",
+        "description": "A request to download a file inode's current revision.",
         "properties": {
           "consistency": {
             "$ref": "#/components/schemas/ReadConsistency",
@@ -968,7 +968,7 @@
           "retention_window_ms": {
             "description": "The namespace's retention window, in milliseconds, which must be positive. The reference\nserver's maintenance sweep then uses this window for the namespace instead of the server's\n`retention_window_ms` setting. A `retention_window` maintenance run can change or clear the\nwindow later.",
             "format": "int64",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           }
         },
@@ -979,7 +979,7 @@
       },
       "CreateRevisionDownloadByInodeRequest": {
         "additionalProperties": false,
-        "description": "The options for downloading one retained revision of an inode.",
+        "description": "A request to download one retained revision of an inode.",
         "properties": {
           "consistency": {
             "$ref": "#/components/schemas/ReadConsistency",
@@ -1012,7 +1012,7 @@
           "ttl_ms": {
             "description": "The snapshot's lifetime in milliseconds, counted from the server's current time. Omit it to\nkeep the snapshot until it's deleted.",
             "format": "int64",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           }
         },
@@ -1453,7 +1453,7 @@
           "ttl_ms": {
             "description": "The new lifetime in milliseconds, counted from the server's current time.",
             "format": "int64",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           }
         },
@@ -3830,7 +3830,7 @@
           "max_wal_tail_objects": {
             "description": "The WAL tail length, in WAL objects, that triggers a fold. Omit it to use the server\ndefault.",
             "format": "int64",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           }
         },
@@ -3896,7 +3896,7 @@
           "retention_window_ms": {
             "description": "The namespace's new retention window, in milliseconds, which must be positive. Without it,\nthe job clears the namespace's window, and the reference server's `retention_window_ms`\nsetting applies to the namespace again.",
             "format": "int64",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           }
         },
@@ -4222,17 +4222,30 @@
         ],
         "type": "object"
       },
-      "StoreProbeCheckOutcome": {
-        "description": "What one contract check found about the store.",
-        "enum": [
-          "passed",
-          "unsupported",
-          "failed"
-        ],
-        "type": "string"
-      },
-      "StoreProbeCheckResult": {
+      "StoreProbeCheck": {
         "description": "The result of one contract check.",
+        "discriminator": {
+          "mapping": {
+            "failed": "#/components/schemas/StoreProbeCheckFailed",
+            "passed": "#/components/schemas/StoreProbeCheckPassed",
+            "unsupported": "#/components/schemas/StoreProbeCheckUnsupported"
+          },
+          "propertyName": "outcome"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/StoreProbeCheckPassed"
+          },
+          {
+            "$ref": "#/components/schemas/StoreProbeCheckUnsupported"
+          },
+          {
+            "$ref": "#/components/schemas/StoreProbeCheckFailed"
+          }
+        ]
+      },
+      "StoreProbeCheckFailed": {
+        "description": "The store violated the contract or the operation failed.",
         "properties": {
           "message": {
             "description": "The expected and actual behavior for a failed check.",
@@ -4243,13 +4256,59 @@
             "type": "string"
           },
           "outcome": {
-            "$ref": "#/components/schemas/StoreProbeCheckOutcome",
-            "description": "Whether the store passed the check, failed it, or doesn't support the capability."
+            "description": "Whether the store passed the check, failed it, or doesn't support the capability.",
+            "enum": [
+              "failed"
+            ],
+            "type": "string"
           }
         },
         "required": [
-          "name",
-          "outcome"
+          "message",
+          "outcome",
+          "name"
+        ],
+        "type": "object"
+      },
+      "StoreProbeCheckPassed": {
+        "description": "The store behaved as the contract requires.",
+        "properties": {
+          "name": {
+            "description": "The check's stable name.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "Whether the store passed the check, failed it, or doesn't support the capability.",
+            "enum": [
+              "passed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "name"
+        ],
+        "type": "object"
+      },
+      "StoreProbeCheckUnsupported": {
+        "description": "The store doesn't support this optional capability.",
+        "properties": {
+          "name": {
+            "description": "The check's stable name.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "Whether the store passed the check, failed it, or doesn't support the capability.",
+            "enum": [
+              "unsupported"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "name"
         ],
         "type": "object"
       },
@@ -4264,7 +4323,7 @@
           "checks": {
             "description": "The check results, in the order that the checks ran.",
             "items": {
-              "$ref": "#/components/schemas/StoreProbeCheckResult"
+              "$ref": "#/components/schemas/StoreProbeCheck"
             },
             "type": "array"
           },

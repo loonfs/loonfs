@@ -11,8 +11,9 @@ use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AbsolutePath, AccessRevisionNo, AccessRight, BindingVersion, CommitPrecondition, DisplayName,
-    InodeId, InodeKind, NameKey, ROOT_INODE_ID,
+    AbsolutePath, AccessRevisionNo, AccessRight, AttributesRevisionNo, BindingVersion,
+    CommitPrecondition, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    ROOT_INODE_ID,
 };
 
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
@@ -311,17 +312,136 @@ pub(super) fn ensure_expected_inode(
     Ok(())
 }
 
-impl From<loonfs_types::DestinationPreconditionError> for CoreError {
-    fn from(error: loonfs_types::DestinationPreconditionError) -> Self {
-        let field = match error {
-            loonfs_types::DestinationPreconditionError::PreconditionsRequireReplace { field } => {
-                field
-            }
-            loonfs_types::DestinationPreconditionError::RevisionRequiresInode {
+/// Field-name family used when validating replacement preconditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreconditionFields {
+    /// Fields on a file put operation.
+    Put,
+    /// Destination fields on a move or copy operation.
+    Destination,
+}
+
+impl PreconditionFields {
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Put => ("expected_revision_no", "expected_inode_id"),
+            Self::Destination => (
+                "expected_destination_revision_no",
+                "expected_destination_inode_id",
+            ),
+        }
+    }
+}
+
+/// Validated file state required before replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ExpectedFileState {
+    /// Destination inode required by the request.
+    pub(super) inode_id: InodeId,
+    /// Destination content revision required by the request.
+    pub(super) revision_no: Option<RevisionNo>,
+}
+
+/// Why a replacement precondition is not a valid request.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(super) enum DestinationPreconditionError {
+    /// A create-only operation supplied a replacement precondition.
+    #[error("destination preconditions require replace behavior")]
+    PreconditionsRequireReplace {
+        /// First supplied expectation field, with inode before revision.
+        field: &'static str,
+    },
+    /// A revision precondition did not name the inode whose revision it checks.
+    #[error(
+        "`{revision_field}` names the revision of one inode; pair it with `{inode_field}` so the precondition names which inode"
+    )]
+    RevisionRequiresInode {
+        /// Revision field supplied by the request.
+        revision_field: &'static str,
+        /// Inode field required beside the revision.
+        inode_field: &'static str,
+    },
+}
+
+/// Validates a replacement precondition and returns the required file state.
+pub(super) fn validate_expected_file_state(
+    behavior: DestinationBehavior,
+    expected_inode_id: Option<InodeId>,
+    expected_revision_no: Option<RevisionNo>,
+    fields: PreconditionFields,
+) -> std::result::Result<Option<ExpectedFileState>, DestinationPreconditionError> {
+    let (revision_field, inode_field) = fields.names();
+    if behavior == DestinationBehavior::NoReplace
+        && (expected_inode_id.is_some() || expected_revision_no.is_some())
+    {
+        return Err(DestinationPreconditionError::PreconditionsRequireReplace {
+            field: if expected_inode_id.is_some() {
+                inode_field
+            } else {
+                revision_field
+            },
+        });
+    }
+    let Some(inode_id) = expected_inode_id else {
+        if expected_revision_no.is_some() {
+            return Err(DestinationPreconditionError::RevisionRequiresInode {
                 revision_field,
-                ..
-            } => revision_field,
-            _ => return Self::InvalidCommitRequest(error.to_string()),
+                inode_field,
+            });
+        }
+        return Ok(None);
+    };
+    Ok(Some(ExpectedFileState {
+        inode_id,
+        revision_no: expected_revision_no,
+    }))
+}
+
+/// Rejects an attribute revision precondition without an inode precondition.
+pub(super) fn validate_attributes_precondition(
+    expected_inode_id: Option<InodeId>,
+    expected_attributes_revision_no: Option<AttributesRevisionNo>,
+) -> std::result::Result<(), DestinationPreconditionError> {
+    validate_revision_precondition(
+        expected_inode_id,
+        expected_attributes_revision_no.is_some(),
+        "expected_attributes_revision_no",
+    )
+}
+
+/// Rejects an access revision precondition without an inode precondition.
+pub(super) fn validate_access_precondition(
+    expected_inode_id: Option<InodeId>,
+    expected_access_revision_no: Option<AccessRevisionNo>,
+) -> std::result::Result<(), DestinationPreconditionError> {
+    validate_revision_precondition(
+        expected_inode_id,
+        expected_access_revision_no.is_some(),
+        "expected_access_revision_no",
+    )
+}
+
+fn validate_revision_precondition(
+    expected_inode_id: Option<InodeId>,
+    has_revision: bool,
+    revision_field: &'static str,
+) -> std::result::Result<(), DestinationPreconditionError> {
+    if has_revision && expected_inode_id.is_none() {
+        return Err(DestinationPreconditionError::RevisionRequiresInode {
+            revision_field,
+            inode_field: "expected_inode_id",
+        });
+    }
+    Ok(())
+}
+
+impl From<DestinationPreconditionError> for CoreError {
+    fn from(error: DestinationPreconditionError) -> Self {
+        let field = match error {
+            DestinationPreconditionError::PreconditionsRequireReplace { field } => field,
+            DestinationPreconditionError::RevisionRequiresInode { revision_field, .. } => {
+                revision_field
+            }
         };
         Self::InvalidCommitField {
             field,

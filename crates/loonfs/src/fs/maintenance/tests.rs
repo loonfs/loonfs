@@ -1452,8 +1452,7 @@ async fn write_a_large_batch_and_fold<S: ObjectStore + ?Sized>(
                 .expect("prepare the content");
             operations.push(FilesystemOperation::PutFile {
                 path: loonfs_types::AbsolutePath::parse(path).expect("path"),
-                content_ref: Some(content.content_ref().clone()),
-                inline_content: None,
+                content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                 behavior: crate::DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

@@ -11,7 +11,7 @@ use crate::{
     ObjectStoreError, ObjectStoreErrorKind, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_OPERATION_DEADLINE,
 };
 use loonfs_types::{
-    MonotonicTimer, OperationDeadline, TransportRetryOutcome, TransportRetryPolicy,
+    duration_ms, MonotonicTimer, OperationDeadline, TransportRetryOutcome, TransportRetryPolicy,
 };
 use object_store::{BackoffConfig, RetryConfig};
 use std::future::Future;
@@ -22,9 +22,9 @@ use std::time::Duration;
 /// and of the provider client's retries.
 pub(crate) const DEFAULT: TransportRetryPolicy = TransportRetryPolicy {
     max_retries: 10,
-    initial_backoff: Duration::from_millis(100),
-    max_backoff: PROVIDER_MAX_RETRY_BACKOFF,
-    operation_deadline: PROVIDER_OPERATION_DEADLINE,
+    initial_backoff_ms: 100,
+    max_backoff_ms: duration_ms(PROVIDER_MAX_RETRY_BACKOFF),
+    operation_deadline_ms: duration_ms(PROVIDER_OPERATION_DEADLINE),
 };
 
 /// Shortest time between two logged retry warnings. The retries in between
@@ -37,12 +37,12 @@ const RETRY_WARNING_INTERVAL_MS: u64 = 60_000;
 pub(crate) fn provider_retry_config() -> RetryConfig {
     RetryConfig {
         backoff: BackoffConfig {
-            init_backoff: DEFAULT.initial_backoff,
-            max_backoff: DEFAULT.max_backoff,
+            init_backoff: Duration::from_millis(DEFAULT.initial_backoff_ms),
+            max_backoff: Duration::from_millis(DEFAULT.max_backoff_ms),
             ..Default::default()
         },
         max_retries: loonfs_types::usize_from_u64(u64::from(DEFAULT.max_retries)),
-        retry_timeout: DEFAULT.operation_deadline,
+        retry_timeout: Duration::from_millis(DEFAULT.operation_deadline_ms),
     }
 }
 
@@ -124,7 +124,7 @@ impl TransportRetry {
             operation,
             payload_bytes,
             retries: 0,
-            deadline: OperationDeadline::start(self.timer.as_ref(), DEFAULT.operation_deadline),
+            deadline: OperationDeadline::start(self.timer.as_ref(), DEFAULT.operation_deadline_ms),
         };
         loop {
             let error = match attempt().await {
@@ -181,8 +181,8 @@ impl RetryLoop<'_> {
     /// Grants one retry under the shared count and deadline budgets.
     fn next_backoff(&mut self, retry: &TransportRetry) -> Option<Duration> {
         let (key, operation, payload_bytes) = (self.key, self.operation, self.payload_bytes);
-        let backoff = match DEFAULT.next_backoff(&mut self.retries, Some(&self.deadline)) {
-            TransportRetryOutcome::Wait { backoff } => backoff,
+        let backoff_ms = match DEFAULT.next_backoff(&mut self.retries, Some(&self.deadline)) {
+            TransportRetryOutcome::Wait { backoff_ms } => backoff_ms,
             TransportRetryOutcome::RetriesExhausted => {
                 tracing::warn!(
                     object_key = key,
@@ -205,7 +205,6 @@ impl RetryLoop<'_> {
             }
         };
         count_retry_attempt();
-        let backoff_ms = loonfs_types::saturating_duration_ms(backoff);
         match retry.next_warning() {
             RetryWarning::Log {
                 suppressed,
@@ -229,34 +228,36 @@ impl RetryLoop<'_> {
                 "transient object store failure, backing off before retry",
             ),
         }
-        Some(backoff)
+        Some(Duration::from_millis(backoff_ms))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{RetryWarning, RetryWarningState, DEFAULT, RETRY_WARNING_INTERVAL_MS};
-    use loonfs_types::transport_retry_backoff;
     use std::time::Duration;
 
     #[test]
     fn transport_retry_backoff_doubles_and_caps() {
         let policy = DEFAULT;
         assert_eq!(
-            transport_retry_backoff(&policy, 1),
+            Duration::from_millis(policy.backoff_ms(1)),
             Duration::from_millis(100)
         );
         assert_eq!(
-            transport_retry_backoff(&policy, 2),
+            Duration::from_millis(policy.backoff_ms(2)),
             Duration::from_millis(200)
         );
         assert_eq!(
-            transport_retry_backoff(&policy, 8),
+            Duration::from_millis(policy.backoff_ms(8)),
             Duration::from_millis(12_800)
         );
-        assert_eq!(transport_retry_backoff(&policy, 9), Duration::from_secs(15));
         assert_eq!(
-            transport_retry_backoff(&policy, 10),
+            Duration::from_millis(policy.backoff_ms(9)),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            Duration::from_millis(policy.backoff_ms(10)),
             Duration::from_secs(15)
         );
     }

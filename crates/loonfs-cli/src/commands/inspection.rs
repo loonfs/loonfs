@@ -610,7 +610,7 @@ mod tests {
         FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
         RecordingStore,
     };
-    use loonfs_types::api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult};
+    use loonfs_types::api::v0::{StoreProbeCheck, StoreProbeCheckOutcome};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -700,10 +700,9 @@ mod tests {
             checks: outcomes
                 .iter()
                 .enumerate()
-                .map(|(index, outcome)| StoreProbeCheckResult {
+                .map(|(index, outcome)| StoreProbeCheck {
                     name: format!("check_{index}"),
-                    outcome: *outcome,
-                    message: Some("replacement was not atomic".to_owned()),
+                    outcome: outcome.clone(),
                 })
                 .collect(),
         }
@@ -711,7 +710,9 @@ mod tests {
 
     #[test]
     fn store_probe_failure_is_included_and_fails_doctor() {
-        let response = probe_response(&[StoreProbeCheckOutcome::Failed]);
+        let response = probe_response(&[StoreProbeCheckOutcome::Failed {
+            message: "replacement was not atomic".to_owned(),
+        }]);
         let check = store_probe_check(response.clone());
         assert_eq!(check.status, DoctorStatus::Failed);
         assert_eq!(

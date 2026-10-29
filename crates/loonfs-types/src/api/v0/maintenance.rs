@@ -3,6 +3,7 @@
 use super::{GcRequest, GcResponse};
 use crate::{AccessRevisionNo, ChangeSeq, CommitId, ManifestNo, NamespaceId, PrincipalId};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 
 /// A request to advance the retention floor to the folded manifest head, or to the one target that
 /// the request sets.
@@ -48,8 +49,11 @@ pub struct SetRetentionWindowRequest {
     /// the job clears the namespace's window, and the reference server's `retention_window_ms`
     /// setting applies to the namespace again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub retention_window_ms: Option<u64>,
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = Option<u64>, nullable = false, minimum = 1)
+    )]
+    pub retention_window_ms: Option<NonZeroU64>,
 }
 
 /// The namespace's retention window after a `retention_window` job.
@@ -121,8 +125,11 @@ pub struct MetadataMaintenanceRequest {
     /// The WAL tail length, in WAL objects, that triggers a fold. Omit it to use the server
     /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub max_wal_tail_objects: Option<u64>,
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = Option<u64>, nullable = false, minimum = 1)
+    )]
+    pub max_wal_tail_objects: Option<NonZeroU64>,
 }
 
 /// What the WAL fold step of a maintenance pass did.
@@ -173,6 +180,9 @@ pub enum RunMaintenanceResponse {
     RetentionWindow(SetRetentionWindowResponse),
     /// The committed administrator recovery.
     RecoverAdministrator(RecoverAdministratorResponse),
+    /// A job kind from a newer server. This variant doesn't include the job's own fields.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The result of one `metadata` maintenance job.
@@ -329,7 +339,7 @@ mod tests {
                 serde_json::json!({"kind": "metadata", "max_wal_tail_objects": 4}),
                 Some(RunMaintenanceRequest::Metadata(
                     MetadataMaintenanceRequest {
-                        max_wal_tail_objects: Some(4),
+                        max_wal_tail_objects: NonZeroU64::new(4),
                     },
                 )),
             ),
@@ -377,7 +387,7 @@ mod tests {
                 serde_json::json!({"kind": "retention_window", "retention_window_ms": 86_400_000}),
                 Some(RunMaintenanceRequest::RetentionWindow(
                     SetRetentionWindowRequest {
-                        retention_window_ms: Some(86_400_000),
+                        retention_window_ms: NonZeroU64::new(86_400_000),
                     },
                 )),
             ),

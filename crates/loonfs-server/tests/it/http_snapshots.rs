@@ -368,7 +368,7 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
 
     let created = harness
         .client
-        .create_snapshot(&namespace, "first", Some(5_000))
+        .create_snapshot(&namespace, "first", std::num::NonZeroU64::new(5_000))
         .await
         .expect("create snapshot");
     assert_eq!(created.namespace_id, namespace);
@@ -383,7 +383,11 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
 
     let extended = harness
         .client
-        .extend_snapshot(&namespace, &created.snapshot_id, 10_000)
+        .extend_snapshot(
+            &namespace,
+            &created.snapshot_id,
+            std::num::NonZeroU64::new(10_000).expect("a nonzero ttl"),
+        )
         .await
         .expect("extend snapshot");
     assert!(extended.expires_at_ms > created.expires_at_ms);
@@ -425,7 +429,7 @@ async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
     for name in ["first", "second"] {
         harness
             .client
-            .create_snapshot(&namespace, name, Some(5_000))
+            .create_snapshot(&namespace, name, std::num::NonZeroU64::new(5_000))
             .await
             .expect("create snapshot");
     }
@@ -511,7 +515,7 @@ async fn snapshot_and_checkpoint_retrieves_return_their_listed_rows() {
         .expect("create namespace");
     let created = harness
         .client
-        .create_snapshot(&namespace, "first", Some(5_000))
+        .create_snapshot(&namespace, "first", std::num::NonZeroU64::new(5_000))
         .await
         .expect("create snapshot");
 

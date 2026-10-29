@@ -8,6 +8,7 @@ use loonfs_types::SecretString;
 use serde::Deserialize;
 use std::fs;
 use std::net::IpAddr;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 /// Client configuration loaded from TOML or built by the caller.
@@ -29,7 +30,7 @@ pub struct ClientConfig {
     /// timeout and a limited number of attempts. Other replay-safe requests
     /// also have a built-in 90-second total retry limit.
     #[serde(default)]
-    pub request_timeout_ms: Option<u64>,
+    pub request_timeout_ms: Option<NonZeroU64>,
     /// Disables the bounded automatic retry of quick-clearing transient
     /// failures: the retryable-unavailability codes (`server_busy`,
     /// `commit_queue_full`, and `shutting_down`, which a draining process
@@ -84,12 +85,6 @@ impl ClientConfig {
                     reason: "bearer tokens require https except for loopback http URLs".to_owned(),
                 });
             }
-        }
-        if self.request_timeout_ms == Some(0) {
-            return Err(ConfigFieldError::Invalid {
-                field: "request_timeout_ms",
-                reason: "must be greater than zero; omit it for built-in deadlines only".to_owned(),
-            });
         }
         if let Some(path) = &self.ca_cert_path {
             if path.trim().is_empty() {

@@ -181,8 +181,7 @@ fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> 
         None,
         FilesystemOperation::PutFile {
             path: parse_mutation_path(path).expect("valid mutation path"),
-            content_ref: Some(content_ref),
-            inline_content: None,
+            content: loonfs_types::FileContent::Ref(content_ref),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -627,8 +626,7 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                 None,
                 FilesystemOperation::PutFile {
                     path: parse_mutation_path("/file.txt").expect("valid mutation path"),
-                    content_ref: Some(content_ref.clone()),
-                    inline_content: None,
+                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
                     behavior,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -686,8 +684,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     // ref, so one proof covers both.
     let put = |path: &str, content_ref: loonfs::ContentRef| FilesystemOperation::PutFile {
         path: parse_mutation_path(path).expect("valid mutation path"),
-        content_ref: Some(content_ref),
-        inline_content: None,
+        content: loonfs_types::FileContent::Ref(content_ref),
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,

@@ -1,6 +1,6 @@
 //! Publish plans that create, recover, or replace path content.
 
-use super::preconditions::ensure_expected_inode;
+use super::preconditions::{ensure_expected_inode, ExpectedFileState};
 use super::publish_path_planning::{
     ensure_parent_directories, ensure_vacant_path, is_missing_visible_path,
     resolve_parent_directory, resolve_visible_child, resolve_visible_inode,
@@ -15,8 +15,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::TombstoneRowAction;
 use loonfs_types::options::UndeleteDestination;
 use loonfs_types::{
-    AbsolutePath, AccessRight, ChangeSeq, ContentRef, DestinationBehavior, DisplayName,
-    ExpectedFileState, InodeId, InodeKind, ROOT_INODE_ID,
+    AbsolutePath, AccessRight, ChangeSeq, ContentRef, DestinationBehavior, DisplayName, InodeId,
+    InodeKind, ROOT_INODE_ID,
 };
 
 pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(

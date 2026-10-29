@@ -179,10 +179,7 @@ async fn a_candidate_charged_before_fencing_is_refused_at_queue_insertion() {
         "late", "late",
     )))
     .expect("candidate");
-    let identity = candidate
-        .candidate
-        .semantic_identity(old.id())
-        .expect("identity");
+    let identity = candidate.candidate.semantic_identity(old.id());
     let permit = publisher
         .admission
         .acquire_candidate(old.id(), &candidate)

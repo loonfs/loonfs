@@ -10,7 +10,7 @@ use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
 use crate::config::ConfigSource;
 use crate::error::CliError;
-use loonfs_types::api::v0::{GrepIndexStatus, StoreProbeCheckOutcome, StoreProbeCheckResult};
+use loonfs_types::api::v0::{GrepIndexStatus, StoreProbeCheck, StoreProbeCheckOutcome};
 use loonfs_types::{AttributeValue, CheckpointOwner, GcResponse};
 use serde::Serialize;
 use std::io::{self, Write};
@@ -44,9 +44,7 @@ mod tests {
     use loonfs_test_support::provider_detail::{
         assert_provider_markers_absent, POISON_PROVIDER_DETAIL,
     };
-    use loonfs_types::api::v0::{
-        StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
-    };
+    use loonfs_types::api::v0::{StoreProbeCheck, StoreProbeCheckOutcome, StoreProbeResponse};
     use loonfs_types::{
         AbsolutePath, AttributesProjection, ChangeSeq, DisplayName, InodeId, NamespaceId,
         PathEntry, PathEntryKind,
@@ -138,30 +136,28 @@ mod tests {
             assert!(rendered.contains("req_provider_hygiene"), "{rendered}");
         }
 
+        let failed = |name: &str, message: String| StoreProbeCheck {
+            name: name.to_owned(),
+            outcome: StoreProbeCheckOutcome::Failed { message },
+        };
         let checks = vec![
-            StoreProbeCheckResult {
-                name: "create_if_absent_enforced".to_owned(),
-                outcome: StoreProbeCheckOutcome::Failed,
-                message: Some(format!("create failed: {public_message}")),
-            },
-            StoreProbeCheckResult {
-                name: "compare_and_swap_rejects_stale".to_owned(),
-                outcome: StoreProbeCheckOutcome::Failed,
-                message: Some(format!(" create   failed:  {public_message}\n")),
-            },
-            StoreProbeCheckResult {
-                name: "stored_checksum_readback".to_owned(),
-                outcome: StoreProbeCheckOutcome::Failed,
-                message: Some(format!("checksum head failed: {public_message}")),
-            },
-            StoreProbeCheckResult {
-                name: "range_reads".to_owned(),
-                outcome: StoreProbeCheckOutcome::Failed,
-                message: Some(
-                    "range read failed: object-store is temporarily unavailable; retry the operation"
-                        .to_owned(),
-                ),
-            },
+            failed(
+                "create_if_absent_enforced",
+                format!("create failed: {public_message}"),
+            ),
+            failed(
+                "compare_and_swap_rejects_stale",
+                format!(" create   failed:  {public_message}\n"),
+            ),
+            failed(
+                "stored_checksum_readback",
+                format!("checksum head failed: {public_message}"),
+            ),
+            failed(
+                "range_reads",
+                "range read failed: object-store is temporarily unavailable; retry the operation"
+                    .to_owned(),
+            ),
         ];
         let doctor = CommandOutput {
             kind: CommandKind::Doctor,

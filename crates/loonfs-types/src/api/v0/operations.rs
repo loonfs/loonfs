@@ -1,12 +1,18 @@
 //! Filesystem operations for the v0 HTTP API.
 
 use super::{DestinationBehavior, DestinationPrecondition};
-use crate::options::UndeleteDestination;
+use crate::options::{
+    AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CopyOptions,
+    CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions, MoveOptions, PutFileOptions,
+    UndeleteDestination, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+};
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
     AttributesRevisionNo, BindingVersion, ChangeSeq, ContentRef, DisplayName, InodeId, RevisionNo,
 };
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
 /// Whether a delete can remove a non-empty directory.
@@ -19,6 +25,77 @@ pub enum DeleteDirectoryBehavior {
     NonRecursive,
     /// A delete that removes the whole directory subtree.
     Recursive,
+}
+
+/// The content that a file write attaches: uploaded content or the file's bytes.
+///
+/// On the wire, the operation includes exactly one of `content_ref` and `inline_content`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileContent {
+    /// Uploaded content, which a content token must cover.
+    Ref(ContentRef),
+    /// The complete file bytes.
+    Inline(Vec<u8>),
+}
+
+/// The wire fields of [`FileContent`], which a write includes beside its other fields.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+struct FileContentFields {
+    /// The uploaded content, which a content token must cover. Set this field or
+    /// `inline_content`, but not both.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    content_ref: Option<ContentRef>,
+    /// The complete file bytes as base64. Set this field or `content_ref`, but not both.
+    #[serde(default, deserialize_with = "crate::base64_bytes::option::deserialize")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
+    inline_content: Option<Vec<u8>>,
+}
+
+impl Serialize for FileContent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut fields = serializer.serialize_struct("FileContent", 1)?;
+        match self {
+            Self::Ref(content_ref) => fields.serialize_field("content_ref", content_ref)?,
+            Self::Inline(bytes) => {
+                fields.serialize_field("inline_content", &crate::base64_bytes::encode(bytes))?
+            }
+        }
+        fields.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FileContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = FileContentFields::deserialize(deserializer)?;
+        match (fields.content_ref, fields.inline_content) {
+            (Some(content_ref), None) => Ok(Self::Ref(content_ref)),
+            (None, Some(bytes)) => Ok(Self::Inline(bytes)),
+            _ => Err(serde::de::Error::custom(
+                "exactly one of `content_ref` and `inline_content` is required",
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for FileContent {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        <FileContentFields as utoipa::PartialSchema>::schema()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for FileContent {
+    fn schemas(
+        schemas: &mut Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) {
+        <FileContentFields as utoipa::ToSchema>::schemas(schemas);
+    }
 }
 
 /// One filesystem operation.
@@ -61,19 +138,9 @@ pub enum FilesystemOperation {
     PutFile {
         /// The absolute destination path. The operation creates any missing ancestor directories.
         path: AbsolutePath,
-        /// The uploaded content, which a content token must cover. Set this field or
-        /// `inline_content`, but not both.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        content_ref: Option<ContentRef>,
-        /// The complete file bytes as base64. Set this field or `content_ref`, but not both.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "crate::base64_bytes::option"
-        )]
-        #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
-        inline_content: Option<Vec<u8>>,
+        /// The uploaded content or the complete file bytes.
+        #[serde(flatten)]
+        content: FileContent,
         /// Whether the operation adds a new revision to an existing file or fails with a conflict.
         #[serde(default)]
         behavior: DestinationBehavior,
@@ -104,19 +171,9 @@ pub enum FilesystemOperation {
         parent_inode_id: InodeId,
         /// The name of the new file.
         display_name: DisplayName,
-        /// The uploaded content, which a content token must cover. Set this field or
-        /// `inline_content`, but not both.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        content_ref: Option<ContentRef>,
-        /// The complete file bytes as base64. Set this field or `content_ref`, but not both.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "crate::base64_bytes::option"
-        )]
-        #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
-        inline_content: Option<Vec<u8>>,
+        /// The uploaded content or the complete file bytes.
+        #[serde(flatten)]
+        content: FileContent,
     },
     /// An operation that adds a revision to a file inode if the inode's current revision is
     /// `expected_revision_no`.
@@ -130,19 +187,9 @@ pub enum FilesystemOperation {
         /// The file to update.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// The uploaded content, which a content token must cover. Set this field or
-        /// `inline_content`, but not both.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        content_ref: Option<ContentRef>,
-        /// The complete file bytes as base64. Set this field or `content_ref`, but not both.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "crate::base64_bytes::option"
-        )]
-        #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
-        inline_content: Option<Vec<u8>>,
+        /// The uploaded content or the complete file bytes.
+        #[serde(flatten)]
+        content: FileContent,
         /// The revision that must be the file's current revision for the write to succeed.
         expected_revision_no: RevisionNo,
     },
@@ -426,6 +473,240 @@ pub enum FilesystemOperation {
 }
 
 impl FilesystemOperation {
+    /// Builds a creation of the directory at `path`.
+    pub fn create_directory(path: AbsolutePath, options: &CreateDirectoryOptions) -> Self {
+        Self::CreateDirectory {
+            path,
+            parents: options.parents,
+        }
+    }
+
+    /// Builds a creation of the directory `display_name` under `parent_inode_id`.
+    pub fn create_directory_by_inode(parent_inode_id: InodeId, display_name: DisplayName) -> Self {
+        Self::CreateDirectoryByInode {
+            parent_inode_id,
+            display_name,
+        }
+    }
+
+    /// Builds a write of `content` to the file at `path`.
+    pub fn put_file(path: AbsolutePath, content: FileContent, options: &PutFileOptions) -> Self {
+        Self::PutFile {
+            path,
+            content,
+            behavior: options.behavior,
+            expected_inode_id: options.expected_inode_id,
+            expected_revision_no: options.expected_revision_no,
+        }
+    }
+
+    /// Builds a creation of the file `display_name` under `parent_inode_id`.
+    pub fn create_file_by_inode(
+        parent_inode_id: InodeId,
+        display_name: DisplayName,
+        content: FileContent,
+    ) -> Self {
+        Self::CreateFileByInode {
+            parent_inode_id,
+            display_name,
+            content,
+        }
+    }
+
+    /// Builds a write of `content` as the next revision of `inode_id`.
+    pub fn put_file_revision_by_inode(
+        inode_id: InodeId,
+        content: FileContent,
+        expected_revision_no: RevisionNo,
+    ) -> Self {
+        Self::PutFileRevisionByInode {
+            inode_id,
+            content,
+            expected_revision_no,
+        }
+    }
+
+    /// Builds an append of `bytes` to the file at `path`.
+    pub fn append_file(path: AbsolutePath, bytes: Vec<u8>, options: &AppendFileOptions) -> Self {
+        Self::AppendFile {
+            path,
+            inline_content: bytes,
+            expected_inode_id: options.expected_inode_id,
+            expected_revision_no: options.expected_revision_no,
+        }
+    }
+
+    /// Builds an append of `bytes` to the file `inode_id`.
+    pub fn append_file_by_inode(
+        inode_id: InodeId,
+        bytes: Vec<u8>,
+        options: &AppendFileByInodeOptions,
+    ) -> Self {
+        Self::AppendFileByInode {
+            inode_id,
+            inline_content: bytes,
+            expected_revision_no: options.expected_revision_no,
+        }
+    }
+
+    /// Builds a deletion of the file or directory at `path`.
+    pub fn delete_path(path: AbsolutePath, options: &DeleteOptions) -> Self {
+        Self::DeletePath {
+            path,
+            behavior: options.behavior,
+            expected_inode_id: options.expected_inode_id,
+        }
+    }
+
+    /// Builds a deletion of `inode_id` at `expected_binding_version`.
+    pub fn delete_by_inode(
+        inode_id: InodeId,
+        expected_binding_version: BindingVersion,
+        options: &DeleteByInodeOptions,
+    ) -> Self {
+        Self::DeleteByInode {
+            inode_id,
+            expected_binding_version,
+            behavior: options.behavior,
+        }
+    }
+
+    /// Builds a move from `source_path` to `destination_path`.
+    pub fn move_path(
+        source_path: AbsolutePath,
+        destination_path: AbsolutePath,
+        options: &MoveOptions,
+    ) -> Self {
+        Self::MovePath {
+            source_path,
+            destination_path,
+            precondition: options.destination_precondition(),
+        }
+    }
+
+    /// Builds a move of `inode_id` at `expected_binding_version` to
+    /// `destination_display_name` under `destination_parent_inode_id`.
+    pub fn move_by_inode(
+        inode_id: InodeId,
+        expected_binding_version: BindingVersion,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: DisplayName,
+        options: &MoveOptions,
+    ) -> Self {
+        Self::MoveByInode {
+            inode_id,
+            expected_binding_version,
+            destination_parent_inode_id,
+            destination_display_name,
+            precondition: options.destination_precondition(),
+        }
+    }
+
+    /// Builds a copy from `source_path` to `destination_path`.
+    pub fn copy_path(
+        source_path: AbsolutePath,
+        destination_path: AbsolutePath,
+        options: &CopyOptions,
+    ) -> Self {
+        Self::CopyPath {
+            source_path,
+            destination_path,
+            precondition: options.destination_precondition(),
+        }
+    }
+
+    /// Builds a copy of `inode_id` to `destination_display_name` under
+    /// `destination_parent_inode_id`.
+    pub fn copy_by_inode(
+        inode_id: InodeId,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: DisplayName,
+        options: &CopyOptions,
+    ) -> Self {
+        Self::CopyByInode {
+            inode_id,
+            destination_parent_inode_id,
+            destination_display_name,
+            precondition: options.destination_precondition(),
+        }
+    }
+
+    /// Builds a restore of `source_revision_no` as the current revision of
+    /// the file at `path`.
+    pub fn restore_revision(path: AbsolutePath, source_revision_no: RevisionNo) -> Self {
+        Self::RestoreRevision {
+            path,
+            source_revision_no,
+        }
+    }
+
+    /// Builds a restore of `source_revision_no` as the current revision of
+    /// `inode_id`.
+    pub fn restore_revision_by_inode(inode_id: InodeId, source_revision_no: RevisionNo) -> Self {
+        Self::RestoreRevisionByInode {
+            inode_id,
+            source_revision_no,
+        }
+    }
+
+    /// Builds an attribute update of the inode at `path`.
+    pub fn update_attributes(
+        path: AbsolutePath,
+        changes: AttributeChanges,
+        options: &UpdateAttributesOptions,
+    ) -> Self {
+        Self::UpdateAttributes {
+            path,
+            set: changes.set,
+            remove: changes.remove,
+            expected_inode_id: options.expected_inode_id,
+            expected_attributes_revision_no: options.expected_attributes_revision_no,
+        }
+    }
+
+    /// Builds an attribute update of `inode_id`.
+    pub fn update_attributes_by_inode(
+        inode_id: InodeId,
+        changes: AttributeChanges,
+        options: &UpdateAttributesByInodeOptions,
+    ) -> Self {
+        Self::UpdateAttributesByInode {
+            inode_id,
+            set: changes.set,
+            remove: changes.remove,
+            expected_attributes_revision_no: options.expected_attributes_revision_no,
+        }
+    }
+
+    /// Builds a replacement of the access row of the inode at `path`.
+    pub fn update_access(
+        path: AbsolutePath,
+        access: AccessState,
+        options: &UpdateAccessOptions,
+    ) -> Self {
+        Self::UpdateAccess {
+            path,
+            boundary: access.boundary,
+            grants: access.grants,
+            expected_inode_id: options.expected_inode_id,
+            expected_access_revision_no: options.expected_access_revision_no,
+        }
+    }
+
+    /// Builds a replacement of the access row of `inode_id`.
+    pub fn update_access_by_inode(
+        inode_id: InodeId,
+        access: AccessState,
+        options: &UpdateAccessByInodeOptions,
+    ) -> Self {
+        Self::UpdateAccessByInode {
+            inode_id,
+            boundary: access.boundary,
+            grants: access.grants,
+            expected_access_revision_no: options.expected_access_revision_no,
+        }
+    }
+
     /// Builds an undelete of the deletion of `inode_id` committed at
     /// `deletion_seq`, bound where `destination` says.
     pub fn undelete(
@@ -451,12 +732,15 @@ impl FilesystemOperation {
         }
     }
 
-    /// Returns the content written by this operation, if any.
+    /// Returns the uploaded content written by this operation, if any.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match self {
-            Self::PutFile { content_ref, .. }
-            | Self::CreateFileByInode { content_ref, .. }
-            | Self::PutFileRevisionByInode { content_ref, .. } => content_ref.as_ref(),
+            Self::PutFile { content, .. }
+            | Self::CreateFileByInode { content, .. }
+            | Self::PutFileRevisionByInode { content, .. } => match content {
+                FileContent::Ref(content_ref) => Some(content_ref),
+                FileContent::Inline(_) => None,
+            },
             Self::CreateDirectory { .. }
             | Self::CreateDirectoryByInode { .. }
             | Self::AppendFile { .. }
@@ -831,8 +1115,7 @@ mod tests {
             (
                 FilesystemOperation::PutFile {
                     path: path("/docs/a.txt"),
-                    content_ref: Some(content_ref.clone()),
-                    inline_content: None,
+                    content: FileContent::Ref(content_ref.clone()),
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

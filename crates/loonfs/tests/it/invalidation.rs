@@ -205,9 +205,9 @@ async fn fenced_session_cannot_delete_namespace() {
     );
     assert_eq!(
         fence
-            .active_writer_id
+            .active_writer
             .as_ref()
-            .map(|writer| writer.as_str()),
+            .map(|writer| writer.writer_id.as_str()),
         Some("writer-b")
     );
     assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);

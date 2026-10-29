@@ -5,7 +5,7 @@ use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::{Consistency, ErrorCode, ListOptions, PinId, ReadAt, ReadConsistency};
 use loonfs_types::{
     decode_cursor, GeneratedIdValidationError, LimitError, ListPageCursor, OpaqueTokenError,
-    PaginationPolicy, PublicOrdinalRangeError, RevisionNo,
+    PublicOrdinalRangeError, RevisionNo,
 };
 use std::str::FromStr;
 
@@ -200,9 +200,7 @@ pub(super) fn effective_page_limit(
     limit: Option<String>,
 ) -> Result<loonfs_types::EffectiveLimit, ApiResponseError> {
     let requested = limit.as_deref().map(parse_page_limit).transpose()?;
-    PaginationPolicy::default()
-        .effective_limit(requested)
-        .map_err(limit_response_error)
+    loonfs_types::EffectiveLimit::from_requested(requested).map_err(limit_response_error)
 }
 
 fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {

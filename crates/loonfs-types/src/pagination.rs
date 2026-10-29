@@ -1,11 +1,9 @@
-//! Page-size policy, page envelopes, and opaque cursors for paginated endpoints.
+//! Page sizes, page envelopes, and opaque cursors for paginated endpoints.
 
-use crate::capability::{LIMIT_PAGINATION_DEFAULT_LIMIT, LIMIT_PAGINATION_MAX_LIMIT};
 use crate::{ChangeSeq, InodeId, NameKey, RevisionNo};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
@@ -70,7 +68,7 @@ impl<P: PagedResponse, E> Pager<P, E> {
             load_page: Box::new(move |request| Box::pin(load_page(request))),
             state: PagerState::NotStarted,
             pending: None,
-            page_limit: EffectiveLimit(PaginationPolicy::default().default_limit()),
+            page_limit: EffectiveLimit::DEFAULT,
             unloaded_items: usize::MAX,
         }
     }
@@ -291,9 +289,30 @@ pub const PAGE_CURSOR_FORMAT_VERSION: u8 = 1;
 pub struct EffectiveLimit(NonZeroU32);
 
 impl EffectiveLimit {
+    /// The page size applied when a caller omits `limit`.
+    pub const DEFAULT: Self =
+        Self(NonZeroU32::new(DEFAULT_PAGE_LIMIT).expect("the default page limit is nonzero"));
+
+    /// The largest page size that a caller can request.
+    pub const MAX: Self =
+        Self(NonZeroU32::new(MAX_PAGE_LIMIT).expect("the maximum page limit is nonzero"));
+
     /// Creates an effective limit from a non-zero value.
     pub fn new(value: NonZeroU32) -> Self {
         Self(value)
+    }
+
+    /// Resolves a caller-supplied limit into the enforced page size, which
+    /// is [`Self::DEFAULT`] when the caller omits it.
+    pub fn from_requested(requested: Option<u32>) -> Result<Self, LimitError> {
+        match requested {
+            None => Ok(Self::DEFAULT),
+            Some(value) if value > MAX_PAGE_LIMIT => Err(LimitError::ExceedsMax {
+                requested: value,
+                max_limit: MAX_PAGE_LIMIT,
+            }),
+            Some(value) => NonZeroU32::new(value).map(Self).ok_or(LimitError::Zero),
+        }
     }
 
     /// Returns the numeric page size.
@@ -318,67 +337,6 @@ impl EffectiveLimit {
         }
         rows.truncate(self.as_usize());
         rows.last().map(cursor)
-    }
-}
-
-/// Fixed pagination contract for endpoints with potentially unbounded results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PaginationPolicy {
-    default_limit: NonZeroU32,
-    max_limit: NonZeroU32,
-}
-
-impl PaginationPolicy {
-    /// Returns the page size applied when callers omit `limit`.
-    pub fn default_limit(self) -> NonZeroU32 {
-        self.default_limit
-    }
-
-    /// Returns the largest accepted caller-supplied `limit`.
-    pub fn max_limit(self) -> NonZeroU32 {
-        self.max_limit
-    }
-
-    /// Resolves a caller-supplied limit into the enforced page size.
-    pub fn effective_limit(self, requested: Option<u32>) -> Result<EffectiveLimit, LimitError> {
-        match requested {
-            None => Ok(EffectiveLimit(self.default_limit)),
-            Some(value) if value > self.max_limit.get() => Err(LimitError::ExceedsMax {
-                requested: value,
-                max_limit: self.max_limit.get(),
-            }),
-            Some(value) => NonZeroU32::new(value)
-                .map(EffectiveLimit)
-                .ok_or(LimitError::Zero),
-        }
-    }
-
-    /// Returns the advisory capability-document limits for this policy.
-    pub fn capability_limits(self) -> BTreeMap<String, u64> {
-        BTreeMap::from([
-            (
-                LIMIT_PAGINATION_DEFAULT_LIMIT.to_owned(),
-                u64::from(self.default_limit.get()),
-            ),
-            (
-                LIMIT_PAGINATION_MAX_LIMIT.to_owned(),
-                u64::from(self.max_limit.get()),
-            ),
-        ])
-    }
-}
-
-impl Default for PaginationPolicy {
-    fn default() -> Self {
-        // These are protocol constants, not configuration defaults. Keeping
-        // them together here makes every consumer enforce and advertise the
-        // same deliberate contract.
-        let default_limit = const { NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap() };
-        let max_limit = const { NonZeroU32::new(MAX_PAGE_LIMIT).unwrap() };
-        Self {
-            default_limit,
-            max_limit,
-        }
     }
 }
 
@@ -883,39 +841,25 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_resolves_omitted_limit_to_default() {
-        let policy = PaginationPolicy::default();
-        let limit = policy.effective_limit(None).expect("default limit");
+    fn an_omitted_limit_resolves_to_the_default() {
+        let limit = EffectiveLimit::from_requested(None).expect("default limit");
 
         assert_eq!(limit.get(), DEFAULT_PAGE_LIMIT);
         assert_eq!(limit.limit_plus_one(), 1_001);
     }
 
     #[test]
-    fn policy_rejects_invalid_limits() {
-        let policy = PaginationPolicy::default();
-
-        assert_eq!(policy.effective_limit(Some(0)), Err(LimitError::Zero));
+    fn invalid_limits_are_rejected() {
         assert_eq!(
-            policy.effective_limit(Some(MAX_PAGE_LIMIT + 1)),
+            EffectiveLimit::from_requested(Some(0)),
+            Err(LimitError::Zero)
+        );
+        assert_eq!(
+            EffectiveLimit::from_requested(Some(MAX_PAGE_LIMIT + 1)),
             Err(LimitError::ExceedsMax {
                 requested: MAX_PAGE_LIMIT + 1,
                 max_limit: MAX_PAGE_LIMIT,
             })
-        );
-    }
-
-    #[test]
-    fn policy_exports_capability_limits() {
-        let limits = PaginationPolicy::default().capability_limits();
-
-        assert_eq!(
-            limits.get("pagination.default_limit"),
-            Some(&u64::from(DEFAULT_PAGE_LIMIT))
-        );
-        assert_eq!(
-            limits.get("pagination.max_limit"),
-            Some(&u64::from(MAX_PAGE_LIMIT))
         );
     }
 

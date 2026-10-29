@@ -7,13 +7,15 @@
 //! guesses tags.
 
 use super::*;
+use crate::limits::READ_REVALIDATION_BOUND_MS;
 use crate::NamespaceAccess;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use utoipa::openapi::{schema::Schema, RefOr};
 use utoipa::ToSchema;
 
-/// Installs the named HTTP unions in an OpenAPI component collection.
+/// Installs the named HTTP unions, the flattened `ErrorDetails` object, and the derived
+/// schemas whose bounds come from constants, in an OpenAPI component collection.
 ///
 /// Panics if a declaration disagrees with the derived wire schema. This runs
 /// when building the static specification, not when serving an HTTP request.
@@ -25,15 +27,24 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<FilesystemChange>("kind", Some("unknown"));
     named.tagged::<FilesystemOperation>("kind", None);
     named.tagged::<NamespaceAccess>("kind", None);
-    named.tagged::<NamespaceAccessMode>("kind", None);
-    named.tagged::<ObjectTransferAccess>("kind", None);
+    named.tagged::<NamespaceAccessMode>("kind", Some("unknown"));
+    named.tagged::<ObjectTransferAccess>("kind", Some("unknown"));
     named.tagged::<RunMaintenanceRequest>("kind", None);
-    named.tagged::<RunMaintenanceResponse>("kind", None);
+    named.tagged::<RunMaintenanceResponse>("kind", Some("unknown"));
     named.tagged::<CompleteUploadBody>("mode", None);
     named.composite::<PathEntry, PathEntryKind>("inode_kind", Some("unknown"));
     named.composite::<UploadSession, UploadSessionStatus>("status", Some("unknown"));
     named.composite::<GrepIndex, GrepIndexStatus>("status", Some("unknown"));
+    named.composite::<StoreProbeCheck, StoreProbeCheckOutcome>("outcome", Some("unknown"));
     named.plain::<MetadataMaintenanceOutcome>("unknown");
+    named.plain::<UploadMode>("unknown");
+    named.object::<ErrorDetails>();
+    named.maximum::<CreateDownloadRequest>("max_staleness_ms", READ_REVALIDATION_BOUND_MS);
+    named.maximum::<CreateDownloadByInodeRequest>("max_staleness_ms", READ_REVALIDATION_BOUND_MS);
+    named.maximum::<CreateRevisionDownloadByInodeRequest>(
+        "max_staleness_ms",
+        READ_REVALIDATION_BOUND_MS,
+    );
 
     // These are implementation fields flattened into the named payloads. The
     // document's reference-integrity test catches accidental independent reuse.
@@ -68,6 +79,33 @@ impl NamedSchemas {
             strip_catch_all(&mut union, tag, catch_all, &T::name());
         }
         self.union(&T::name(), tag, union, &source, None);
+    }
+
+    /// Merges the field groups that an object flattens into its own properties.
+    fn object<T: ToSchema>(&mut self) {
+        let source = Source::of::<T>();
+        let schema = self.flatten(source.schema.clone(), &source);
+        let name = T::name().into_owned();
+        self.roots.insert(name.clone());
+        assert!(
+            self.schemas.insert(name, schema).is_none(),
+            "duplicate object name"
+        );
+    }
+
+    /// Sets the largest value of an integer field, which the derive takes only as a literal.
+    fn maximum<T: ToSchema>(&mut self, field: &str, maximum: u64) {
+        let name = T::name().into_owned();
+        let mut schema = Source::of::<T>().schema;
+        let property = schema["properties"]
+            .get_mut(field)
+            .expect("a bounded field should be a derived property");
+        property["maximum"] = json!(maximum);
+        self.roots.insert(name.clone());
+        assert!(
+            self.schemas.insert(name, schema).is_none(),
+            "duplicate schema name"
+        );
     }
 
     /// Leaves the catch-all value out of a string enum's derived values.
@@ -176,6 +214,10 @@ impl NamedSchemas {
                 "UploadSession" => {
                     Some("Whether the upload session is open, completed, or aborted.")
                 }
+                "StoreProbeCheck" => Some(
+                    "Whether the store passed the check, failed it, or doesn't support the \
+                     capability.",
+                ),
                 _ => None,
             };
             if let Some(description) = description {
