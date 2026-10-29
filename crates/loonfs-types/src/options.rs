@@ -1,11 +1,10 @@
 //! Per-operation options and payloads shared by the embedded runtime and HTTP
 //! client.
 
-use crate::PinId;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
     AttributesRevisionNo, CommitId, CommitPrecondition, DeleteDirectoryBehavior,
-    DestinationBehavior, DisplayName, InodeId, RevisionNo,
+    DestinationBehavior, DisplayName, InodeId, PinId, RevisionNo,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -473,7 +472,7 @@ pub struct DirectMultipartUploadOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForkNamespaceOptions {
     /// Fork from this unexpired snapshot instead of the current head.
-    pub snapshot_id: Option<crate::PinId>,
+    pub snapshot_id: Option<PinId>,
 }
 
 #[cfg(test)]

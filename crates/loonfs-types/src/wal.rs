@@ -431,8 +431,8 @@ fn decode_wal_object_envelope_zstd_with_limit(
     let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     let expected_kind = WalEnvelopeKind::WalObject;
-    envelope::verify_kind(expected_kind.as_str(), &probe.kind)?;
-    envelope::verify_version(&probe.kind, probe.format_version, WAL_FORMAT_VERSION)?;
+    envelope::ensure_kind(expected_kind.as_str(), &probe.kind)?;
+    envelope::ensure_version(&probe.kind, probe.format_version, WAL_FORMAT_VERSION)?;
 
     let document: WalObjectDocument = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;

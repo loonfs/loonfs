@@ -119,10 +119,7 @@ pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Siz
         );
         if let Some(memo) = memo {
             for entry in &entries[1..] {
-                let start = usize::try_from(entry.block.offset - handle.offset).expect(
-                    "the read stops at `MAX_BULK_LOAD_BYTES` past its first block, so a block's \
-                     offset in it should fit usize",
-                );
+                let start = loonfs_types::usize_from_u64(entry.block.offset - handle.offset);
                 memo.record_stored(
                     &segment_block_cache_key(
                         descriptor,
@@ -370,10 +367,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     let mut retained = Vec::with_capacity(span.len());
     for entry in span {
         let handle = entry.block;
-        let begin = usize::try_from(handle.offset - first.offset).expect(
-            "`load_section_bytes` holds the whole span in memory, so a block's offset in it \
-             should fit usize",
-        );
+        let begin = loonfs_types::usize_from_u64(handle.offset - first.offset);
         let stored = bytes.slice(begin..begin + handle.stored_bytes as usize);
         let decoded = Arc::new(
             decode_data_block(&stored, &handle)

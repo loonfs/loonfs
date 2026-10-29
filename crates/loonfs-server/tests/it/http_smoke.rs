@@ -10,15 +10,15 @@ use loonfs_client::{ClientError, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     ChangeSeq, CommitId, DestinationBehavior, EntryInodeKind, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
+    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, DEFAULT_PAGE_LIMIT,
     LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
-    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT,
-    LIMIT_PAGINATION_MAX, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
+    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT_LIMIT,
+    LIMIT_PAGINATION_MAX_LIMIT, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
-    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, MAX_PAGE_LIMIT,
 };
 use tempfile::tempdir;
 
@@ -167,12 +167,12 @@ async fn capabilities_endpoint_advertises_capabilities() {
         "a deployment that presigns no uploads advertises no direct-put ceiling"
     );
     assert_eq!(
-        capabilities.limits.get(LIMIT_PAGINATION_DEFAULT),
+        capabilities.limits.get(LIMIT_PAGINATION_DEFAULT_LIMIT),
         Some(&u64::from(DEFAULT_PAGE_LIMIT))
     );
     assert_eq!(
-        capabilities.limits.get(LIMIT_PAGINATION_MAX),
-        Some(&u64::from(DEFAULT_MAX_PAGE_LIMIT))
+        capabilities.limits.get(LIMIT_PAGINATION_MAX_LIMIT),
+        Some(&u64::from(MAX_PAGE_LIMIT))
     );
     // The two halves a client pre-validates a write against: what this
     // deployment will carry over the wire, and what the runtime will accept

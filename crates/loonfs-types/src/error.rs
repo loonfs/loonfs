@@ -51,7 +51,8 @@ pub enum ErrorKind {
 /// One `Variant => "wire_string"` line emits the enum variant, its
 /// [`ErrorCode::ALL`] entry (in registry order), its `as_str` arm, its
 /// `parse` arm, and the string-backed serde impls — so registering a new
-/// code is one line here plus a [`ErrorCode::kind`] arm and an api.md row.
+/// code is one line here plus a [`ErrorCode::kind`] arm, a
+/// [`ErrorCode::retryable_without_operator_action`] arm, and an api.md row.
 macro_rules! error_codes {
     (@count) => { 0 };
     (@count $head:ident $($tail:ident)*) => { 1 + error_codes!(@count $($tail)*) };

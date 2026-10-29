@@ -19,3 +19,8 @@ const _: () = assert!(
 pub const fn usize_from_u64(value: u64) -> usize {
     value as usize
 }
+
+/// Converts a `usize` to `u64`, which is lossless because LoonFS builds only for 64-bit targets.
+pub const fn u64_from_usize(value: usize) -> u64 {
+    value as u64
+}

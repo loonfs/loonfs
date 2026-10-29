@@ -8,7 +8,7 @@ use std::fmt;
 use thiserror::Error;
 
 /// A supported kind of content reference, serialized as a string.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ContentRefKind {
@@ -18,7 +18,7 @@ pub enum ContentRefKind {
 
 impl ContentRefKind {
     /// Returns the frozen wire spelling.
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::BlobV1 => "blob_v1",
         }
@@ -164,13 +164,13 @@ impl Checksum {
 
     /// Validates the exact width for `algorithm`.
     pub fn validate(&self) -> Result<(), ChecksumValidationError> {
-        let expected_len = self.algorithm.value_bytes() * 2;
-        let actual_len = self.value.as_str().len();
-        if actual_len != expected_len {
+        let expected_bytes = self.algorithm.value_bytes() * 2;
+        let actual_bytes = self.value.as_str().len();
+        if actual_bytes != expected_bytes {
             return Err(ChecksumValidationError::InvalidWidth {
                 algorithm: self.algorithm,
-                expected_len,
-                actual_len,
+                expected_bytes,
+                actual_bytes,
             });
         }
         Ok(())
@@ -178,20 +178,20 @@ impl Checksum {
 }
 
 /// Describes why a checksum is not in its canonical wire form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ChecksumValidationError {
     /// The checksum value does not have the exact width for its algorithm.
     #[error(
-        "checksum for algorithm `{algorithm}` must be {expected_len} hex characters, got {actual_len}"
+        "checksum for algorithm `{algorithm}` must be {expected_bytes} hex characters, got {actual_bytes}"
     )]
     InvalidWidth {
         /// Algorithm whose checksum width was required.
         algorithm: ChecksumAlgorithm,
         /// Required number of hexadecimal characters.
-        expected_len: usize,
+        expected_bytes: usize,
         /// Number of characters supplied.
-        actual_len: usize,
+        actual_bytes: usize,
     },
 }
 
@@ -445,7 +445,7 @@ fn crc32_from_u64(value: u64) -> u32 {
 }
 
 /// Describes why a content reference cannot be part of a durable commit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ContentRefValidationError {
     /// The checksum is not in the algorithm's canonical form.

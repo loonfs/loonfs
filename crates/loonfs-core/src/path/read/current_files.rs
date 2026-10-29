@@ -14,7 +14,7 @@ use loonfs_types::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use std::collections::{HashMap, HashSet};
 
 /// Maximum number of inode IDs accepted by a batch resolution.
-pub const MAX_CURRENT_FILES_PER_STAT: usize = loonfs_types::DEFAULT_MAX_PAGE_LIMIT as usize;
+pub const MAX_CURRENT_FILES_PER_STAT: usize = loonfs_types::MAX_PAGE_LIMIT as usize;
 
 /// Current namespace state for one inode.
 #[derive(Debug, Clone, PartialEq, Eq)]

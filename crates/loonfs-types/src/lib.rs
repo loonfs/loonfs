@@ -110,7 +110,7 @@ pub use capability::{
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_PAGINATION_DEFAULT_LIMIT, LIMIT_PAGINATION_MAX_LIMIT, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
@@ -145,7 +145,7 @@ pub use pagination::{
     encode_token_bytes, DirectoryPageCursor, DirectoryTreeFrame, DirectoryTreePageCursor,
     EffectiveLimit, FileRevisionsPageCursor, GrepPageCursor, LimitError, ListPageCursor,
     OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse, Pager,
-    PaginationPolicy, TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
+    PaginationPolicy, TrashPageCursor, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
     PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
@@ -157,7 +157,7 @@ pub use retry::{
     StdMonotonicTimer, SystemWallClock, TransportRetryOutcome, TransportRetryPolicy, WallClock,
 };
 pub use secret::{SecretString, REDACTED};
-pub use widths::usize_from_u64;
+pub use widths::{u64_from_usize, usize_from_u64};
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `api::v0`; add here only what most consumers touch.
