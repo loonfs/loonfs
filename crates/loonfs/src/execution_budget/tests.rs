@@ -611,13 +611,19 @@ async fn one_namespace_id_in_two_stores_is_charged_separately() {
     let first = gated_runtime(|builder| {
         builder
             .execution_budget(budget.clone())
-            .publication_policy(one_request_per_namespace())
+            .config(crate::RuntimeConfig {
+                publication: one_request_per_namespace(),
+                ..crate::RuntimeConfig::default()
+            })
     })
     .await;
     let second = gated_runtime(|builder| {
         builder
             .execution_budget(budget.clone())
-            .publication_policy(one_request_per_namespace())
+            .config(crate::RuntimeConfig {
+                publication: one_request_per_namespace(),
+                ..crate::RuntimeConfig::default()
+            })
     })
     .await;
     let first_documents = first.namespace("documents").await;
@@ -705,9 +711,12 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
     let runtime = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("staging-writer"))
         .execution_budget(budget.clone())
-        .inline_content(crate::InlineContentPolicy {
-            inline_content_threshold_bytes: None,
-            ..Default::default()
+        .config(crate::RuntimeConfig {
+            inline_content: crate::InlineContentPolicy {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            },
+            ..crate::RuntimeConfig::default()
         })
         .build()
         .await

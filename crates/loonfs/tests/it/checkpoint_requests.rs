@@ -48,8 +48,11 @@ async fn fixture(fold: Fold) -> Fixture {
     };
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id(&name))
-        .min_publish_interval_ms(0)
-        .inline_content(inline_content)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            inline_content,
+            ..loonfs::RuntimeConfig::default()
+        })
         .monotonic_timer(Arc::new(ManualClock::new(1_000_000)))
         .build()
         .await

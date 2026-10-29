@@ -1,10 +1,12 @@
 //! Admission of one runtime's publication requests: its per-namespace limits,
 //! and the totals of the execution budget it shares.
 
-use super::{CoreError, NamespaceId, PreparedCandidate};
+use super::queue::PreparedCandidate;
 use crate::execution_budget::{AdmissionChange, BudgetPermit};
+use crate::CoreError;
 use crate::{ExecutionBudget, PublicationPolicy};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
+use loonfs_types::NamespaceId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -462,7 +464,7 @@ mod tests {
             .build()
             .await
             .expect("writer");
-        let admission = &writer.mode.publisher.shared.admission;
+        let admission = &writer.mode.publisher.shared.context.admission;
         let budget = writer.execution_budget();
         let namespaces = (0..9)
             .map(|index| NamespaceId::parse(format!("ns-{index}")).expect("namespace"))

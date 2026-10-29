@@ -48,7 +48,10 @@ async fn advance_floor_through(
 async fn reader(store: &SharedObjectStore) -> LoonFs<ReadOnly> {
     LoonFs::builder_with_store(store.clone())
         .read_only()
-        .max_staleness_ms(0)
+        .config(loonfs::RuntimeConfig {
+            max_staleness_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("reader")

@@ -16,7 +16,10 @@ fn manifest_gets(gets: &[String]) -> Vec<String> {
 async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) {
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("seed-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("build writer");
@@ -90,7 +93,10 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
 
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("warm-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("build writer");

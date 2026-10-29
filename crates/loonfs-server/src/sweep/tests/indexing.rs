@@ -22,7 +22,7 @@ async fn ticks_index_publishes_and_lifecycle_changes_then_cost_nothing() {
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(Some(GrepWorkerConfig::default()));
-    config.idle_fold_after_ms = 0;
+    config.idle_fold_after_ms = Some(0);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("index-changes");
     server
@@ -222,7 +222,7 @@ async fn pending_reorganization_keeps_an_idle_entry_settling() {
         max_files_per_step: 1,
         ..GrepWorkerConfig::default()
     }));
-    config.idle_fold_after_ms = 0;
+    config.idle_fold_after_ms = Some(0);
     let mut server = SweepServer::start(store.clone(), &config, 0).await;
     let policy = &mut Arc::get_mut(&mut server.sweep.inner)
         .expect("one sweep")

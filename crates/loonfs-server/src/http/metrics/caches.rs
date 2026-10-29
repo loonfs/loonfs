@@ -4,7 +4,7 @@
 use super::prometheus::{write_counter, write_gauge, SeriesLabels, NO_LABELS};
 use loonfs::engine::DecodedBlockCacheStats;
 use loonfs::metrics::{RESULT_HIT, RESULT_MISS};
-use loonfs::{MetadataCacheStats, SsdSegmentBlocksStats};
+use loonfs::{MetadataCacheStats, SegmentFilterStats, SsdSegmentBlocksStats};
 
 /// Returns the `hit` and `miss` series of a lookup counter.
 fn lookups(hits: usize, misses: usize) -> [(SeriesLabels<'static>, usize); 2] {
@@ -111,6 +111,136 @@ fn render_segment_cache(
     }
 }
 
+/// The names of one cache's metric families, and the nouns that their
+/// descriptions use.
+struct CacheNames {
+    /// The cache's part of each metric name, such as `manifest` in
+    /// `loonfs_manifest_cache_gets`.
+    metric: &'static str,
+    /// The cache, as the description of its lookups starts.
+    lookups: &'static str,
+    /// The cache's entries, at the start of a description.
+    entries_title: &'static str,
+    /// The cache's entries, inside a description.
+    entries: &'static str,
+    /// The cache, as the descriptions of its inserts and its budget name it.
+    budget: &'static str,
+}
+
+const MANIFESTS: CacheNames = CacheNames {
+    metric: "manifest",
+    lookups: "Manifest",
+    entries_title: "Manifests",
+    entries: "manifests",
+    budget: "manifest",
+};
+
+const HEADS: CacheNames = CacheNames {
+    metric: "head",
+    lookups: "Namespace head",
+    entries_title: "Namespace heads",
+    entries: "namespace heads",
+    budget: "head",
+};
+
+const WAL_TAILS: CacheNames = CacheNames {
+    metric: "wal_tail",
+    lookups: "WAL-tail",
+    entries_title: "WAL-tail projections",
+    entries: "WAL-tail projections",
+    budget: "WAL-tail",
+};
+
+const CONTENT_OBJECTS: CacheNames = CacheNames {
+    metric: "content_object",
+    lookups: "Content object",
+    entries_title: "Content objects",
+    entries: "content objects",
+    budget: "content object",
+};
+
+const GREP_BLOCKS: CacheNames = CacheNames {
+    metric: "grep",
+    lookups: "Grep",
+    entries_title: "Decoded grep manifests and blocks",
+    entries: "decoded grep manifests and blocks",
+    budget: "grep",
+};
+
+/// Writes one cache's lookups, inserts, evictions, and rejections as
+/// counters, and the bytes it keeps as a gauge.
+///
+/// Listing every field makes this code fail to compile when
+/// `DecodedBlockCacheStats` gains a field, which ensures new statistics are
+/// considered for export.
+fn render_cache(rendered: &mut String, names: &CacheNames, stats: &DecodedBlockCacheStats) {
+    let DecodedBlockCacheStats {
+        hits,
+        misses,
+        inserts,
+        evictions,
+        evicted_decoded_bytes,
+        rejections,
+        rejected_decoded_bytes,
+        cached_decoded_bytes,
+    } = *stats;
+    let CacheNames {
+        metric,
+        lookups: lookups_label,
+        entries_title,
+        entries,
+        budget,
+    } = names;
+    write_counter(
+        rendered,
+        &format!("loonfs_{metric}_cache_gets"),
+        &format!("{lookups_label} cache lookups, by outcome"),
+        &lookups(hits, misses),
+    );
+    for (family, description, value) in [
+        (
+            "inserts",
+            format!("{entries_title} inserted into the {budget} cache"),
+            inserts,
+        ),
+        (
+            "evictions",
+            format!("{entries_title} evicted to stay within the {budget} budget"),
+            evictions,
+        ),
+        (
+            "evicted_decoded_bytes",
+            format!("Bytes charged to evicted {entries}, including keys and per-entry bookkeeping"),
+            evicted_decoded_bytes,
+        ),
+        (
+            "rejections",
+            format!("{entries_title} heavier than the whole {budget} budget"),
+            rejections,
+        ),
+        (
+            "rejected_decoded_bytes",
+            format!(
+                "Bytes charged to rejected {entries}, including keys and per-entry bookkeeping"
+            ),
+            rejected_decoded_bytes,
+        ),
+    ] {
+        write_counter(
+            rendered,
+            &format!("loonfs_{metric}_cache_{family}"),
+            &description,
+            &[(NO_LABELS, value)],
+        );
+    }
+    write_gauge(
+        rendered,
+        &format!("loonfs_{metric}_cache_retained_decoded_bytes"),
+        &format!("Bytes currently charged to {entries}, including keys and per-entry bookkeeping"),
+        cached_decoded_bytes,
+    );
+}
+
 /// Writes the metadata cache's stats as counters and gauges, in one family
 /// for each cache.
 ///
@@ -121,234 +251,56 @@ fn render_segment_cache(
 /// exported.
 pub(super) fn render_metadata_cache(rendered: &mut String, stats: &MetadataCacheStats) {
     let MetadataCacheStats {
-        segment_hits,
-        segment_misses,
-        segment_inserts,
-        segment_evictions,
-        segment_rejections,
-        segment_filter_skips,
-        segment_filter_false_positives,
-        segment_bytes,
+        segment_blocks,
+        segment_filter:
+            SegmentFilterStats {
+                skips,
+                false_positives,
+            },
         segment_ssd,
-        manifest_hits,
-        manifest_misses,
-        manifest_inserts,
-        manifest_evictions,
-        manifest_rejections,
-        manifest_bytes,
-        head_hits,
-        head_misses,
-        head_evictions,
-        head_evicted_bytes,
-        head_rejections,
-        head_rejected_bytes,
-        head_bytes,
-        wal_tail_hits,
-        wal_tail_misses,
-        wal_tail_inserts,
-        wal_tail_evictions,
-        wal_tail_evicted_bytes,
-        wal_tail_rejections,
-        wal_tail_rejected_bytes,
-        wal_tail_bytes,
-        content_object_hits,
-        content_object_misses,
-        content_object_inserts,
-        content_object_evictions,
-        content_object_bytes,
-        completed_upload_session_hits: _,
-        completed_upload_session_misses: _,
-        completed_upload_session_evictions: _,
-        completed_upload_session_bytes: _,
+        manifests,
+        heads,
+        wal_tails,
+        content_objects,
+        completed_upload_sessions: _,
     } = *stats;
     render_segment_cache(
         rendered,
         SegmentTierCounts {
-            hits: segment_hits,
-            misses: segment_misses,
-            inserts: segment_inserts,
-            evictions: segment_evictions,
-            rejections: segment_rejections,
+            hits: segment_blocks.hits,
+            misses: segment_blocks.misses,
+            inserts: segment_blocks.inserts,
+            evictions: segment_blocks.evictions,
+            rejections: segment_blocks.rejections,
         },
         segment_ssd,
-        segment_bytes,
+        segment_blocks.cached_decoded_bytes,
     );
-    for (name, description, hits, misses) in [
-        (
-            "loonfs_manifest_cache_gets",
-            "Manifest cache lookups, by outcome",
-            manifest_hits,
-            manifest_misses,
-        ),
-        (
-            "loonfs_head_cache_gets",
-            "Namespace head cache lookups, by outcome",
-            head_hits,
-            head_misses,
-        ),
-        (
-            "loonfs_wal_tail_cache_gets",
-            "WAL-tail cache lookups, by outcome",
-            wal_tail_hits,
-            wal_tail_misses,
-        ),
-        (
-            "loonfs_content_object_cache_gets",
-            "Content object cache lookups, by outcome",
-            content_object_hits,
-            content_object_misses,
-        ),
-    ] {
-        write_counter(rendered, name, description, &lookups(hits, misses));
-    }
     for (name, description, value) in [
         (
             "loonfs_segment_cache_filter_skips",
             "Segments skipped after their filter ruled out a lookup",
-            segment_filter_skips,
+            skips,
         ),
         (
             "loonfs_segment_cache_filter_false_positives",
             "Filter admissions that matched no metadata rows",
-            segment_filter_false_positives,
-        ),
-        (
-            "loonfs_manifest_cache_inserts",
-            "Manifests inserted into the manifest cache",
-            manifest_inserts,
-        ),
-        (
-            "loonfs_manifest_cache_evictions",
-            "Manifests evicted to stay within the manifest budget",
-            manifest_evictions,
-        ),
-        (
-            "loonfs_manifest_cache_rejections",
-            "Manifests heavier than the whole manifest budget",
-            manifest_rejections,
-        ),
-        (
-            "loonfs_head_cache_evictions",
-            "Namespace heads evicted to stay within the head budget",
-            head_evictions,
-        ),
-        (
-            "loonfs_head_cache_evicted_decoded_bytes",
-            "Bytes charged to evicted namespace heads, including keys and per-entry bookkeeping",
-            head_evicted_bytes,
-        ),
-        (
-            "loonfs_head_cache_rejections",
-            "Namespace heads heavier than the whole head budget",
-            head_rejections,
-        ),
-        (
-            "loonfs_head_cache_rejected_decoded_bytes",
-            "Bytes charged to rejected namespace heads, including keys and per-entry bookkeeping",
-            head_rejected_bytes,
-        ),
-        (
-            "loonfs_wal_tail_cache_inserts",
-            "WAL-tail projections inserted into the WAL-tail cache",
-            wal_tail_inserts,
-        ),
-        (
-            "loonfs_wal_tail_cache_evictions",
-            "WAL-tail projections evicted to stay within the WAL-tail budget",
-            wal_tail_evictions,
-        ),
-        (
-            "loonfs_wal_tail_cache_evicted_decoded_bytes",
-            "Bytes charged to evicted WAL-tail projections, including keys and per-entry bookkeeping",
-            wal_tail_evicted_bytes,
-        ),
-        (
-            "loonfs_wal_tail_cache_rejections",
-            "WAL-tail projections heavier than the whole WAL-tail budget",
-            wal_tail_rejections,
-        ),
-        (
-            "loonfs_wal_tail_cache_rejected_decoded_bytes",
-            "Bytes charged to rejected WAL-tail projections, including keys and per-entry bookkeeping",
-            wal_tail_rejected_bytes,
-        ),
-        (
-            "loonfs_content_object_cache_inserts",
-            "Content objects inserted into the content object cache",
-            content_object_inserts,
-        ),
-        (
-            "loonfs_content_object_cache_evictions",
-            "Content objects evicted to stay within the content object budget",
-            content_object_evictions,
+            false_positives,
         ),
     ] {
         write_counter(rendered, name, description, &[(NO_LABELS, value)]);
     }
-    for (name, description, value) in [
-        (
-            "loonfs_manifest_cache_retained_decoded_bytes",
-            "Bytes currently charged to manifests, including keys and per-entry bookkeeping",
-            manifest_bytes,
-        ),
-        (
-            "loonfs_head_cache_retained_decoded_bytes",
-            "Bytes currently charged to namespace heads, including keys and per-entry bookkeeping",
-            head_bytes,
-        ),
-        (
-            "loonfs_wal_tail_cache_retained_decoded_bytes",
-            "Bytes currently charged to WAL-tail projections, including keys and per-entry bookkeeping",
-            wal_tail_bytes,
-        ),
-        (
-            "loonfs_content_object_cache_retained_decoded_bytes",
-            "Bytes currently charged to content objects, including keys and per-entry bookkeeping",
-            content_object_bytes,
-        ),
+    for (names, stats) in [
+        (&MANIFESTS, manifests),
+        (&HEADS, heads),
+        (&WAL_TAILS, wal_tails),
+        (&CONTENT_OBJECTS, content_objects),
     ] {
-        write_gauge(rendered, name, description, value);
+        render_cache(rendered, names, &stats);
     }
 }
 
 /// Writes the grep cache's stats as counters and a gauge.
-///
-/// Listing every field makes this code fail to compile when
-/// `DecodedBlockCacheStats` gains a field, which ensures new statistics are
-/// considered for export. The fields bound to `_` aren't exported.
 pub(super) fn render_grep_block_cache(rendered: &mut String, stats: &DecodedBlockCacheStats) {
-    let DecodedBlockCacheStats {
-        hits,
-        misses,
-        inserts,
-        evictions,
-        evicted_decoded_bytes: _,
-        rejections: _,
-        rejected_decoded_bytes: _,
-        cached_decoded_bytes,
-    } = *stats;
-    write_counter(
-        rendered,
-        "loonfs_grep_cache_gets",
-        "Grep cache lookups, by outcome",
-        &lookups(hits, misses),
-    );
-    write_counter(
-        rendered,
-        "loonfs_grep_cache_inserts",
-        "Decoded grep manifests and blocks inserted into the grep cache",
-        &[(NO_LABELS, inserts)],
-    );
-    write_counter(
-        rendered,
-        "loonfs_grep_cache_evictions",
-        "Decoded grep manifests and blocks evicted to stay within the grep cache budget",
-        &[(NO_LABELS, evictions)],
-    );
-    write_gauge(
-        rendered,
-        "loonfs_grep_cache_retained_decoded_bytes",
-        "Bytes currently charged to decoded grep manifests and blocks, including keys and per-entry bookkeeping",
-        cached_decoded_bytes,
-    );
+    render_cache(rendered, &GREP_BLOCKS, stats);
 }

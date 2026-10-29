@@ -794,9 +794,12 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
         KeyPredicate::content_blob(),
     ));
     let fs = open_runtime_with_async(counting.clone(), "read-content-ref-test", |builder| {
-        builder.inline_content(loonfs::InlineContentPolicy {
-            inline_content_threshold_bytes: None,
-            ..Default::default()
+        builder.config(loonfs::RuntimeConfig {
+            inline_content: loonfs::InlineContentPolicy {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            },
+            ..loonfs::RuntimeConfig::default()
         })
     })
     .await;
@@ -851,9 +854,12 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
     let fs = open_runtime_with_async(store.clone(), "read-content-ref-digest-test", |builder| {
-        builder.inline_content(loonfs::InlineContentPolicy {
-            inline_content_threshold_bytes: None,
-            ..Default::default()
+        builder.config(loonfs::RuntimeConfig {
+            inline_content: loonfs::InlineContentPolicy {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            },
+            ..loonfs::RuntimeConfig::default()
         })
     })
     .await;

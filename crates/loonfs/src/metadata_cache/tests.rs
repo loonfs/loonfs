@@ -249,7 +249,7 @@ async fn two_stores_with_the_same_ids_read_their_own_bytes_through_one_cache() {
         }
     }
     assert!(
-        cache.stats().wal_tail_hits > 0,
+        cache.stats().wal_tails.hits > 0,
         "the second pass reads warm"
     );
 
@@ -289,13 +289,16 @@ async fn runtimes_over_one_store_share_decoded_segment_blocks() {
     }
     let (cold, warm) = (stats_after_each_read[0], stats_after_each_read[1]);
     assert!(
-        cold.segment_misses > 0,
+        cold.segment_blocks.misses > 0,
         "the first runtime reads cold: {cold:?}"
     );
-    assert!(warm.segment_hits > cold.segment_hits, "{warm:?}");
+    assert!(
+        warm.segment_blocks.hits > cold.segment_blocks.hits,
+        "{warm:?}"
+    );
     assert_eq!(
-        (warm.segment_misses, warm.manifest_misses),
-        (cold.segment_misses, cold.manifest_misses),
+        (warm.segment_blocks.misses, warm.manifests.misses),
+        (cold.segment_blocks.misses, cold.manifests.misses),
         "the second runtime reads the blocks and the manifest the first runtime decoded: {warm:?}"
     );
 }
@@ -334,44 +337,57 @@ async fn the_manifest_limit_bounds_the_cached_manifests() {
 
     let (kept, kept_gets) = read_twice(MetadataCache::default()).await;
     assert_eq!(
-        (kept.manifest_inserts, kept.manifest_evictions, kept_gets),
+        (kept.manifests.inserts, kept.manifests.evictions, kept_gets),
         (1, 0, 0),
         "the second pass reads the manifest from the cache: {kept:?}"
     );
     let (exact, exact_gets) = read_twice(
         MetadataCache::builder()
-            .max_manifest_bytes(kept.manifest_bytes)
+            .max_manifest_bytes(kept.manifests.cached_decoded_bytes)
             .build(),
     )
     .await;
     assert_eq!(
-        (exact.manifest_bytes, exact_gets),
-        (kept.manifest_bytes, 0),
+        (exact.manifests.cached_decoded_bytes, exact_gets),
+        (kept.manifests.cached_decoded_bytes, 0),
         "{exact:?}"
     );
     let (short, _) = read_twice(
         MetadataCache::builder()
-            .max_manifest_bytes(kept.manifest_bytes - 1)
+            .max_manifest_bytes(kept.manifests.cached_decoded_bytes - 1)
             .build(),
     )
     .await;
     assert_eq!(
-        (short.manifest_inserts, short.manifest_bytes),
+        (
+            short.manifests.inserts,
+            short.manifests.cached_decoded_bytes
+        ),
         (0, 0),
         "{short:?}"
     );
-    assert!(short.manifest_rejections > 0, "{short:?}");
+    assert!(short.manifests.rejections > 0, "{short:?}");
 
     let (none, none_gets) =
         read_twice(MetadataCache::builder().max_manifest_bytes(0).build()).await;
     assert_eq!(
-        (none.manifest_inserts, none.manifest_bytes, none_gets),
+        (
+            none.manifests.inserts,
+            none.manifests.cached_decoded_bytes,
+            none_gets
+        ),
         (0, 0, 2),
         "each of the second pass's two reads loads the manifest: {none:?}"
     );
     assert_eq!(
-        (none.segment_inserts, none.segment_bytes),
-        (kept.segment_inserts, kept.segment_bytes),
+        (
+            none.segment_blocks.inserts,
+            none.segment_blocks.cached_decoded_bytes
+        ),
+        (
+            kept.segment_blocks.inserts,
+            kept.segment_blocks.cached_decoded_bytes
+        ),
         "the segment limit is charged no manifest"
     );
 }
@@ -418,7 +434,7 @@ async fn a_manifest_stays_cached_while_another_namespace_reads_many_blocks() {
         }
     }
     let before = cache.stats();
-    assert!(before.segment_evictions > 0, "{before:?}");
+    assert!(before.segment_blocks.evictions > 0, "{before:?}");
 
     small_store.reset();
     assert_reads(&small, b"file").await;
@@ -429,8 +445,8 @@ async fn a_manifest_stays_cached_while_another_namespace_reads_many_blocks() {
         "the read finds its manifest in the cache: {after:?}"
     );
     assert_eq!(
-        (after.manifest_misses, after.manifest_evictions),
-        (before.manifest_misses, 0),
+        (after.manifests.misses, after.manifests.evictions),
+        (before.manifests.misses, 0),
         "{after:?}"
     );
 }
@@ -473,10 +489,10 @@ async fn bindings_share_one_capacity() {
     .await;
     let one_binding = measured.stats();
     let cache = MetadataCache::builder()
-        .max_segment_bytes(one_binding.segment_bytes)
-        .max_manifest_bytes(one_binding.manifest_bytes)
-        .max_head_bytes(one_binding.head_bytes)
-        .max_wal_tail_bytes(one_binding.wal_tail_bytes)
+        .max_segment_bytes(one_binding.segment_blocks.cached_decoded_bytes)
+        .max_manifest_bytes(one_binding.manifests.cached_decoded_bytes)
+        .max_head_bytes(one_binding.heads.cached_decoded_bytes)
+        .max_wal_tail_bytes(one_binding.wal_tails.cached_decoded_bytes)
         .build();
 
     for (root, bytes) in [(&first_root, b"first"), (&second_root, b"other")] {
@@ -485,22 +501,26 @@ async fn bindings_share_one_capacity() {
 
     let stats = cache.stats();
     assert!(
-        stats.segment_bytes <= one_binding.segment_bytes,
+        stats.segment_blocks.cached_decoded_bytes
+            <= one_binding.segment_blocks.cached_decoded_bytes,
         "{stats:?}"
     );
     assert!(
-        stats.manifest_bytes <= one_binding.manifest_bytes,
+        stats.manifests.cached_decoded_bytes <= one_binding.manifests.cached_decoded_bytes,
         "{stats:?}"
     );
-    assert!(stats.head_bytes <= one_binding.head_bytes, "{stats:?}");
     assert!(
-        stats.wal_tail_bytes <= one_binding.wal_tail_bytes,
+        stats.heads.cached_decoded_bytes <= one_binding.heads.cached_decoded_bytes,
         "{stats:?}"
     );
-    assert!(stats.segment_evictions > 0, "{stats:?}");
-    assert!(stats.manifest_evictions > 0, "{stats:?}");
-    assert!(stats.head_evictions > 0, "{stats:?}");
-    assert!(stats.wal_tail_evictions > 0, "{stats:?}");
+    assert!(
+        stats.wal_tails.cached_decoded_bytes <= one_binding.wal_tails.cached_decoded_bytes,
+        "{stats:?}"
+    );
+    assert!(stats.segment_blocks.evictions > 0, "{stats:?}");
+    assert!(stats.manifests.evictions > 0, "{stats:?}");
+    assert!(stats.heads.evictions > 0, "{stats:?}");
+    assert!(stats.wal_tails.evictions > 0, "{stats:?}");
 }
 
 #[tokio::test]
@@ -517,7 +537,7 @@ async fn closing_one_runtime_leaves_the_cache_and_the_other_usable() {
     let before = cache.stats();
     assert_reads(&second.read_only(), b"other").await;
     assert!(
-        cache.stats().wal_tail_hits > before.wal_tail_hits,
+        cache.stats().wal_tails.hits > before.wal_tails.hits,
         "the other runtime still reads its warm entries"
     );
 
@@ -569,15 +589,19 @@ async fn read_policy_stays_with_each_binding() {
     // Both bindings confirm the head on every read, and only one checks
     // for a successor manifest.
     let (every_read, every_read_store) = binding(|builder| {
-        builder
-            .manifest_revalidation_interval_ms(0)
-            .max_staleness_ms(0)
+        builder.config(crate::RuntimeConfig {
+            manifest_revalidation_interval_ms: 0,
+            max_staleness_ms: 0,
+            ..crate::RuntimeConfig::default()
+        })
     })
     .await;
     let (never, never_store) = binding(|builder| {
-        builder
-            .manifest_revalidation_interval_ms(crate::engine::READ_REVALIDATION_BOUND_MS)
-            .max_staleness_ms(0)
+        builder.config(crate::RuntimeConfig {
+            manifest_revalidation_interval_ms: crate::engine::READ_REVALIDATION_BOUND_MS,
+            max_staleness_ms: 0,
+            ..crate::RuntimeConfig::default()
+        })
     })
     .await;
     for (runtime, store) in [(&every_read, &every_read_store), (&never, &never_store)] {
@@ -676,7 +700,7 @@ async fn runtimes_report_no_cache_metrics_to_their_recorder() {
         }
         let stats = runtime.metadata_cache().stats();
         assert!(
-            stats.head_misses > 0 && stats.wal_tail_bytes > 0,
+            stats.heads.misses > 0 && stats.wal_tails.cached_decoded_bytes > 0,
             "{stats:?}"
         );
     }
@@ -928,9 +952,9 @@ async fn reads_of_empty_files_keep_no_content_objects() {
                 .is_empty());
         }
         let stats = cache.stats();
-        assert_eq!(stats.content_object_inserts, 0, "{stats:?}");
+        assert_eq!(stats.content_objects.inserts, 0, "{stats:?}");
         assert!(
-            stats.content_object_bytes <= max_content_object_bytes,
+            stats.content_objects.cached_decoded_bytes <= max_content_object_bytes,
             "{stats:?}"
         );
     }

@@ -133,9 +133,12 @@ impl Fixture {
             .writer_id(loonfs_test_support::ids::writer_id("read-budget"))
             .metadata_cache(metadata_cache)
             .execution_budget(budget)
-            .inline_content(InlineContentPolicy {
-                inline_content_threshold_bytes: None,
-                ..InlineContentPolicy::default()
+            .config(crate::RuntimeConfig {
+                inline_content: InlineContentPolicy {
+                    inline_content_threshold_bytes: None,
+                    ..InlineContentPolicy::default()
+                },
+                ..crate::RuntimeConfig::default()
             })
             .build()
             .await

@@ -49,7 +49,10 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let writer = Arc::new(
         LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id("parked-writer"))
-            .min_publish_interval_ms(0)
+            .config(loonfs::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                ..loonfs::RuntimeConfig::default()
+            })
             .build()
             .await
             .expect("build writer"),

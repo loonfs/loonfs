@@ -83,7 +83,10 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_withou
     let clock = Arc::new(ManualClock::at_system_time());
     let writer = LoonFs::builder_with_store(store(temp_dir.path()))
         .writer_id(writer_id("expiry-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .wall_clock(clock.clone())
         .build()
         .await

@@ -557,23 +557,12 @@ root = "/tmp/loonfs-server"
         .expect("valid config")
         .config()
         .clone();
-    assert_eq!(config.max_download_bytes, 256 * 1024 * 1024);
-    assert_eq!(
-        config.max_concurrent_reads.get(),
-        loonfs::DEFAULT_MAX_CONCURRENT_READS
-    );
-    assert_eq!(
-        config.max_concurrent_folds.get(),
-        loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
-    );
-    assert_eq!(
-        config.max_concurrent_compactions.get(),
-        loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS
-    );
-    assert_eq!(
-        config.max_concurrent_content_writes.get(),
-        loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES
-    );
+    // An absent limit takes the runtime's default.
+    assert_eq!(config.max_download_bytes, None);
+    assert_eq!(config.max_concurrent_reads, None);
+    assert_eq!(config.max_concurrent_folds, None);
+    assert_eq!(config.max_concurrent_compactions, None);
+    assert_eq!(config.max_concurrent_content_writes, None);
     for field in ["max_in_flight_requests", "max_connections"] {
         let mut oversized = config.clone();
         let value = NonZeroUsize::new(tokio::sync::Semaphore::MAX_PERMITS + 1)
@@ -668,11 +657,11 @@ root = "/tmp/loonfs-server"
 }
 
 #[test]
-fn idle_fold_period_defaults_to_fifteen_minutes_and_accepts_zero() {
+fn idle_fold_period_is_optional_and_accepts_zero() {
     for (setting, expected) in [
-        ("", 900_000),
-        ("idle_fold_after_ms = 60000", 60_000),
-        ("idle_fold_after_ms = 0", 0),
+        ("", None),
+        ("idle_fold_after_ms = 60000", Some(60_000)),
+        ("idle_fold_after_ms = 0", Some(0)),
     ] {
         let path = write_config(&format!(
             r#"

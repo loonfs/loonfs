@@ -120,7 +120,7 @@ async fn http_snapshots_are_listed_extended_and_deleted_idempotently() {
         .await
         .expect("create namespace");
 
-    let before_create = loonfs::current_time_ms();
+    let before_create = loonfs_core::time::current_time_ms();
     let created = create_snapshot(
         &harness.server_url,
         namespace.as_str(),
@@ -128,7 +128,7 @@ async fn http_snapshots_are_listed_extended_and_deleted_idempotently() {
         Some(5_000),
     )
     .expect("create snapshot");
-    let after_create = loonfs::current_time_ms();
+    let after_create = loonfs_core::time::current_time_ms();
     assert_eq!(created.namespace_id, namespace);
     assert_eq!(created.name, "report");
     assert_eq!(created.captured_seq, ChangeSeq(0));

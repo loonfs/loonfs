@@ -5,8 +5,8 @@ use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
-    current_time_ms, CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior,
-    GcOptions, InlineContentPolicy, LoonFs, MaintainMetadataOptions, MetadataCompactionOutcome,
+    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, GcOptions,
+    InlineContentPolicy, LoonFs, MaintainMetadataOptions, MetadataCompactionOutcome,
     MetadataCompactionPolicy, PutFileOptions, WalFoldStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS,
 };
 use loonfs_core::test_support::WriterAt;
@@ -30,12 +30,14 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
     let directory = tempdir().expect("tempdir");
     let object_store = store(directory.path());
     let runtime = open_runtime_with_async(object_store.clone(), "retained-views", |builder| {
-        builder
-            .min_publish_interval_ms(0)
-            .inline_content(InlineContentPolicy {
+        builder.config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            inline_content: InlineContentPolicy {
                 inline_content_threshold_bytes: Some(64),
                 ..Default::default()
-            })
+            },
+            ..loonfs::RuntimeConfig::default()
+        })
     })
     .await;
     let source = namespace_id("source");
@@ -280,7 +282,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 // Every object is fresh, so the pass runs at a clock past
                 // every age gate. The checkpoint and fork pins are the only
                 // roots for the pre-rebuild file set.
-                let now_ms = current_time_ms()
+                let now_ms = loonfs_core::time::current_time_ms()
                     + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
                     + GC_DEFAULT_GRACE_WINDOW_MS
                     + 1;

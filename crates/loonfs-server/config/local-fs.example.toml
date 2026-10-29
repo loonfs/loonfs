@@ -25,6 +25,12 @@ memory_limit_bytes = 4294967296
 # cap is too low. Defaults to 32.
 #max_concurrent_content_writes = 32
 
+# Shared publication admission. Includes active requests, duplicate callers,
+# and namespace deletes. Full admission returns `commit_queue_full`. The
+# admitted bytes are derived when sized.
+#max_admitted_requests = 8192
+#max_concurrent_publications = 8
+
 # Minimum interval between publication starts per namespace; cold namespaces
 # publish immediately. Defaults to 200 ms.
 #min_publish_interval_ms = 200
@@ -198,10 +204,8 @@ kind = "local_fs"
 root = "./.loonfs-store"
 key_prefix = "local-demo"
 
-# Shared publication admission. Includes active requests, duplicate callers,
-# and namespace deletes. Full admission returns `commit_queue_full`.
+# Per-namespace publication admission. A commit at the write stop waits
+# half of `request_deadline_ms` for the session's fold.
 #[publication]
-#max_requests = 8192
 #max_requests_per_namespace = 1024
 #max_estimated_bytes_per_namespace = 8388608
-#max_concurrent_publications = 8

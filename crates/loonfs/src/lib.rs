@@ -7,6 +7,10 @@
 //! The durable protocol doesn't belong here: it's in `loonfs-core`, and this
 //! crate adds caching, batching, budgets, and maintenance around it.
 //!
+//! The crate root re-exports each type that a public runtime signature, or a
+//! field of a type that one returns, uses, and the sub-modules re-export the
+//! items their docs list. Nothing else is re-exported.
+//!
 //! The crate has two nouns. A [`LoonFs`] is the runtime: it owns the store
 //! client and the read budgets, and reads through a [`MetadataCache`] that
 //! several runtimes may share. A writable runtime runs its publications,
@@ -57,15 +61,19 @@
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 compile_error!("the loonfs runtime needs a monotonic clock that counts host sleep; see StdMonotonicTimer in loonfs-types");
 
-mod cache;
 mod config;
 mod execution_budget;
-mod fs;
-mod handle;
+mod maintenance;
 mod metadata_cache;
 pub mod metrics;
+mod namespace;
 mod options;
+mod pagers;
+mod pinned_read;
 mod publisher;
+mod read_view;
+mod runtime;
+mod runtime_core;
 /// Runtime handles that test targets build the same way, available through
 /// the `test-support` feature.
 #[cfg(any(test, feature = "test-support"))]
@@ -77,7 +85,7 @@ pub use loonfs_core::limits::{
     MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES, MAX_SIGNED_PARTS_PER_REQUEST,
     READAHEAD_WINDOW_BYTES, SSD_WRITE_QUEUE_BYTES,
 };
-pub use loonfs_core::time::{current_time_ms, WallClock};
+pub use loonfs_core::time::WallClock;
 pub use loonfs_core::{
     classify_store_failure, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
     CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
@@ -99,14 +107,12 @@ pub use loonfs_types::{
     DirectoryPageCursor, DisplayName, EffectiveLimit, EntryInodeKind, FileRevision,
     FileRevisionsPageCursor, GcResponse, InodeId, InodeKind, ListCheckpointsResponse,
     ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
-    ListSnapshotsResponse, ManifestNo, MetadataCompactionOutcome, MetadataCompactionResponse,
-    MetadataMaintenanceOutcome, MetadataMaintenanceResponse, MetadataPassReport, NameKey,
-    NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry,
-    PathEntryKind, PinId, RetainedCandidates, RetainedReason, RevisionNo, RunMaintenanceRequest,
-    RunMaintenanceResponse, SetRetentionWindowResponse, Snapshot, TrashEntry, UploadId,
-    WalFoldStepOutcome, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    PROTOCOL_VERSION,
+    ListSnapshotsResponse, ManifestNo, MetadataMaintenanceOutcome, MetadataMaintenanceResponse,
+    NameKey, NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry,
+    PathEntryKind, PinId, RetainedCandidates, RetainedReason, RevisionNo,
+    SetRetentionWindowResponse, Snapshot, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0,
+    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
@@ -125,14 +131,6 @@ pub mod engine {
     pub use loonfs_core::{
         grace_age, next_run_no_after, refill_iterators, select_next_iterator, GraceAge,
         SegmentBlockLoader, SegmentRowIterator,
-    };
-}
-
-/// Request shapes a serving host decodes before converting them to runtime options.
-pub mod requests {
-    pub use loonfs_types::{
-        AdvanceRetentionRequest, CreateSnapshotRequest, ExtendSnapshotRequest, GcRequest,
-        MetadataMaintenanceRequest, RunMaintenanceRequest,
     };
 }
 
@@ -207,7 +205,7 @@ pub use loonfs_objectstore::{
 };
 
 pub use config::{
-    InlineContentPolicy, PublicationPolicy, DEFAULT_IDLE_FOLD_AFTER_MS,
+    InlineContentPolicy, PublicationPolicy, RuntimeConfig, DEFAULT_IDLE_FOLD_AFTER_MS,
     DEFAULT_MAX_READ_CONTENT_BYTES,
 };
 pub use execution_budget::{
@@ -215,23 +213,20 @@ pub use execution_budget::{
     DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_CONTENT_WRITES,
     DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS, DEFAULT_MAX_READ_WORKING_BYTES,
 };
-pub use fs::{
-    AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorResponse, ChangesPager,
-    CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
-    PathEntriesPager, ReadView, RetentionFloors, SnapshotsPager, TrashPager,
-};
-pub use handle::{
-    LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Mode, Namespace, ReadOnly,
-    Writable,
-};
 pub use loonfs_core::{phase_span, Phase};
-pub use metadata_cache::{
-    MetadataCache, MetadataCacheBuilder, MetadataCacheStats, SsdBlockWriter, SsdSegmentBlocks,
-    SsdSegmentBlocksStats, ASSUMED_STORED_BLOCK_BYTES, DEFAULT_MAX_CACHED_OBJECT_BYTES,
-    DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES, DEFAULT_MAX_CONTENT_OBJECT_BYTES,
-    DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_MANIFEST_BYTES, DEFAULT_MAX_SEGMENT_BYTES,
-    DEFAULT_MAX_WAL_TAIL_BYTES, SSD_INDEX_ENTRY_BYTES,
+pub use maintenance::{
+    AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorReport, Maintenance,
+    MaintenanceCancellation, MetadataCompactionOutcome, MetadataCompactionReport,
+    MetadataPassReport, RetentionFloors, WalFoldStepOutcome,
 };
+pub use metadata_cache::{
+    MetadataCache, MetadataCacheBuilder, MetadataCacheStats, SegmentFilterStats, SsdBlockWriter,
+    SsdSegmentBlocks, SsdSegmentBlocksStats, ASSUMED_STORED_BLOCK_BYTES,
+    DEFAULT_MAX_CACHED_OBJECT_BYTES, DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
+    DEFAULT_MAX_CONTENT_OBJECT_BYTES, DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_MANIFEST_BYTES,
+    DEFAULT_MAX_SEGMENT_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES, SSD_INDEX_ENTRY_BYTES,
+};
+pub use namespace::Namespace;
 pub use options::{
     AccessState, AdvanceRetentionFloorOptions, AppendFileByInodeOptions, AppendFileOptions,
     AttributeChanges, CommitOptions, Consistency, CopyOptions, CreateDirectoryOptions,
@@ -242,7 +237,14 @@ pub use options::{
     UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
     UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
+pub use pagers::{
+    ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
+    PathEntriesPager, SnapshotsPager, TrashPager,
+};
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
+pub use read_view::ReadView;
+pub(crate) use runtime::WriterState;
+pub use runtime::{LoonFs, LoonFsBuilder, Mode, ReadOnly, Writable};
 pub use trace::TraceMode;
 
 /// Result type used by the embedded runtime.

@@ -43,7 +43,10 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
     let disabled = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("idle-off-worker"))
         .wall_clock(clock.clone())
-        .idle_fold_after_ms(None)
+        .config(loonfs::RuntimeConfig {
+            idle_fold_after_ms: None,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("maintenance without idle folds")

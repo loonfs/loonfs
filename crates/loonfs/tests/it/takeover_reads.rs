@@ -90,10 +90,13 @@ async fn takeover(
     let recorded: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(recorded)
         .writer_id(writer_id(name))
-        .min_publish_interval_ms(0)
-        .manifest_revalidation_interval_ms(0)
-        .max_staleness_ms(0)
-        .inline_content(inline_content)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            manifest_revalidation_interval_ms: 0,
+            max_staleness_ms: 0,
+            inline_content,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer A");
@@ -129,7 +132,10 @@ impl Takeover {
         };
         LoonFs::builder_with_store(store)
             .writer_id(writer_id("takeover-peer"))
-            .min_publish_interval_ms(0)
+            .config(loonfs::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                ..loonfs::RuntimeConfig::default()
+            })
             .build()
             .await
             .expect("writer B")

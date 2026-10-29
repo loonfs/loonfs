@@ -781,7 +781,10 @@ root = "unused"
 async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id(writer_id))
-        .trace_mode(TraceMode::Remote)
+        .config(loonfs::RuntimeConfig {
+            trace_mode: TraceMode::Remote,
+            ..loonfs::RuntimeConfig::default()
+        })
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await

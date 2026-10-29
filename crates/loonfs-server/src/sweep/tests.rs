@@ -46,6 +46,15 @@ fn visit_held<T>(
 }
 const DAY_MS: u64 = 24 * 60 * MINUTE_MS;
 
+/// Returns the idle fold age, in milliseconds, of the runtime that `config`
+/// builds, and zero when the runtime doesn't fold idle tails.
+fn idle_fold_after_ms(config: &ServerConfig) -> u64 {
+    config
+        .runtime_config()
+        .idle_fold_after_ms
+        .map_or(0, std::num::NonZeroU64::get)
+}
+
 /// A server's runtime and sweep over `store`, reading `clock`.
 struct SweepServer {
     clock: Arc<ManualClock>,
@@ -62,9 +71,10 @@ impl SweepServer {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let runtime = LoonFs::builder_with_store(store)
             .writer_id(loonfs_test_support::ids::writer_id("sweep-server"))
-            .min_publish_interval_ms(0)
-            .inline_content(config.inline_content.effective_policy())
-            .idle_fold_after_ms(std::num::NonZeroU64::new(config.idle_fold_after_ms))
+            .config(loonfs::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                ..config.runtime_config()
+            })
             .wall_clock(clock.clone())
             .monotonic_timer(clock.clone())
             .metrics_recorder(recorder.clone() as Arc<dyn MetricsRecorder>)
@@ -213,7 +223,10 @@ root = "unused"
 async fn seed_writer(store: &SharedObjectStore) -> (LoonFs<Writable>, u64) {
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("before-the-server"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("build the seed writer");
@@ -787,7 +800,7 @@ async fn a_failing_collection_backs_off_from_one_tick_to_an_hour() {
     const WAIT_SECONDS: [u64; 12] = [5, 10, 20, 40, 80, 160, 320, 640, 1_280, 2_560, 3_600, 3_600];
     let directory = tempdir().expect("tempdir");
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = 0;
+    config.idle_fold_after_ms = Some(0);
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
     server.tick_after(config.tick_interval_ms).await;

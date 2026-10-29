@@ -793,9 +793,12 @@ async fn a_second_collection_reads_no_completed_session_record() {
         )),
     ));
     let fs = open_runtime_with_async(store.clone(), "session-cache-test", |builder| {
-        builder.inline_content(loonfs::InlineContentPolicy {
-            inline_content_threshold_bytes: None,
-            ..Default::default()
+        builder.config(loonfs::RuntimeConfig {
+            inline_content: loonfs::InlineContentPolicy {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            },
+            ..loonfs::RuntimeConfig::default()
         })
     })
     .await;

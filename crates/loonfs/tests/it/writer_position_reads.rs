@@ -115,8 +115,11 @@ pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id(name))
-        .min_publish_interval_ms(0)
-        .max_staleness_ms(MAX_STALENESS_MS)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            max_staleness_ms: MAX_STALENESS_MS,
+            ..loonfs::RuntimeConfig::default()
+        })
         .monotonic_timer(clock.clone())
         .metrics_recorder(recorder.clone())
         .build()
@@ -150,7 +153,10 @@ pub(crate) async fn peer(fixture: &Fixture, name: &str) -> LoonFs<Writable> {
     let store: SharedObjectStore = fixture.recording.clone();
     LoonFs::builder_with_store(store)
         .writer_id(writer_id(name))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("peer")
@@ -186,7 +192,7 @@ impl Fixture {
     /// many missed.
     fn head_cache_lookups(&self) -> (usize, usize) {
         let stats = self.writer.metadata_cache().stats();
-        (stats.head_hits, stats.head_misses)
+        (stats.heads.hits, stats.heads.misses)
     }
 
     fn tail_replays(&self) -> u64 {

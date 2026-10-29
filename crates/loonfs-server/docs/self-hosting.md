@@ -104,7 +104,7 @@ The budgets of the manifest cache (`metadata_cache.max_manifest_bytes`) and the 
 | Content object cache | 10% | `metadata_cache.max_content_object_bytes` |
 | Grep cache | 10% | `grep.max_cache_bytes` (added to the segment cache's share when grep isn't served) |
 | Read working memory | 20% | `max_read_working_bytes` |
-| Admitted publication bytes | 10% | `publication.max_estimated_bytes` |
+| Admitted publication bytes | 10% | `max_admitted_bytes` |
 | Merge input | 10% | `max_merge_input_bytes`, divided by `max_concurrent_compactions` |
 
 You can still set each pool's setting to override its share. The sum check uses the final values, including one merge input allowance for each concurrent compaction. At startup, the server logs one line for each term, with its final value and whether it was derived or set. Without sizing, the pools you didn't set are logged as defaults.
@@ -396,7 +396,7 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | WAL tail cache | `metadata_cache.max_wal_tail_bytes` | Derived: 10%. 64 MiB without a memory limit | Cached WAL tails for reads, for any number of namespaces | Steady |
 | Completed upload sessions | None | 32 MiB | The content ID and completion time of each completed upload session, which garbage collection keeps between passes | Steady |
 | Content object cache | `metadata_cache.max_content_object_bytes` | Derived: 10%. 96 MiB without a memory limit | Verified content objects of up to 1 MiB that reads keep for later reads | Steady |
-| Publication queue | `publication.max_estimated_bytes` | Derived: 10%. 64 MiB without a memory limit | Estimated bytes of admitted commit requests | Steady |
+| Publication queue | `max_admitted_bytes` | Derived: 10%. 64 MiB without a memory limit | Estimated bytes of admitted commit requests | Steady |
 | HTTP requests | `max_in_flight_requests` | 256 | Requests until their responses complete, excluding health and readiness probes | Concurrency |
 | Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
@@ -410,7 +410,7 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Sweep visits | `max_concurrent_maintenance` | 8 | Namespaces the maintenance sweep visits at once, including their grep indexing | Concurrency |
 | Grep steps | `[grep].max_concurrent_steps` | 2 | Grep build and reorganize steps that have file content or index segments in memory at once, across daily visits and session ticks | Concurrency |
 | Reads | `max_concurrent_reads` | 64 | Public reads running at once. Each page takes one slot | Concurrency |
-| Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
+| Publications | `max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
 All memos share one read working memory pool. When the pool is full, a memo evicts its own entries or doesn't retain new blocks, and reads don't wait or fail because of memory. The pool counts decoded data, index and filter sections, stored read-ahead bytes, keys, reference counts, and memo containers. Setting it to zero disables retention. A block that a caller already has stays valid after it's evicted.
 
@@ -484,26 +484,27 @@ When the server drops a fenced session, it logs a warning with `namespace_id`, a
 
 An embedded host sets this limit with `ExecutionBudgetBuilder::max_concurrent_reads`, and read-only and writable runtimes can share the budget through `LoonFsBuilder::execution_budget`. Reads inside commits, folds, compactions, pin creation, and garbage collection call core directly, and they don't take a read slot. Grep queries and index steps take a slot for each public read they call. A caller that has a read slot doesn't wait for a grep step permit.
 
-Publication admission counts queued and active callers, including duplicate commits, conflicts, and namespace deletes. A caller that disconnects is still counted until its admitted work settles. A request over a count limit or an estimated byte limit receives `commit_queue_full`, and admitted work waits for a shared publication slot. Each namespace has its own allowance, so one busy tenant can't use up the default host budget. The `loonfs.execution_budget.admission_rejections` counter counts the requests refused because the `max_requests` or `max_estimated_bytes` total was full. If the `loonfs.execution_budget.publications_waiting` gauge stays above zero, namespaces are waiting for a publication slot.
+Publication admission counts queued and active callers, including duplicate commits, conflicts, and namespace deletes. A caller that disconnects is still counted until its admitted work settles. A request over a count limit or an estimated byte limit receives `commit_queue_full`, and admitted work waits for a shared publication slot. Each namespace has its own allowance, so one busy tenant can't use up the default host budget. The `loonfs.execution_budget.admission_rejections` counter counts the requests refused because the `max_admitted_requests` or `max_admitted_bytes` total was full. If the `loonfs.execution_budget.publications_waiting` gauge stays above zero, namespaces are waiting for a publication slot.
 
 A commit at the write stop waits in its namespace's queue for the session's fold, for at most the write-stop wait, and it keeps its request slot while it waits. LoonFS releases the namespace's publication slot during the wait, so other namespaces keep publishing. One namespace's waiting commits can take every `max_in_flight_requests` slot, so other requests receive `server_busy` until the session's fold finishes, unless you set `max_requests_per_namespace` below `max_in_flight_requests`. The `loonfs.publisher.write_stop_waits` counter records the commits that waited, and `loonfs.publisher.write_stop_refusals` records the commits that waited for the whole write-stop wait.
 
 ```toml
-[publication]
-max_requests = 8192
-max_requests_per_namespace = 1024
-max_estimated_bytes = 67108864
-max_estimated_bytes_per_namespace = 8388608
+max_admitted_requests = 8192
+max_admitted_bytes = 67108864
 max_concurrent_publications = 8
+
+[publication]
+max_requests_per_namespace = 1024
+max_estimated_bytes_per_namespace = 8388608
 ```
 
-These are the defaults without a memory limit. With sizing, `max_estimated_bytes` is derived by default. Every value must be positive. The byte estimate counts request data, prepared proofs, and queue bookkeeping, but not allocator slack, HTTP request buffers, or the metadata and working copies that a publication loads. Size process memory for those costs, and for the separate fold and cache limits too.
+These are the defaults without a memory limit. With sizing, `max_admitted_bytes` is derived by default. Every value must be positive. The byte estimate counts request data, prepared proofs, and queue bookkeeping, but not allocator slack, HTTP request buffers, or the metadata and working copies that a publication loads. Size process memory for those costs, and for the separate fold and cache limits too.
 
-An embedded host sets the per-namespace limits and the write-stop wait (`write_stop_wait_budget_ms`, 30000 ms by default) with `LoonFsBuilder::publication_policy`. It sets `max_requests`, `max_estimated_bytes`, and `max_concurrent_publications` on the execution budget, with `ExecutionBudgetBuilder::max_admitted_requests`, `max_admitted_bytes`, and `max_concurrent_publications`. Runtimes that share one budget share these three limits, but each runtime keeps its own per-namespace limits.
+The `[publication]` table is the runtime's `PublicationPolicy`, and an embedded host sets the per-namespace limits and the write-stop wait in `RuntimeConfig::publication`. It sets `max_admitted_requests`, `max_admitted_bytes`, and `max_concurrent_publications` on the execution budget, with the `ExecutionBudgetBuilder` methods of the same names. Runtimes that share one budget share these three limits, but each runtime keeps its own per-namespace limits.
 
 A hosted server configures [inline content](../../../docs/specs/glossary.md#inline-content) (a small file's bytes, included in the commit itself) in the `[inline_content]` table, with the settings below. Inline writes are enabled by default, with a 64 KiB threshold. To disable them, set `inline_content_threshold_bytes = false`. By default, capability discovery advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation`, and it leaves out both when inline writes are disabled.
 
-An embedded host configures inline writes with `LoonFsBuilder::inline_content` and `InlineContentPolicy`. These settings don't change the format limits that readers apply.
+The `[inline_content]` table is the runtime's `InlineContentPolicy`, which an embedded host sets in `RuntimeConfig::inline_content`. These settings don't change the format limits that readers apply.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -682,7 +683,7 @@ A namespace whose writes stop before its tail reaches the fold thresholds is fol
 
 Set `idle_fold_after_ms = 0` to turn the rule off. An explicit `metadata` maintenance request uses the same period as the sweep. An embedded CLI profile doesn't read the server config, and it always uses 15 minutes.
 
-An embedded host sets the period with `LoonFsBuilder::idle_fold_after_ms`, where `None` turns the rule off, and every maintenance call on that runtime uses it. Both `maintain_metadata_while_due` forms return a `MetadataMaintenanceOutcome`. `CaughtUp` means that no metadata work remains or can become due without another commit. The call works out the result from the reads it has already made.
+An embedded host sets the period in `RuntimeConfig::idle_fold_after_ms`, where `None` turns the rule off, and every maintenance call on that runtime uses it. Both `maintain_metadata_while_due` forms return a `MetadataMaintenanceOutcome`. `CaughtUp` means that no metadata work remains or can become due without another commit. The call works out the result from the reads it has already made.
 
 ## Current limitations
 

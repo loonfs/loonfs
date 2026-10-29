@@ -2,14 +2,16 @@
 //!
 //! Embedders can implement [`MetricsRecorder`] for an existing registry or
 //! use [`DefaultMetricsRecorder`] to collect a [`MetricsSnapshot`]. Without a
-//! recorder, the runtime does not register or update instruments.
+//! recorder, the runtime reports into a [`NoopMetricsRecorder`].
 //!
 //! Metric names use `loonfs.<subsystem>.<metric>`. Names and labels are static
 //! strings so request IDs, paths, and other unbounded values cannot become
 //! labels. This module also re-exports the object-store metrics API.
 
-mod instruments;
-mod read_working_memory;
+pub(crate) mod labels;
+pub(crate) mod object_store;
+pub(crate) mod read_working_memory;
+mod runtime;
 
 pub use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, ObjectKeyKind,
@@ -17,14 +19,12 @@ pub use loonfs_objectstore::metrics::{
     ObjectStoreResultKind, PutModeKind, RangeKind, VecObjectStoreMetricsRecorder,
 };
 
-pub(crate) use instruments::{
-    fan_out_object_store_recorder, AdmissionInstruments, ExecutionBudgetInstruments,
-    PublishOutcome, ReadHeadSource, RuntimeInstruments,
-};
+pub(crate) use object_store::fan_out_object_store_recorder;
+pub(crate) use runtime::{ReadHeadSource, RuntimeInstruments};
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// `result` label for a successful operation.
 pub const RESULT_OK: &str = "ok";
@@ -44,6 +44,10 @@ pub const LATENCY_SECONDS_BOUNDARIES: &[f64] = &[
 
 /// Bucket upper bounds for histograms over small counts.
 pub const SMALL_COUNT_BOUNDARIES: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
+
+pub(crate) fn seconds_from_ms(milliseconds: u64) -> f64 {
+    milliseconds as f64 / 1_000.0
+}
 
 /// Registers instruments used by the runtime.
 ///
@@ -116,7 +120,7 @@ impl MetricsRecorder for NoopMetricsRecorder {
         _description: &'static str,
         _labels: &[(&'static str, &'static str)],
     ) -> Arc<dyn CounterHandle> {
-        Arc::new(NoopInstrument)
+        Arc::clone(&NOOP_COUNTER)
     }
 
     fn register_gauge(
@@ -125,7 +129,7 @@ impl MetricsRecorder for NoopMetricsRecorder {
         _description: &'static str,
         _labels: &[(&'static str, &'static str)],
     ) -> Arc<dyn GaugeHandle> {
-        Arc::new(NoopInstrument)
+        Arc::clone(&NOOP_GAUGE)
     }
 
     fn register_histogram(
@@ -135,9 +139,15 @@ impl MetricsRecorder for NoopMetricsRecorder {
         _labels: &[(&'static str, &'static str)],
         _boundaries: &'static [f64],
     ) -> Arc<dyn HistogramHandle> {
-        Arc::new(NoopInstrument)
+        Arc::clone(&NOOP_HISTOGRAM)
     }
 }
+
+/// The handles that every registration with [`NoopMetricsRecorder`] returns.
+static NOOP_COUNTER: LazyLock<Arc<dyn CounterHandle>> = LazyLock::new(|| Arc::new(NoopInstrument));
+static NOOP_GAUGE: LazyLock<Arc<dyn GaugeHandle>> = LazyLock::new(|| Arc::new(NoopInstrument));
+static NOOP_HISTOGRAM: LazyLock<Arc<dyn HistogramHandle>> =
+    LazyLock::new(|| Arc::new(NoopInstrument));
 
 struct NoopInstrument;
 
@@ -239,17 +249,13 @@ impl DefaultMetricsRecorder {
         let registered = self.register(InstrumentKey::new(name, labels), || {
             build(Arc::clone(&fresh))
         });
-        if let Some(instrument) = extract(&registered) {
-            return instrument;
-        }
-        tracing::error!(
-            metric = name,
-            expected_kind,
-            actual_kind = registered.kind(),
-            "metric registered with conflicting kind"
+        let instrument = extract(&registered);
+        assert!(
+            instrument.is_some(),
+            "metric `{name}` is registered as a {} and can't be registered as a {expected_kind}",
+            registered.kind()
         );
-        debug_assert!(false, "metric `{name}` registered with conflicting kind");
-        fresh
+        instrument.expect("the assertion above checked the instrument's kind")
     }
 }
 

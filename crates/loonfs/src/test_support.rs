@@ -42,7 +42,10 @@ pub async fn maintenance_past_the_grace_window(store: SharedObjectStore) -> Main
 pub async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store)
         .writer_id(test_writer_id(writer_id))
-        .min_publish_interval_ms(0)
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..crate::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("build writer")

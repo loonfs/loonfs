@@ -141,11 +141,14 @@ async fn build_initialized_writer(
 ) -> LoonFs<Writable> {
     let writer = LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id(writer_id))
-        .inline_content(loonfs::InlineContentPolicy {
-            inline_content_threshold_bytes: None,
-            ..Default::default()
+        .config(loonfs::RuntimeConfig {
+            inline_content: loonfs::InlineContentPolicy {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            },
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
         })
-        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");

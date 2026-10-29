@@ -79,15 +79,20 @@ pub(super) async fn test_app_with_sessions(
 ) -> loonfs::Result<(axum::Router, BindingState, Arc<Namespaces<()>>)> {
     let options = config.binding;
     let metrics = HttpMetrics::new();
-    let builder = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store));
-    let builder = match inputs.max_staleness_ms {
-        Some(interval_ms) => builder.max_staleness_ms(interval_ms),
-        None => builder,
-    };
-    let builder = match inputs.consistency {
-        Some(consistency) => builder.consistency(consistency),
-        None => builder,
-    };
+    let defaults = loonfs::RuntimeConfig::default();
+    let builder = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store)).config(
+        loonfs::RuntimeConfig {
+            max_staleness_ms: inputs.max_staleness_ms.unwrap_or(defaults.max_staleness_ms),
+            consistency: inputs.consistency.unwrap_or(defaults.consistency),
+            min_publish_interval_ms: 0,
+            inline_content: config.inline_content,
+            max_read_content_bytes: options
+                .max_download_bytes
+                .expect("test bindings should cap proxied reads"),
+            trace_mode: TraceMode::Remote,
+            ..defaults
+        },
+    );
     let builder = match inputs.monotonic_timer {
         Some(timer) => builder.monotonic_timer(timer),
         None => builder,
@@ -100,14 +105,6 @@ pub(super) async fn test_app_with_sessions(
         .writer_id(loonfs_test_support::ids::writer_id(
             config.writer_id.as_str(),
         ))
-        .min_publish_interval_ms(0)
-        .inline_content(config.inline_content)
-        .max_read_content_bytes(
-            options
-                .max_download_bytes
-                .expect("test bindings should cap proxied reads"),
-        )
-        .trace_mode(TraceMode::Remote)
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .metrics_recorder(metrics.recorder())
         .build()

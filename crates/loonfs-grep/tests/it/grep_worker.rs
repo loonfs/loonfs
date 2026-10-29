@@ -171,7 +171,10 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
     let namespace_id = NamespaceId::parse("index-ahead").expect("namespace id");
     let writer = LoonFs::builder_with_store(base.clone())
         .writer_id(loonfs_test_support::ids::writer_id("index-ahead-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -235,7 +238,10 @@ async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query()
     let namespace_id = NamespaceId::parse("query-pin").expect("namespace id");
     let writer = LoonFs::builder_with_store(base_store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("query-pin-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -296,7 +302,10 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     let namespace_id = NamespaceId::parse("worker-lifecycle").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("lifecycle-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -425,7 +434,10 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
         .writer_id(loonfs_test_support::ids::writer_id(
             "run-number-limit-writer",
         ))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -563,7 +575,10 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         .writer_id(loonfs_test_support::ids::writer_id(
             "enable-manifest-failure-writer",
         ))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -622,7 +637,10 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .writer_id(loonfs_test_support::ids::writer_id(
             "ambiguous-enable-writer",
         ))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -678,7 +696,10 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .writer_id(loonfs_test_support::ids::writer_id(
             "ambiguous-restart-writer",
         ))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -745,7 +766,10 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     let namespace_id = NamespaceId::parse("worker-gap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("gap-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -821,7 +845,10 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     let namespace_id = NamespaceId::parse("worker-handoff-gap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("handoff-gap-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -857,7 +884,10 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     // retention floor from the reader's pinned manifest, so the worker must
     // revalidate on every read to observe the advance within this test.
     let worker = GrepHost::with_reader(&store, "grep-worker-tests", |builder| {
-        builder.manifest_revalidation_interval_ms(0)
+        builder.config(loonfs::RuntimeConfig {
+            manifest_revalidation_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
     })
     .await
     .worker;
@@ -952,7 +982,10 @@ async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
     let namespace_id = NamespaceId::parse("worker-expiry").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("expiry-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -1096,7 +1129,10 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
     let namespace_id = NamespaceId::parse("backfill-overlap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("overlap-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -1203,7 +1239,10 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
     let namespace_id = NamespaceId::parse("move-no-reindex").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("move-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -1263,7 +1302,10 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     let namespace_id = NamespaceId::parse("delete-undelete").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("delete-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -1369,7 +1411,10 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         .writer_id(loonfs_test_support::ids::writer_id(
             "undelete-backfill-writer",
         ))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -1473,7 +1518,10 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
     let namespace_id = NamespaceId::parse("worker-isolation").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("isolation-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -1743,7 +1791,10 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     let namespace_id = NamespaceId::parse("scan-gap").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("scan-gap-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -1820,7 +1871,10 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
     let namespace_id = NamespaceId::parse("deep-scan").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("deep-scan-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -1961,7 +2015,10 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     let namespace_id = NamespaceId::parse("worker-results").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("worker-results-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -2128,7 +2185,10 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     let target = NamespaceId::parse("grep-fork-target").expect("target namespace");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("fork-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -2216,7 +2276,10 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
     let incremental_namespace = NamespaceId::parse("equiv-incremental").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("equiv-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -2292,7 +2355,10 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     let namespace_id = NamespaceId::parse("enable-honesty").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("enable-honesty-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -2804,7 +2870,10 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("grep-access"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");

@@ -86,7 +86,7 @@ Why does an append move the chain to content objects, instead of writing a longe
 
 This section describes the setting that controls which small files a fold stores as bytes rows, and what happens when it changes.
 
-A fold stores a qualifying chain as a bytes row when the chain's size is at most the row threshold of the runtime that runs the fold. The threshold is writer policy, like the inline threshold, and it isn't stored in the namespace. It's configured like the other inline settings, as a new field of `InlineContentPolicy`, which an embedded host sets with `LoonFsBuilder::inline_content`, and as a new key in the server's `[inline_content]` table, which [Resource sizing](../../crates/loonfs-server/docs/self-hosting.md#resource-sizing) documents. Every fold reads the threshold from its own runtime, as maintenance folds already read `inline_content_fold_at_bytes`.
+A fold stores a qualifying chain as a bytes row when the chain's size is at most the row threshold of the runtime that runs the fold. The threshold is writer policy, like the inline threshold, and it isn't stored in the namespace. It's configured like the other inline settings, as a new field of `InlineContentPolicy`, which an embedded host sets with `RuntimeConfig::inline_content`, and as a new key in the server's `[inline_content]` table, which [Resource sizing](../../crates/loonfs-server/docs/self-hosting.md#resource-sizing) documents. Every fold reads the threshold from its own runtime, as maintenance folds already read `inline_content_fold_at_bytes`.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

@@ -62,7 +62,10 @@ async fn warm_read_of_an_appended_file_gets_every_extent_at_once() {
     // read sends its WAL probe.
     let reader = LoonFs::builder_with_store(recording.clone())
         .read_only()
-        .max_staleness_ms(0)
+        .config(loonfs::RuntimeConfig {
+            max_staleness_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("reader")

@@ -1,13 +1,15 @@
 //! The work in flight that one or more runtimes share.
 
-use crate::metrics::{AdmissionInstruments, ExecutionBudgetInstruments, MetricsRecorder};
+use crate::metrics::{MetricsRecorder, NoopMetricsRecorder};
 use loonfs_core::cache::ReadWorkingMemory;
 pub(crate) use loonfs_core::BudgetPermit;
 use loonfs_core::PermitPool;
+use metrics::{AdmissionInstruments, ExecutionBudgetInstruments};
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+mod metrics;
 #[cfg(test)]
 mod read_tests;
 #[cfg(test)]
@@ -299,7 +301,7 @@ impl ExecutionBudgetBuilder {
     /// Installs the metrics recorder the budget reports its admitted,
     /// running, and waiting work to (see [`crate::metrics`]). The budget
     /// registers its instruments once, when it is built. A budget built
-    /// without one reports nothing. Give each budget its own recorder: two
+    /// without one reports into a [`NoopMetricsRecorder`]. Give each budget its own recorder: two
     /// budgets on one recorder set the same gauges.
     pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.metrics_recorder = Some(recorder);
@@ -316,12 +318,15 @@ impl ExecutionBudgetBuilder {
             compactions,
             content_writes,
             read_working_memory,
-        } = ExecutionBudgetInstruments::new(self.metrics_recorder.as_deref());
+        } = match &self.metrics_recorder {
+            Some(recorder) => ExecutionBudgetInstruments::new(recorder.as_ref()),
+            None => ExecutionBudgetInstruments::new(&NoopMetricsRecorder),
+        };
         ExecutionBudget {
             inner: Arc::new(ExecutionBudgetInner {
                 read_working_memory: Arc::new(ReadWorkingMemory::new(
                     self.max_read_working_bytes,
-                    read_working_memory,
+                    Some(read_working_memory),
                 )),
                 admission: AdmittedTotals {
                     max_requests: self.max_admitted_requests,
@@ -329,14 +334,14 @@ impl ExecutionBudgetBuilder {
                     admitted: Mutex::default(),
                     instruments: admission,
                 },
-                reads: PermitPool::new(self.max_concurrent_reads, reads),
-                publications: PermitPool::new(self.max_concurrent_publications, publications),
-                folds: PermitPool::new(self.max_concurrent_folds, folds),
-                compactions: PermitPool::new(self.max_concurrent_compactions, compactions),
+                reads: PermitPool::new(self.max_concurrent_reads, Some(reads)),
+                publications: PermitPool::new(self.max_concurrent_publications, Some(publications)),
+                folds: PermitPool::new(self.max_concurrent_folds, Some(folds)),
+                compactions: PermitPool::new(self.max_concurrent_compactions, Some(compactions)),
                 max_merge_input_bytes: self.max_merge_input_bytes,
                 content_writes: Arc::new(PermitPool::new(
                     self.max_concurrent_content_writes,
-                    content_writes,
+                    Some(content_writes),
                 )),
             }),
         }

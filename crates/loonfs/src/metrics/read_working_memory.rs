@@ -11,7 +11,7 @@ struct ReadWorkingMemoryGauges {
     failed_reservations: AtomicUsize,
 }
 
-pub(super) fn register(recorder: &dyn MetricsRecorder) -> Arc<dyn ReadWorkingMemoryObserver> {
+pub(crate) fn register(recorder: &dyn MetricsRecorder) -> Arc<dyn ReadWorkingMemoryObserver> {
     Arc::new(ReadWorkingMemoryGauges {
         bytes: recorder.register_gauge(
             "loonfs.execution_budget.read_working_bytes",

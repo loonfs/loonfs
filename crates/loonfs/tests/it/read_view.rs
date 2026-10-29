@@ -234,10 +234,10 @@ async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
         .expect("the read after the stale-head retry");
     assert_eq!(again, entry);
     let after_read = reader.metadata_cache().stats();
-    assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
+    assert_eq!(after_read.wal_tails.misses, before_read.wal_tails.misses);
     assert_eq!(
-        after_read.wal_tail_hits,
-        before_read.wal_tail_hits + 1,
+        after_read.wal_tails.hits,
+        before_read.wal_tails.hits + 1,
         "the next read reuses the tail the retry loaded"
     );
 }

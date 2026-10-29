@@ -168,7 +168,7 @@ impl SsdBlockKey {
 /// Adds `field` to `hasher` after its length, so no two sequences of fields
 /// hash the same bytes.
 fn add_field(hasher: &mut Sha256, field: &[u8]) {
-    hasher.update((field.len() as u64).to_le_bytes());
+    hasher.update(loonfs_types::u64_from_usize(field.len()).to_le_bytes());
     hasher.update(field);
 }
 

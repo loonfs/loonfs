@@ -16,8 +16,8 @@ mod trace;
 
 pub use config::{
     load_server_config, parse_server_config, AuthConfig, GrepConfig, JobMode, MetadataCacheConfig,
-    MetadataCacheSsdConfig, PublicationLimitsConfig, ReadConsistency, ServerConfig, StoreConfig,
-    TlsServerConfig, TransportConfig, ValidatedServerConfig,
+    MetadataCacheSsdConfig, ReadConsistency, ServerConfig, StoreConfig, TlsServerConfig,
+    TransportConfig, ValidatedServerConfig,
 };
 pub use error::{Result, ServerError};
 pub use http::{app, check_config, probe_store, serve, serve_with_shutdown, AppConfig, AppState};

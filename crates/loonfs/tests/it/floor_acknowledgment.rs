@@ -29,7 +29,10 @@ fn recording_store(root: &std::path::Path) -> Store {
 async fn runtime(store: &Store, clock: &Arc<ManualClock>, writer: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id(writer))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .wall_clock(clock.clone())
         .build()
         .await

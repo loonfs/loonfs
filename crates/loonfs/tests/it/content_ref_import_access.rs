@@ -41,7 +41,7 @@ fn administrator_grants(administrator: &str) -> AccessGrants {
 /// Runs one collection pass on `namespace_id` at a clock far enough ahead
 /// that every unreferenced segment is past its age gate.
 async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
-    let now_ms = loonfs::current_time_ms()
+    let now_ms = loonfs_core::time::current_time_ms()
         + 2 * loonfs_core::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
         + 2 * loonfs::GcOptions::default().grace_window_ms;
     loonfs_core::test_support::namespace_store(store, namespace_id)
@@ -86,7 +86,10 @@ async fn open_writer_on(
         .writer_id(loonfs_test_support::ids::writer_id(
             "content-ref-import-access",
         ))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .monotonic_timer(timer)
         .build()
         .await
@@ -347,7 +350,7 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
             },
             &loonfs_core::test_support::WriterAt {
                 writer_id: loonfs_types::WriterId::parse("collector").expect("writer id"),
-                now_ms: loonfs::current_time_ms()
+                now_ms: loonfs_core::time::current_time_ms()
                     + loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
                     + 1,
             }
@@ -425,7 +428,10 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         .writer_id(loonfs_test_support::ids::writer_id(
             "content-ref-import-access-cold",
         ))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("cold writer");

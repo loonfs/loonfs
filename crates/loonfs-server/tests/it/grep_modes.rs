@@ -378,7 +378,10 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("restart-seed"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -776,7 +779,10 @@ async fn seed_namespace(
         .writer_id(loonfs_test_support::ids::writer_id(&format!(
             "grep-mode-seed-{name}"
         )))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");

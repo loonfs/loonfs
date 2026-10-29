@@ -66,7 +66,7 @@ fn four_gib_derives_each_pool_and_folds_unused_grep_into_segments() {
             if mode.serves() { 198_977_781 } else { 0 }
         );
         assert_eq!(memory.read_working.bytes, 397_955_563);
-        assert_eq!(memory.publication.bytes, 198_977_781);
+        assert_eq!(memory.admitted.bytes, 198_977_781);
         assert_eq!(memory.merge_input.bytes, 99_488_890);
         for (term, _) in memory.terms() {
             if ![memory.head.name, memory.manifest.name].contains(&term.name) {
@@ -74,15 +74,15 @@ fn four_gib_derives_each_pool_and_folds_unused_grep_into_segments() {
             }
         }
     }
-    assert_eq!(config.max_concurrent_reads.get(), 64);
-    assert_eq!(config.max_concurrent_folds.get(), 2);
-    assert_eq!(config.max_concurrent_compactions.get(), 2);
-    assert_eq!(config.max_concurrent_content_writes.get(), 32);
+    assert_eq!(config.max_concurrent_reads, None);
+    assert_eq!(config.max_concurrent_folds, None);
+    assert_eq!(config.max_concurrent_compactions, None);
+    assert_eq!(config.max_concurrent_content_writes, None);
     assert_eq!(config.max_in_flight_requests.get(), 256);
     assert_eq!(config.max_connections.get(), 1024);
     assert_eq!(config.max_concurrent_uploads.get(), 8);
     assert_eq!(config.max_concurrent_downloads.get(), 16);
-    assert_eq!(config.publication.max_concurrent_publications, None);
+    assert_eq!(config.max_concurrent_publications, None);
 }
 
 #[test]
@@ -119,14 +119,13 @@ max_concurrent_compactions = 4
 max_concurrent_content_writes = 8
 max_read_working_bytes = 0
 max_merge_input_bytes = 67108864
+max_admitted_bytes = 8388608
 [metadata_cache]
 max_segment_bytes = 67108864
 max_manifest_bytes = 4194304
 max_head_bytes = 8388608
 max_wal_tail_bytes = 0
 max_content_object_bytes = 12582912
-[publication]
-max_estimated_bytes = 8388608
 [grep]
 mode = "serve_only"
 max_cache_bytes = 0
@@ -196,7 +195,7 @@ const EVERY_MEMORY_TERM: [&str; 23] = [
     "metadata_cache.max_content_object_bytes",
     "grep.max_cache_bytes",
     "max_read_working_bytes",
-    "publication.max_estimated_bytes",
+    "max_admitted_bytes",
     "max_merge_input_bytes",
     "total",
 ];
@@ -268,7 +267,7 @@ fn no_limit_or_cgroup_file_keeps_the_unsized_defaults() {
     assert_eq!(memory.content_object.bytes, 100_663_296);
     assert_eq!(memory.grep.bytes, 268_435_456);
     assert_eq!(memory.read_working.bytes, 268_435_456);
-    assert_eq!(memory.publication.bytes, 67_108_864);
+    assert_eq!(memory.admitted.bytes, 67_108_864);
     assert_eq!(memory.merge_input.bytes, 67_108_864);
     assert!(memory
         .terms()

@@ -330,10 +330,13 @@ impl ResolvedTarget {
             .map_err(|error| CliError::invalid_config(error.to_string()))?;
         let runtime = LoonFs::builder_with_store(store.clone())
             .writer_id(writer)
-            .inline_content(inline_content.clone())
-            // A CLI invocation is one solo mutation: holding the commit
-            // window open would only add its full delay to every command.
-            .min_publish_interval_ms(0)
+            .config(loonfs::RuntimeConfig {
+                inline_content: inline_content.clone(),
+                // A CLI invocation is one solo mutation: holding the commit
+                // window open would only add its full delay to every command.
+                min_publish_interval_ms: 0,
+                ..loonfs::RuntimeConfig::default()
+            })
             .store_kind(store_kind)
             .build()
             .await

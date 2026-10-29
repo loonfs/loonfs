@@ -5,7 +5,7 @@
 use super::*;
 use loonfs::engine::DecodedBlockCacheStats;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricsRecorder, LATENCY_SECONDS_BOUNDARIES};
-use loonfs::{MetadataCacheStats, SsdSegmentBlocksStats};
+use loonfs::{MetadataCacheStats, SegmentFilterStats, SsdSegmentBlocksStats};
 
 #[test]
 fn a_counter_renders_with_the_total_suffix_and_its_labels() {
@@ -180,115 +180,91 @@ fn a_scrape_reports_positive_process_resident_bytes() {
 /// tier of the segment cache reports under its `tier` label.
 #[test]
 fn each_cache_stats_field_renders_into_its_own_series() {
+    // Each cache's counters start at a different hundred, so a series that
+    // renders another cache's field shows up as a mismatch.
+    let cache = |base: usize| DecodedBlockCacheStats {
+        hits: base + 1,
+        misses: base + 2,
+        inserts: base + 3,
+        evictions: base + 4,
+        evicted_decoded_bytes: base + 5,
+        rejections: base + 6,
+        rejected_decoded_bytes: base + 7,
+        cached_decoded_bytes: base + 8,
+    };
     let mut rendered = String::new();
     render_metadata_cache(
         &mut rendered,
         &MetadataCacheStats {
-            segment_hits: 1,
-            segment_misses: 2,
-            segment_inserts: 3,
-            segment_evictions: 4,
-            segment_rejections: 37,
-            segment_filter_skips: 5,
-            segment_filter_false_positives: 6,
-            segment_bytes: 7,
+            segment_blocks: cache(0),
+            segment_filter: SegmentFilterStats {
+                skips: 9,
+                false_positives: 10,
+            },
             segment_ssd: Some(SsdSegmentBlocksStats {
-                hits: 38,
-                misses: 39,
-                inserts: 40,
-                evictions: 41,
-                rejections: 42,
-                stored_bytes: 43,
+                hits: 11,
+                misses: 12,
+                inserts: 13,
+                evictions: 14,
+                rejections: 15,
+                stored_bytes: 16,
             }),
-            manifest_hits: 45,
-            manifest_misses: 46,
-            manifest_inserts: 47,
-            manifest_evictions: 48,
-            manifest_rejections: 49,
-            manifest_bytes: 50,
-            head_hits: 8,
-            head_misses: 9,
-            wal_tail_hits: 10,
-            wal_tail_misses: 11,
-            wal_tail_inserts: 12,
-            wal_tail_evictions: 13,
-            wal_tail_evicted_bytes: 14,
-            wal_tail_rejections: 15,
-            wal_tail_rejected_bytes: 16,
-            wal_tail_bytes: 17,
-            content_object_hits: 21,
-            content_object_misses: 22,
-            content_object_inserts: 23,
-            head_evictions: 30,
-            head_evicted_bytes: 31,
-            head_rejections: 32,
-            head_rejected_bytes: 33,
-            head_bytes: 34,
-            content_object_evictions: 35,
-            content_object_bytes: 36,
-            ..MetadataCacheStats::default()
+            manifests: cache(100),
+            heads: cache(200),
+            wal_tails: cache(300),
+            content_objects: cache(400),
+            completed_upload_sessions: cache(500),
         },
     );
-    render_grep_block_cache(
-        &mut rendered,
-        &DecodedBlockCacheStats {
-            hits: 26,
-            misses: 27,
-            inserts: 28,
-            evictions: 29,
-            cached_decoded_bytes: 44,
-            ..DecodedBlockCacheStats::default()
-        },
-    );
+    render_grep_block_cache(&mut rendered, &cache(600));
 
-    let expected = [
-        "loonfs_segment_cache_gets_total{tier=\"memory\",result=\"hit\"} 1",
-        "loonfs_segment_cache_gets_total{tier=\"memory\",result=\"miss\"} 2",
-        "loonfs_segment_cache_inserts_total{tier=\"memory\"} 3",
-        "loonfs_segment_cache_evictions_total{tier=\"memory\"} 4",
-        "loonfs_segment_cache_rejections_total{tier=\"memory\"} 37",
-        "loonfs_segment_cache_filter_skips_total 5",
-        "loonfs_segment_cache_filter_false_positives_total 6",
-        "loonfs_segment_cache_retained_decoded_bytes 7",
-        "loonfs_segment_cache_gets_total{tier=\"ssd\",result=\"hit\"} 38",
-        "loonfs_segment_cache_gets_total{tier=\"ssd\",result=\"miss\"} 39",
-        "loonfs_segment_cache_inserts_total{tier=\"ssd\"} 40",
-        "loonfs_segment_cache_evictions_total{tier=\"ssd\"} 41",
-        "loonfs_segment_cache_rejections_total{tier=\"ssd\"} 42",
-        "loonfs_segment_cache_retained_stored_bytes 43",
-        "loonfs_manifest_cache_gets_total{result=\"hit\"} 45",
-        "loonfs_manifest_cache_gets_total{result=\"miss\"} 46",
-        "loonfs_manifest_cache_inserts_total 47",
-        "loonfs_manifest_cache_evictions_total 48",
-        "loonfs_manifest_cache_rejections_total 49",
-        "loonfs_manifest_cache_retained_decoded_bytes 50",
-        "loonfs_head_cache_gets_total{result=\"hit\"} 8",
-        "loonfs_head_cache_gets_total{result=\"miss\"} 9",
-        "loonfs_wal_tail_cache_gets_total{result=\"hit\"} 10",
-        "loonfs_wal_tail_cache_gets_total{result=\"miss\"} 11",
-        "loonfs_wal_tail_cache_inserts_total 12",
-        "loonfs_wal_tail_cache_evictions_total 13",
-        "loonfs_wal_tail_cache_evicted_decoded_bytes_total 14",
-        "loonfs_wal_tail_cache_rejections_total 15",
-        "loonfs_wal_tail_cache_rejected_decoded_bytes_total 16",
-        "loonfs_wal_tail_cache_retained_decoded_bytes 17",
-        "loonfs_content_object_cache_gets_total{result=\"hit\"} 21",
-        "loonfs_content_object_cache_gets_total{result=\"miss\"} 22",
-        "loonfs_content_object_cache_inserts_total 23",
-        "loonfs_grep_cache_gets_total{result=\"hit\"} 26",
-        "loonfs_grep_cache_gets_total{result=\"miss\"} 27",
-        "loonfs_grep_cache_inserts_total 28",
-        "loonfs_grep_cache_evictions_total 29",
-        "loonfs_grep_cache_retained_decoded_bytes 44",
-        "loonfs_head_cache_evictions_total 30",
-        "loonfs_head_cache_evicted_decoded_bytes_total 31",
-        "loonfs_head_cache_rejections_total 32",
-        "loonfs_head_cache_rejected_decoded_bytes_total 33",
-        "loonfs_head_cache_retained_decoded_bytes 34",
-        "loonfs_content_object_cache_evictions_total 35",
-        "loonfs_content_object_cache_retained_decoded_bytes 36",
+    let mut expected = vec![
+        "loonfs_segment_cache_gets_total{tier=\"memory\",result=\"hit\"} 1".to_owned(),
+        "loonfs_segment_cache_gets_total{tier=\"memory\",result=\"miss\"} 2".to_owned(),
+        "loonfs_segment_cache_inserts_total{tier=\"memory\"} 3".to_owned(),
+        "loonfs_segment_cache_evictions_total{tier=\"memory\"} 4".to_owned(),
+        "loonfs_segment_cache_rejections_total{tier=\"memory\"} 6".to_owned(),
+        "loonfs_segment_cache_retained_decoded_bytes 8".to_owned(),
+        "loonfs_segment_cache_gets_total{tier=\"ssd\",result=\"hit\"} 11".to_owned(),
+        "loonfs_segment_cache_gets_total{tier=\"ssd\",result=\"miss\"} 12".to_owned(),
+        "loonfs_segment_cache_inserts_total{tier=\"ssd\"} 13".to_owned(),
+        "loonfs_segment_cache_evictions_total{tier=\"ssd\"} 14".to_owned(),
+        "loonfs_segment_cache_rejections_total{tier=\"ssd\"} 15".to_owned(),
+        "loonfs_segment_cache_retained_stored_bytes 16".to_owned(),
+        "loonfs_segment_cache_filter_skips_total 9".to_owned(),
+        "loonfs_segment_cache_filter_false_positives_total 10".to_owned(),
     ];
-    for series in expected {
+    for (name, base) in [
+        ("manifest", 100),
+        ("head", 200),
+        ("wal_tail", 300),
+        ("content_object", 400),
+        ("grep", 600),
+    ] {
+        expected.extend([
+            format!(
+                "loonfs_{name}_cache_gets_total{{result=\"hit\"}} {}",
+                base + 1
+            ),
+            format!(
+                "loonfs_{name}_cache_gets_total{{result=\"miss\"}} {}",
+                base + 2
+            ),
+            format!("loonfs_{name}_cache_inserts_total {}", base + 3),
+            format!("loonfs_{name}_cache_evictions_total {}", base + 4),
+            format!(
+                "loonfs_{name}_cache_evicted_decoded_bytes_total {}",
+                base + 5
+            ),
+            format!("loonfs_{name}_cache_rejections_total {}", base + 6),
+            format!(
+                "loonfs_{name}_cache_rejected_decoded_bytes_total {}",
+                base + 7
+            ),
+            format!("loonfs_{name}_cache_retained_decoded_bytes {}", base + 8),
+        ]);
+    }
+    for series in &expected {
         assert!(
             rendered.lines().any(|line| line == series),
             "missing `{series}` in:\n{rendered}"

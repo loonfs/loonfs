@@ -756,7 +756,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
     );
     // Keep the test payload above both proxy limits without uploading a large file.
     server_config.max_upload_bytes = PROXY_CAP_BYTES;
-    server_config.max_download_bytes = PROXY_CAP_BYTES;
+    server_config.max_download_bytes = Some(PROXY_CAP_BYTES);
     let harness = start_server(server_config).await;
 
     let namespace = "gcs-capabilities";
