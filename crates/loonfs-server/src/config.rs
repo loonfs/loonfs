@@ -2821,7 +2821,7 @@ writer_id = "loonfs-server"
 
 [grep]
 mode = "serve_only"
-max_files_per_step = 4096
+max_files_per_step = 1000
 max_content_bytes_per_step = 536870912
 
 [store]
@@ -2836,7 +2836,7 @@ root = "/tmp/loonfs-server"
             .worker_config()
             .build_policy()
             .expect("valid configured grep policy");
-        assert_eq!(policy.max_files_per_step.get(), 4096);
+        assert_eq!(policy.max_files_per_step.get(), 1000);
         assert_eq!(policy.max_content_bytes_per_step.get(), 536_870_912);
         let defaults = loonfs_grep::GramIndexBuildPolicy::default();
         assert_eq!(policy.max_rows_per_segment, defaults.max_rows_per_segment);

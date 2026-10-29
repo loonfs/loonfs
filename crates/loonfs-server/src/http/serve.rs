@@ -187,7 +187,7 @@ pub async fn app(
             runtime.object_store(),
             runtime.read_only(),
             runtime.clone(),
-            loonfs_grep::GrepStepBudget::new(
+            loonfs_grep::GrepPassBudget::new(
                 std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
                     .expect("validated grep step limit should be nonzero"),
             ),

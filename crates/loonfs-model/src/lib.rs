@@ -16,5 +16,5 @@ mod genesis;
 pub mod metadata;
 pub mod visibility;
 
-pub use error::{Error, Result};
+pub use error::{ModelError, Result};
 pub use genesis::bootstrap_metadata_state;

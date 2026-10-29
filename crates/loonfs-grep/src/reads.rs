@@ -3,7 +3,7 @@
 //! Grep reads filesystem state through a read-only [`Namespace`] handle and
 //! reads its own index objects directly from the extension keyspace.
 
-use crate::{GrepError, Result};
+use crate::Result;
 use loonfs::{
     CheckpointFilesPager, Consistency, CoreError, CurrentFileState, ListChangesOptions,
     ListCheckpointFilesOptions, Namespace, NamespaceMetadata, ReadAt, ReadOnly, ReadView,
@@ -94,7 +94,7 @@ impl NamespaceReads {
         Ok(self
             .namespace
             .list_changes_with_options(after_seq, &options)
-            .page_limit(page_limit(limit)?)
+            .page_limit(page_limit(limit))
             .page()
             .await?)
     }
@@ -151,7 +151,7 @@ impl NamespaceReadView<'_> {
         let mut page = self
             .namespace
             .list_changes(after_seq)
-            .page_limit(page_limit(limit)?)
+            .page_limit(page_limit(limit))
             .page()
             .await?;
         page.changes
@@ -211,7 +211,7 @@ impl NamespaceReadView<'_> {
         let page = self
             .view
             .list_by_inode(inode_id)
-            .page_limit(page_limit(limit)?)
+            .page_limit(page_limit(limit))
             .cursor(cursor)
             .page()
             .await?;
@@ -285,10 +285,13 @@ pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRe
     }
 }
 
-/// Validates an internal page size of `limit` items against the public
-/// pagination contract.
-pub(crate) fn page_limit(limit: usize) -> Result<EffectiveLimit> {
-    contract_page_limit(limit).map_err(|error| GrepError::InvalidQuery(error.to_string()))
+/// Converts an internal page size of `limit` items into a page limit of the
+/// public pagination contract.
+pub(crate) fn page_limit(limit: usize) -> EffectiveLimit {
+    contract_page_limit(limit).expect(
+        "an internal page size should be a constant or a step budget validated against the \
+         pagination contract",
+    )
 }
 
 fn contract_page_limit(limit: usize) -> std::result::Result<EffectiveLimit, LimitError> {

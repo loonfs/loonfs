@@ -133,7 +133,7 @@ fn scrape_time_gauges_carry_permit_levels() {
     let mut rendered = String::new();
     render_scrape_gauges(
         &mut rendered,
-        Some(GrepStepBudgetStats {
+        Some(GrepPassBudgetStats {
             running: 1,
             waiting: 3,
         }),

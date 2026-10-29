@@ -15,8 +15,8 @@ use loonfs_grep::manifest::{
 };
 use loonfs_grep::NamespaceReads;
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
-    GrepStepBudget, GrepWorker, GREP_GC_GRACE_WINDOW_MS,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepPassBudget, GrepReorganizeOutcome,
+    GrepService, GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -585,7 +585,7 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         failing_store.clone(),
         host.reader.clone(),
         host.writer.clone(),
-        GrepStepBudget::default(),
+        GrepPassBudget::default(),
     );
 
     let error = worker
@@ -650,7 +650,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         failing_store.clone(),
         host.reader.clone(),
         host.writer.clone(),
-        GrepStepBudget::default(),
+        GrepPassBudget::default(),
     );
 
     let outcome = worker
@@ -718,7 +718,7 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         failing_store.clone(),
         host.reader.clone(),
         host.writer.clone(),
-        GrepStepBudget::default(),
+        GrepPassBudget::default(),
     );
 
     let outcome = worker
@@ -2927,4 +2927,48 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
             .collect::<Vec<_>>(),
         ["/team/file"]
     );
+}
+
+#[tokio::test]
+async fn a_direct_build_policy_rejects_oversized_pages_without_panicking() {
+    let directory = tempdir().expect("directory");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("policy-limit").expect("namespace");
+    let host = GrepHost::new(&store, "policy-limit").await;
+    host.writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    host.worker
+        .enable(&namespace_id)
+        .await
+        .expect("enable grep");
+    for limit in [loonfs_types::MAX_PAGE_LIMIT as usize + 1, usize::MAX] {
+        let error = host
+            .worker
+            .build_step(
+                &namespace_id,
+                GramIndexBuildPolicy {
+                    max_files_per_step: nonzero_usize(limit),
+                    ..GramIndexBuildPolicy::default()
+                },
+            )
+            .await
+            .expect_err("an oversized policy returns an error");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+        assert_eq!(
+            error.to_error_response().param.as_deref(),
+            Some("max_files_per_step")
+        );
+    }
+    host.worker
+        .build_step(
+            &namespace_id,
+            GramIndexBuildPolicy {
+                max_files_per_step: nonzero_usize(loonfs_types::MAX_PAGE_LIMIT as usize),
+                ..GramIndexBuildPolicy::default()
+            },
+        )
+        .await
+        .expect("the maximum page size is accepted");
 }

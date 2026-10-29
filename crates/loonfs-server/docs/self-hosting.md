@@ -358,7 +358,7 @@ The maintenance sweep builds the index, so indexing runs only on a server whose 
 
 These optional settings limit indexing work, and each one must be positive:
 
-- `max_files_per_step` (256 files by default) and `max_content_bytes_per_step` (64 MiB by default) limit the input work of each indexing step.
+- `max_files_per_step` (256 files by default, and at most 1,000) and `max_content_bytes_per_step` (64 MiB by default) limit the input work of each indexing step.
 - `max_concurrent_steps` (2 by default) limits how many indexing steps have file content or index segments in memory at once.
 
 [Resource sizing](#resource-sizing) describes how these limits affect memory.
@@ -459,7 +459,7 @@ Index building runs in daily sweep visits and in session ticks. A build step rea
 
 The `loonfs_grep_steps_running` gauge reports the steps that have a permit, and the `loonfs_grep_steps_waiting` gauge reports the steps that are waiting for one. If `loonfs_grep_steps_waiting` stays above zero, indexing steps are waiting at the cap.
 
-The server builds one `GrepStepBudget` from `[grep].max_concurrent_steps` for its grep worker. If you embed grep in a host that runs more than one worker (for example, one for each runtime), pass a clone of one budget to every worker, so the limit is one ceiling for the whole process. A worker that has its own budget adds its own steps on top of that ceiling.
+The server builds one `GrepPassBudget` from `[grep].max_concurrent_steps` for its grep worker. If you embed grep in a host that runs more than one worker (for example, one for each runtime), pass a clone of one budget to every worker, so the limit is one ceiling for the whole process. A worker that has its own budget adds its own steps on top of that ceiling.
 
 A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 259 MiB of managed memory, and the smallest limit that passes is 2,044 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 3,836 MiB unless you lower `max_concurrent_content_writes`. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
 

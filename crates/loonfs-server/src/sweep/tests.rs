@@ -58,7 +58,7 @@ impl SweepServer {
                 runtime.object_store(),
                 runtime.read_only(),
                 runtime.clone(),
-                loonfs_grep::GrepStepBudget::default(),
+                loonfs_grep::GrepPassBudget::default(),
             )
         });
         let grep = grep_worker.clone().map(|worker| {

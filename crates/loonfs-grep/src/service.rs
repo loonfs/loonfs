@@ -12,7 +12,7 @@ use crate::manifest::{
     load_current_grep_manifest, ChangeFeedResume, GrepIndexStatus, GrepManifestState,
     GrepSegmentRef,
 };
-use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
+use crate::query::{compile_pattern, CompiledPattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{effective_batch_size, published_revision, NamespaceReadView, NamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::join_all;
@@ -29,7 +29,7 @@ use loonfs_types::format::segment_blocks::{
 use loonfs_types::{
     decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EntryInodeKind, ErrorCode, GrepMatch,
     GrepPageCursor, GrepRequest, GrepResponse, InodeId, NamespaceId, PageRequest, PathEntry,
-    RevisionNo, ROOT_INODE_ID,
+    RevisionNo, MAX_PAGE_LIMIT, ROOT_INODE_ID,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -64,6 +64,12 @@ pub(crate) const TAIL_FEED_PAGE_COMMITS: usize = 256;
 /// Directory entries one plan-less scan page reads. The scan is bounded by
 /// [`MAX_GREP_SCAN_FILES`]; this only sizes the reads that reach it.
 pub(crate) const SCAN_DIRECTORY_PAGE_ENTRIES: usize = 1000;
+const _: () = assert!(
+    0 < TAIL_FEED_PAGE_COMMITS
+        && TAIL_FEED_PAGE_COMMITS <= MAX_PAGE_LIMIT as usize
+        && 0 < SCAN_DIRECTORY_PAGE_ENTRIES
+        && SCAN_DIRECTORY_PAGE_ENTRIES <= MAX_PAGE_LIMIT as usize
+);
 /// Maximum concurrent content reads while verifying grep candidates.
 ///
 /// Indexed files are size-limited, so content reads may use more concurrency
@@ -75,8 +81,62 @@ pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
 #[derive(Debug)]
 pub struct GrepService {
     block_cache: Arc<GrepBlockCache>,
-    current_manifests: Mutex<BTreeMap<NamespaceId, (Weak<GrepManifestState>, Observation)>>,
+    /// An insert removes the entries whose manifest was dropped once the map
+    /// holds more than twice the entries the last removal kept. Only the
+    /// block cache and the queries in progress keep a manifest alive, so the
+    /// map holds at most one more than twice the manifests those kept at the
+    /// last removal.
+    current_manifests: Mutex<CurrentManifests>,
     timer: Arc<dyn MonotonicTimer>,
+}
+
+/// The newest manifest the service confirmed for each namespace it queried,
+/// and when it confirmed it.
+#[derive(Debug, Default)]
+struct CurrentManifests {
+    entries: BTreeMap<NamespaceId, (Weak<GrepManifestState>, Observation)>,
+    entries_after_prune: usize,
+}
+
+impl CurrentManifests {
+    /// Finds the namespace's confirmed manifest, and removes an entry whose
+    /// manifest was dropped.
+    fn find(
+        &mut self,
+        namespace_id: &NamespaceId,
+    ) -> Option<(Arc<GrepManifestState>, Observation)> {
+        let (state, checked) = self.entries.get(namespace_id)?;
+        let Some(state) = state.upgrade() else {
+            self.entries.remove(namespace_id);
+            return None;
+        };
+        Some((state, checked.clone()))
+    }
+
+    /// Records `state` as confirmed at `observed`, unless the entry holds a
+    /// newer manifest.
+    fn insert(
+        &mut self,
+        namespace_id: &NamespaceId,
+        state: &Arc<GrepManifestState>,
+        observed: Observation,
+    ) {
+        if self
+            .entries
+            .get(namespace_id)
+            .and_then(|(cached, _)| cached.upgrade())
+            .is_some_and(|cached| cached.manifest_no() > state.manifest_no())
+        {
+            return;
+        }
+        self.entries
+            .insert(namespace_id.clone(), (Arc::downgrade(state), observed));
+        if self.entries.len() > self.entries_after_prune.saturating_mul(2) {
+            self.entries
+                .retain(|_, (state, _)| state.strong_count() > 0);
+            self.entries_after_prune = self.entries.len();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +151,7 @@ impl GrepService {
     pub fn new(block_cache: Arc<GrepBlockCache>, timer: Arc<dyn MonotonicTimer>) -> Self {
         Self {
             block_cache,
-            current_manifests: Mutex::new(BTreeMap::new()),
+            current_manifests: Mutex::new(CurrentManifests::default()),
             timer,
         }
     }
@@ -105,9 +165,8 @@ impl GrepService {
             .current_manifests
             .lock()
             .expect("grep manifest cache lock should not be poisoned")
-            .get(namespace_id)
-            .filter(|(_, checked)| checked.is_within_revalidation_bound())
-            .and_then(|(state, checked)| Some((state.upgrade()?, checked.clone())));
+            .find(namespace_id)
+            .filter(|(_, checked)| checked.is_within_revalidation_bound());
         let observed = Observation::now(Arc::clone(&self.timer));
         let confirmed = match cached {
             Some((state, checked)) => {
@@ -151,17 +210,10 @@ impl GrepService {
                 state
             }
         };
-        let mut manifests = self
-            .current_manifests
+        self.current_manifests
             .lock()
-            .expect("grep manifest cache lock should not be poisoned");
-        if manifests
-            .get(namespace_id)
-            .and_then(|(cached, _)| cached.upgrade())
-            .is_none_or(|cached| cached.manifest_no() <= state.manifest_no())
-        {
-            manifests.insert(namespace_id.clone(), (Arc::downgrade(&state), observed));
-        }
+            .expect("grep manifest cache lock should not be poisoned")
+            .insert(namespace_id, &state, observed);
         materialized_snapshot_from_state(state)
     }
 
@@ -221,20 +273,17 @@ impl GrepService {
             }
             None => None,
         };
-        let pattern = regex::bytes::RegexBuilder::new(&request.pattern)
-            .case_insensitive(request.case_insensitive)
-            .multi_line(true)
-            .build()
-            .map_err(|error| GrepError::InvalidPattern(error.to_string()))?;
+        let CompiledPattern {
+            regex: pattern,
+            plan: gram_plan,
+        } = compile_pattern(request)?;
         let scope = match (&request.path_prefix, request.inode_id) {
             (Some(prefix), _) => Some(reads.resolve_path(prefix).await?),
             (None, Some(inode_id)) => Some(reads.resolve_inode(inode_id).await?),
             (None, None) => None,
         };
         let mut candidates = GrepCandidates::default();
-        let tail_resume = match plan_pattern(&request.pattern, request.case_insensitive)
-            .map_err(GrepError::InvalidPattern)?
-        {
+        let tail_resume = match gram_plan {
             GramPlanOutcome::Indexable(plan) => {
                 candidates.indexed = indexed_candidates(
                     store,
@@ -1247,6 +1296,7 @@ mod tests {
             .current_manifests
             .lock()
             .expect("lock")
+            .entries
             .get_mut(&namespace_id)
             .expect("cached manifest")
             .1 = Observation::now(clock.clone());

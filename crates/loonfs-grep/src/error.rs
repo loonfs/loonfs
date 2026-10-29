@@ -30,9 +30,6 @@ pub enum GrepError {
     /// planned against the index.
     #[error("invalid search query: {0}")]
     InvalidPattern(String),
-    /// A page size is outside the pagination contract.
-    #[error("invalid search query: {0}")]
-    InvalidQuery(String),
     /// The pattern has no run of literal bytes for the trigram index, and the
     /// query cannot search without the index: `allow_scan` is off, or the
     /// scan would pass its file budget.
@@ -132,7 +129,7 @@ impl GrepError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::NotEnabled | Self::Backfilling => ErrorCode::NotSupported,
-            Self::InvalidPattern(_) | Self::InvalidQuery(_) => ErrorCode::InvalidRequest,
+            Self::InvalidPattern(_) => ErrorCode::InvalidRequest,
             Self::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
             Self::IndexLagging { .. } => ErrorCode::IndexLagging,
             Self::StoreUnavailable { kind, .. } => loonfs::classify_store_failure(*kind),

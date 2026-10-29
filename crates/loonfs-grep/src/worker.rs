@@ -17,7 +17,7 @@ use crate::manifest::{
 };
 use crate::reads::{page_limit, published_revision, NamespaceReads};
 use crate::service::is_indexable_text_content;
-use crate::{GrepError, GrepStepBudget, Result};
+use crate::{GrepError, GrepPassBudget, Result};
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use loonfs::engine::{
     next_run_no_after, refill_iterators, select_next_iterator, Deadline, Observation,
@@ -35,7 +35,7 @@ use loonfs_types::format::segment_blocks::{
 };
 use loonfs_types::{
     ChangeSeq, ContentRef, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId, RevisionNo,
-    RunNo,
+    RunNo, MAX_PAGE_LIMIT,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -68,7 +68,8 @@ const GREP_MAX_MID_RUNS: usize = 8;
 /// Writer-side budgets for one grep build or reorganize step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GramIndexBuildPolicy {
-    /// Revisions examined per step.
+    /// Revisions examined per step, at most `MAX_PAGE_LIMIT`, because a
+    /// step reads them as one page of the change feed.
     pub max_files_per_step: NonZeroUsize,
     /// Content bytes read per step.
     pub max_content_bytes_per_step: NonZeroU64,
@@ -161,14 +162,14 @@ pub enum GrepReorganizeOutcome {
 /// read-only `LoonFs` and creates or deletes backfill snapshots through a
 /// writable `LoonFs`, whose writer id the snapshot folds record. Scheduling is
 /// external to this type. A build or reorganize step that finds work waits
-/// for a permit of the worker's [`GrepStepBudget`] before it reads file
+/// for a permit of the worker's [`GrepPassBudget`] before it reads file
 /// content or index segments.
 #[derive(Clone)]
 pub struct GrepWorker<S> {
     store: S,
     reader: LoonFs<ReadOnly>,
     writer: LoonFs<Writable>,
-    step_budget: GrepStepBudget,
+    step_budget: GrepPassBudget,
     timer: Arc<dyn MonotonicTimer>,
 }
 
@@ -192,7 +193,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         store: S,
         reader: LoonFs<ReadOnly>,
         writer: LoonFs<Writable>,
-        step_budget: GrepStepBudget,
+        step_budget: GrepPassBudget,
     ) -> Self {
         let timer = reader.monotonic_timer();
         Self {
@@ -210,7 +211,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     /// The budget this worker's build and reorganize steps draw from.
-    pub fn step_budget(&self) -> &GrepStepBudget {
+    pub fn step_budget(&self) -> &GrepPassBudget {
         &self.step_budget
     }
 
@@ -241,34 +242,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 });
             }
         }
-        let manifest_no = next_manifest_no(current.as_ref())?;
-        let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let next_run_no = current.as_ref().map_or(RunNo(0), |manifest| {
-            manifest.manifest_state().index().next_run_no
-        });
-        let next = backfilling_manifest(
-            namespace_id,
-            manifest_no,
-            checkpoint.captured_seq,
-            checkpoint.snapshot_id.clone(),
-            next_run_no,
-        );
-        let published =
-            publish_grep_manifest(&self.store, current.as_ref(), &next, &deadline).await;
-        match published {
-            Ok(published) => Ok(GrepEnableOutcome::Enabled {
-                state: published.manifest_state().status().clone(),
-            }),
-            Err(GrepError::PublicationConflict { .. }) => {
-                self.delete_pin_if_present(namespace_id, &checkpoint.snapshot_id)
-                    .await;
-                Ok(GrepEnableOutcome::Superseded)
-            }
-            // A non-conflict failure may be an acknowledgement failure after
-            // the manifest landed. Keep the checkpoint because it
-            // may already reference it.
-            Err(error) => Err(error),
-        }
+        let Some(checkpoint) = self
+            .publish_backfill(namespace_id, current.as_ref(), &deadline)
+            .await?
+        else {
+            return Ok(GrepEnableOutcome::Superseded);
+        };
+        Ok(GrepEnableOutcome::Enabled {
+            state: backfill_status(&checkpoint),
+        })
     }
 
     /// Disables grep by publishing the next manifest. Existing segments become grep-GC
@@ -276,20 +258,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         self.reads(namespace_id).head().await?;
         let deadline = Deadline::start(self.timer());
-        let Some(current) =
-            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?
-        else {
+        let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
             return Ok(GrepDisableOutcome::NotEnabled);
-        };
-        if matches!(
-            current.manifest_state().status(),
-            GrepIndexStatus::Disabled {}
-        ) {
-            return Ok(GrepDisableOutcome::NotEnabled);
-        }
-        let pin_id = match current.manifest_state().status() {
-            GrepIndexStatus::Backfilling { pin_id, .. } => Some(pin_id.clone()),
-            GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
@@ -304,8 +274,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         .expect("a successor of a grep manifest that decoding validated should be valid");
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => {
-                if let Some(pin_id) = pin_id {
-                    self.delete_pin_if_present(namespace_id, &pin_id).await;
+                if let Some(pin_id) = current.manifest_state().status().backfill_pin_id() {
+                    self.delete_pin_if_present(namespace_id, pin_id).await;
                 }
                 Ok(GrepDisableOutcome::Disabled)
             }
@@ -326,18 +296,17 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildOutcome> {
+        if policy.max_files_per_step.get() > MAX_PAGE_LIMIT as usize {
+            return Err(loonfs::Error::InvalidRequest {
+                message: format!("max_files_per_step must be at most {MAX_PAGE_LIMIT}"),
+                param: "max_files_per_step",
+            }
+            .into());
+        }
         let deadline = Deadline::start(self.timer());
-        let Some(current) =
-            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?
-        else {
+        let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
             return Ok(GrepBuildOutcome::NotEnabled);
         };
-        if matches!(
-            current.manifest_state().status(),
-            GrepIndexStatus::Disabled {}
-        ) {
-            return Ok(GrepBuildOutcome::NotEnabled);
-        }
         let reads = self.reads(namespace_id);
         reads.head().await?;
         let planned = match current.manifest_state().status() {
@@ -465,33 +434,67 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         current: &LoadedGrepManifest,
         deadline: &Deadline,
     ) -> Result<GrepBuildOutcome> {
-        let previous_pin_id = match current.manifest_state().status() {
-            GrepIndexStatus::Backfilling { pin_id, .. } => Some(pin_id.clone()),
-            GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
+        let Some(checkpoint) = self
+            .publish_backfill(namespace_id, Some(current), deadline)
+            .await?
+        else {
+            return Ok(GrepBuildOutcome::Superseded);
         };
-        let manifest_no = next_manifest_no(Some(current))?;
+        if let Some(previous_pin_id) = current.manifest_state().status().backfill_pin_id() {
+            self.delete_pin_if_present(namespace_id, previous_pin_id)
+                .await;
+        }
+        Ok(GrepBuildOutcome::BackfillRestarted {
+            captured_seq: checkpoint.captured_seq,
+        })
+    }
+
+    /// Loads the current grep manifest, or `None` when grep was never enabled
+    /// or is disabled.
+    async fn load_enabled(
+        &self,
+        namespace_id: &NamespaceId,
+        deadline: &Deadline,
+    ) -> Result<Option<LoadedGrepManifest>> {
+        let current =
+            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?;
+        Ok(current.filter(|current| {
+            !matches!(
+                current.manifest_state().status(),
+                GrepIndexStatus::Disabled {}
+            )
+        }))
+    }
+
+    /// Creates a backfill snapshot and publishes the backfilling successor of
+    /// `current`. Returns the snapshot, or `None` when another publisher won.
+    async fn publish_backfill(
+        &self,
+        namespace_id: &NamespaceId,
+        current: Option<&LoadedGrepManifest>,
+        deadline: &Deadline,
+    ) -> Result<Option<loonfs_types::Snapshot>> {
+        let manifest_no = next_manifest_no(current)?;
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let next = backfilling_manifest(
-            namespace_id,
+        let next = GrepManifestState::new(
+            namespace_id.clone(),
             manifest_no,
-            checkpoint.captured_seq,
-            checkpoint.snapshot_id.clone(),
-            current.manifest_state().index().next_run_no,
-        );
-        match publish_grep_manifest(&self.store, Some(current), &next, deadline).await {
-            Ok(_) => {
-                if let Some(previous_pin_id) = previous_pin_id {
-                    self.delete_pin_if_present(namespace_id, &previous_pin_id)
-                        .await;
-                }
-                Ok(GrepBuildOutcome::BackfillRestarted {
-                    captured_seq: checkpoint.captured_seq,
-                })
-            }
+            backfill_status(&checkpoint),
+            GrepIndexState {
+                reorganize: None,
+                next_run_no: current.map_or(RunNo(0), |manifest| {
+                    manifest.manifest_state().index().next_run_no
+                }),
+            },
+            Vec::new(),
+        )
+        .expect("a backfilling grep manifest state should be valid");
+        match publish_grep_manifest(&self.store, current, &next, deadline).await {
+            Ok(_) => Ok(Some(checkpoint)),
             Err(GrepError::PublicationConflict { .. }) => {
                 self.delete_pin_if_present(namespace_id, &checkpoint.snapshot_id)
                     .await;
-                Ok(GrepBuildOutcome::Superseded)
+                Ok(None)
             }
             // A non-conflict failure may be an acknowledgement failure after
             // the manifest landed. Keep the checkpoint because it
@@ -600,28 +603,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 }
 
-fn backfilling_manifest(
-    namespace_id: &NamespaceId,
-    manifest_no: ManifestNo,
-    captured_seq: ChangeSeq,
-    pin_id: PinId,
-    next_run_no: RunNo,
-) -> GrepManifestState {
-    GrepManifestState::new(
-        namespace_id.clone(),
-        manifest_no,
-        GrepIndexStatus::Backfilling {
-            captured_seq,
-            cursor_inode_id: None,
-            pin_id,
-        },
-        GrepIndexState {
-            reorganize: None,
-            next_run_no,
-        },
-        Vec::new(),
-    )
-    .expect("a backfilling grep manifest state should be valid")
+/// The status of a backfill that starts at the beginning of `checkpoint`.
+fn backfill_status(checkpoint: &loonfs_types::Snapshot) -> GrepIndexStatus {
+    GrepIndexStatus::Backfilling {
+        captured_seq: checkpoint.captured_seq,
+        cursor_inode_id: None,
+        pin_id: checkpoint.snapshot_id.clone(),
+    }
 }
 
 /// The errors that mean "the state this projection was built from is
@@ -745,7 +733,7 @@ async fn plan_backfill_unit(
     loop {
         let page = reads
             .list_checkpoint_files(pin_id)
-            .page_limit(page_limit(files_remaining)?)
+            .page_limit(page_limit(files_remaining))
             .cursor(cursor)
             .page()
             .await?;
@@ -1014,17 +1002,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepReorganizeOutcome> {
         let deadline = Deadline::start(self.timer());
-        let Some(current) =
-            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?
-        else {
+        let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
             return Ok(GrepReorganizeOutcome::NotEnabled);
         };
-        if matches!(
-            current.manifest_state().status(),
-            GrepIndexStatus::Disabled {}
-        ) {
-            return Ok(GrepReorganizeOutcome::NotEnabled);
-        }
         let (reorganize, next_run_no) = match current.manifest_state().index().reorganize.clone() {
             Some(reorganize) => (reorganize, current.manifest_state().index().next_run_no),
             None => {

@@ -16,9 +16,9 @@ use loonfs_types::{
 };
 use std::collections::BTreeSet;
 
-/// The answer to a path lookup at one sequence.
+/// The answer to resolving a path at one sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathLookup<'a> {
+pub enum ResolvedPath<'a> {
     /// Every component named a visible child. `absolute_path` is spelled
     /// with the stored display names, and `binding` is the last binding
     /// followed, absent for the root.
@@ -66,9 +66,9 @@ impl MetadataState {
 
     /// Resolves `path` from the root, folding each component into its name
     /// key and following only bindings of visible children.
-    pub fn resolve_path(&self, path: &AbsolutePath, seq: ChangeSeq) -> Result<PathLookup<'_>> {
+    pub fn resolve_path(&self, path: &AbsolutePath, seq: ChangeSeq) -> Result<ResolvedPath<'_>> {
         let Some(mut inode) = self.visible_inode(ROOT_INODE_ID, seq)? else {
-            return Ok(PathLookup::NotFound {
+            return Ok(ResolvedPath::NotFound {
                 absolute_path: absolute_path(&[]),
             });
         };
@@ -76,7 +76,7 @@ impl MetadataState {
         let mut names = Vec::new();
         for component in path.components() {
             if inode.inode_kind != InodeKind::Directory {
-                return Ok(PathLookup::NotADirectory {
+                return Ok(ResolvedPath::NotADirectory {
                     absolute_path: absolute_path(&names),
                     inode,
                 });
@@ -84,7 +84,7 @@ impl MetadataState {
             let name_key = NameKey::for_display_name(&component.to_display_name());
             let Some(entry) = self.visible_entry(inode.inode_id, &name_key, seq)? else {
                 names.push(component.as_str());
-                return Ok(PathLookup::NotFound {
+                return Ok(ResolvedPath::NotFound {
                     absolute_path: absolute_path(&names),
                 });
             };
@@ -92,7 +92,7 @@ impl MetadataState {
             inode = entry.child;
             binding = Some(entry.binding);
         }
-        Ok(PathLookup::Found {
+        Ok(ResolvedPath::Found {
             absolute_path: absolute_path(&names),
             inode,
             binding,
