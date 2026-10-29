@@ -125,10 +125,6 @@ enum NormalizedTombstoneAction {
         target_seq: u64,
         target_delta_index: u32,
     },
-    Expire {
-        target_seq: u64,
-        target_delta_index: u32,
-    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -733,53 +729,6 @@ fn metadata_apply_matches_model_for_undelete() {
             ),
         ],
     );
-}
-
-/// An expiry keeps the deleted subtree hidden at every later sequence, the
-/// way a deletion does, and unlike the undelete in the scenario above.
-#[test]
-fn metadata_apply_matches_model_for_an_expired_deletion() {
-    let notes = InodeId(3);
-    let model = assert_core_matches_model(
-        CaseInsensitive,
-        &["/docs", "/docs/notes.txt"],
-        &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
-            create_file(
-                CaseInsensitive,
-                0,
-                notes,
-                InodeId(2),
-                "notes.txt",
-                content_ref("content-1"),
-                1,
-            ),
-            delete(
-                CaseInsensitive,
-                0,
-                InodeId(2),
-                InodeKind::Directory,
-                InodeId(1),
-                "docs",
-                position(1, 1),
-                0,
-            ),
-            vec![WalDelta::ExpireSubtreeTombstone {
-                delta_index: 0,
-                root_inode_id: InodeId(2),
-                target: position(3, 1),
-            }],
-        ],
-    );
-    for inode_id in [InodeId(2), notes] {
-        assert_eq!(
-            model
-                .visible_inode(inode_id, ChangeSeq(4))
-                .expect("the model should answer for a state it accepted"),
-            None,
-            "inode `{inode_id}` after the expiry"
-        );
-    }
 }
 
 #[test]
@@ -1830,10 +1779,6 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                         target_seq: target.seq.0,
                         target_delta_index: target.delta_index,
                     },
-                    CoreTombstoneAction::Expire { target } => NormalizedTombstoneAction::Expire {
-                        target_seq: target.seq.0,
-                        target_delta_index: target.delta_index,
-                    },
                 },
             })
             .collect(),
@@ -1930,10 +1875,6 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                         }
                     }
                     ModelTombstoneAction::Revoke { target } => NormalizedTombstoneAction::Revoke {
-                        target_seq: target.seq.0,
-                        target_delta_index: target.delta_index,
-                    },
-                    ModelTombstoneAction::Expire { target } => NormalizedTombstoneAction::Expire {
                         target_seq: target.seq.0,
                         target_delta_index: target.delta_index,
                     },

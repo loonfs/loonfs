@@ -488,6 +488,9 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     /// Where the output stands in the group and whether rows may be dropped.
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
+    /// The basis manifest's acknowledged floor, at or below which a listed
+    /// deletion that no undelete cancelled has expired.
+    acknowledged_floor_seq: ChangeSeq,
     policy: MetadataRunPolicy,
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
@@ -570,6 +573,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 .manifest
                 .as_ref()
                 .map(|manifest| manifest.payload().next_run_no),
+            acknowledged_floor_seq: basis.manifest.as_ref().map_or(ChangeSeq(0), |manifest| {
+                manifest.payload().acknowledged_floor_seq
+            }),
             chain_filter: ChainFilter::NotNeeded,
             kept_inodes,
             output_cache,
@@ -760,7 +766,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
 
         let floor_seq = self.frozen_floor_seq;
         let rule = self.rule_for(cluster);
-        let mut operator = rule.operator();
+        let mut operator = rule.operator(self.acknowledged_floor_seq);
         let mut locality: Option<String> = None;
         loop {
             if let Some(stop) = control.cancellation() {

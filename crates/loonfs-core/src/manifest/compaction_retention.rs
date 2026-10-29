@@ -20,7 +20,8 @@ pub(super) enum RetentionRule {
     /// Every revision above the floor, plus the newest at or below it, per
     /// inode.
     WholeState,
-    /// Retain active deletions and remove completed deletion pairs.
+    /// Remove cancelled deletion pairs and the listed rows of expired
+    /// deletions.
     ActiveDeletions,
     /// Per edge, retains the values above the floor and the bound value at
     /// the floor.
@@ -28,15 +29,18 @@ pub(super) enum RetentionRule {
 }
 
 impl RetentionRule {
-    pub(super) fn operator(self) -> RetentionOperator {
+    /// The operator that applies the rule in a merge whose basis manifest
+    /// has `acknowledged_floor_seq` as its acknowledged floor.
+    pub(super) fn operator(self, acknowledged_floor_seq: ChangeSeq) -> RetentionOperator {
         match self {
             Self::KeepEveryRow => RetentionOperator::KeepEveryRow,
             Self::FirstPerGroup => RetentionOperator::FirstPerGroup(false),
             Self::CommitHistory => RetentionOperator::CommitHistory,
             Self::WholeState => RetentionOperator::WholeState(WholeStateRetention::default()),
-            Self::ActiveDeletions => {
-                RetentionOperator::ActiveDeletions(ActiveDeletionRetention::default())
-            }
+            Self::ActiveDeletions => RetentionOperator::ActiveDeletions(ActiveDeletionRetention {
+                acknowledged_floor_seq,
+                revoked: false,
+            }),
             Self::Bindings => RetentionOperator::Bindings(Box::default()),
         }
     }
@@ -207,20 +211,29 @@ fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, ChangeSeq)> 
 
 /// Processes active-deletion rows one deletion identity at a time.
 ///
-/// Active deletions represent current recoverable state, so the retention
-/// floor does not remove a listed deletion. The operator removes only a
-/// listed row paired with its removal marker. Row-key order places the marker
-/// first, allowing one flag to determine whether the listed row is retained.
-#[derive(Debug, Default)]
+/// The operator removes a listed row paired with its removal marker, and the
+/// listed row of a deletion at or below the acknowledged floor, which has
+/// expired. A listed row above the acknowledged floor stays, even at or
+/// below the retention floor, because an undelete validated against an
+/// older floor can still revoke it
+/// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
+/// Row-key order places the marker first, allowing one flag to determine
+/// whether the listed row is retained.
+#[derive(Debug)]
 pub(super) struct ActiveDeletionRetention {
+    /// The basis manifest's acknowledged floor.
+    acknowledged_floor_seq: ChangeSeq,
     /// Whether this deletion's removal marker has already arrived.
     revoked: bool,
 }
 
 impl ActiveDeletionRetention {
     fn push(&mut self, row: MetadataRow) -> Option<MetadataRow> {
-        let MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord { action, .. }) =
-            &row
+        let MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
+            action,
+            deletion_seq,
+            ..
+        }) = &row
         else {
             return Some(row);
         };
@@ -231,7 +244,11 @@ impl ActiveDeletionRetention {
                 self.revoked = true;
                 None
             }
-            ActiveDeletionRowAction::Listed { .. } if self.revoked => None,
+            ActiveDeletionRowAction::Listed { .. }
+                if self.revoked || *deletion_seq <= self.acknowledged_floor_seq =>
+            {
+                None
+            }
             ActiveDeletionRowAction::Listed { .. } => Some(row),
         }
     }
@@ -354,7 +371,7 @@ mod tests {
         ];
         rows.sort_by_key(MetadataRow::row_key);
         let cluster = &retention_clusters(MetadataFamilyGroup::ContentLayouts)[0];
-        let mut operator = cluster.rule.operator();
+        let mut operator = cluster.rule.operator(ChangeSeq(0));
         let family = MetadataRowFamily::ContentLayouts;
         let mut previous = String::new();
         let mut kept = Vec::new();
@@ -470,7 +487,7 @@ mod tests {
     #[test]
     fn one_inode_keeps_the_newest_row_at_the_floor_and_holds_nothing() {
         for family in WHOLE_STATE_FAMILIES {
-            let mut operator = RetentionRule::WholeState.operator();
+            let mut operator = RetentionRule::WholeState.operator(ChangeSeq(0));
             let mut kept = Vec::new();
             // Newest first: two above the floor, then a hundred thousand below.
             for (revision, committed_seq) in [(100_002u64, 102u64), (100_001, 101)] {
@@ -502,7 +519,7 @@ mod tests {
     #[test]
     fn two_whole_state_rows_at_one_revision_below_the_floor_are_refused() {
         for family in WHOLE_STATE_FAMILIES {
-            let mut operator = RetentionRule::WholeState.operator();
+            let mut operator = RetentionRule::WholeState.operator(ChangeSeq(0));
             operator
                 .push(family, whole_state_row(family, 7, 5, 50), floor())
                 .expect("the first row at the floor is kept");
@@ -515,20 +532,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_cancelled_deletion_leaves_and_a_live_one_stays() {
-        let mut operator = RetentionRule::ActiveDeletions.operator();
-        let removed = MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
+    fn active_deletion_row(deletion_seq: u64, action: ActiveDeletionRowAction) -> MetadataRow {
+        MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
             root_inode_id: InodeId(9),
-            deletion_seq: ChangeSeq(3),
-            action: ActiveDeletionRowAction::Removed {
-                removed_seq: ChangeSeq(4),
-            },
-        });
-        let listed = MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
-            root_inode_id: InodeId(9),
-            deletion_seq: ChangeSeq(3),
-            action: ActiveDeletionRowAction::Listed {
+            deletion_seq: ChangeSeq(deletion_seq),
+            action,
+        })
+    }
+
+    fn listed(deletion_seq: u64) -> MetadataRow {
+        active_deletion_row(
+            deletion_seq,
+            ActiveDeletionRowAction::Listed {
                 inode_kind: loonfs_types::InodeKind::Directory,
                 deleted_at_ms: 1_000,
                 deleted_by: loonfs_types::ActorId::loonfs(),
@@ -539,13 +554,24 @@ mod tests {
                         .expect("valid display name"),
                 },
             },
-        });
+        )
+    }
+
+    #[test]
+    fn a_cancelled_deletion_leaves_and_a_live_one_stays() {
+        let mut operator = RetentionRule::ActiveDeletions.operator(ChangeSeq(0));
+        let removed = active_deletion_row(
+            3,
+            ActiveDeletionRowAction::Removed {
+                removed_seq: ChangeSeq(4),
+            },
+        );
         assert!(operator
-            .push(MetadataRowFamily::ActiveDeletions, removed.clone(), floor())
+            .push(MetadataRowFamily::ActiveDeletions, removed, floor())
             .expect("push")
             .is_none());
         assert!(operator
-            .push(MetadataRowFamily::ActiveDeletions, listed.clone(), floor())
+            .push(MetadataRowFamily::ActiveDeletions, listed(3), floor())
             .expect("push")
             .is_none());
         assert_eq!(operator.held_rows(), 0);
@@ -553,16 +579,38 @@ mod tests {
         operator.close_group(floor()).expect("close");
         assert!(
             operator
-                .push(MetadataRowFamily::ActiveDeletions, listed, floor())
+                .push(MetadataRowFamily::ActiveDeletions, listed(3), floor())
                 .expect("push")
                 .is_some(),
             "the next deletion is decided on its own markers, not the previous one's"
         );
     }
 
+    /// Checks that a listed row at or below the acknowledged floor leaves,
+    /// and that one above it stays, even at or below the retention floor.
+    #[test]
+    fn a_listed_row_leaves_at_or_below_the_acknowledged_floor() {
+        let mut operator = RetentionRule::ActiveDeletions.operator(ChangeSeq(40));
+        let mut kept = Vec::new();
+        for deletion_seq in [39, 40, 41, 99] {
+            operator.close_group(floor()).expect("close");
+            if let Some((_, row)) = operator
+                .push(
+                    MetadataRowFamily::ActiveDeletions,
+                    listed(deletion_seq),
+                    floor(),
+                )
+                .expect("push")
+            {
+                kept.push(row);
+            }
+        }
+        assert_eq!(kept, vec![listed(41), listed(99)]);
+    }
+
     #[test]
     fn one_slot_of_many_versions_holds_at_most_one_row() {
-        let mut operator = RetentionRule::Bindings.operator();
+        let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
         let mut kept = Vec::new();
         let mut peak = 0usize;
         for position in 1..=100_000u64 {
@@ -592,7 +640,7 @@ mod tests {
 
     #[test]
     fn a_second_unretired_bind_in_one_slot_is_refused() {
-        let mut operator = RetentionRule::Bindings.operator();
+        let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
         operator
             .push(
                 MetadataRowFamily::DirentryBinds,
@@ -632,7 +680,7 @@ mod tests {
 
     #[test]
     fn two_children_bound_in_one_slot_at_the_floor_are_refused() {
-        let mut operator = RetentionRule::Bindings.operator();
+        let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
         operator
             .push(
                 MetadataRowFamily::DirentryBinds,
@@ -661,7 +709,7 @@ mod tests {
 
     #[test]
     fn two_edges_bound_for_one_child_at_the_floor_are_refused() {
-        let mut operator = RetentionRule::Bindings.operator();
+        let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
         for (parent, name, child) in [(9, "z.txt", 41), (7, "a.txt", 42)] {
             operator
                 .push(

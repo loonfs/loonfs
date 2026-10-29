@@ -139,13 +139,8 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     .expect("delete");
     let prepared = verify_content_token("secret", &catalog, &token, clock.now_ms())
         .expect("token remains valid");
-    let candidate = CommitCandidate::prepared(
-        put_candidate(&completed)
-            .intent()
-            .expect("a filesystem request")
-            .clone(),
-        vec![prepared],
-    );
+    let candidate =
+        CommitCandidate::prepared(put_candidate(&completed).intent().clone(), vec![prepared]);
     let mut engine = NamespaceCommitEngine::new(
         namespace_id,
         std::sync::Arc::new(crate::test_support::content_writes()),
@@ -319,7 +314,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     engine.invalidate_projection();
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
-    let alias = CommitCandidate::new(primary.intent().expect("a filesystem request").clone());
+    let alias = CommitCandidate::new(primary.intent().clone());
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.block_next();
     let candidates = vec![primary, alias, later, replay];
@@ -447,7 +442,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
             .expect("head");
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
-    let alias = CommitCandidate::new(primary.intent().expect("a filesystem request").clone());
+    let alias = CommitCandidate::new(primary.intent().clone());
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.block_next();
     let batch = Deadline::start(timer.clone());
@@ -557,13 +552,8 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
             verify_content_token("secret", &catalog, &token, setup.now_ms).expect("prepare token"),
         );
     }
-    let candidate = CommitCandidate::prepared(
-        put_candidate(&completed)
-            .intent()
-            .expect("a filesystem request")
-            .clone(),
-        proofs.clone(),
-    );
+    let candidate =
+        CommitCandidate::prepared(put_candidate(&completed).intent().clone(), proofs.clone());
     let metadata = CommitCandidate::prepared(
         directory_request("metadata", "metadata"),
         proofs[1..].to_vec(),

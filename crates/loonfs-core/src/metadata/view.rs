@@ -222,10 +222,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     /// The retention floor of the view's manifest. A view without a
-    /// manifest, which only tests build, reads every row it has as at or
-    /// below its floor.
+    /// manifest, which only tests build, has a floor of 0, like a new
+    /// namespace's first manifest.
     pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
-        self.sources.manifest.map_or(self.visible_seq, |segments| {
+        self.sources.manifest.map_or(ChangeSeq(0), |segments| {
             segments.manifest().payload().retention_floor_seq
         })
     }
@@ -773,17 +773,18 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     /// The `set` event of the root's recoverable deletion: its latest
-    /// tombstone event, when that event is a `set`.
+    /// tombstone event, when that event is a `set` above the view's
+    /// retention floor
+    /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
     pub(crate) async fn recoverable_deletion(
         &self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>> {
-        let tombstones = self.tombstones_for_root(root_inode_id).await?;
-        let hiding = super::rows::hiding_tombstone_from_records(
-            tombstones.iter().cloned(),
-            self.visible_seq(),
-        );
-        Ok(hiding.filter(|tombstone| tombstone.action.is_recoverable()))
+        let retention_floor_seq = self.retention_floor_seq();
+        Ok(self
+            .hiding_subtree_tombstone(root_inode_id)
+            .await?
+            .filter(|tombstone| tombstone.committed_seq > retention_floor_seq))
     }
 
     pub(super) async fn direntry_binds_for_parent_name(
@@ -893,8 +894,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         revisions
     }
 
-    /// One page of the namespace's recoverable deletions in `range`, oldest
-    /// deletion first.
+    /// One page of the namespace's deletions in `range` that no undelete has
+    /// cancelled, oldest deletion first.
     ///
     /// Manifest rows merge with the rows the WAL tail derives, so a deletion
     /// committed seconds ago lists like a fresh file appears in `ls`. Both
@@ -1024,6 +1025,10 @@ pub(crate) struct MetadataViewReads<'a, 'store, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, '_, S> {
     type Error = CoreError;
+
+    fn retention_floor_seq(&self) -> ChangeSeq {
+        self.view.retention_floor_seq()
+    }
 
     async fn find_inode(
         &mut self,

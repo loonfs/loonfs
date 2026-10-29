@@ -1,55 +1,66 @@
-//! The worker's steps of the session's expiry after a retention advance.
+//! A writer session that undeletes a deletion after another process's
+//! retention advance passed it, while the session still plans against the
+//! manifest before the advance.
 
 use super::*;
 use loonfs_types::api::v0::FilesystemChange;
-use loonfs_types::DeleteDirectoryBehavior;
+use loonfs_types::{DeleteDirectoryBehavior, InodeId};
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_busy_session_retries_a_panicked_expiry_step_after_its_next_publication() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
-    let clock = Arc::new(ManualClock::at_system_time());
-    let writer = crate::LoonFs::builder_with_store(store.clone() as SharedStore)
-        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .min_publish_interval_ms(0)
-        .wall_clock(clock.clone())
-        .build()
+/// The inode rows that the current manifest's segments store.
+async fn inode_rows(store: &dyn ObjectStore, namespace_id: &NamespaceId) -> u64 {
+    loonfs_core::control::load_namespace_statistics(store, namespace_id)
         .await
-        .expect("build writer");
-    let actor = loonfs_test_support::test_actor();
-    writer
-        .create_namespace(&namespace_id, &actor)
+        .expect("load the namespace's statistics")
+        .inode_record_count
+}
+
+/// Runs compaction units through `maintenance` until none is needed, and
+/// returns how many published.
+async fn drain_compaction(maintenance: &crate::Maintenance, namespace_id: &NamespaceId) -> usize {
+    for published in 0..32 {
+        let response = maintenance
+            .compact_metadata(namespace_id, &crate::MaintenanceCancellation::new())
+            .await
+            .expect("compact");
+        if response.compaction == crate::MetadataCompactionOutcome::NotNeeded {
+            return published;
+        }
+    }
+    panic!("compaction kept publishing");
+}
+
+/// Creates `/deleted` with `/deleted/inner` in it through `namespace`'s
+/// session.
+async fn create_directories(namespace: &crate::Namespace<crate::Writable>) {
+    for (commit_id, name) in [
+        ("create-deleted", "deleted"),
+        ("create-inner", "deleted/inner"),
+    ] {
+        namespace
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                commit_id, name,
+            )))
+            .await
+            .expect("create a directory");
+    }
+}
+
+/// Deletes `/deleted` through `namespace`'s session, and returns the deleted
+/// root with the deletion's sequence.
+async fn delete_a_directory(namespace: &crate::Namespace<crate::Writable>) -> (InodeId, ChangeSeq) {
+    let deleted = namespace
+        .commit_candidate(CommitCandidate::new(CommitIntent::single(
+            CommitId::parse("delete").expect("commit id"),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::DeletePath {
+                path: AbsolutePath::parse("/deleted").expect("path"),
+                behavior: DeleteDirectoryBehavior::Recursive,
+                expected_inode_id: None,
+            },
+        )))
         .await
-        .expect("bootstrap");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let commit = |request: CommitIntent| {
-        let namespace = namespace.clone();
-        tokio::spawn(async move {
-            namespace
-                .commit_candidate(CommitCandidate::new(request))
-                .await
-        })
-    };
-    commit(create_directory_request("create", "deleted"))
-        .await
-        .expect("create task")
-        .expect("create");
-    let deleted = commit(CommitIntent::single(
-        CommitId::parse("delete").expect("commit id"),
-        actor.clone(),
-        None,
-        FilesystemOperation::DeletePath {
-            path: AbsolutePath::parse("/deleted").expect("path"),
-            behavior: DeleteDirectoryBehavior::Recursive,
-            expected_inode_id: None,
-        },
-    ))
-    .await
-    .expect("delete task")
-    .expect("delete");
+        .expect("delete");
     let inode_id = deleted
         .events
         .iter()
@@ -58,74 +69,118 @@ async fn a_busy_session_retries_a_panicked_expiry_step_after_its_next_publicatio
             _ => None,
         })
         .expect("the delete reports its deletion");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
-    maintenance.fold_wal(&namespace_id).await.expect("fold");
+    (inode_id, deleted.committed_seq)
+}
 
-    // Once every commit is one grace window old, the advance's position move
-    // starts the worker's expiry step, and the step's WAL put panics.
-    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
-    store.arm_blocking_panic();
+/// Checks the race that the acknowledged floor closes. Another process folds
+/// a deletion and advances the floor past it while the writer's session
+/// still plans against the manifest before the advance, which it keeps until
+/// its next successor check, so the session accepts an undelete of the
+/// deletion. A base compaction over the advance's manifest keeps the
+/// deletion's rows, because the acknowledged floor is still below the
+/// deletion. Once the session's next commit, which records the new floor,
+/// is folded, the deletion's latest event is the revoke, so no compaction
+/// removes the restored item's rows.
+#[tokio::test]
+async fn an_undelete_against_an_older_floor_keeps_its_rows_through_every_compaction() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    // The session trusts its basis without a successor check until its
+    // monotonic clock moves.
+    let clock = Arc::new(ManualClock::at_system_time());
+    let writer = crate::LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .min_publish_interval_ms(0)
+        .wall_clock(clock.clone())
+        .monotonic_timer(clock.clone())
+        .build()
+        .await
+        .expect("build writer");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let actor = loonfs_test_support::test_actor();
+    writer
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let maintainer_clock = Arc::new(ManualClock::at_system_time());
+    maintainer_clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    let maintainer = crate::LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("maintainer"))
+        .wall_clock(maintainer_clock)
+        .build()
+        .await
+        .expect("build the maintainer");
+    let maintenance = maintainer.maintenance(loonfs_test_support::ids::writer_id("maintainer"));
+    // Two folds leave a delta run above the first, so a compaction has a
+    // window to merge.
+    create_directories(&namespace).await;
     maintenance
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the directories");
+    let (inode_id, deletion_seq) = delete_a_directory(&namespace).await;
+    maintenance
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the deletion");
+    let advanced = maintenance
         .advance_retention_floor(&namespace_id)
         .await
         .expect("advance the floor");
-    store.wait_until_blocked().await;
-    // Twelve writes queue behind the step, so the worker that survives the
-    // panic never runs out of work.
-    let writes: Vec<_> = (0..12)
-        .map(|index| {
-            commit(create_directory_request(
-                format!("write-{index}"),
-                format!("write-{index}"),
-            ))
-        })
-        .collect();
-    wait_for_queued_candidates(&namespace.session().publisher, writes.len()).await;
-    store.release_into_panic();
-    let mut last_write_seq = ChangeSeq(0);
-    for write in writes {
-        last_write_seq = write
-            .await
-            .expect("write task")
-            .expect("the worker publishes queued work after the panic")
-            .committed_seq;
-    }
-    let drain_error = writer
-        .drain()
+    assert_eq!(advanced.retention_floor_seq, deletion_seq);
+
+    namespace
+        .undelete(inode_id, deletion_seq, &actor)
         .await
-        .expect_err("drain surfaces the contained panic");
-    assert!(
-        drain_error
-            .to_string()
-            .contains("1 publisher task(s) panicked"),
-        "{drain_error}"
+        .expect("an undelete against the old floor");
+    let rows = inode_rows(store.as_ref(), &namespace_id).await;
+    assert!(drain_compaction(&maintenance, &namespace_id).await > 0);
+    let diagnostics = maintenance
+        .diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics");
+    assert_eq!(diagnostics.retention_floor_seq, deletion_seq);
+    assert_eq!(diagnostics.acknowledged_floor_seq, ChangeSeq(0));
+    assert_eq!(
+        inode_rows(store.as_ref(), &namespace_id).await,
+        rows,
+        "a compaction over the advance's manifest keeps the deletion's rows"
     );
 
-    // The same worker retried the step after its first publication, without
-    // a new worker or a fold.
-    let changes = writer
-        .read_only()
-        .namespace(&namespace_id)
-        .list_changes(deleted.committed_seq)
-        .collect_up_to(64)
+    // Once the session's basis is older than the publication budget, its
+    // next commit checks for a successor, plans against the advance's floor,
+    // and records that floor.
+    clock.advance_ms(loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1);
+    namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "later", "later",
+        )))
         .await
-        .expect("list changes");
-    let expiry = changes
-        .iter()
-        .find(|commit| {
-            commit.events
-                == [FilesystemChange::DeletionExpired {
-                    inode_id,
-                    deletion_seq: deleted.committed_seq,
-                }]
-        })
-        .expect("the expiry commits before the fold");
-    assert_eq!(expiry.committed_by, ActorId::loonfs());
-    assert!(expiry.committed_seq > last_write_seq, "{changes:?}");
-    maintenance.fold_wal(&namespace_id).await.expect("fold");
-    let error = namespace
-        .undelete(inode_id, deleted.committed_seq, &actor)
+        .expect("a commit after the undelete");
+    maintenance
+        .fold_wal(&namespace_id)
         .await
-        .expect_err("an undelete after the expiry");
-    assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
+        .expect("fold the undelete and the later commit");
+    let diagnostics = maintenance
+        .diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics");
+    assert_eq!(diagnostics.acknowledged_floor_seq, deletion_seq);
+    let rows = inode_rows(store.as_ref(), &namespace_id).await;
+    assert!(drain_compaction(&maintenance, &namespace_id).await > 0);
+    assert_eq!(
+        inode_rows(store.as_ref(), &namespace_id).await,
+        rows,
+        "no compaction removes the restored item's rows"
+    );
+    let reader = maintainer.read_only().namespace(&namespace_id);
+    for path in ["/deleted", "/deleted/inner"] {
+        reader
+            .stat(path)
+            .await
+            .unwrap_or_else(|error| panic!("{path} is restored: {error}"));
+    }
 }

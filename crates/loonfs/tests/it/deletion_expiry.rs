@@ -1,15 +1,13 @@
-//! The writer session's expiry of the deletions that a retention advance
-//! reaches, and of a fork's inherited deletions.
+//! Deletions that a retention advance reaches, and a fork's inherited
+//! deletions, expire without a commit.
 
 use crate::common::*;
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{ChangeSeq, CommitId, DeleteDirectoryBehavior, ErrorCode, InodeId, LoonFs};
-use loonfs_core::limits::MAX_EXPIRED_DELETIONS_PER_COMMIT;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_types::api::v0::{Commit, FilesystemChange};
-use loonfs_types::{AbsolutePath, ActorId};
-use std::collections::BTreeSet;
+use loonfs_types::AbsolutePath;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -59,42 +57,27 @@ fn deleted_roots(commit: &Commit) -> Vec<InodeId> {
         .collect()
 }
 
-/// The deletions that each expiry commit after `after_seq` expired, one list
-/// for each commit, checking that the writer made each of them as `loonfs`.
-async fn expiry_commits(
+/// The sequences of the commits after `after_seq`.
+async fn commits_after(
     namespace: &loonfs::Namespace<loonfs::ReadOnly>,
     after_seq: ChangeSeq,
-) -> Vec<Vec<(InodeId, ChangeSeq)>> {
+) -> Vec<ChangeSeq> {
     namespace
         .list_changes(after_seq)
         .collect_up_to(64)
         .await
         .expect("list changes")
         .into_iter()
-        .filter_map(|commit| {
-            let expired = commit
-                .events
-                .iter()
-                .filter_map(|event| match event {
-                    FilesystemChange::DeletionExpired {
-                        inode_id,
-                        deletion_seq,
-                    } => Some((*inode_id, *deletion_seq)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if expired.is_empty() {
-                return None;
-            }
-            assert_eq!(commit.committed_by, ActorId::loonfs());
-            assert_eq!(expired.len(), commit.events.len(), "{commit:?}");
-            Some(expired)
-        })
+        .map(|commit| commit.committed_seq)
         .collect()
 }
 
+/// Checks that a retention advance expires every deletion at or below the
+/// new floor without a commit: the trash leaves them out, an undelete of
+/// one returns `not_deleted`, and the deletion above the floor stays
+/// recoverable.
 #[tokio::test]
-async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_in_bounded_commits() {
+async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_without_a_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let clock = Arc::new(ManualClock::at_system_time());
     let writer = LoonFs::builder_with_store(store(temp_dir.path()))
@@ -106,17 +89,16 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_in_bou
         .expect("build writer");
     let maintenance = writer.maintenance(writer_id("expiry-writer"));
     let namespace_id = namespace_id("expiry");
+    let actor = loonfs_test_support::test_actor();
     writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .create_namespace(&namespace_id, &actor)
         .await
         .expect("create namespace");
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
-    // One commit deletes one more directory than an expiry commit can
-    // expire, so the expiry takes two commits.
-    let below_floor = MAX_EXPIRED_DELETIONS_PER_COMMIT + 1;
+    let below_floor = 3;
     namespace
         .commit(intent("create", create_directories(0..below_floor + 1)))
         .await
@@ -140,22 +122,13 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_in_bou
         .await
         .expect("advance the floor");
     assert_eq!(advanced.retention_floor_seq, deleted.committed_seq);
-    writer.drain().await.expect("drain the expiry");
+    writer.drain().await.expect("drain");
 
     let reader = writer.read_only().namespace(&namespace_id);
-    let expired = expiry_commits(&reader, above_floor.committed_seq).await;
     assert_eq!(
-        expired.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![MAX_EXPIRED_DELETIONS_PER_COMMIT, 1],
-        "the advance's position move expires the floor's deletions one bounded commit at a time"
-    );
-    assert_eq!(
-        expired.into_iter().flatten().collect::<BTreeSet<_>>(),
-        deleted_roots(&deleted)
-            .into_iter()
-            .map(|inode_id| (inode_id, deleted.committed_seq))
-            .collect::<BTreeSet<_>>(),
-        "every deletion at or below the floor expires once"
+        commits_after(&reader, above_floor.committed_seq).await,
+        Vec::new(),
+        "the advance commits nothing for the deletions it expires"
     );
     let trash = namespace
         .list_trash()
@@ -171,12 +144,30 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_in_bou
             .into_iter()
             .map(|inode_id| (inode_id, above_floor.committed_seq))
             .collect::<Vec<_>>(),
-        "the deletion above the floor stays in the trash"
+        "only the deletion above the floor stays in the trash"
     );
+    let error = namespace
+        .undelete(deleted_roots(&deleted)[0], deleted.committed_seq, &actor)
+        .await
+        .expect_err("an undelete at the floor");
+    assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
+    namespace
+        .undelete(
+            deleted_roots(&above_floor)[0],
+            above_floor.committed_seq,
+            &actor,
+        )
+        .await
+        .expect("an undelete above the floor");
 }
 
+/// Checks that every deletion a fork inherits has expired in the fork from
+/// its creation: the fork's trash is empty, its first request, an undelete
+/// of an inherited deletion, returns `not_deleted`, and its first write
+/// commits right after the fork point with nothing before it. The source
+/// keeps its own trash.
 #[tokio::test]
-async fn a_forks_first_writer_session_expires_every_inherited_deletion_before_its_first_request() {
+async fn a_forks_inherited_deletions_have_expired_and_its_first_write_commits_nothing_else() {
     let temp_dir = tempdir().expect("tempdir");
     let writer = writer(store(temp_dir.path()), "fork-expiry-writer").await;
     let actor = loonfs_test_support::test_actor();
@@ -201,29 +192,29 @@ async fn a_forks_first_writer_session_expires_every_inherited_deletion_before_it
         .expect("fork");
     assert_eq!(fork.retention_floor_seq, deleted.committed_seq);
 
-    let fork_writer = writer.open_namespace(&fork_id).expect("open the fork");
-    let restored = deleted_roots(&deleted)[0];
-    let error = fork_writer
-        .undelete(restored, deleted.committed_seq, &actor)
-        .await
-        .expect_err("the fork's first request");
-    assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
-
     let fork_reader = writer.read_only().namespace(&fork_id);
-    assert_eq!(
-        expiry_commits(&fork_reader, fork.retention_floor_seq).await,
-        vec![deleted_roots(&deleted)
-            .into_iter()
-            .map(|inode_id| (inode_id, deleted.committed_seq))
-            .collect::<Vec<_>>()],
-        "one commit expires both inherited deletions before the undelete"
-    );
     let fork_trash = fork_reader
         .list_trash()
         .collect_up_to(4)
         .await
         .expect("list the fork's trash");
     assert!(fork_trash.is_empty(), "{fork_trash:?}");
+    let fork_writer = writer.open_namespace(&fork_id).expect("open the fork");
+    let error = fork_writer
+        .undelete(deleted_roots(&deleted)[0], deleted.committed_seq, &actor)
+        .await
+        .expect_err("the fork's first request");
+    assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
+    let created = fork_writer
+        .commit(intent("fork-create", create_directories(2..3)))
+        .await
+        .expect("the fork's first write");
+    assert_eq!(created.committed_seq.0, fork.retention_floor_seq.0 + 1);
+    assert_eq!(
+        commits_after(&fork_reader, fork.retention_floor_seq).await,
+        vec![created.committed_seq],
+        "the fork commits nothing before its first write"
+    );
     let source_trash = writer
         .read_only()
         .namespace(&source_id)

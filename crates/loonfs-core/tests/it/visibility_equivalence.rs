@@ -5,22 +5,18 @@
 
 use crate::common::read_context;
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::publish::{
-    CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
-};
-use loonfs_core::time::Deadline;
+use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::{
     CompactionUnitOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
-    MutationContext, NamespaceWriterEngine, RuntimeReadContext,
+    NamespaceWriterEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_types::api::v0::Commit;
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    ExpiredDeletion, InodeId, NamespaceId, PageRequest, RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    NamespaceId, PageRequest, RevisionNo,
 };
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -242,33 +238,6 @@ impl VisibilityHarness {
 
     async fn read_context(&self) -> RuntimeReadContext {
         read_context(&self.store, self.namespace_id()).await
-    }
-
-    /// Commits the writer's expiry of one deletion.
-    async fn expire(&self, inode_id: InodeId, deletion_seq: ChangeSeq) {
-        NamespaceCommitEngine::new(
-            self.namespace_id().clone(),
-            Arc::new(loonfs_core::test_support::content_writes()),
-        )
-        .publish_expiry(
-            &*self.store,
-            CommitId::generate(),
-            vec![ExpiredDeletion {
-                inode_id,
-                deletion_seq,
-            }],
-            &MutationContext {
-                writer_id: loonfs_types::WriterId::parse("visibility-equivalence")
-                    .expect("writer id"),
-                now_ms: 5_000,
-            },
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("expire the deletion");
     }
 
     /// The inode rows that the current manifest's segments store.
@@ -901,7 +870,7 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
     harness.engine.fold_wal().await.expect("fold fifth run");
     let reused_old = harness.inode_id("/old").await;
     let reused_file = harness.inode_id("/old/reused.txt").await;
-    let grave_deletion = harness
+    harness
         .delete("/grave", DeleteDirectoryBehavior::Recursive)
         .await
         .expect("delete retained descendant subtree");
@@ -957,14 +926,23 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
                 .advance_retention_floor(loonfs_core::RetentionTarget::Head)
                 .await
                 .expect("advance retention before compaction");
-            // The floor has passed the deletion of /grave, so the writer can
-            // expire it, and each group's base compaction then removes the
-            // rows of the three inodes that the deletion hides.
-            harness.expire(grave, grave_deletion.committed_seq).await;
-            harness.engine.fold_wal().await.expect("fold the expiry");
+            // The floor has passed the deletions of /old and /grave, so both
+            // have expired. The next commit's WAL object records the new
+            // floor, its fold acknowledges the floor, and each group's base
+            // compaction then removes the rows of the four inodes that the
+            // deletions hide.
+            harness
+                .put_file(
+                    "/moved/live.txt",
+                    b"live four",
+                    DestinationBehavior::Replace,
+                )
+                .await
+                .expect("a commit after the advance");
+            harness.engine.fold_wal().await.expect("fold the commit");
             let inode_rows = harness.inode_rows().await;
-            drain_compaction(&harness, &expected, "after retention and expiry").await;
-            assert_eq!(harness.inode_rows().await, inode_rows - 3);
+            drain_compaction(&harness, &expected, "after retention").await;
+            assert_eq!(harness.inode_rows().await, inode_rows - 4);
         }
     }
 

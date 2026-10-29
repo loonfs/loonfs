@@ -1538,7 +1538,7 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Lists the namespace's recoverable deletions, oldest deletion first.
     /// A deletion stays listed until it's undeleted, or until the retention
-    /// floor reaches it and the writer expires it.
+    /// floor reaches it and it expires.
     pub fn list_trash(&self) -> TrashPager {
         self.list_trash_with_options(&ListTrashOptions::default())
     }

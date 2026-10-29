@@ -246,14 +246,6 @@ pub(super) fn event_descriptor(event: &loonfs_types::api::v0::FilesystemChange) 
         FilesystemChange::Undeleted { display_name, .. } => {
             format!("undelete '{display_name}'")
         }
-        FilesystemChange::DeletionExpired {
-            inode_id,
-            deletion_seq,
-        } => format!(
-            "expire deletion of inode {} from seq {}",
-            public_inode_id(*inode_id),
-            deletion_seq.0
-        ),
         FilesystemChange::AttributesChanged {
             inode_id,
             attributes_revision_no,

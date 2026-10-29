@@ -158,17 +158,13 @@ impl MetadataState {
     }
 
     /// Whether the newest tombstone event for `root_inode_id` at or below
-    /// `seq` is a set or an expire. An expire ends the deletion's
-    /// recoverability but restores nothing, so the subtree stays hidden.
+    /// `seq` is a set.
     fn is_hidden_root(&self, root_inode_id: InodeId, seq: ChangeSeq) -> bool {
         self.subtree_tombstones
             .iter()
             .filter(|event| event.root_inode_id == root_inode_id && event.committed_seq <= seq)
             .max_by_key(|event| (event.committed_seq, event.delta_index))
-            .is_some_and(|event| match event.action {
-                SubtreeTombstoneAction::Set { .. } | SubtreeTombstoneAction::Expire { .. } => true,
-                SubtreeTombstoneAction::Revoke { .. } => false,
-            })
+            .is_some_and(|event| matches!(event.action, SubtreeTombstoneAction::Set { .. }))
     }
 }
 

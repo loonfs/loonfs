@@ -1,5 +1,5 @@
-//! The inode routes' responses for a file whose deletion the namespace's
-//! writer expired.
+//! The inode routes' responses for a file whose deletion the retention floor
+//! reached.
 
 use super::direct_download::LoopbackIssuer;
 use super::fixtures::{test_app, test_options, TestAppOptions};
@@ -7,15 +7,11 @@ use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs::{DeleteDirectoryBehavior, DeleteOptions, SharedObjectStore};
-use loonfs_core::publish::NamespaceCommitEngine;
-use loonfs_core::time::Deadline;
-use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::DirectTransferIssuers;
-use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_types::{public_inode_id, CommitId, ErrorCode, ErrorResponse, ExpiredDeletion};
+use loonfs_types::{public_inode_id, ErrorCode, ErrorResponse};
 use std::sync::Arc;
 use tower::ServiceExt as _;
 
@@ -31,9 +27,9 @@ const INODE_ROUTES: [(&str, &str, bool); 7] = [
     ("POST", "/revisions/1/downloads", true),
 ];
 
-/// Deletes `/kept.txt`, deletes `/old` with `/old/notes.txt` in it, and
-/// expires the deletion of `/old`, before the server starts. Returns the
-/// public inode IDs of the two files.
+/// Deletes `/old` with `/old/notes.txt` in it, then deletes `/kept.txt`, and
+/// advances the retention floor to the deletion of `/old`, before the server
+/// starts. Returns the public inode IDs of the two files.
 async fn expire_old(store: &SharedObjectStore) -> (String, String) {
     let namespace_id = namespace_id("demo");
     let actor = test_actor();
@@ -49,13 +45,9 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
         namespace.put_file(path, b"one", &actor).await.expect("put");
     }
     let mut inodes = Vec::new();
-    for path in ["/kept.txt", "/old/notes.txt", "/old"] {
+    for path in ["/kept.txt", "/old/notes.txt"] {
         inodes.push(namespace.stat(path).await.expect("stat").inode_id);
     }
-    namespace
-        .delete_path("/kept.txt", &actor)
-        .await
-        .expect("delete file");
     let deletion = namespace
         .delete_path_with_options(
             "/old",
@@ -67,6 +59,10 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
         )
         .await
         .expect("delete directory");
+    namespace
+        .delete_path("/kept.txt", &actor)
+        .await
+        .expect("delete file");
     writer.shutdown().await.expect("writer shutdown");
     // The floor passes a commit once it's one grace window old, so this
     // engine's clock is that far ahead of the writer's.
@@ -74,38 +70,20 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
     clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
     let maintenance = loonfs_core::NamespaceWriterEngine::writer(
         store.clone(),
-        namespace_id.clone(),
-        writer_id("expiry-writer"),
+        namespace_id,
+        writer_id("maintainer"),
         Arc::new(loonfs_core::test_support::content_writes()),
     )
     .with_wall_clock(clock);
     maintenance.fold_wal().await.expect("fold the deletion");
-    maintenance
+    let advanced = maintenance
         .advance_retention_floor(loonfs_core::RetentionTarget::Seq(deletion.committed_seq))
         .await
         .expect("advance the floor to the deletion");
-    NamespaceCommitEngine::new(
-        namespace_id,
-        Arc::new(loonfs_core::test_support::content_writes()),
-    )
-    .publish_expiry(
-        store,
-        CommitId::generate(),
-        vec![ExpiredDeletion {
-            inode_id: inodes[2],
-            deletion_seq: deletion.committed_seq,
-        }],
-        &MutationContext {
-            writer_id: writer_id("expiry-writer"),
-            now_ms: 1_000,
-        },
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .pop()
-    .expect("one result")
-    .expect("expire the deletion");
+    assert_eq!(
+        advanced.response.retention_floor_seq,
+        deletion.committed_seq
+    );
     (
         public_inode_id::encode(inodes[0]),
         public_inode_id::encode(inodes[1]),

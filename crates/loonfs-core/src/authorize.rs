@@ -144,7 +144,8 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
     /// Requires `rights` on `inode_id`, plus `history` for a snapshot read.
     ///
     /// In an ACL namespace, a snapshot read of an inode that an expired
-    /// deletion hides at the head, or whose ancestry is disconnected there,
+    /// deletion hides at the head (a deletion at or below the head
+    /// manifest's retention floor), or whose ancestry is disconnected there,
     /// also requires an administrator, so any other subject gets the
     /// not-found error that a live read gives
     /// ([API section 6.8](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#authorization-in-acl-namespaces)).

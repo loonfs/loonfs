@@ -1,31 +1,26 @@
-//! Reads by inode ID of a subtree whose deletion the writer expired, and the
-//! trash listing of a fork.
+//! Reads by inode ID of a subtree whose deletion the retention floor
+//! reached, and the trash listing of a fork.
 
 use loonfs::{
-    AccessState, ChangeSeq, CommitId, CreateNamespaceOptions, CreateSnapshotOptions,
-    DeleteDirectoryBehavior, DeleteOptions, ErrorCode, InodeId, LoonFs, Namespace, PinId, ReadAt,
-    ReadOnly, RevisionNo, SharedObjectStore, StatOptions, Writable,
+    AccessState, ChangeSeq, CreateNamespaceOptions, CreateSnapshotOptions, DeleteDirectoryBehavior,
+    DeleteOptions, ErrorCode, InodeId, LoonFs, Namespace, PinId, ReadAt, ReadOnly, RevisionNo,
+    SharedObjectStore, StatOptions, Writable,
 };
-use loonfs_core::publish::NamespaceCommitEngine;
-use loonfs_core::time::Deadline;
-use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
 use loonfs_types::{
-    AccessGrants, AccessRight, AttributeInclusion, ExpiredDeletion, NamespaceAccess, NamespaceId,
-    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, AttributeInclusion, NamespaceAccess, NamespaceId, PrincipalId,
+    PrincipalScope, PrincipalSet, Subject, SubjectId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// Commits the writer's expiry of one deletion through a commit engine of
-/// its own.
-async fn expire(
+/// Advances the retention floor to `deletion_seq` through an engine of its
+/// own, which expires the deletion committed there and every older one.
+async fn advance_floor_through(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-    inode_id: InodeId,
     deletion_seq: ChangeSeq,
 ) {
     // The floor passes a commit once it's one grace window old, so this
@@ -35,37 +30,16 @@ async fn expire(
     let maintenance = loonfs_core::NamespaceWriterEngine::writer(
         store.clone(),
         namespace_id.clone(),
-        writer_id("expiry-writer"),
+        writer_id("maintainer"),
         Arc::new(loonfs_core::test_support::content_writes()),
     )
     .with_wall_clock(clock);
     maintenance.fold_wal().await.expect("fold the deletion");
-    maintenance
+    let advanced = maintenance
         .advance_retention_floor(loonfs_core::RetentionTarget::Seq(deletion_seq))
         .await
         .expect("advance the floor to the deletion");
-    NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        Arc::new(loonfs_core::test_support::content_writes()),
-    )
-    .publish_expiry(
-        store,
-        CommitId::generate(),
-        vec![ExpiredDeletion {
-            inode_id,
-            deletion_seq,
-        }],
-        &MutationContext {
-            writer_id: writer_id("expiry-writer"),
-            now_ms: 1_000,
-        },
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .pop()
-    .expect("one result")
-    .expect("expire the deletion");
+    assert_eq!(advanced.response.retention_floor_seq, deletion_seq);
 }
 
 /// A runtime that confirms the head on every read, so it sees a commit that
@@ -164,6 +138,12 @@ fn recursive() -> DeleteOptions {
     }
 }
 
+/// Checks that every read by inode ID refuses an inode under a deletion at or
+/// below the floor and serves the history of one under a deletion above it,
+/// with nested deletions: `/old/draft.txt` is deleted on its own before
+/// `/old`, so a floor between the two deletions expires the inner one and
+/// leaves the outer one recoverable, and a floor at `/old`'s deletion
+/// expires both.
 #[tokio::test]
 async fn every_read_by_inode_refuses_an_expired_subtree_and_serves_a_recoverable_deletion() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -187,38 +167,45 @@ async fn every_read_by_inode_refuses_an_expired_subtree_and_serves_a_recoverable
         namespace.put_file(path, b"one", &actor).await.expect("put");
         inodes.insert(path, namespace.stat(path).await.expect("stat").inode_id);
     }
-    let old = namespace
-        .stat("/old")
+    let inner = namespace
+        .delete_path("/old/draft.txt", &actor)
         .await
-        .expect("stat directory")
-        .inode_id;
-    // `/old/draft.txt` is deleted on its own first, so its deletion stays
-    // recoverable after the deletion of `/old` around it expires.
-    for path in ["/kept.txt", "/old/draft.txt"] {
-        namespace.delete_path(path, &actor).await.expect("delete");
-    }
-    let deletion = namespace
+        .expect("delete")
+        .committed_seq;
+    namespace
+        .delete_path("/kept.txt", &actor)
+        .await
+        .expect("delete");
+    let outer = namespace
         .delete_path_with_options("/old", &actor, &recursive())
         .await
-        .expect("delete directory");
-    expire(&store, &namespace_id, old, deletion.committed_seq).await;
+        .expect("delete directory")
+        .committed_seq;
 
-    let namespace = reader(&store).await.namespace(&namespace_id);
     let not_found = Err(ErrorCode::InodeNotFound);
-    for (path, recoverable) in [
-        ("/kept.txt", true),
-        ("/old/draft.txt", true),
-        ("/old/notes.txt", false),
+    for (floor_seq, recoverable) in [
+        (inner, vec!["/kept.txt", "/old/notes.txt"]),
+        (outer, Vec::new()),
     ] {
-        let (current, history) = reads_by_inode(&namespace, inodes[path]).await;
-        // A deleted inode has no current entry or content, so only the
-        // history reads serve a recoverable deletion.
-        for (read, outcome) in current {
-            assert_eq!(outcome, not_found, "{path}: {read}");
-        }
-        let expected = if recoverable { Ok(()) } else { not_found };
-        for (read, outcome) in history {
-            assert_eq!(outcome, expected, "{path}: {read}");
+        advance_floor_through(&store, &namespace_id, floor_seq).await;
+        // A view compares each deletion with the floor of its own manifest,
+        // so a reader started after the advance reads the new floor.
+        let namespace = reader(&store).await.namespace(&namespace_id);
+        for path in ["/kept.txt", "/old/draft.txt", "/old/notes.txt"] {
+            let (current, history) = reads_by_inode(&namespace, inodes[path]).await;
+            // A deleted inode has no current entry or content, so only the
+            // history reads serve a recoverable deletion.
+            for (read, outcome) in current {
+                assert_eq!(outcome, not_found, "floor {floor_seq}, {path}: {read}");
+            }
+            let expected = if recoverable.contains(&path) {
+                Ok(())
+            } else {
+                not_found
+            };
+            for (read, outcome) in history {
+                assert_eq!(outcome, expected, "floor {floor_seq}, {path}: {read}");
+            }
         }
     }
 }
@@ -294,7 +281,7 @@ async fn history_reads(
 /// The example in the retention window design note: `/team` grants a team
 /// `read` and `history`, and `/team/hr` sets its boundary and grants the same
 /// rights to one person. A snapshot from before the deletion still serves
-/// the administrator after the expiry.
+/// the administrator once the floor reaches the deletion.
 #[tokio::test]
 async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
     use AccessRight::{History, Read};
@@ -344,7 +331,6 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
         .put_file("/team/hr/salaries.csv", b"salaries", &actor)
         .await
         .expect("put file");
-    let hr = namespace.stat("/team/hr").await.expect("stat").inode_id;
     let salaries = namespace
         .stat("/team/hr/salaries.csv")
         .await
@@ -360,11 +346,15 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
         .await
         .expect("delete directory");
 
-    let reader = reader(&store).await;
     let subjects = [subject("bob", "team"), subject("ada", "ada"), admin];
     let ok = [Ok(()); 4];
     let not_found = [Err(ErrorCode::InodeNotFound); 4];
-    let reads = || history_reads(&reader, &namespace_id, &subjects, salaries, &snapshot_id);
+    // A view compares each deletion with the floor of its own manifest, so
+    // each round of reads starts a reader that reads the current floor.
+    let reads = || async {
+        let reader = reader(&store).await;
+        history_reads(&reader, &namespace_id, &subjects, salaries, &snapshot_id).await
+    };
     assert_eq!(
         reads().await,
         vec![
@@ -374,7 +364,7 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
         ],
         "while the deletion is recoverable, the boundary keeps the team out"
     );
-    expire(&store, &namespace_id, hr, deletion.committed_seq).await;
+    advance_floor_through(&store, &namespace_id, deletion.committed_seq).await;
     let mut snapshot_only = not_found;
     snapshot_only[3] = Ok(());
     assert_eq!(

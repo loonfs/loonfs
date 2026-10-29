@@ -2,10 +2,8 @@
 //! candidates as one numbered WAL put, then returns
 //! one result per candidate.
 
-mod deletion_expiry;
-
 use crate::authorize::CommitAuthority;
-use crate::commit::{CommitFingerprint, DeletionExpiry};
+use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::{MetadataRunPolicy, MetadataSegmentCache, PublishedManifest};
@@ -22,15 +20,14 @@ use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, MonotonicTimer, Observation, StdMonotonicTimer};
 use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
-use deletion_expiry::DeletionExpiryState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
 use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
 use loonfs_types::{
-    CommitId, ContentId, ContentRef, DeleteNamespaceResponse, ExpiredDeletion,
-    InlineContentIdentity, ManifestNo, NamespaceId,
+    CommitId, ContentId, ContentRef, DeleteNamespaceResponse, InlineContentIdentity, ManifestNo,
+    NamespaceId,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -48,22 +45,23 @@ pub struct CommitCandidate {
 
 /// What a candidate commits, and whose authority it commits under.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CandidateRequest {
+enum CandidateRequest {
     /// Filesystem operations, authorized against the intent's subject.
     Intent(CommitIntent),
     /// Filesystem operations that maintenance commits with no subject check.
     Maintenance(CommitIntent),
-    /// The writer's expiry of deletions, which no subject check applies to.
-    /// An expiry includes no content, so its candidate's content fields stay
-    /// empty.
-    Expiry(DeletionExpiry),
 }
 
 impl CandidateRequest {
-    fn intent(&self) -> Option<&CommitIntent> {
+    fn intent(&self) -> &CommitIntent {
         match self {
-            Self::Intent(intent) | Self::Maintenance(intent) => Some(intent),
-            Self::Expiry(_) => None,
+            Self::Intent(intent) | Self::Maintenance(intent) => intent,
+        }
+    }
+
+    fn intent_mut(&mut self) -> &mut CommitIntent {
+        match self {
+            Self::Intent(intent) | Self::Maintenance(intent) => intent,
         }
     }
 }
@@ -102,12 +100,8 @@ impl CommitCandidate {
     /// Uses the handle subject to authorize this publication.
     pub fn with_subject(mut self, subject: loonfs_types::Subject) -> Self {
         let mut intent = match self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => {
-                Some(intent)
-            }
-            CandidateRequest::Expiry(_) => None,
-        }
-        .expect("only a filesystem request takes a subject, and an expiry is the writer's own");
+            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => intent,
+        };
         intent.subject = Some(subject);
         self.request = CandidateRequest::Intent(intent);
         self
@@ -115,7 +109,7 @@ impl CommitCandidate {
 
     /// Supplies the subject used to own content staged for this candidate.
     pub fn subject(&self) -> Option<&loonfs_types::Subject> {
-        self.intent()?.subject.as_ref()
+        self.intent().subject.as_ref()
     }
 
     /// A commit no subject check applies to. Only maintenance builds one.
@@ -123,17 +117,10 @@ impl CommitCandidate {
         Self::with_request(CandidateRequest::Maintenance(intent))
     }
 
-    /// The writer's commit that expires `expiry`'s deletions.
-    pub(crate) fn expiry(expiry: DeletionExpiry) -> Self {
-        Self::with_request(CandidateRequest::Expiry(expiry))
-    }
-
     pub(crate) fn authority(&self) -> CommitAuthority<'_> {
         match &self.request {
             CandidateRequest::Intent(intent) => CommitAuthority::Subject(intent.subject.as_ref()),
-            CandidateRequest::Maintenance(_) | CandidateRequest::Expiry(_) => {
-                CommitAuthority::Maintenance
-            }
+            CandidateRequest::Maintenance(_) => CommitAuthority::Maintenance,
         }
     }
 
@@ -201,9 +188,7 @@ impl CommitCandidate {
 
     /// Lists inline values in the order their operations first name them.
     pub fn ordered_inline_content(&self, namespace_id: &NamespaceId) -> Result<Vec<InlineContent>> {
-        let Some(intent) = self.intent() else {
-            return Ok(Vec::new());
-        };
+        let intent = self.intent();
         crate::protocol::validate_inline_content_references(
             intent,
             &self.inline_content,
@@ -225,13 +210,7 @@ impl CommitCandidate {
     /// Replaces an inline value with a staged proof without changing its identity form.
     pub fn stage_inline_content(&mut self, content_id: &ContentId, proof: PreparedContent) {
         let reference = proof.content_ref();
-        let operations: &mut [FilesystemOperation] = match &mut self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => {
-                &mut intent.operations
-            }
-            CandidateRequest::Expiry(_) => &mut [],
-        };
-        for operation in operations {
+        for operation in &mut self.request.intent_mut().operations {
             match operation {
                 FilesystemOperation::PutFile {
                     content_ref: Some(content_ref),
@@ -297,7 +276,8 @@ impl CommitCandidate {
 
     /// Bytes the request's appends add. They always travel in the WAL.
     pub fn appended_bytes(&self) -> usize {
-        self.filesystem_operations()
+        self.intent()
+            .operations
             .iter()
             .filter_map(FilesystemOperation::appended_content)
             .fold(0usize, |total, bytes| total.saturating_add(bytes.len()))
@@ -306,7 +286,7 @@ impl CommitCandidate {
     /// Rejects an append of no bytes or of more than one WAL piece holds,
     /// naming the operation.
     pub fn validate_appended_content(&self) -> Result<()> {
-        for (index, operation) in self.filesystem_operations().iter().enumerate() {
+        for (index, operation) in self.intent().operations.iter().enumerate() {
             let Some(bytes) = operation.appended_content() else {
                 continue;
             };
@@ -329,33 +309,14 @@ impl CommitCandidate {
         Ok(())
     }
 
-    pub(crate) fn request(&self) -> &CandidateRequest {
-        &self.request
-    }
-
-    /// The filesystem request the candidate commits, unless it's an expiry.
-    pub(crate) fn intent(&self) -> Option<&CommitIntent> {
+    /// The filesystem request the candidate commits.
+    pub(crate) fn intent(&self) -> &CommitIntent {
         self.request.intent()
     }
 
     #[cfg(test)]
     pub(crate) fn intent_mut(&mut self) -> &mut CommitIntent {
-        match &mut self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => {
-                Some(intent)
-            }
-            CandidateRequest::Expiry(_) => None,
-        }
-        .expect("a test edits the operations of a filesystem request")
-    }
-
-    /// The filesystem operations the candidate commits, which an expiry has
-    /// none of.
-    fn filesystem_operations(&self) -> &[FilesystemOperation] {
-        match self.intent() {
-            Some(intent) => &intent.operations,
-            None => &[],
-        }
+        self.request.intent_mut()
     }
 
     pub(crate) fn content_preparation(&self) -> &ContentPreparation {
@@ -364,23 +325,14 @@ impl CommitCandidate {
 
     /// Returns the idempotency key carried by the mutation request.
     pub fn commit_id(&self) -> &CommitId {
-        match &self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => {
-                &intent.commit_id
-            }
-            CandidateRequest::Expiry(expiry) => expiry.commit_id(),
-        }
+        &self.intent().commit_id
     }
 
     /// Computes semantic identity without applying current operational request limits.
     pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> Result<CommitFingerprint> {
-        let intent = match &self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => intent,
-            CandidateRequest::Expiry(expiry) => return Ok(expiry.semantic_identity(namespace_id)),
-        };
         commit_fingerprint(
             namespace_id,
-            intent,
+            self.intent(),
             &self
                 .inline_content
                 .iter()
@@ -440,14 +392,7 @@ impl CommitCandidate {
         &self,
         retained_inline_content: &[InlineContent],
     ) -> Result<usize> {
-        let intent = match &self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => intent,
-            CandidateRequest::Expiry(expiry) => {
-                return Ok(std::mem::size_of_val(self)
-                    .saturating_add(std::mem::size_of_val(expiry.deletions()))
-                    .saturating_add(expiry.commit_id().as_str().len()));
-            }
-        };
+        let intent = self.intent();
         let mut bytes = RequestByteCounter(
             std::mem::size_of_val(self)
                 .saturating_add(std::mem::size_of_val(intent.operations.as_slice()))
@@ -530,14 +475,7 @@ impl CommitCandidate {
         &self,
         inline_content: &[InlineContent],
     ) -> usize {
-        match &self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => {
-                crate::commit_wal_size::estimated_wal_record_bytes(intent, inline_content)
-            }
-            CandidateRequest::Expiry(expiry) => {
-                crate::commit_wal_size::estimated_expiry_record_bytes(expiry)
-            }
-        }
+        crate::commit_wal_size::estimated_wal_record_bytes(self.intent(), inline_content)
     }
 
     /// Bounds the planned WAL record, which can carry layouts that the
@@ -547,45 +485,26 @@ impl CommitCandidate {
         deltas: &[loonfs_types::format::wal::WalCommitDelta],
         appended: &[loonfs_types::format::wal::WalInlineContent],
     ) -> usize {
-        match &self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => {
-                crate::commit_wal_size::planned_wal_record_bytes(
-                    intent,
-                    &self.inline_content,
-                    deltas,
-                    appended,
-                )
-            }
-            CandidateRequest::Expiry(expiry) => {
-                crate::commit_wal_size::estimated_expiry_record_bytes(expiry)
-            }
-        }
-    }
-
-    /// The number of operations the request commits.
-    fn operation_count(&self) -> usize {
-        match &self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => {
-                intent.operations.len()
-            }
-            CandidateRequest::Expiry(expiry) => expiry.deletions().len(),
-        }
+        crate::commit_wal_size::planned_wal_record_bytes(
+            self.intent(),
+            &self.inline_content,
+            deltas,
+            appended,
+        )
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
         // Apply limits to the complete request because the serialized publisher
         // processes every operation before releasing the write path.
         self.validate_request_has_operations()?;
-        if self.operation_count() > crate::limits::MAX_COMMIT_OPERATIONS {
+        let intent = self.intent();
+        if intent.operations.len() > crate::limits::MAX_COMMIT_OPERATIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {} operations; maximum is {}",
-                self.operation_count(),
+                intent.operations.len(),
                 crate::limits::MAX_COMMIT_OPERATIONS
             )));
         }
-        let Some(intent) = self.intent() else {
-            return Ok(());
-        };
         if intent.preconditions.len() > crate::limits::MAX_COMMIT_PRECONDITIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {} preconditions; maximum is {}",
@@ -646,7 +565,7 @@ impl CommitCandidate {
     }
 
     pub(crate) fn validate_request_has_operations(&self) -> Result<()> {
-        if self.operation_count() == 0 {
+        if self.intent().operations.is_empty() {
             return Err(CoreError::InvalidCommitRequest(
                 "mutation request carries no operations".to_owned(),
             ));
@@ -767,9 +686,6 @@ pub struct NamespaceCommitEngine {
     /// Shared cache of decoded blocks used by publish-view reads. Blocks are
     /// keyed by segment digest. Successor probes verify that the view is current.
     segment_cache: Option<Arc<MetadataSegmentCache>>,
-    /// How far this session has expired the deletions that the retention
-    /// floor reaches. It stays with the session when the position drops.
-    deletion_expiry: DeletionExpiryState,
     /// The newest manifest that this engine published itself (the claim of
     /// the session's writer epoch, or a tombstone) and that
     /// [`Self::take_published_manifest_no`] hasn't returned yet.
@@ -788,7 +704,6 @@ impl NamespaceCommitEngine {
             session: SharedWriterSessionStatus::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
-            deletion_expiry: DeletionExpiryState::new(),
             published_manifest_no: None,
         }
     }
@@ -974,8 +889,6 @@ impl NamespaceCommitEngine {
             acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
         let acquired_writer = acquisition.writer;
         self.record_published_manifest_no(acquisition.claim_manifest_no);
-        self.deletion_expiry
-            .open_session(&acquisition.anchor.read_state);
         self.acquired_anchor = Some(acquisition.anchor);
         let mut session = self.lock_session();
         if let WriterSessionStatus::Fenced(fence) = &*session {
@@ -1032,64 +945,7 @@ impl NamespaceCommitEngine {
         }
     }
 
-    /// Publishes the writer's commit that expires `deletions`, in a batch of
-    /// its own, so no other commit is planned between the caller's choice of
-    /// deletions and their expiry.
-    ///
-    /// The commit is attributed to the actor `loonfs`, and no subject check
-    /// applies to it. Each deletion has to be its root's latest tombstone
-    /// event, as for an undelete, or the commit fails with `not_deleted`
-    /// ([File and subtree deletion](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
-    /// A retry after an unknown outcome passes the same `commit_id` and
-    /// `deletions`.
-    pub async fn publish_expiry<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        commit_id: CommitId,
-        deletions: Vec<ExpiredDeletion>,
-        context: &MutationContext,
-        batch: &Deadline,
-    ) -> NamespaceCommitEnginePublishResult {
-        let segment_cache = self.segment_cache.clone();
-        match self
-            .load_publish_view(store, segment_cache.as_deref(), context, batch)
-            .await
-        {
-            Ok(loaded) => {
-                self.publish_expiry_against(store, loaded, commit_id, deletions, context, batch)
-                    .await
-            }
-            Err(error) => failed_publication(1, error),
-        }
-    }
-
-    /// Publishes the writer's commit that expires `deletions` against
-    /// `loaded`, in a batch of its own (see [`Self::publish_expiry`]).
-    async fn publish_expiry_against<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        loaded: LoadedPublishView<'_, S>,
-        commit_id: CommitId,
-        deletions: Vec<ExpiredDeletion>,
-        context: &MutationContext,
-        batch: &Deadline,
-    ) -> NamespaceCommitEnginePublishResult {
-        let candidate = CommitCandidate::expiry(DeletionExpiry::new(commit_id, deletions));
-        self.publish_against(
-            store,
-            loaded,
-            std::slice::from_ref(&candidate),
-            context,
-            batch,
-        )
-        .await
-    }
-
     /// Retries share `batch` so content evidence continues aging.
-    ///
-    /// In a fork, a new session first expires every deletion at or below the
-    /// fork point, so the outcome of its first request doesn't depend on
-    /// timing ([Retention window](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#recoverable-and-expired-deletions)).
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
@@ -1105,29 +961,15 @@ impl NamespaceCommitEngine {
             };
         }
         let segment_cache = self.segment_cache.clone();
-        // Each pass that doesn't publish the batch expires at least one
-        // inherited deletion, so the loop runs once for each
-        // `MAX_EXPIRED_DELETIONS_PER_COMMIT` inherited deletions, plus once.
-        loop {
-            let loaded = match self
-                .load_publish_view(store, segment_cache.as_deref(), context, batch)
-                .await
-            {
-                Ok(loaded) => loaded,
-                Err(error) => return failed_publication(candidates.len(), error),
-            };
-            match self
-                .expire_inherited_deletions(store, loaded, context, batch)
-                .await
-            {
-                Ok(Some(loaded)) => {
-                    return self
-                        .publish_against(store, loaded, candidates, context, batch)
-                        .await;
-                }
-                Ok(None) => {}
-                Err(error) => return failed_publication(candidates.len(), error),
+        match self
+            .load_publish_view(store, segment_cache.as_deref(), context, batch)
+            .await
+        {
+            Ok(loaded) => {
+                self.publish_against(store, loaded, candidates, context, batch)
+                    .await
             }
+            Err(error) => failed_publication(candidates.len(), error),
         }
     }
 
@@ -1273,9 +1115,6 @@ impl NamespaceCommitEngine {
         if update.landed && self.publish_tail.is_some() {
             self.projection_observed = Some(attempt);
         }
-        if update.landed {
-            self.deletion_expiry.record_publication();
-        }
         NamespaceCommitEnginePublishResult {
             results: published.results,
             wal_tail: Some(WalTailReport {
@@ -1288,16 +1127,6 @@ impl NamespaceCommitEngine {
                 },
             }),
         }
-    }
-
-    /// Keeps the position that `loaded` planned against, for a unit that
-    /// published nothing.
-    fn keep_loaded_position<S: ObjectStore + ?Sized>(&mut self, loaded: LoadedPublishView<'_, S>) {
-        self.projection_observed = Some(loaded.projection_observed);
-        self.update_publish_tail_projection(
-            loaded.view.into_position(),
-            PublishViewEffect::Unchanged,
-        );
     }
 
     /// Folds one batch's effect into the unit's position and its tail, keeps

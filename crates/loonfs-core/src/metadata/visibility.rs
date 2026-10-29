@@ -23,6 +23,11 @@ use std::future::Future;
 pub(crate) trait MetadataVisibilityReads {
     type Error: From<VisiblePathError>;
 
+    /// The retention floor of the view's manifest. A deletion at or below it
+    /// has expired in the view
+    /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
+    fn retention_floor_seq(&self) -> ChangeSeq;
+
     /// The inode record created at or before the read seq, if any.
     async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error>;
 
@@ -40,7 +45,7 @@ pub(crate) trait MetadataVisibilityReads {
     ) -> Result<Option<DirentryBindingRecord>, Self::Error>;
 
     /// Latest tombstone event rooted at `root_inode_id` at the read seq, when
-    /// that event hides the subtree (a `set` or an `expire`).
+    /// that event hides the subtree (a `set`).
     async fn find_hiding_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
@@ -190,9 +195,10 @@ pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
 
 /// The first hiding subtree tombstone rooted at `inode_id` or at any of its
 /// current ancestors (following current parent bindings upward). A
-/// recoverable deletion and an expired one both hide their subtree. A walk
-/// that revisits an inode found a parent-binding cycle, which is corrupt
-/// stored metadata: answering "not covered" could show a deleted subtree.
+/// recoverable deletion and an expired one both hide their subtree, so the
+/// rule doesn't read the retention floor. A walk that revisits an inode
+/// found a parent-binding cycle, which is corrupt stored metadata: answering
+/// "not covered" could show a deleted subtree.
 pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
@@ -226,11 +232,13 @@ pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
 /// ([format section 4.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#44-paths-listings-and-revision-reads)).
 ///
 /// The walk follows current bound edges up from the inode and stops at the
-/// first tombstone that hides the inode or an ancestor. An `expire` refuses
-/// the read, and a `set` allows it, because a recoverable deletion's rights
-/// are judged on its saved ancestry, so the walk doesn't continue above a
-/// recoverable root. Reaching the root inode without a tombstone allows the
-/// read. Reaching an inode with no bound edge before any tombstone means the
+/// first tombstone that hides the inode or an ancestor (a `set`; a `revoke`
+/// hides nothing, so the walk passes it). A deletion at or below the view's
+/// retention floor has expired, which refuses the read. A deletion above the
+/// floor allows it, because a recoverable deletion's rights are judged on
+/// its saved ancestry, so the walk doesn't continue above a recoverable
+/// root. Reaching the root inode without a tombstone allows the read.
+/// Reaching an inode with no bound edge before any tombstone means the
 /// ancestry is disconnected, which refuses the read. Every live inode has
 /// bound edges up to the root, and every deleted inode has them up to its
 /// deletion's root, which has a tombstone, so a chain that breaks before
@@ -250,7 +258,7 @@ pub(crate) async fn ancestry_allows_read<R: MetadataVisibilityReads>(
             return Err(VisiblePathError::ParentBindingCycle { inode_id: current }.into());
         }
         if let Some(tombstone) = reads.find_hiding_subtree_tombstone(current).await? {
-            return Ok(tombstone.action.is_recoverable());
+            return Ok(tombstone.committed_seq > reads.retention_floor_seq());
         }
         match reads.current_parent_binding_for_child(current).await? {
             Some(binding) => current = binding.parent_inode_id,
@@ -502,6 +510,12 @@ impl MetadataState {
 
 impl MetadataVisibilityReads for MetadataStateReads<'_> {
     type Error = VisiblePathError;
+
+    /// In-memory state has no manifest, so like a new namespace's first
+    /// manifest, it has a floor of 0 and no deletion in it has expired.
+    fn retention_floor_seq(&self) -> ChangeSeq {
+        ChangeSeq(0)
+    }
 
     async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
         Ok(if self.base_seq >= self.state.indexed_seq() {

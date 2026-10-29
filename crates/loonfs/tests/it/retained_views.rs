@@ -448,8 +448,10 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 .expect("trash listing");
             assert!(trash.next_cursor.is_none());
             // The fork's listing starts above its fork point, so it leaves
-            // out the deletion that the fork inherited.
-            let listed = usize::from(namespace == &source);
+            // out the deletion that the fork inherited, and the source's
+            // listing leaves it out once the source's floor passes it.
+            let listed =
+                usize::from(namespace == &source && matches!(stage, "cold" | "folded" | "forked"));
             assert_eq!(trash.entries.len(), listed, "{stage}: {namespace}");
             if let Some(entry) = trash.entries.first() {
                 assert_eq!(entry.inode_id, deleted_inode);

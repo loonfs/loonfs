@@ -910,81 +910,87 @@ async fn restore_revision_overflow_is_rejected() {
     );
 }
 
-/// An expiry, like an undelete, applies only while the deletion it names is
-/// its root's latest tombstone event.
+/// Deletes `/docs` (inode 2), whose binding was published at `bound_at`:
+/// unbinds it, then records the tombstone's `set` at delta index 1.
+fn wal_delete_docs(bound_at: DeltaPosition) -> Vec<WalDelta> {
+    let mut deltas = vec![WalDelta::UnbindDirentry {
+        delta_index: 0,
+        parent_inode_id: InodeId(1),
+        name_key: NameKey::parse("docs").expect("valid name key"),
+        display_name: test_display_name("docs"),
+        child_inode_id: InodeId(2),
+        child_kind: InodeKind::Directory,
+        child_created_by: loonfs_types::ActorId::loonfs(),
+        child_created_at_ms: 4_200,
+        target: bound_at,
+    }];
+    deltas.extend(wal_tombstone(1, InodeId(2)));
+    deltas
+}
+
+/// An undelete applies only while the deletion it names is its root's
+/// latest tombstone event, so a stale request can't cancel a later deletion.
 #[tokio::test]
-async fn an_expiry_applies_only_while_its_deletion_is_the_roots_latest_event() {
-    let deletion = DeltaPosition {
-        seq: ChangeSeq(2),
-        delta_index: 0,
+async fn an_undelete_applies_only_while_its_deletion_is_the_roots_latest_event() {
+    let position = |seq, delta_index| DeltaPosition {
+        seq: ChangeSeq(seq),
+        delta_index,
     };
-    let revoke = vec![WalDelta::RevokeSubtreeTombstone {
-        delta_index: 0,
-        root_inode_id: InodeId(2),
-        target: deletion,
-    }];
-    let expire = vec![WalDelta::ExpireSubtreeTombstone {
-        delta_index: 0,
-        root_inode_id: InodeId(2),
-        target: deletion,
-    }];
-    let expire_at = |seq| CommitOperation::ExpireDeletion {
-        inode_id: InodeId(2),
-        deletion_seq: ChangeSeq(seq),
-    };
+    let deletion = position(2, 1);
     let undelete_at = |seq| CommitOperation::Undelete {
         inode_id: InodeId(2),
         deletion_seq: ChangeSeq(seq),
         parent_inode_id: InodeId(1),
         display_name: test_display_name("docs"),
     };
-    let not_deleted = |operand| CommitValidationError::TargetNotDeleted {
-        operand,
+    // An undelete at sequence 3: the revoke, then the binding at delta 1.
+    let mut undeleted = vec![WalDelta::RevokeSubtreeTombstone {
+        delta_index: 0,
+        root_inode_id: InodeId(2),
+        target: deletion,
+    }];
+    undeleted.extend(
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned())
+            .into_iter()
+            .skip(1),
+    );
+    let not_deleted = CommitValidationError::UndeleteTargetNotDeleted {
         inode_id: InodeId(2),
     };
     let cases = [
         (
-            "expired twice in one commit",
+            "undeleted twice in one commit",
             Vec::new(),
-            vec![expire_at(2), expire_at(2)],
-            not_deleted(CommitOperand::ExpireTarget),
+            vec![undelete_at(2), undelete_at(2)],
+            not_deleted.clone(),
         ),
         (
             "already undeleted",
-            vec![revoke.clone()],
-            vec![expire_at(2)],
-            not_deleted(CommitOperand::ExpireTarget),
-        ),
-        (
-            "already expired",
-            vec![expire.clone()],
-            vec![expire_at(2)],
-            not_deleted(CommitOperand::ExpireTarget),
-        ),
-        (
-            "undeleted after it expired",
-            vec![expire],
+            vec![undeleted.clone()],
             vec![undelete_at(2)],
-            not_deleted(CommitOperand::UndeleteTarget),
+            not_deleted,
         ),
         (
             "deleted again since",
-            vec![revoke, wal_tombstone(0, InodeId(2))],
-            vec![expire_at(2)],
-            CommitValidationError::DeletionSequenceMismatch {
-                operand: CommitOperand::ExpireTarget,
+            vec![undeleted, wal_delete_docs(position(3, 1))],
+            vec![undelete_at(2)],
+            CommitValidationError::UndeleteSequenceMismatch {
                 inode_id: InodeId(2),
                 requested_seq: ChangeSeq(2),
                 active_seq: ChangeSeq(4),
             },
         ),
     ];
-    for (name, later, ops, expected) in cases {
+    let history = |later: Vec<Vec<WalDelta>>| {
         let mut history = vec![
             wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
-            wal_tombstone(0, InodeId(2)),
+            wal_delete_docs(position(1, 1)),
         ];
         history.extend(later);
+        history
+    };
+    for (name, later, ops, expected) in cases {
+        let history = history(later);
         let metadata_state = metadata_state_after(&history);
         let head_seq = ChangeSeq(u64::try_from(history.len()).expect("seq"));
         let context = validation_context(&metadata_state, head_seq, InodeId(3));
@@ -999,23 +1005,22 @@ async fn an_expiry_applies_only_while_its_deletion_is_the_roots_latest_event() {
         );
     }
 
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
-        wal_tombstone(0, InodeId(2)),
-    ]);
+    let metadata_state = metadata_state_after(&history(Vec::new()));
     let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(3));
-    let plan = build_commit_plan(&[expire_at(2)], 4_200, &context)
+    let plan = build_commit_plan(&[undelete_at(2)], 4_200, &context)
         .await
-        .expect("expire the latest deletion");
-    assert_eq!(
-        plan.deltas,
-        vec![WalCommitDelta {
-            semantic_operation_index: 0,
-            delta: WalDelta::ExpireSubtreeTombstone {
-                delta_index: 0,
-                root_inode_id: InodeId(2),
-                target: deletion,
+        .expect("undelete the latest deletion");
+    assert_matches!(
+        plan.deltas.as_slice(),
+        [
+            WalCommitDelta {
+                delta: WalDelta::RevokeSubtreeTombstone { target, .. },
+                ..
             },
-        }]
+            WalCommitDelta {
+                delta: WalDelta::BindDirentry { .. },
+                ..
+            },
+        ] if *target == deletion
     );
 }

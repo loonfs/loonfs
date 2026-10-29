@@ -108,9 +108,9 @@ impl PublishTailPosition {
     /// basis's head keeps that directory, which is why it keeps the tail
     /// instead of cutting it.
     ///
-    /// A position that moves takes the manifest's retention floor, which is
-    /// how the session finds that a retention advance raised the floor (see
-    /// `NamespaceCommitEngine::expiry_due`).
+    /// A position that moves takes the manifest's retention floor, so the
+    /// session validates its next commits against a floor that a retention
+    /// advance raised, and its next WAL object records that floor.
     ///
     /// The rule doesn't depend on whether this runtime or another process
     /// published the manifest, or on the order in which manifests arrive.

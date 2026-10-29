@@ -15,7 +15,7 @@ use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::format::manifest::{
     ActiveDeletionRowAction, DeletedBinding, DeltaPosition, InodeRecord,
 };
-use loonfs_types::{AttributeInclusion, EntryInodeKind, ExpiredDeletion, InodeKind};
+use loonfs_types::{AttributeInclusion, EntryInodeKind, InodeKind};
 use loonfs_types::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 use std::assert_matches;
 use std::sync::Arc;
@@ -60,19 +60,6 @@ fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> Subtre
         action: TombstoneRowAction::Revoke {
             target: position(target_seq),
         },
-    }
-}
-
-pub(super) fn tombstone_expire(
-    root_inode_id: InodeId,
-    seq: u64,
-    target_seq: u64,
-) -> SubtreeTombstoneRecord {
-    SubtreeTombstoneRecord {
-        action: TombstoneRowAction::Expire {
-            target: position(target_seq),
-        },
-        ..tombstone_revoke(root_inode_id, seq, target_seq)
     }
 }
 
@@ -172,57 +159,55 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
 }
 
 #[test]
-fn a_removal_carries_the_undeletes_or_expirys_sequence_so_it_lands_in_that_commits_run() {
-    for cancel in [
+fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
+    let state = state_from_tombstones(vec![
+        tombstone_set(InodeId(7), 5, "notes.txt"),
         tombstone_revoke(InodeId(7), 9, 5),
-        tombstone_expire(InodeId(7), 9, 5),
-    ] {
-        let state = state_from_tombstones(vec![tombstone_set(InodeId(7), 5, "notes.txt"), cancel]);
-        assert_eq!(
-            active_deletion_rows(&state),
-            vec![
-                (
-                    "active-deletion-00000000000000000005-00000000000000000007-0000000000"
-                        .to_owned(),
-                    "removed"
-                ),
-                (
-                    "active-deletion-00000000000000000005-00000000000000000007-0000000001"
-                        .to_owned(),
-                    "listed"
-                ),
-            ],
-            "the removal repeats the deletion's own position"
-        );
-        let delta_rows = super::super::row::manifest_rows_for_family_after_seq(
-            &state,
-            ApiMetadataRowFamily::ActiveDeletions,
-            ChangeSeq(5),
-        );
-        assert_eq!(
-            delta_rows.len(),
-            1,
-            "only the removal belongs to the run above sequence 5"
-        );
-        assert_matches!(
-            &delta_rows[0],
-            MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
-                action: ActiveDeletionRowAction::Removed { removed_seq },
-                ..
-            }) if *removed_seq == ChangeSeq(9),
-            "unexpected delta row: {:?}",
-            delta_rows[0]
-        );
-    }
+    ]);
+    assert_eq!(
+        active_deletion_rows(&state),
+        vec![
+            (
+                "active-deletion-00000000000000000005-00000000000000000007-0000000000".to_owned(),
+                "removed"
+            ),
+            (
+                "active-deletion-00000000000000000005-00000000000000000007-0000000001".to_owned(),
+                "listed"
+            ),
+        ],
+        "the removal repeats the deletion's own position"
+    );
+    let delta_rows = super::super::row::manifest_rows_for_family_after_seq(
+        &state,
+        ApiMetadataRowFamily::ActiveDeletions,
+        ChangeSeq(5),
+    );
+    assert_eq!(
+        delta_rows.len(),
+        1,
+        "only the removal belongs to the run above sequence 5"
+    );
+    assert_matches!(
+        &delta_rows[0],
+        MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
+            action: ActiveDeletionRowAction::Removed { removed_seq },
+            ..
+        }) if *removed_seq == ChangeSeq(9),
+        "unexpected delta row: {:?}",
+        delta_rows[0]
+    );
 }
 
+/// Checks that a base merge drops cancelled pairs and the listed row of a
+/// deletion at or below the acknowledged floor, and keeps every listed row
+/// above the acknowledged floor, however far the retention floor advanced.
 #[test]
-fn the_merge_drops_cancelled_pairs_and_keeps_every_live_deletion() {
+fn the_merge_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest() {
     let state = state_from_tombstones(vec![
         tombstone_set(InodeId(7), 5, "notes.txt"),
         tombstone_revoke(InodeId(7), 9, 5),
         tombstone_set(InodeId(9), 10, "old.txt"),
-        tombstone_expire(InodeId(9), 13, 10),
         tombstone_set(InodeId(8), 11, "report.txt"),
         tombstone_set(InodeId(7), 12, "notes.txt"),
     ]);
@@ -230,11 +215,11 @@ fn the_merge_drops_cancelled_pairs_and_keeps_every_live_deletion() {
         ApiMetadataRowFamily::ActiveDeletions,
         manifest_rows_for_family(&state, ApiMetadataRowFamily::ActiveDeletions),
     )]);
-    // Far above every row: the floor must not touch this family.
     merge_rows_with_retention(
         MetadataFamilyGroup::ActiveDeletions,
         &mut rows_by_family,
         ChangeSeq(10_000),
+        ChangeSeq(10),
     )
     .expect("merge active deletions");
 
@@ -250,8 +235,8 @@ fn the_merge_drops_cancelled_pairs_and_keeps_every_live_deletion() {
             "active-deletion-00000000000000000011-00000000000000000008-0000000001".to_owned(),
             "active-deletion-00000000000000000012-00000000000000000007-0000000001".to_owned(),
         ],
-        "the undeleted and expired pairs go and both live deletions stay, however far the \
-         floor advanced"
+        "the undeleted pair and the deletion at the acknowledged floor go, and both deletions \
+         above it stay"
     );
 }
 
@@ -316,47 +301,31 @@ async fn undelete<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Commits the writer's expiry of one deletion, once the deletion is folded
-/// and the retention floor reaches it, as the writer's own expiry requires.
-pub(super) async fn expire<S: ObjectStore + ?Sized>(
+/// Undeletes the deletion of `inode_id` at `deletion_seq` in place, and
+/// returns the error that refused it.
+async fn refused_undelete<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
     context: &MutationContext,
-) -> Result<loonfs_types::Commit, CoreError> {
-    crate::manifest::fold_wal_tail(
-        store,
-        None,
-        namespace_id,
-        None,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        MetadataRunPolicy::default(),
-        &crate::test_support::content_writes(),
-    )
-    .await
-    .expect("fold the deletion");
-    advance_retention_floor(
-        store,
-        None,
-        namespace_id,
-        RetentionTarget::Seq(deletion_seq),
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("advance the floor to the deletion");
+) -> CoreError {
     NamespaceCommitEngine::new(
         namespace_id.clone(),
         std::sync::Arc::new(crate::test_support::content_writes()),
     )
-    .publish_expiry(
+    .publish_batch(
         store,
-        CommitId::generate(),
-        vec![ExpiredDeletion {
-            inode_id,
-            deletion_seq,
-        }],
+        vec![CommitCandidate::new(CommitIntent::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::undelete(
+                inode_id,
+                deletion_seq,
+                &loonfs_types::options::UndeleteDestination::Recorded,
+            ),
+        ))],
         context,
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
     )
@@ -364,6 +333,7 @@ pub(super) async fn expire<S: ObjectStore + ?Sized>(
     .results
     .pop()
     .expect("one result")
+    .expect_err("the undelete is refused")
 }
 
 async fn trash_page<S: ObjectStore + ?Sized>(
@@ -425,12 +395,17 @@ async fn trash_entries<S: ObjectStore + ?Sized>(
 }
 
 /// The listing algorithm the active-deletions family replaced: load every
-/// tombstone event the namespace ever recorded, group by root, and reduce
-/// newest-event-wins per root.
+/// tombstone event the namespace ever recorded, group by root, reduce
+/// newest-event-wins per root, and leave out every deletion at or below the
+/// retention floor.
 ///
 /// This lives only here, as the differential test's model. Production has one
 /// implementation, and it is the range scan.
-fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) -> Vec<TrashEntry> {
+fn trash_by_walking_every_tombstone(
+    state: &MetadataState,
+    head_seq: ChangeSeq,
+    retention_floor_seq: ChangeSeq,
+) -> Vec<TrashEntry> {
     let mut per_root: std::collections::BTreeMap<InodeId, Vec<SubtreeTombstoneRecord>> =
         std::collections::BTreeMap::new();
     for record in state.subtree_tombstones() {
@@ -442,7 +417,8 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
     per_root
         .into_iter()
         .filter_map(|(root_inode_id, records)| {
-            let active = hiding_tombstone_from_records(records, head_seq)?;
+            let active = hiding_tombstone_from_records(records, head_seq)
+                .filter(|active| active.committed_seq > retention_floor_seq)?;
             let TombstoneRowAction::Set { deleted_binding } = active.action else {
                 return None;
             };
@@ -483,7 +459,11 @@ async fn assert_listing_matches_the_old_walk<S: ObjectStore + ?Sized>(
     let (head, state) = load_manifest_projection_metadata_state(store, namespace_id)
         .await
         .expect("load projection");
-    let expected = sorted_by_position(trash_by_walking_every_tombstone(&state, head.seq));
+    let expected = sorted_by_position(trash_by_walking_every_tombstone(
+        &state,
+        head.seq,
+        read_floor_seq(store, namespace_id).await,
+    ));
     // A limit of 2 forces the page machinery — cursors, removal markers
     // straddling page boundaries — on every step.
     let listed = sorted_by_position(trash_entries(store, namespace_id, 2).await);
@@ -503,8 +483,9 @@ enum HistoryStep {
     /// Undelete the deletion the named path produced, re-binding at the
     /// second path.
     Undelete(&'static str, &'static str),
-    /// Expire the deletion the named path produced.
-    Expire(&'static str),
+    /// Advance the retention floor to the deletion the named path produced,
+    /// which expires it and every older deletion.
+    AdvanceFloorThrough(&'static str),
 }
 
 #[tokio::test]
@@ -538,14 +519,15 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
         HistoryStep::Delete("/dir-restored"),
         HistoryStep::Undelete("/dir-restored", "/dir-again"),
         HistoryStep::Undelete("/b.txt", "/b-back.txt"),
-        // Expire a deletion nested under a recovered subtree, then a plain
-        // one, and recreate a path that an expired deletion used to hold.
-        HistoryStep::Expire("/dir/inner.txt"),
+        // Expire a deletion nested under a recovered subtree, with every
+        // deletion before it, then a plain one, and recreate a path that an
+        // expired deletion used to hold.
+        HistoryStep::AdvanceFloorThrough("/dir/inner.txt"),
         HistoryStep::Create("/c.txt"),
         HistoryStep::Delete("/c.txt"),
         HistoryStep::Create("/d.txt"),
         HistoryStep::Delete("/d.txt"),
-        HistoryStep::Expire("/c.txt"),
+        HistoryStep::AdvanceFloorThrough("/c.txt"),
         HistoryStep::Create("/c.txt"),
     ];
 
@@ -580,13 +562,11 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
                 )
                 .await;
             }
-            HistoryStep::Expire(deleted_path) => {
-                let (inode_id, deletion_seq) = deletions
+            HistoryStep::AdvanceFloorThrough(deleted_path) => {
+                let (_, deletion_seq) = deletions
                     .remove(deleted_path)
-                    .expect("an expiry follows a recorded delete");
-                expire(&store, &namespace_id, inode_id, deletion_seq, &context)
-                    .await
-                    .expect("expire the deletion");
+                    .expect("an advance follows a recorded delete");
+                advance_floor_through(&store, &namespace_id, deletion_seq, &context).await;
             }
         }
         assert_listing_matches_the_old_walk(&store, &namespace_id, step).await;
@@ -600,8 +580,10 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
         }
     }
 
-    // Merge everything, then compare once more: the cancelled pairs are gone
-    // from the family and the answer is unchanged.
+    // Merge everything, then compare once more: the cancelled pairs and the
+    // expired deletions are gone from the family and the answer is
+    // unchanged.
+    acknowledge_floor(&store, &namespace_id, &context).await;
     drain_compaction(
         &store,
         &namespace_id,
@@ -783,8 +765,84 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
         .expect_err("another endpoint's cursor must not resume a trash listing");
 }
 
+/// The rows of the active-deletions family in the current manifest, as
+/// `(deletion sequence, listed or removed)` pairs.
+async fn stored_active_deletions<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<(ChangeSeq, &'static str)> {
+    let current = load_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest");
+    crate::manifest::metadata_basis_from_manifest(store, None, &current)
+        .segments
+        .scan_prefix(ApiMetadataRowFamily::ActiveDeletions, "")
+        .await
+        .expect("scan the family")
+        .into_iter()
+        .map(|row| match row {
+            MetadataRow::ActiveDeletion(record) => (
+                record.deletion_seq,
+                match record.action {
+                    ActiveDeletionRowAction::Listed { .. } => "listed",
+                    ActiveDeletionRowAction::Removed { .. } => "removed",
+                },
+            ),
+            other => panic!("unexpected row in the active-deletions family: {other:?}"),
+        })
+        .collect()
+}
+
+/// Deletes `/old.txt`, writes more files after it, and advances the floor
+/// past the deletion. Returns the deleted inode and the deletion's commit.
+async fn delete_below_the_floor<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> (InodeId, loonfs_types::Commit) {
+    write_test_file(
+        store,
+        namespace_id,
+        "/old.txt",
+        "com_floorseed0000000000000001",
+        context,
+    )
+    .await;
+    let deleted_inode_id = inode_id_of(store, namespace_id, "/old.txt").await;
+    let deleted = delete_path(store, namespace_id, "/old.txt", context, None)
+        .await
+        .expect("delete path");
+    for index in 0..6u32 {
+        write_test_file(
+            store,
+            namespace_id,
+            &format!("/later-{index}.txt"),
+            &format!("com_floorfill{index:022}"),
+            context,
+        )
+        .await;
+    }
+    create_checkpoint(store, namespace_id, context)
+        .await
+        .expect("create checkpoint");
+    advance_retention_floor(
+        store,
+        None,
+        namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(context.now_ms),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance retention floor");
+    (deleted_inode_id, deleted)
+}
+
+/// Checks that a deletion at or below the retention floor leaves the trash
+/// and refuses an undelete at once, and that a base compaction keeps its
+/// listed row until a fold acknowledges the floor, and removes it after.
 #[tokio::test]
-async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undeletes() {
+async fn a_deletion_below_the_floor_leaves_the_trash_before_its_row_is_removed() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-below-floor").expect("namespace id");
@@ -792,54 +850,12 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
-
-    write_test_file(
-        &store,
-        &namespace_id,
-        "/old.txt",
-        "com_floorseed0000000000000001",
-        &context,
-    )
-    .await;
-    let deleted_inode_id = inode_id_of(&store, &namespace_id, "/old.txt").await;
-    let deleted = delete_path(&store, &namespace_id, "/old.txt", &context, None)
-        .await
-        .expect("delete path");
-
-    // Push history far past the deletion, then move the floor up over it and
-    // merge every run.
-    for index in 0..6u32 {
-        write_test_file(
-            &store,
-            &namespace_id,
-            &format!("/later-{index}.txt"),
-            &format!("com_floorfill{index:022}"),
-            &context,
-        )
-        .await;
-    }
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-    advance_retention_floor(
-        &store,
-        None,
-        &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("advance retention floor");
-    drain_compaction(
-        &store,
-        &namespace_id,
-        MetadataRunPolicy {
-            max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataRunPolicy::default()
-        },
-    )
-    .await;
+    let (deleted_inode_id, deleted) = delete_below_the_floor(&store, &namespace_id, &context).await;
+    let every_group = MetadataRunPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        ..MetadataRunPolicy::default()
+    };
+    drain_compaction(&store, &namespace_id, every_group).await;
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     assert!(
         floor_seq > deleted.committed_seq,
@@ -847,29 +863,119 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
          floor {floor_seq}, deletion {}",
         deleted.committed_seq
     );
-
-    let entries = trash_entries(&store, &namespace_id, 10).await;
-    assert_eq!(
-        entries.len(),
-        1,
-        "a deletion below the floor stays listed: {entries:?}"
+    assert!(
+        read_acknowledged_floor_seq(&store, &namespace_id).await < deleted.committed_seq,
+        "no WAL object validated against the new floor is folded yet"
     );
-    assert_eq!(entries[0].inode_id, deleted_inode_id);
-    assert_eq!(entries[0].deletion_seq, deleted.committed_seq);
 
-    undelete(
+    assert_eq!(
+        trash_entries(&store, &namespace_id, 10).await,
+        Vec::new(),
+        "a deletion below the floor leaves the trash"
+    );
+    let error = refused_undelete(
         &store,
         &namespace_id,
-        "com_floorrecover000000000001",
         deleted_inode_id,
         deleted.committed_seq,
-        "/recovered.txt",
         &context,
     )
     .await;
-    assert!(
-        trash_entries(&store, &namespace_id, 10).await.is_empty(),
-        "recovery below the floor still works, and empties the trash"
+    assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
+    assert_eq!(
+        stored_active_deletions(&store, &namespace_id).await,
+        vec![(deleted.committed_seq, "listed")],
+        "a base compaction keeps the listed row until the floor is acknowledged"
+    );
+
+    // A later deletion gives the family a delta run, so the next compaction
+    // rewrites the family's base.
+    acknowledge_floor(&store, &namespace_id, &context).await;
+    write_test_file(
+        &store,
+        &namespace_id,
+        "/later.txt",
+        "com_floorlater000000000000001",
+        &context,
+    )
+    .await;
+    let later = delete_path(&store, &namespace_id, "/later.txt", &context, None)
+        .await
+        .expect("delete path")
+        .committed_seq;
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    drain_compaction(&store, &namespace_id, every_group).await;
+    assert_eq!(
+        stored_active_deletions(&store, &namespace_id).await,
+        vec![(later, "listed")],
+        "a base compaction over an acknowledged floor removes the expired listed row"
+    );
+    assert_eq!(
+        trash_entries(&store, &namespace_id, 10)
+            .await
+            .iter()
+            .map(|entry| entry.deletion_seq)
+            .collect::<Vec<_>>(),
+        vec![later]
+    );
+}
+
+/// Checks that a trash cursor from a page taken before a retention advance
+/// resumes above the new floor, so the next page leaves out the deletions
+/// that the advance expired and still lists every deletion above the floor
+/// once.
+#[tokio::test]
+async fn a_trash_cursor_resumes_above_a_floor_that_passed_it() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
+    let namespace_id = NamespaceId::parse("trash-cursor-floor").expect("namespace id");
+    let context = mutation_context("writer-1", 5_000);
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
+    let mut deletion_seqs = Vec::new();
+    for index in 0..6u32 {
+        let path = format!("/file-{index}.txt");
+        write_test_file(
+            &store,
+            &namespace_id,
+            &path,
+            &format!("com_cursor{index:026}"),
+            &context,
+        )
+        .await;
+        deletion_seqs.push(
+            delete_path(&store, &namespace_id, &path, &context, None)
+                .await
+                .expect("delete path")
+                .committed_seq,
+        );
+    }
+
+    let first = trash_page(&store, &namespace_id, 2, None).await;
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|entry| entry.deletion_seq)
+            .collect::<Vec<_>>(),
+        deletion_seqs[..2]
+    );
+    advance_floor_through(&store, &namespace_id, deletion_seqs[3], &context).await;
+
+    let mut resumed = Vec::new();
+    let mut cursor = first.next_cursor;
+    while let Some(next) = cursor {
+        let page = trash_page(&store, &namespace_id, 2, Some(next)).await;
+        resumed.extend(page.items.into_iter().map(|entry| entry.deletion_seq));
+        cursor = page.next_cursor;
+    }
+    assert_eq!(
+        resumed,
+        deletion_seqs[4..],
+        "the cursor resumes above the floor"
     );
 }
 
@@ -1223,13 +1329,13 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
 }
 
 /// A namespace in which `/docs` (holding `notes.txt`) and `/keep.txt` are
-/// deleted, and the writer then expires the deletion of `/docs`.
+/// deleted, and a retention advance then moves the floor to the deletion of
+/// `/docs`.
 struct ExpiredDocs {
     docs: InodeId,
     notes: InodeId,
     deletion_seq: ChangeSeq,
     keep_seq: ChangeSeq,
-    expiry: loonfs_types::Commit,
 }
 
 async fn expire_docs<S: ObjectStore>(
@@ -1252,18 +1358,19 @@ async fn expire_docs<S: ObjectStore>(
         .await
         .expect("delete the file")
         .committed_seq;
-    let expiry = expire(store, namespace_id, docs, deletion_seq, context)
-        .await
-        .expect("expire the directory's deletion");
+    advance_floor_through(store, namespace_id, deletion_seq, context).await;
     ExpiredDocs {
         docs,
         notes,
         deletion_seq,
         keep_seq,
-        expiry,
     }
 }
 
+/// Checks that the trash, path reads, visibility, and undelete validation
+/// treat a deletion at or below the floor as expired from the advance on,
+/// and the same once a fold acknowledges the floor and base compactions
+/// remove the rows it hides.
 #[tokio::test]
 async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidden() {
     let temp = tempdir().expect("tempdir");
@@ -1272,11 +1379,18 @@ async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidd
     let context = mutation_context("writer-1", 5_000);
     let expired = expire_docs(&store, &namespace_id, &context).await;
 
-    for folded in [false, true] {
-        if folded {
-            create_checkpoint(&store, &namespace_id, &context)
-                .await
-                .expect("fold the expiry");
+    for compacted in [false, true] {
+        if compacted {
+            acknowledge_floor(&store, &namespace_id, &context).await;
+            drain_compaction(
+                &store,
+                &namespace_id,
+                MetadataRunPolicy {
+                    max_delta_runs: NonZeroUsize::MIN,
+                    ..MetadataRunPolicy::default()
+                },
+            )
+            .await;
         }
         let entries = trash_entries(&store, &namespace_id, 10).await;
         assert_eq!(
@@ -1285,7 +1399,7 @@ async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidd
                 .map(|entry| entry.deletion_seq)
                 .collect::<Vec<_>>(),
             vec![expired.keep_seq],
-            "folded {folded}: only the unexpired deletion stays in the trash"
+            "compacted {compacted}: only the deletion above the floor stays in the trash"
         );
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
@@ -1299,7 +1413,7 @@ async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidd
             assert_eq!(
                 error.code(),
                 ErrorCode::PathNotFound,
-                "folded {folded}: {path}"
+                "compacted {compacted}: {path}"
             );
         }
         for inode_id in [expired.docs, expired.notes] {
@@ -1309,101 +1423,49 @@ async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidd
                     .await
                     .expect("visibility"),
                 None,
-                "folded {folded}: inode `{inode_id}` stays hidden"
+                "compacted {compacted}: inode `{inode_id}` stays hidden"
             );
         }
 
-        let undelete = NamespaceCommitEngine::new(
-            namespace_id.clone(),
-            std::sync::Arc::new(crate::test_support::content_writes()),
-        )
-        .publish_batch(
+        let error = refused_undelete(
             &store,
-            vec![CommitCandidate::new(CommitIntent::single(
-                CommitId::generate(),
-                loonfs_test_support::test_actor(),
-                None,
-                FilesystemOperation::undelete(
-                    expired.docs,
-                    expired.deletion_seq,
-                    &loonfs_types::options::UndeleteDestination::Recorded,
-                ),
-            ))],
+            &namespace_id,
+            expired.docs,
+            expired.deletion_seq,
             &context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect_err("an expired deletion can't be undeleted");
-        assert_eq!(undelete.code(), ErrorCode::NotDeleted, "folded {folded}");
+        .await;
+        assert_eq!(error.code(), ErrorCode::NotDeleted, "compacted {compacted}");
     }
 }
 
+/// Checks that a retention advance commits nothing for the deletions it
+/// expires, so the change feed has no event for an expiry.
 #[tokio::test]
-async fn the_change_feed_reports_an_expiry_as_a_deletion_expired_event_by_loonfs() {
+async fn an_expiry_commits_nothing_and_the_change_feed_reports_no_event() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("feed-expiry").expect("namespace id");
     let context = mutation_context("writer-1", 5_000);
     let expired = expire_docs(&store, &namespace_id, &context).await;
 
-    assert_eq!(expired.expiry.committed_by, loonfs_types::ActorId::loonfs());
-    assert_eq!(
-        expired.expiry.events,
-        vec![loonfs_types::api::v0::FilesystemChange::DeletionExpired {
-            inode_id: expired.docs,
-            deletion_seq: expired.deletion_seq,
-        }]
-    );
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("load read view");
+    assert_eq!(view.head().seq, expired.keep_seq);
     let page = list_changes_after(
         &view,
-        expired.keep_seq,
+        expired.deletion_seq,
         EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
     )
     .await
     .expect("list changes");
-    assert_eq!(page.changes, vec![expired.expiry.clone()]);
-    let record = view
-        .metadata_view()
-        .commit_at_seq(expired.expiry.committed_seq)
-        .await
-        .expect("read the commit row")
-        .expect("the expiry is committed");
-    let deletions = vec![ExpiredDeletion {
-        inode_id: expired.docs,
-        deletion_seq: expired.deletion_seq,
-    }];
     assert_eq!(
-        record.semantic_commit_fingerprint,
-        loonfs_types::expiry_commit_fingerprint(
-            &namespace_id,
-            &loonfs_types::ActorId::loonfs(),
-            &deletions,
-        )
+        page.changes
+            .iter()
+            .map(|commit| commit.committed_seq)
+            .collect::<Vec<_>>(),
+        vec![expired.keep_seq],
+        "the feed after the expired deletion has only the later deletion"
     );
-
-    // A retry with the same commit ID and deletions replays the commit from
-    // its receipt, though the deletion is no longer recoverable.
-    let replayed = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .publish_expiry(
-        &store,
-        expired.expiry.commit_id.clone(),
-        deletions,
-        &context,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .pop()
-    .expect("one result")
-    .expect("replay the expiry");
-    assert_eq!(replayed, expired.expiry);
 }

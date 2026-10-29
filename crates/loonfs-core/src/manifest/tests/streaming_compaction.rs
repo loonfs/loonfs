@@ -999,22 +999,25 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
             .await
             .expect("checkpoint the revisions");
     }
-    delete_path(&store, &namespace_id, "/deleted.txt", &context, None)
+    let deletion_seq = delete_path(&store, &namespace_id, "/deleted.txt", &context, None)
         .await
-        .expect("delete a file");
+        .expect("delete a file")
+        .committed_seq;
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint the deletion");
+    // The floor stops just below the deletion, so the deletion stays
+    // recoverable.
     advance_retention_floor(
         &store,
         None,
         &namespace_id,
-        RetentionTarget::Head,
+        RetentionTarget::Seq(ChangeSeq(deletion_seq.0 - 1)),
         crate::test_support::grace_elapsed_after(context.now_ms),
         crate::test_support::std_timer(),
     )
     .await
-    .expect("advance the floor past the deletion");
+    .expect("advance the floor to the last revision");
     // Above the floor: two more revisions of the file that stays.
     for body in ["four", "five"] {
         write_file_bytes(
@@ -1084,7 +1087,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
             kept,
             [(2, 5), (2, 4), (2, 3), (3, 3)],
             "each file keeps the revisions above the floor and its newest at or below it, \
-             and the deleted file keeps its newest"
+             and the recoverably deleted file keeps its newest"
         );
         assert!(
             after[&ApiMetadataRowFamily::Revisions]

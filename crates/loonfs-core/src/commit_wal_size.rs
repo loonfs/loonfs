@@ -1,6 +1,5 @@
 //! Bounds the WAL records produced by a request before metadata planning.
 
-use crate::commit::DeletionExpiry;
 use crate::path::write::CommitIntent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::wal::{
@@ -170,16 +169,6 @@ const REVOKE_BYTES: usize = delta_bytes(
         ),
     ],
 );
-const EXPIRE_BYTES: usize = delta_bytes(
-    "expire_subtree_tombstone",
-    &[
-        ("root_inode_id", INTEGER_BYTES),
-        (
-            "target",
-            cbor_map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),
-        ),
-    ],
-);
 
 const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
     cbor_map_bytes(&[
@@ -209,13 +198,6 @@ fn commit_fields_bytes(commit_id: &CommitId, actor_id: &ActorId, message: Option
         ("message", cbor_string_bytes(message.map_or(0, str::len))),
         ("deltas", 9),
     ])
-}
-
-/// Bounds the WAL record of the writer's commit that expires deletions: one
-/// expire delta for each deletion.
-pub(crate) fn estimated_expiry_record_bytes(expiry: &DeletionExpiry) -> usize {
-    commit_fields_bytes(expiry.commit_id(), &DeletionExpiry::actor_id(), None)
-        .saturating_add(expiry.deletions().len().saturating_mul(EXPIRE_BYTES))
 }
 
 pub(crate) fn estimated_wal_record_bytes(

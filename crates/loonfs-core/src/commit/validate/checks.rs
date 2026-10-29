@@ -165,10 +165,6 @@ pub(crate) async fn validate_operations<S: ObjectStore + ?Sized>(
                 )
                 .await?
             }
-            CommitOperation::ExpireDeletion {
-                inode_id,
-                deletion_seq,
-            } => validate_expire_deletion(view, numbering, *inode_id, *deletion_seq).await?,
             CommitOperation::UpdateAttributes {
                 inode_id,
                 base_attributes_revision_no,
@@ -469,9 +465,7 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
                 operand: CommitOperand::UndeleteTarget,
                 inode_id,
             })?;
-    let deletion =
-        validate_recoverable_deletion(view, inode_id, deletion_seq, CommitOperand::UndeleteTarget)
-            .await?;
+    let deletion = validate_recoverable_deletion(view, inode_id, deletion_seq).await?;
     let name_key = validate_name_absent(
         view,
         parent_inode_id,
@@ -499,39 +493,6 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
             child_created_at_ms: inode.committed_at_ms,
         },
     ])
-}
-
-/// Validates an expiry the way [`validate_undelete`] validates an undelete:
-/// the deletion at `deletion_seq` has to be the root's latest tombstone event.
-/// The expire event restores no binding, so the subtree stays hidden.
-///
-/// The deletion also has to be at or below the retention floor of the view,
-/// because a base compaction removes the rows that an expired deletion hides
-/// on the strength of that rule.
-async fn validate_expire_deletion<S: ObjectStore + ?Sized>(
-    view: &PublishValidationSession<'_, S>,
-    numbering: &mut CommitNumbering,
-    inode_id: InodeId,
-    deletion_seq: ChangeSeq,
-) -> Result<Vec<WalDelta>> {
-    let retention_floor_seq = view.view().retention_floor_seq();
-    if deletion_seq > retention_floor_seq {
-        return Err(CommitValidationError::DeletionAboveRetentionFloor {
-            operand: CommitOperand::ExpireTarget,
-            inode_id,
-            deletion_seq,
-            retention_floor_seq,
-        }
-        .into());
-    }
-    let deletion =
-        validate_recoverable_deletion(view, inode_id, deletion_seq, CommitOperand::ExpireTarget)
-            .await?;
-    Ok(vec![WalDelta::ExpireSubtreeTombstone {
-        delta_index: numbering.reserve_delta_index()?,
-        root_inode_id: inode_id,
-        target: deletion.position(),
-    }])
 }
 
 async fn validate_update_attributes<S: ObjectStore + ?Sized>(
@@ -645,26 +606,32 @@ fn next_attributes_revision_no(
 }
 
 /// Returns the `set` event of the deletion that `deletion_seq` identifies,
-/// which has to be the root's latest tombstone event. A request for a
-/// deletion that a later event revoked or expired, or that a later deletion
-/// replaced, fails here, so it can't cancel a different deletion.
+/// which has to be the root's latest tombstone event and above the retention
+/// floor of the writer's basis
+/// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
+/// A request for a deletion that has expired, that a later event revoked,
+/// or that a later deletion replaced, fails here, so it can't cancel a
+/// different deletion.
+///
+/// The floor check comes first, so a request for an expired deletion reads
+/// no tombstone. A base compaction relies on this rule: the WAL object of
+/// every accepted undelete records a basis floor below the deletion.
 async fn validate_recoverable_deletion<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
-    operand: CommitOperand,
 ) -> Result<SubtreeTombstoneRecord> {
+    if deletion_seq <= view.view().retention_floor_seq() {
+        return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
+    }
     let Some(deletion) = view.view().recoverable_deletion(inode_id).await? else {
-        return Err(CommitValidationError::TargetNotDeleted { operand, inode_id }.into());
+        return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
     };
     if deletion.committed_seq >= view.committed_seq() {
-        return Err(
-            CommitValidationError::TargetDeletedInCurrentCommit { operand, inode_id }.into(),
-        );
+        return Err(CommitValidationError::UndeleteTargetsCurrentCommit { inode_id }.into());
     }
     if deletion.committed_seq != deletion_seq {
-        return Err(CommitValidationError::DeletionSequenceMismatch {
-            operand,
+        return Err(CommitValidationError::UndeleteSequenceMismatch {
             inode_id,
             requested_seq: deletion_seq,
             active_seq: deletion.committed_seq,
