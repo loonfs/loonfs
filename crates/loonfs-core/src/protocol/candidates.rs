@@ -93,9 +93,8 @@ impl BatchDedup {
 
 /// Prepares a request and resolves commit-ID reuse.
 pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
-    content_writes: &crate::PermitPool,
     view: &PublishMetadataView<'_, S>,
-    session: &PublishPlanningSession<'_>,
+    session: &PublishPlanningSession<'_, S>,
     candidate: &CommitCandidate,
     index: usize,
     time: CandidateTime,
@@ -144,8 +143,6 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     let mut allocation = session.begin_candidate();
     match session
         .prepare_commit(
-            view.store(),
-            content_writes,
             candidate,
             semantic_identity,
             view.metadata_view(),

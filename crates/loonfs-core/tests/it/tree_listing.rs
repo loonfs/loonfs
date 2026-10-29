@@ -3,7 +3,7 @@
 //! costs.
 
 use crate::common::{
-    create_checkpoint, mutation_context, namespace_engine, read_context, submit_commit,
+    create_checkpoint, default_writer, namespace_engine, read_context, submit_commit,
     submit_operation,
 };
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
@@ -53,7 +53,7 @@ const SMALL_TREE_LISTING: &[&str] = &[
 /// Creates a namespace and commits `paths` in one commit, a directory for
 /// each path that ends in `/` and a file for every other path.
 async fn seed<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId, paths: &[&str]) {
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(store, namespace_id, &context)
         .create()
         .await
@@ -109,7 +109,7 @@ async fn page<S: ObjectStore + ?Sized>(
     options: ListOptions,
 ) -> Result<Page<PathEntry, ListPageCursor>, CoreError> {
     let context = read_context(store, namespace_id).await;
-    namespace_engine(store, namespace_id, &mutation_context())
+    namespace_engine(store, namespace_id, &default_writer())
         .list_path_page(
             path,
             PageRequest {
@@ -166,7 +166,7 @@ async fn a_recursive_listing_walks_the_subtree_depth_first_in_name_key_order() {
     seed(&store, &namespace_id, SMALL_TREE).await;
 
     let context = read_context(&store, &namespace_id).await;
-    let engine = namespace_engine(&store, &namespace_id, &mutation_context());
+    let engine = namespace_engine(&store, &namespace_id, &default_writer());
     let docs = engine
         .resolve_path("/docs", Default::default(), &context)
         .await
@@ -277,7 +277,7 @@ async fn a_resumed_page_continues_in_the_parent_of_a_directory_that_moved_away()
                 expected_revision_no: None,
             },
         },
-        &mutation_context(),
+        &default_writer(),
     )
     .await
     .expect("move the directory the cursor is in");
@@ -349,7 +349,7 @@ async fn a_recursive_page_costs_the_store_requests_of_one_directory_page() {
     }
     let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
     seed(&store, &namespace_id, &paths).await;
-    create_checkpoint(&store, &namespace_id, &mutation_context())
+    create_checkpoint(&store, &namespace_id, &default_writer())
         .await
         .expect("fold the tree into segments");
 
@@ -357,7 +357,7 @@ async fn a_recursive_page_costs_the_store_requests_of_one_directory_page() {
     for (path, recursive) in [("/tree", true), ("/wide", false)] {
         let context = read_context(&store, &namespace_id).await;
         store.reset();
-        let listed = namespace_engine(&store, &namespace_id, &mutation_context())
+        let listed = namespace_engine(&store, &namespace_id, &default_writer())
             .list_path_page(
                 path,
                 PageRequest {

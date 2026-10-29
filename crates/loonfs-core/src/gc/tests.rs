@@ -2,7 +2,6 @@
 
 use super::options::GcOptions;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
-use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::in_flight::{STORE_READS_IN_FLIGHT, STORE_WRITES_IN_FLIGHT};
 use crate::limits::{
@@ -11,12 +10,12 @@ use crate::limits::{
     UPLOAD_SESSION_LEASE_MS,
 };
 use crate::manifest::tests::{
-    compact_a_family_group, create_checkpoint, mutation_context, write_test_file,
+    compact_a_family_group, create_checkpoint, write_test_file, writer_at,
 };
 use crate::manifest::MetadataCompactionPolicy;
 use crate::manifest::RetentionTarget;
 use crate::path::write::{CommitIntent, FilesystemOperation};
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::test_support::WriterAt;
 use crate::upload_records::UploadSessionState;
 use futures::StreamExt;
 use loonfs_objectstore::keys::{
@@ -65,8 +64,8 @@ fn options() -> GcOptions {
     }
 }
 
-fn context(now_ms: u64) -> MutationContext {
-    mutation_context("gc-test", now_ms)
+fn context(now_ms: u64) -> WriterAt {
+    writer_at("gc-test", now_ms)
 }
 
 /// How long after its deletion a namespace retires under `options()`.
@@ -192,7 +191,7 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
         ..Default::default()
     };
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &too_small, &context(1_000))
+        .gc(None, &too_small, &context(1_000).clock())
         .await
         .expect_err("sub-minimum grace window must be rejected");
     assert_matches!(
@@ -211,7 +210,7 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
         ..Default::default()
     };
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &no_rows, &context(1_000))
+        .gc(None, &no_rows, &context(1_000).clock())
         .await
         .expect_err("zero shard target");
     assert_matches!(
@@ -238,7 +237,7 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(setup.now_ms),
         ),
@@ -250,7 +249,7 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
 
@@ -267,7 +266,7 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
 async fn stage_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> (UploadId, ContentRef) {
     let begin = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
@@ -277,7 +276,7 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     let staged = crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context("test-writer", context.now_ms),
+        &crate::test_support::writer_at("test-writer", context.now_ms),
     )
     .engine()
     .upload_content(&begin.upload_id, b"racing upload\n")
@@ -348,7 +347,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .activity;
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
     assert!(report.deleted.wal_objects >= 1);
@@ -358,7 +357,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS);
     store.reset();
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &reaped)
+        .gc(None, &options(), &reaped.clock())
         .await
         .expect("gc pass after segment grace");
     assert_eq!(
@@ -403,10 +402,8 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .load_current_manifest()
         .await
         .expect("tombstone");
-    assert!(current.state.envelope.payload().status.is_deleted());
+    assert!(current.payload().status.is_deleted());
     let rooted_segments = current
-        .state
-        .envelope
         .payload()
         .runs
         .iter()
@@ -423,7 +420,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
             .collect::<BTreeSet<_>>(),
         rooted_segments
     );
-    assert_eq!(current.state.envelope.payload().activity, final_activity);
+    assert_eq!(current.payload().activity, final_activity);
 
     assert!(store
         .head(&current.object_key)
@@ -437,7 +434,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .is_some());
     let again = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &again)
+        .gc(None, &options(), &again.clock())
         .await
         .expect("second gc pass");
     assert_eq!(report.deleted.wal_objects, 0);
@@ -488,7 +485,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let basis_key = metadata_manifest_object(&source, &fork_record.pin_id.manifest_no());
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass with live clone");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
@@ -518,21 +515,21 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("delete clone");
     let retired = crate::test_support::namespace_store(&store, &clone)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("retire clone");
     let deadline = retired.reclaimable_at_ms.expect("clone retired");
 
     let aged = context(deadline);
     crate::test_support::namespace_store(&store, &clone)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("clone releases source pin");
     assert!(!pin_exists(&store, &source, &fork_record.pin_id).await);
 
     let again = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &again)
+        .gc(None, &options(), &again.clock())
         .await
         .expect("idempotent pass");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
@@ -566,7 +563,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     // session carries its own expiry, so no provider timestamp decides this.
     let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &inside)
+        .gc(None, &options(), &inside.clock())
         .await
         .expect("gc pass inside the lease");
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -576,7 +573,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     // was writing is deleted — in that order.
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &expired)
+        .gc(None, &options(), &expired.clock())
         .await
         .expect("gc pass past the lease");
     assert_eq!(
@@ -595,7 +592,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     // The aborted record is reaped a grace window after its own stamp.
     let reaped = context(expired.now_ms + GRACE_MS + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &reaped)
+        .gc(None, &options(), &reaped.clock())
         .await
         .expect("gc pass past the abort grace");
     assert_eq!(report.deleted.upload_sessions, 1);
@@ -607,7 +604,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
 
     let again = context(reaped.now_ms + GRACE_MS);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &again)
+        .gc(None, &options(), &again.clock())
         .await
         .expect("gc pass after the sweep");
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -632,14 +629,14 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
 
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &expired)
+        .gc(None, &options(), &expired.clock())
         .await
         .expect("abort expired upload");
 
     store.fail_next(1);
     let reaped = context(expired.now_ms + GRACE_MS + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &reaped)
+        .gc(None, &options(), &reaped.clock())
         .await
         .expect("retain after failed cleanup");
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -652,7 +649,7 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
     );
 
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &reaped)
+        .gc(None, &options(), &reaped.clock())
         .await
         .expect("retry cleanup");
     assert_eq!(report.deleted.upload_sessions, 1);
@@ -678,7 +675,7 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
     // pass's own grace window is the whole answer.
     let inside = context(setup.now_ms + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &inside)
+        .gc(None, &options(), &inside.clock())
         .await
         .expect("gc pass inside the lease");
     assert_eq!(report.retained.total(), 3);
@@ -693,7 +690,7 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
     let completed_at = context(setup.now_ms + 2);
     complete_staged_upload(&store, &namespace_id, &upload_id, &completed_at).await;
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &completed_at)
+        .gc(None, &options(), &completed_at.clock())
         .await
         .expect("gc pass over the completed session");
     assert_eq!(
@@ -720,7 +717,7 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
     // record now ages out a grace window from this instant.
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &expired)
+        .gc(None, &options(), &expired.clock())
         .await
         .expect("gc pass past the lease");
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -733,7 +730,7 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
     // the time the first pass reported is the whole trigger.
     let reclaiming = context(reclaim_at_ms + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &reclaiming)
+        .gc(None, &options(), &reclaiming.clock())
         .await
         .expect("gc pass at the reported deadline");
     assert_eq!(report.deleted.upload_sessions, 1);
@@ -749,7 +746,7 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
@@ -779,12 +776,12 @@ async fn upload_gc_reaps_a_session_that_never_staged_anything() {
 
     let expired = context(1_000 + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &expired)
+        .gc(None, &options(), &expired.clock())
         .await
         .expect("gc pass past the lease");
     let reaped = context(expired.now_ms + GRACE_MS + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &reaped)
+        .gc(None, &options(), &reaped.clock())
         .await
         .expect("gc pass past the abort grace");
 
@@ -812,7 +809,8 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let store = blocking_outcome_store(store, BlockedOutcome::Aborted);
     let gc_options = options();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let gc = namespace.gc(None, &gc_options, &aged);
+    let clock = aged.clock();
+    let gc = namespace.gc(None, &gc_options, &clock);
     let complete = async {
         store.wait_until_blocked().await;
         let result = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside)
@@ -875,7 +873,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let abort = async {
         store.wait_until_blocked().await;
         let report = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(None, &options(), &aged)
+            .gc(None, &options(), &aged.clock())
             .await;
         store.release();
         report
@@ -900,7 +898,7 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     bytes: &[u8],
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> (UploadId, ContentRef) {
     let begin = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
@@ -910,7 +908,7 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     let staged = crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context("test-writer", context.now_ms),
+        &crate::test_support::writer_at("test-writer", context.now_ms),
     )
     .engine()
     .upload_content(&begin.upload_id, bytes)
@@ -961,33 +959,35 @@ async fn put_file_content_with_id<S: ObjectStore>(
     .await
     .expect("content");
     let content_ref = stored.content_ref().clone();
-    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
-        .publish_batch(
-            vec![CommitCandidate::prepared(
-                CommitIntent::single(
-                    loonfs_types::CommitId::generate(),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::PutFile {
-                        path: loonfs_types::AbsolutePath::parse(path).expect("path"),
-                        content: loonfs_types::FileContent::Ref(content_ref.clone()),
-                        behavior: loonfs_types::DestinationBehavior::Replace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-                vec![crate::storage::content::prepare_stored_content(
-                    &catalog, stored,
-                )],
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        context(1_000).writer_id.clone(),
+    )
+    .publish_batch(
+        vec![CommitCandidate::prepared(
+            CommitIntent::single(
+                loonfs_types::CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::PutFile {
+                    path: loonfs_types::AbsolutePath::parse(path).expect("path"),
+                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
+                    behavior: loonfs_types::DestinationBehavior::Replace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+            ),
+            vec![crate::storage::content::prepare_stored_content(
+                &catalog, stored,
             )],
-            &context(1_000),
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("published");
+        )],
+        &context(1_000).clock(),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("published");
     content_ref
 }
 
@@ -997,7 +997,7 @@ async fn publish_inline(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     index: usize,
-    setup: &MutationContext,
+    setup: &WriterAt,
 ) -> String {
     let value = crate::storage::inline_content::InlineContent::new(
         namespace_id.clone(),
@@ -1018,21 +1018,23 @@ async fn publish_inline(
             expected_revision_no: None,
         },
     );
-    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
-        .publish_batch(
-            [CommitCandidate::with_inline_content(
-                request,
-                Vec::new(),
-                vec![value],
-            )],
-            setup,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("result")
-        .expect("publish inline");
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        setup.writer_id.clone(),
+    )
+    .publish_batch(
+        [CommitCandidate::with_inline_content(
+            request,
+            Vec::new(),
+            vec![value],
+        )],
+        &setup.clock(),
+    )
+    .await
+    .results
+    .pop()
+    .expect("result")
+    .expect("publish inline");
     key
 }
 
@@ -1046,7 +1048,7 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(1_000),
         ),
@@ -1059,7 +1061,7 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
         let outcome = crate::test_support::NamespaceFixture::new(
             store,
             namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
         .compact_metadata_unit(
@@ -1087,11 +1089,10 @@ async fn read_context<S: ObjectStore + ?Sized>(
         .await
         .expect("read anchor");
     crate::RuntimeReadContext {
-        basis: anchor.basis(),
-        head: anchor.read_state,
-        segment_cache: Arc::new(crate::cache::MetadataSegmentCache::unshared(usize::MAX)),
-        head_and_wal_tail_cache: Arc::new(crate::cache::HeadAndWalTailCache::unshared(usize::MAX)),
-        object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        read_basis: crate::control::ReadBasis {
+            basis: anchor.basis(),
+            head: anchor.read_state,
+        },
         tail: None,
     }
 }
@@ -1115,7 +1116,7 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
 
     let inside = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS - 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &inside)
+        .gc(None, &options(), &inside.clock())
         .await
         .expect("gc pass inside the content grace");
 
@@ -1154,7 +1155,7 @@ async fn an_unpublished_completed_upload_loses_its_record_then_its_object() {
         .await,
     );
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &past)
+        .gc(None, &options(), &past.clock())
         .await
         .expect("gc pass past the content grace");
     assert_eq!(report.deleted.upload_sessions, 1);
@@ -1168,7 +1169,7 @@ async fn an_unpublished_completed_upload_loses_its_record_then_its_object() {
     assert!(store.head(&content_key).await.expect("head").is_some());
 
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &past)
+        .gc(None, &options(), &past.clock())
         .await
         .expect("gc pass after the record");
     assert_eq!(report.deleted.content_objects, 1);
@@ -1211,7 +1212,7 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     let young = context(now_after_newest_object(&store, &namespace_id, 0).await);
     let aged_content = MetadataMapStore::aged(&store, KeyPredicate::content_blob());
     let report = crate::test_support::namespace_store(&aged_content, &namespace_id)
-        .gc(None, &options(), &young)
+        .gc(None, &options(), &young.clock())
         .await
         .expect("gc pass inside the grace");
     assert_eq!(report.deleted.content_objects, 0);
@@ -1219,7 +1220,7 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass past the grace");
     assert_eq!(report.deleted.content_objects, 1);
@@ -1268,7 +1269,7 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(setup.now_ms),
         ),
@@ -1288,7 +1289,7 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass past the grace");
     let content_key = |content_ref: &ContentRef| {
@@ -1341,7 +1342,7 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass with the pin");
     assert_eq!(report.deleted.content_objects, 0);
@@ -1350,14 +1351,14 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .delete_snapshot(&checkpoint.checkpoint_id)
     .await
     .expect("release the pin");
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass after the release");
     assert_eq!(report.deleted.content_objects, 1);
@@ -1386,7 +1387,7 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_pin_exists() {
 
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass with a live fork");
     assert_eq!(report.deleted.content_objects, 0);
@@ -1429,7 +1430,7 @@ async fn the_wal_tail_roots_inline_content_a_direct_download_wrote_early() {
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
     assert_eq!(report.deleted.content_objects, 0);
@@ -1465,7 +1466,7 @@ async fn content_and_temporary_keys_the_layout_does_not_recognize_are_kept() {
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
     assert_eq!(
@@ -1501,7 +1502,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(setup.now_ms),
         ),
@@ -1519,7 +1520,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
     let young = context(now_after_newest_object(&store, &namespace_id, 0).await);
     let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &young)
+        .gc(None, &options(), &young.clock())
         .await
         .expect("gc pass");
 
@@ -1574,7 +1575,7 @@ async fn published_compaction_segments_are_referenced_and_kept() {
         .await,
     );
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &long_after)
+        .gc(None, &options(), &long_after.clock())
         .await
         .expect("gc pass long after the job published");
     assert!(
@@ -1636,7 +1637,8 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
     gated.block_next();
     let pass_options = options();
     let namespace = crate::test_support::namespace_store(&gated, &namespace_id);
-    let (report, staged) = tokio::join!(namespace.gc(None, &pass_options, &pass_clock), async {
+    let clock = pass_clock.clock();
+    let (report, staged) = tokio::join!(namespace.gc(None, &pass_options, &clock), async {
         gated.wait_until_blocked().await;
         crate::manifest::tests::publish_planned_compaction(
             &seed,
@@ -1682,7 +1684,7 @@ async fn a_pass_names_a_pin_it_could_not_advance() {
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS * 2).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
 
@@ -1718,7 +1720,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(setup.now_ms),
         ),
@@ -1732,7 +1734,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
 
@@ -1794,7 +1796,7 @@ async fn gc_retains_unrecognized_manifest_keys() {
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
 
@@ -1850,7 +1852,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
 
@@ -1875,7 +1877,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &store,
                 &namespace_id,
-                &crate::test_support::mutation_context("test-writer", 0),
+                &crate::test_support::writer_at("test-writer", 0),
             );
             fixture.namespace.run_policy = merge_policy;
             fixture
@@ -1903,7 +1905,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         .await,
     );
     let after_merge = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass after compaction");
     assert!(
@@ -1945,7 +1947,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
                 name: "keeper".to_owned(),
                 expires_at_ms: None,
             },
-            &setup,
+            &setup.clock(),
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -1956,7 +1958,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
                 name: "releaser".to_owned(),
                 expires_at_ms: None,
             },
-            &setup,
+            &setup.clock(),
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -1971,7 +1973,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .delete_snapshot(&second.checkpoint_id)
@@ -1979,7 +1981,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     .expect("release one owner");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let first_pass = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("first gc pass");
     assert_eq!(
@@ -1988,7 +1990,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     );
 
     let second_pass = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("second gc pass");
     assert_eq!(second_pass.deleted.manifests, 0);
@@ -2040,7 +2042,7 @@ async fn gc_retains_active_checkpoint_bases() {
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
 
@@ -2126,7 +2128,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
 
     let before = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &before)
+        .gc(None, &options(), &before.clock())
         .await
         .expect("gc with live target");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
@@ -2139,17 +2141,17 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let aged = context(setup.now_ms + GRACE_MS - 1);
 
     let waiting = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("wait for retirement");
     assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
     let retired = crate::test_support::namespace_store(&store, &clone)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("retire materialized target");
     let deadline = retired.reclaimable_at_ms.expect("target retired");
     let waiting = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &context(deadline - 1))
+        .gc(None, &options(), &context(deadline - 1).clock())
         .await
         .expect("wait for grace");
     assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
@@ -2168,18 +2170,18 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     );
     store.inner().fail_next(1);
     crate::test_support::namespace_store(&store, &clone)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect_err("a failed source pin delete should fail the pass");
     assert!(pin_exists(&store, &source, &fork_record.pin_id).await);
     let released = crate::test_support::namespace_store(&store, &clone)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("retry source pin delete");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
     assert!(!pin_exists(&store, &source, &fork_record.pin_id).await);
     let repeated = crate::test_support::namespace_store(&store, &clone)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("repeat source pin delete");
     assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
@@ -2195,7 +2197,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let store = store.inner().inner();
     let aged = context(now_after_newest_object(store, &source, GRACE_MS + 1).await);
     let next_pass = crate::test_support::namespace_store(store, &source)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("collect basis");
     assert_basis_reaped(
@@ -2235,7 +2237,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
     let aged = context(setup.now_ms + GRACE_MS);
     store.fail_all();
     let report = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("an unreadable target is retained conservatively");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
@@ -2247,7 +2249,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         .expect("corrupt target manifest");
     let before = namespace_keys(store.inner(), &source).await;
     let error = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect_err("a corrupt target manifest must fail the source pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
@@ -2291,7 +2293,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         u64::MAX / 2,
     ] {
         let report = crate::test_support::namespace_store(&store, &source)
-            .gc(None, &options(), &context(now_ms))
+            .gc(None, &options(), &context(now_ms).clock())
             .await
             .expect("gc pass with a live target");
         assert_eq!(report.deleted_checkpoints_by_owner.fork, 0, "at {now_ms}");
@@ -2338,7 +2340,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
             PinOwner::Fork {
                 target_namespace_id: clone.clone(),
             },
-            &setup,
+            &setup.clock(),
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -2362,13 +2364,13 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
 
     let before_creation_grace = context(setup.now_ms + 1);
     let report = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &before_creation_grace)
+        .gc(None, &options(), &before_creation_grace.clock())
         .await
         .expect("gc pass with a target that reads through another record");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
     assert!(pin_exists(&store, &source, &abandoned.checkpoint_id).await);
     let report = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &context(setup.now_ms + GRACE_MS))
+        .gc(None, &options(), &context(setup.now_ms + GRACE_MS).clock())
         .await
         .expect("an aged pin the target does not name is the abandoned attempt's");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 1);
@@ -2428,7 +2430,7 @@ async fn a_corrupt_pin_and_an_unreadable_one_both_fail_the_pass() {
 
     store.fail_all();
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect_err("a record the store will not read fails the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
@@ -2448,7 +2450,7 @@ async fn a_corrupt_pin_and_an_unreadable_one_both_fail_the_pass() {
         .expect("corrupt record");
     let aged = context(setup.now_ms);
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect_err("a corrupt record fails the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
@@ -2497,7 +2499,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
 
     store.fail_all();
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect_err("discovery read fails closed");
     assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
@@ -2515,7 +2517,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
     }
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect_err("a corrupt manifest fails the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
@@ -2553,7 +2555,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(setup.now_ms),
         ),
@@ -2567,7 +2569,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
     // provider timestamp.
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass");
 
@@ -2591,7 +2593,7 @@ async fn gc_of_an_absent_namespace_reads_the_hint_and_reports_it_missing() {
     let store = RecordingStore::new(inner, KeyPredicate::any());
 
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(u64::MAX))
+        .gc(None, &options(), &context(u64::MAX).clock())
         .await
         .expect_err("gc absent namespace");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceNotFound);
@@ -2642,14 +2644,14 @@ async fn provider_age_reserves_the_clock_margin_before_deletion() {
     let publication_bound = GC_MIN_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
     let now_ms = provider_stamp + publication_bound - 1 + GC_SAFETY_MARGIN_MS;
     let retained = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &context(now_ms))
+        .gc(None, &options, &context(now_ms).clock())
         .await
         .expect("pass before cutoff");
     assert_eq!(retained.deleted.content_objects, 0);
     assert_eq!(retained.retained.within_grace_window, 1);
     assert_eq!(store.counts().deletes, 0);
     let collected = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &context(now_ms + 1))
+        .gc(None, &options, &context(now_ms + 1).clock())
         .await
         .expect("pass at cutoff");
     assert_eq!(collected.deleted.content_objects, 1);
@@ -2660,7 +2662,7 @@ async fn provider_age_reserves_the_clock_margin_before_deletion() {
 async fn retired_content_namespace<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> (MutationContext, Vec<String>) {
+) -> (WriterAt, Vec<String>) {
     let setup = context(1_000);
     crate::test_support::NamespaceFixture::new(store, namespace_id, &setup)
         .create()
@@ -2673,7 +2675,7 @@ async fn retired_content_namespace<S: ObjectStore>(
         .await
         .expect("delete");
     let report = crate::test_support::namespace_store(store, namespace_id)
-        .gc(None, &options(), &setup)
+        .gc(None, &options(), &setup.clock())
         .await
         .expect("retire");
     (context(report.reclaimable_at_ms.expect("deadline")), keys)
@@ -2722,7 +2724,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             .expect("delete");
         let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
         let report = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(None, &options(), &context(first_run_ms))
+            .gc(None, &options(), &context(first_run_ms).clock())
             .await
             .expect("unretired run");
         assert_eq!(report.listed_bytes, listed_bytes);
@@ -2738,7 +2740,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             .gc(
                 None,
                 &options(),
-                &context(report.reclaimable_at_ms.expect("retired")),
+                &context(report.reclaimable_at_ms.expect("retired")).clock(),
             )
             .await
             .expect("retired run");
@@ -2807,7 +2809,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
     .expect("rewind hint");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("collect");
     assert_eq!(report.deleted.manifests, 0);
@@ -2815,9 +2817,8 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_manifest()
             .await
-            .expect("discovery after deferred sweep")
-            .state,
-        current.state
+            .expect("discovery after deferred sweep"),
+        current
     );
     write_test_file(&store, &namespace_id, "/four", "four", &setup).await;
     crate::test_support::namespace_store(&store, &namespace_id)
@@ -2834,7 +2835,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         .expect("current");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &aged)
+        .gc(None, &options(), &aged.clock())
         .await
         .expect("collect after publication");
     assert_eq!(report.deleted.manifests, 7);
@@ -2845,16 +2846,15 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
             .expect("list for assertion"),
         vec![
             metadata_manifest_object(&namespace_id, &pinned.manifest_no),
-            metadata_manifest_object(&namespace_id, &current.state.manifest().manifest_no),
+            metadata_manifest_object(&namespace_id, &current.manifest().manifest_no),
         ]
     );
     assert_eq!(
         crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_manifest()
             .await
-            .expect("discovery after sweep")
-            .state,
-        current.state
+            .expect("discovery after sweep"),
+        current
     );
 }
 
@@ -2903,7 +2903,7 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
         OperationSelector::Delete,
     );
     store.block_next();
-    let clock = context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1);
+    let clock = context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).clock();
     let gc_options = options();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let (first, second) = tokio::join!(namespace.gc(None, &gc_options, &clock), async {
@@ -2975,7 +2975,7 @@ async fn unreferenced_segments_are_deleted_concurrently_within_the_write_wave() 
         .gc(
             None,
             &options(),
-            &context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
+            &context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).clock(),
         )
         .await
         .expect("gc pass");
@@ -3011,18 +3011,18 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         KeyPredicate::any(),
     );
     let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(deadline.now_ms - 1))
+        .gc(None, &options(), &context(deadline.now_ms - 1).clock())
         .await
         .expect("before deadline");
     assert_eq!(before.deleted.retired_content_objects, 0);
     assert_eq!(before.next_reclamation_at_ms, Some(deadline.now_ms));
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(deadline.now_ms - 1))
+        .gc(None, &options(), &context(deadline.now_ms - 1).clock())
         .await
         .expect("collect older manifests");
     store.inner().fail_next(1);
     match crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &deadline)
+        .gc(None, &options(), &deadline.clock())
         .await
     {
         Err(CoreError::Store { object_key, .. }) => assert_eq!(object_key, keys[0]),
@@ -3035,7 +3035,7 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         .await
         .expect("remaining content");
     let retried = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &deadline)
+        .gc(None, &options(), &deadline.clock())
         .await
         .expect("retry owner sweep");
     assert_eq!(
@@ -3052,7 +3052,7 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         .await
         .expect("late content");
     let late = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &deadline)
+        .gc(None, &options(), &deadline.clock())
         .await
         .expect("collect earlier key");
     assert_eq!(late.deleted.retired_content_objects, 1);
@@ -3094,14 +3094,14 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     ] {
         pins.push(
             crate::test_support::namespace_store(&store, &namespace_id)
-                .create_pin(owner, &setup)
+                .create_pin(owner, &setup.clock())
                 .await
                 .map(|report| crate::pin::checkpoint_summary(report.response))
                 .expect("pin"),
         );
     }
     let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(1_000 + GRACE_MS - 1))
+        .gc(None, &options(), &context(1_000 + GRACE_MS - 1).clock())
         .await
         .expect("before creation grace");
     assert_eq!(
@@ -3109,14 +3109,14 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         loonfs_types::DeletedCheckpointsByOwner::default()
     );
     let abandoned = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(1_000 + GRACE_MS))
+        .gc(None, &options(), &context(1_000 + GRACE_MS).clock())
         .await
         .expect("creation grace");
     assert_eq!(abandoned.deleted_checkpoints_by_owner.fork, 1);
     assert!(!pin_exists(&store, &namespace_id, &pins[3].checkpoint_id).await);
     assert!(namespace_keys(&store, &target).await.is_empty());
     let before_expiry = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(2_000 + GRACE_MS - 1))
+        .gc(None, &options(), &context(2_000 + GRACE_MS - 1).clock())
         .await
         .expect("before expiry grace");
     assert_eq!(
@@ -3124,7 +3124,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         loonfs_types::DeletedCheckpointsByOwner::default()
     );
     let expired = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(2_000 + GRACE_MS))
+        .gc(None, &options(), &context(2_000 + GRACE_MS).clock())
         .await
         .expect("expiry grace");
     assert_eq!(expired.deleted_checkpoints_by_owner.user, 2);
@@ -3141,7 +3141,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         .await
         .expect("delete");
     let retired = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(deleted_at))
+        .gc(None, &options(), &context(deleted_at).clock())
         .await
         .expect("retire");
     assert_eq!(
@@ -3176,7 +3176,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
                 name: "initial".to_owned(),
                 expires_at_ms: None,
             },
-            &setup,
+            &setup.clock(),
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -3200,7 +3200,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         .expect("delete manifest");
     store.reset();
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(GRACE_MS * 3))
+        .gc(None, &options(), &context(GRACE_MS * 3).clock())
         .await
         .expect_err("missing pin manifest");
     assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
@@ -3243,13 +3243,17 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
         .expect("absent target hint");
     store.reset();
     let young = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &context(setup.now_ms + GRACE_MS - 1))
+        .gc(
+            None,
+            &options(),
+            &context(setup.now_ms + GRACE_MS - 1).clock(),
+        )
         .await
         .expect("young pins");
     assert_eq!(young.deleted_checkpoints_by_owner.fork, 0);
     assert!(store.snapshot().is_empty());
     let aged = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &context(setup.now_ms + GRACE_MS))
+        .gc(None, &options(), &context(setup.now_ms + GRACE_MS).clock())
         .await
         .expect("aged pins");
     assert_eq!(aged.deleted_checkpoints_by_owner.fork, 1);
@@ -3307,7 +3311,7 @@ async fn create_on_a_deleted_id_fails_before_and_after_content_reclamation() {
         }
         if !reclaimed {
             let report = crate::test_support::namespace_store(&store, &namespace_id)
-                .gc(None, &options(), &deadline)
+                .gc(None, &options(), &deadline.clock())
                 .await
                 .expect("reclaim content");
             assert_eq!(report.deleted.retired_content_objects, keys.len() as u64);
@@ -3368,7 +3372,7 @@ async fn a_pass_reads_its_roots_through_the_given_cache_and_releases_their_memor
         segment_cache: Arc::clone(&cache),
         ..crate::test_support::namespace_store(&store, &namespace_id)
     }
-    .gc(None, &options(), &aged)
+    .gc(None, &options(), &aged.clock())
     .await
     .expect("gc pass");
 
@@ -3390,7 +3394,7 @@ async fn a_pass_fails_when_its_pinned_manifests_do_not_fit_the_read_memory() {
         .load_current_manifest()
         .await
         .expect("current manifest");
-    let budget = 8 * crate::heap_bytes::manifest_heap_bytes(&head.state.envelope);
+    let budget = 8 * crate::heap_bytes::manifest_heap_bytes(&head.envelope);
     let memory = Arc::new(crate::cache::ReadWorkingMemory::new(budget, None));
     let cache = Arc::new(root_scan_cache(Arc::clone(&memory)));
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -3398,7 +3402,7 @@ async fn a_pass_fails_when_its_pinned_manifests_do_not_fit_the_read_memory() {
         segment_cache: Arc::clone(&cache),
         ..crate::test_support::namespace_store(&store, &namespace_id)
     }
-    .gc(None, &options(), &aged)
+    .gc(None, &options(), &aged.clock())
     .await
     .expect("one pinned manifest fits the budget");
 
@@ -3418,7 +3422,7 @@ async fn a_pass_fails_when_its_pinned_manifests_do_not_fit_the_read_memory() {
         segment_cache: Arc::clone(&cache),
         ..crate::test_support::namespace_store(&store, &namespace_id)
     }
-    .gc(None, &options(), &aged)
+    .gc(None, &options(), &aged.clock())
     .await
     .expect_err("ten pinned manifests do not fit the budget");
 
@@ -3461,7 +3465,7 @@ async fn session_content_ids_are_charged_as_their_records_are_read() {
         segment_cache: Arc::clone(&cache),
         ..crate::test_support::namespace_store(&store, &namespace_id)
     }
-    .gc(None, &options(), &setup)
+    .gc(None, &options(), &setup.clock())
     .await
     .expect_err("the first session's content id does not fit the budget");
 
@@ -3517,7 +3521,7 @@ async fn a_pass_reads_each_completed_session_record_once() {
         .gc(
             None,
             &options(),
-            &context(early.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS),
+            &context(early.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS).clock(),
         )
         .await
         .expect("gc pass");

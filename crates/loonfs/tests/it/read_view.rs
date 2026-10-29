@@ -308,8 +308,6 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         .await
         .expect("captured manifest");
     let segment = captured
-        .state
-        .envelope
         .payload()
         .runs
         .iter()
@@ -331,7 +329,7 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         .load_current_manifest()
         .await
         .expect("current manifest");
-    assert!(current.state.manifest().manifest_no > captured.state.manifest().manifest_no);
+    assert!(current.manifest().manifest_no > captured.manifest().manifest_no);
 
     for view in [snapshot_view, unexpiring_view] {
         store.reset();
@@ -409,8 +407,6 @@ async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_pin_when
         .await
         .expect("manifest");
     let segment = manifest
-        .state
-        .envelope
         .payload()
         .runs
         .iter()

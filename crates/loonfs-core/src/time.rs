@@ -11,38 +11,66 @@ pub(crate) use loonfs_types::MonotonicTimer;
 pub(crate) use loonfs_types::StdMonotonicTimer;
 pub use loonfs_types::{SystemWallClock, WallClock};
 
-/// The start of one bounded publication, measured on a monotonic timer.
+/// The clocks of one bounded operation: the wall time when the operation
+/// started, and the monotonic timer reading at that moment.
+///
+/// The operation's durable timestamps record the wall time at the start. A
+/// later check, such as an expiry check after a read, uses the wall time at
+/// the start plus the monotonic time elapsed since the start.
 #[derive(Debug, Clone)]
-pub struct Deadline {
+pub struct OperationClock {
     timer: Arc<dyn MonotonicTimer>,
     started_at_ms: u64,
+    request_at_ms: u64,
 }
 
-impl Deadline {
-    /// Starts a deadline at the timer's current time.
-    pub fn start(timer: Arc<dyn MonotonicTimer>) -> Self {
+impl OperationClock {
+    /// Starts a clock for an operation that began at the wall time
+    /// `request_at_ms`, at the timer's current reading.
+    pub fn start(request_at_ms: u64, timer: Arc<dyn MonotonicTimer>) -> Self {
         let started_at_ms = timer.monotonic_now_ms();
         Self {
             timer,
             started_at_ms,
+            request_at_ms,
         }
     }
 
-    /// Returns the milliseconds elapsed since the deadline started.
+    /// Returns the wall time when the operation started, in unix
+    /// milliseconds.
+    pub fn request_at_ms(&self) -> u64 {
+        self.request_at_ms
+    }
+
+    /// Returns the current wall time of the operation: the wall time at the
+    /// start plus the monotonic time elapsed since the start.
+    pub fn now_ms(&self) -> u64 {
+        self.wall_time_after(self.elapsed_ms())
+    }
+
+    /// Returns the wall time of `observation`, a reading of this clock's
+    /// timer, by the same rule as [`Self::now_ms`].
+    pub(crate) fn observed_at_ms(&self, observation: &Observation) -> u64 {
+        self.wall_time_after(observation.at_ms.saturating_sub(self.started_at_ms))
+    }
+
+    fn wall_time_after(&self, elapsed_ms: u64) -> u64 {
+        self.request_at_ms.saturating_add(elapsed_ms)
+    }
+
+    /// Returns the milliseconds elapsed since the operation started.
     pub fn elapsed_ms(&self) -> u64 {
-        self.now_ms().saturating_sub(self.started_at_ms)
+        self.timer
+            .monotonic_now_ms()
+            .saturating_sub(self.started_at_ms)
     }
 
-    fn now_ms(&self) -> u64 {
-        self.timer.monotonic_now_ms()
-    }
-
-    /// Returns an observation of the current time on this deadline's timer.
+    /// Returns an observation of the current time on this clock's timer.
     pub fn observe(&self) -> Observation {
         Observation::now(Arc::clone(&self.timer))
     }
 
-    /// Returns the observation this deadline started from.
+    /// Returns the observation this clock started from.
     pub(crate) fn origin(&self) -> Observation {
         Observation {
             timer: Arc::clone(&self.timer),
@@ -50,12 +78,9 @@ impl Deadline {
         }
     }
 
-    pub(crate) fn elapsed_at(&self, observation: &Observation) -> u64 {
-        observation.at_ms.saturating_sub(self.started_at_ms)
-    }
-
     /// Returns `MetadataPublicationBudgetExceeded` once more than
-    /// [`METADATA_PUBLICATION_BUDGET_MS`] has elapsed since the deadline started.
+    /// [`METADATA_PUBLICATION_BUDGET_MS`] has elapsed since the operation
+    /// started.
     pub fn ensure_metadata_publication_budget(&self, namespace_id: &NamespaceId) -> Result<()> {
         let elapsed_ms = self.elapsed_ms();
         if elapsed_ms <= METADATA_PUBLICATION_BUDGET_MS {
@@ -153,17 +178,19 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn retries_keep_the_deadline_origin_and_observations_age_independently() {
-        let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(100));
-        let deadline = Deadline::start(clock.clone());
-        clock.advance_ms(30);
-        let observation = deadline.observe();
-        let retry = deadline.clone();
-        clock.advance_ms(20);
-        assert_eq!(deadline.elapsed_ms(), 50);
+    fn retries_keep_the_clock_origin_and_observations_age_independently() {
+        let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(100));
+        let clock = OperationClock::start(5_000, timer.clone());
+        timer.advance_ms(30);
+        let observation = clock.observe();
+        let retry = clock.clone();
+        timer.advance_ms(20);
+        assert_eq!(clock.elapsed_ms(), 50);
         assert_eq!(retry.elapsed_ms(), 50);
         assert_eq!(observation.age_ms(), 20);
-        assert_eq!(deadline.elapsed_at(&observation), 30);
+        assert_eq!(clock.request_at_ms(), 5_000);
+        assert_eq!(clock.observed_at_ms(&observation), 5_030);
+        assert_eq!(retry.now_ms(), 5_050);
     }
 
     #[test]

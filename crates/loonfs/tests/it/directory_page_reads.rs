@@ -20,8 +20,6 @@ async fn family_keys(
         .load_current_manifest()
         .await
         .expect("load manifest")
-        .state
-        .envelope
         .payload()
         .runs
         .iter()

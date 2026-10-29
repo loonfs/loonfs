@@ -129,7 +129,7 @@ async fn seed_wal_tail<S: ObjectStore + ?Sized>(
     loonfs_core::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &MutationContext {
+        &WriterAt {
             writer_id: loonfs_types::WriterId::parse("tail-seed").expect("valid writer id"),
             now_ms: 1_000,
         },

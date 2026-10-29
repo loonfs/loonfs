@@ -5,7 +5,6 @@ use super::publish::ManifestChange;
 use super::published::{same_head, PublicationReport, PublishedManifest};
 use super::runs::flatten_manifest_segments;
 use super::scan::VerifiedMetadataSegments;
-use crate::commit_engine::WalFoldInput;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
@@ -16,8 +15,9 @@ use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
+use crate::protocol::WriterPosition;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
-use crate::time::{Deadline, Observation};
+use crate::time::{Observation, OperationClock};
 use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
 use crate::wal::WalPublishError;
@@ -69,10 +69,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn fold_wal(&self) -> Result<PublicationReport<FoldWalResponse>> {
         let folded = self
             .namespace
-            .fold_wal_tail(
-                self.writer_position.clone(),
-                &Deadline::start(Arc::clone(&self.namespace.timer)),
-            )
+            .fold_wal_tail(self.writer_position.clone(), &self.namespace.start_clock())
             .await?;
         Ok(PublicationReport {
             published: folded.published(),
@@ -85,8 +82,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Folds the visible WAL tail into segments and publishes the next manifest.
     #[cfg(test)]
     pub(crate) async fn fold_wal(&self) -> Result<FoldWalResponse> {
-        let deadline = Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default()));
-        self.fold_wal_tail(None, &deadline)
+        let clock = self.start_clock();
+        self.fold_wal_tail(None, &clock)
             .await
             .map(|folded| folded.response)
     }
@@ -96,10 +93,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         observed: Observation,
     ) -> Result<ManifestProjection<'_, S>> {
         self.load_manifest_projection(observed)
-            .instrument(tracing::debug_span!(
-                "loonfs.phase",
-                phase = "scan_namespace_state"
-            ))
+            .instrument(crate::phase_span!(crate::Phase::ScanNamespaceState))
             .await
     }
 
@@ -167,8 +161,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// stops the fold.
     pub async fn fold_wal_tail(
         &self,
-        held: Option<WalFoldInput>,
-        deadline: &Deadline,
+        held: Option<WriterPosition>,
+        clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
         let held = held.filter(|held| held.basis_checked.is_within_revalidation_bound());
         let projection = match held {
@@ -176,16 +170,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 manifest_segments: load_basis_metadata_segments(
                     &self.store,
                     Some(&self.segment_cache),
-                    &held.basis,
+                    &held.read_basis.basis,
                 )
                 .await?
                 .segments,
-                head: held.head,
-                basis: held.basis,
+                head: held.read_basis.head,
+                basis: held.read_basis.basis,
                 basis_checked: held.basis_checked,
-                tail_state: held.tail_state,
+                tail_state: held.tail,
             },
-            None => self.load_fold_projection(deadline.observe()).await?,
+            None => self.load_fold_projection(clock.observe()).await?,
         };
         let basis = projection.manifest_segments.manifest();
         if basis.payload().folded_wal_no == projection.head.wal_no {
@@ -206,14 +200,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // future that a closure returns can't borrow the closure's own state.
         let fold = tokio::sync::Mutex::new(FoldAttempts {
             namespace: self,
-            deadline,
+            clock,
             projection,
             layouts: None,
         });
         let folded = self
             .update_manifest(
                 Some(publication_basis),
-                deadline,
+                clock,
                 MAX_CONTENTION_ATTEMPTS,
                 |current: LoadedManifest| {
                     let fold = &fold;
@@ -230,11 +224,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
             Err(error) => return Err(error),
         };
         // The call published the manifest, or found it current, after the
-        // deadline started.
+        // clock started.
         Ok(FoldedWalTail::new(
             &self.namespace_id,
             fold.into_inner().projection.head.seq,
-            PublishedManifest::new(&manifest.state.envelope, Some(deadline.origin())),
+            PublishedManifest::new(&manifest.envelope, Some(clock.origin())),
             outcome,
         ))
     }
@@ -250,7 +244,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let basis = anchor.basis();
         let basis_checked = anchor.checked.clone();
         let head = anchor.read_state;
-        crate::namespace::control::ensure_namespace_live(&head)?;
+        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
         let loaded_basis = super::load::metadata_basis_from_manifest(
             &self.store,
             Some(&self.segment_cache),
@@ -274,7 +268,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         projection: &ManifestProjection<'_, S>,
         layouts: &HashMap<ContentId, ContentLayoutRecord>,
-        manifest_no: ManifestNo,
     ) -> Result<NamespaceManifestPayload> {
         let activity = projection
             .manifest_segments
@@ -337,17 +330,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
             (runs, next_run_no)
         };
 
+        let previous = projection.manifest_segments.manifest().payload();
         Ok(NamespaceManifestPayload {
             activity,
-            manifest_no,
             head_seq,
             writer_epoch: projection.head.writer_epoch,
             next_inode_id: projection.head.next_inode_id,
             next_run_no,
             folded_wal_no: projection.head.wal_no,
             acknowledged_floor_seq: acknowledged_floor_after_fold(projection)?,
-            runs,
-            ..projection.manifest_segments.manifest().payload().clone()
+            ..previous
+                .successor(runs)
+                .map_err(|_| no_manifest_after(previous.manifest_no))?
         })
     }
 }
@@ -392,7 +386,7 @@ impl FoldedWalTail {
 /// One fold's state across its publication attempts.
 struct FoldAttempts<'a, S: ObjectStore> {
     namespace: &'a NamespaceStore<S>,
-    deadline: &'a Deadline,
+    clock: &'a OperationClock,
     projection: ManifestProjection<'a, S>,
     /// The content objects written for the projection's tail, which a
     /// rebuild over a manifest at the same head uses again.
@@ -403,7 +397,7 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
     /// Returns the next manifest over `current`, or `Finished` when `current`
     /// already folds the tail.
     async fn attempt(&mut self, current: LoadedManifest) -> Result<ManifestChange<FoldWalOutcome>> {
-        let payload = current.state.envelope.payload();
+        let payload = current.payload();
         if payload.status.is_deleted() {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: self.namespace.namespace_id.clone(),
@@ -431,9 +425,9 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
             if same_head(
                 &self.projection.basis,
                 &self.projection.head,
-                &PublishedManifest::new(&current.state.envelope, None),
+                &PublishedManifest::new(&current.envelope, None),
             ) {
-                self.projection.basis = MetadataBasis(current.state.manifest());
+                self.projection.basis = MetadataBasis::new(current.manifest());
                 self.projection.manifest_segments = metadata_basis_from_manifest(
                     &self.namespace.store,
                     Some(&self.namespace.segment_cache),
@@ -443,7 +437,7 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
             } else {
                 self.projection = self
                     .namespace
-                    .load_fold_projection(self.deadline.observe())
+                    .load_fold_projection(self.clock.observe())
                     .await?;
                 self.layouts = None;
                 // The tail was read above a manifest newer than `current`.
@@ -463,15 +457,11 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
                     .await?
             }
         };
-        self.deadline
+        self.clock
             .ensure_metadata_publication_budget(&self.namespace.namespace_id)?;
         let manifest = self
             .namespace
-            .build_namespace_manifest_for_projection(
-                &self.projection,
-                &layouts,
-                next_manifest_no_after(payload.manifest_no)?,
-            )
+            .build_namespace_manifest_for_projection(&self.projection, &layouts)
             .await?;
         self.layouts = Some(layouts);
         Ok(ManifestChange::Next(
@@ -523,12 +513,16 @@ impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
 }
 
 pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> {
-    current.successor().map_err(|_| {
-        CoreError::NamespaceCorrupt(format!(
-            "the current manifest is number {current}, the largest manifest number, so no \
-             manifest can follow it"
-        ))
-    })
+    current.successor().map_err(|_| no_manifest_after(current))
+}
+
+/// Returns the error for a manifest numbered `current`, the largest manifest
+/// number, which no manifest can follow.
+pub(super) fn no_manifest_after(current: ManifestNo) -> CoreError {
+    CoreError::NamespaceCorrupt(format!(
+        "the current manifest is number {current}, the largest manifest number, so no \
+         manifest can follow it"
+    ))
 }
 
 /// Advances the manifest's run allocator after a producer has taken

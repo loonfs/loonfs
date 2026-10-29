@@ -1,10 +1,10 @@
 //! Shared fixtures for the crate's integration tests.
 
-use loonfs_core::cache::{HeadAndWalTailCache, MetadataSegmentCache, ObjectCache};
 use loonfs_core::content::prepare_existing_content_ref;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::{CoreError, MutationContext, NamespaceWriterEngine, RuntimeReadContext};
+use loonfs_core::{CoreError, NamespaceWriterEngine, RuntimeReadContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::page_limit;
@@ -12,14 +12,13 @@ use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, ContentRef, NamespaceId};
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
 
 /// Returns a writable engine over `namespace_id` that commits as
 /// `context.writer_id` and reads the system clock.
 pub(crate) fn namespace_engine<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> NamespaceWriterEngine<&'a S> {
     NamespaceWriterEngine::writer(
         namespace_store(store, namespace_id),
@@ -36,11 +35,10 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
         .await
         .expect("load read anchor");
     RuntimeReadContext {
-        basis: anchor.basis(),
-        head: anchor.read_state,
-        segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
-        head_and_wal_tail_cache: Arc::new(HeadAndWalTailCache::unshared(usize::MAX)),
-        object_cache: Arc::new(ObjectCache::unshared(0, 0)),
+        read_basis: loonfs_core::control::ReadBasis {
+            basis: anchor.basis(),
+            head: anchor.read_state,
+        },
         tail: None,
     }
 }
@@ -51,7 +49,7 @@ pub(crate) async fn submit_commit<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: CommitIntent,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::api::v0::Commit, CoreError> {
     let candidate = prepared_candidate(store, namespace_id, request).await;
     NamespaceFixture::new(store, namespace_id, context)
@@ -68,7 +66,7 @@ pub(crate) async fn submit_commits_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     requests: Vec<CommitIntent>,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Vec<Result<loonfs_types::api::v0::Commit, CoreError>> {
     let mut candidates = Vec::with_capacity(requests.len());
     for request in requests {
@@ -129,7 +127,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
 ) -> Result<loonfs_types::api::v0::ListChangesResponse, CoreError> {
     let context = read_context(store, namespace_id).await;
-    namespace_engine(store, namespace_id, &mutation_context())
+    namespace_engine(store, namespace_id, &default_writer())
         .list_changes_after(
             after_seq,
             page_limit(loonfs_types::DEFAULT_PAGE_LIMIT),
@@ -141,7 +139,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
 pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::Snapshot, CoreError> {
     namespace_engine(store, namespace_id, context)
         .create_snapshot("test-pin".to_owned(), None)
@@ -156,7 +154,7 @@ pub(crate) async fn submit_operation<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     commit_id: CommitId,
     operation: FilesystemOperation,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::Commit, CoreError> {
     submit_commit(
         store,
@@ -176,7 +174,7 @@ pub(crate) async fn create_directory_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-    context: &MutationContext,
+    context: &WriterAt,
     commit_id: Option<&CommitId>,
 ) -> Result<loonfs_types::Commit, CoreError> {
     submit_operation(
@@ -198,7 +196,7 @@ pub(crate) async fn resolve_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<loonfs_types::PathEntry, CoreError> {
     let context = read_context(store, namespace_id).await;
-    namespace_engine(store, namespace_id, &mutation_context())
+    namespace_engine(store, namespace_id, &default_writer())
         .resolve_path(
             absolute_path,
             loonfs_types::options::StatOptions::default(),
@@ -213,14 +211,14 @@ pub(crate) async fn read_file_bytes<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<loonfs_core::FileBytes, CoreError> {
     let context = read_context(store, namespace_id).await;
-    namespace_engine(store, namespace_id, &mutation_context())
+    namespace_engine(store, namespace_id, &default_writer())
         .read_file(absolute_path, &context, None)
         .await
 }
 
-/// The context of the suites' default writer, `writer-a` at 1,000 ms.
-pub(crate) fn mutation_context() -> MutationContext {
-    loonfs_core::test_support::mutation_context("writer-a", 1_000)
+/// The suites' default writer, `writer-a` at 1,000 ms.
+pub(crate) fn default_writer() -> WriterAt {
+    loonfs_core::test_support::writer_at("writer-a", 1_000)
 }
 
 pub(crate) fn content_ref(seed: &str) -> ContentRef {

@@ -121,7 +121,7 @@ pub mod engine {
         METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS,
         UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
     };
-    pub use loonfs_core::time::{Deadline, Observation};
+    pub use loonfs_core::time::{Observation, OperationClock};
     pub use loonfs_core::{
         grace_age, next_run_no_after, refill_iterators, select_next_iterator, GraceAge,
         SegmentBlockLoader, SegmentRowIterator,
@@ -195,7 +195,7 @@ pub mod downloads {
 /// [`NamespaceStore`]: loonfs_core::NamespaceStore
 pub mod control {
     pub use loonfs_core::control::{
-        ControlObjectLoadError, CurrentManifest, LoadedControl, LoadedManifest, NamespaceReadState,
+        ControlObjectLoadError, LoadedControl, LoadedManifest, NamespaceReadState,
         NamespaceStatistics, VerifiedNamespaceCatalogEntry,
     };
     pub use loonfs_core::NamespaceStore;
@@ -224,6 +224,7 @@ pub use handle::{
     LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Mode, Namespace, ReadOnly,
     Writable,
 };
+pub use loonfs_core::{phase_span, Phase};
 pub use metadata_cache::{
     MetadataCache, MetadataCacheBuilder, MetadataCacheStats, SsdBlockWriter, SsdSegmentBlocks,
     SsdSegmentBlocksStats, ASSUMED_STORED_BLOCK_BYTES, DEFAULT_MAX_CACHED_OBJECT_BYTES,

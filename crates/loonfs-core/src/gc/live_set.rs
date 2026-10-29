@@ -4,21 +4,22 @@
 //! provider timestamp.
 
 use super::charged_set::{Charge, ChargedMap, ChargedSet, PassMemory};
+use super::families::CandidateFamily;
 use super::pins::{GraceAge, PinSweep};
 use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use super::uploads::ListedUploadSession;
-use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::heap_bytes::manifest_heap_bytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS;
 use crate::manifest::cache::read_working_memory;
 use crate::manifest::load_namespace_manifest_envelope_if_present;
-use crate::namespace::control::{CurrentManifest, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::project_anchor_tail;
 use crate::namespace::store::NamespaceStore;
 use crate::pin::record::pin_key_ids;
 use crate::time::Observation;
+use crate::time::OperationClock;
 use crate::wal::{live_folded_wal_no, object_is_required};
 use futures::{future, stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{
@@ -72,7 +73,7 @@ impl LiveSet {
         namespace: &NamespaceStore<S>,
         session_cache: Option<&CompletedUploadSessionCache>,
         grace_window_ms: u64,
-        context: &MutationContext,
+        clock: &OperationClock,
     ) -> Result<Self> {
         let namespace_id = &namespace.namespace_id;
         let observed = Observation::now(Arc::clone(&namespace.timer));
@@ -86,7 +87,7 @@ impl LiveSet {
         );
         let mut content_ids = ChargedSet::new(&memory);
         let mut completed_sessions = ChargedMap::new(&memory);
-        if !manifest.state.envelope.payload().status.is_deleted() {
+        if !manifest.payload().status.is_deleted() {
             namespace
                 .load_upload_sessions(session_cache, |listed| match listed {
                     ListedUploadSession::Completed { upload_id, session } => {
@@ -102,7 +103,7 @@ impl LiveSet {
         let anchor = namespace
             .load_read_anchor_from_manifest(manifest, hint, observed)
             .await?;
-        let head = anchor.manifest.state.envelope.payload();
+        let head = anchor.manifest.payload();
         let mut live = Self {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
@@ -121,7 +122,7 @@ impl LiveSet {
             memory,
             has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
-            now_ms: context.now_ms,
+            now_ms: clock.request_at_ms(),
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
         // A tombstone roots its runs like any current manifest: an import from
@@ -142,7 +143,7 @@ impl LiveSet {
             }
         }
         let mut rooted = BTreeSet::from([head.manifest_no]);
-        live.load_pinned_manifests(namespace, grace_window_ms, context, &mut rooted)
+        live.load_pinned_manifests(namespace, grace_window_ms, clock, &mut rooted)
             .await?;
         let prefix = metadata_manifest_prefix(namespace_id);
         let mut listing = namespace.store.list_entries_from_stream(&prefix, None);
@@ -163,7 +164,7 @@ impl LiveSet {
                 && listed_manifests
                     .get(&ManifestNo(manifest_no.0 + 1))
                     .is_some_and(|&successor_time| {
-                        GraceAge::of(successor_time, grace_window_ms, context.now_ms)
+                        GraceAge::of(successor_time, grace_window_ms, clock.request_at_ms())
                             != GraceAge::Aged
                     })
         });
@@ -191,7 +192,7 @@ impl LiveSet {
         &mut self,
         namespace: &NamespaceStore<S>,
         grace_window_ms: u64,
-        context: &MutationContext,
+        clock: &OperationClock,
         rooted: &mut BTreeSet<ManifestNo>,
     ) -> Result<()> {
         let prefix = pin_prefix(&namespace.namespace_id);
@@ -238,7 +239,7 @@ impl LiveSet {
                 // number can still require retention when an earlier pin was
                 // deletable.
                 match namespace
-                    .sweep_pin(&key, grace_window_ms, self, context)
+                    .sweep_pin(&key, grace_window_ms, self, clock)
                     .await?
                 {
                     PinSweep::Retain { .. } => {
@@ -258,27 +259,33 @@ impl LiveSet {
 
     fn protect_manifest(&mut self, manifest: &LoadedManifest) -> Result<()> {
         self.objects.insert(manifest.object_key.clone())?;
-        for segment in manifest
-            .state
-            .envelope
-            .payload()
-            .runs
-            .iter()
-            .flat_map(|run| &run.segments)
-        {
+        for segment in manifest.payload().runs.iter().flat_map(|run| &run.segments) {
             self.objects.insert(metadata_segment_object_key(segment))?;
         }
         if self.current_tombstone.is_none() {
             self.manifest_charge
-                .add(manifest_heap_bytes(&manifest.state.envelope))?;
+                .add(manifest_heap_bytes(&manifest.envelope))?;
             self.manifests.push(manifest.clone());
         }
         Ok(())
     }
 
-    pub(super) fn protects_wal(&self, key: &str) -> bool {
-        self.live_folded_wal_no
-            .is_some_and(|folded_wal_no| object_is_required(key, folded_wal_no))
+    /// Returns whether the pass keeps the object of `family` at `key`, because
+    /// a live root references the object, discovery can still read it, or a
+    /// live head hasn't folded it.
+    pub(super) fn protects(&self, family: CandidateFamily, key: &str) -> bool {
+        self.objects.contains(key)
+            || match family {
+                CandidateFamily::Manifests => manifest_no_of(key)
+                    .is_some_and(|number| number >= self.discovery_start_manifest_no),
+                CandidateFamily::WalObjects => self
+                    .live_folded_wal_no
+                    .is_some_and(|folded_wal_no| object_is_required(key, folded_wal_no)),
+                CandidateFamily::MetadataSegments
+                | CandidateFamily::Pins
+                | CandidateFamily::Content
+                | CandidateFamily::Temporary => false,
+            }
     }
 
     pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {
@@ -331,9 +338,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Ok(envelope.map(|(envelope, manifest_bytes)| LoadedManifest {
             object_key: metadata_manifest_object(&self.namespace_id, &manifest_no),
             manifest_bytes,
-            state: CurrentManifest {
-                envelope: Arc::new(envelope),
-            },
+            envelope: Arc::new(envelope),
         }))
     }
 }

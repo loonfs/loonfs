@@ -1,7 +1,7 @@
 //! Publication confirmation at the metadata budget boundary.
 
 use super::*;
-use loonfs::engine::{Deadline, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::engine::{OperationClock, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs::CoreError;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -25,7 +25,7 @@ async fn publication_returning_at_budget(drop_acknowledgement: bool) {
             KeyPredicate::any(),
         );
         let timer = Arc::new(ManualClock::new(0));
-        let deadline = Deadline::start(timer.clone());
+        let deadline = OperationClock::start(0, timer.clone());
         let state = |manifest_no| {
             GrepManifestState::new(
                 namespace_id.clone(),

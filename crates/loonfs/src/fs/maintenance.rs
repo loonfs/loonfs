@@ -18,9 +18,10 @@ use crate::{
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
-use loonfs_core::control::{CurrentManifest, NamespaceReadAnchor, PublicationBasis};
+use loonfs_core::control::{LoadedManifest, NamespaceReadAnchor, PublicationBasis};
 use loonfs_core::CheckpointPageCursor;
 use loonfs_core::CoreError;
+use loonfs_core::Phase;
 use loonfs_types::CompactorEpoch;
 use loonfs_types::PageRequest;
 use std::num::NonZeroU64;
@@ -213,7 +214,7 @@ impl Maintenance {
             .load_current_manifest()
             .await
             .map_err(CoreError::from)?;
-        if manifest.state.envelope.payload().status.is_deleted() {
+        if manifest.payload().status.is_deleted() {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
             }
@@ -227,7 +228,7 @@ impl Maintenance {
     /// last check is at the revalidation bound.
     async fn load_position_basis(
         &self,
-        position: Option<&loonfs_core::publish::WalFoldInput>,
+        position: Option<&loonfs_core::publish::WriterPosition>,
     ) -> Result<Option<PublicationBasis>> {
         let Some(position) = position else {
             return Ok(None);
@@ -378,10 +379,10 @@ impl Maintenance {
                 Some(basis) => basis,
                 None => self.load_live_basis(namespace_id).await?,
             };
-            let manifest_no = manifest.manifest.state.manifest().manifest_no;
+            let manifest_no = manifest.manifest.manifest().manifest_no;
             let behind = position
                 .as_ref()
-                .map(|position| position.basis.manifest_no())
+                .map(|position| position.read_basis.basis.manifest_no())
                 .filter(|position_manifest_no| manifest_no < *position_manifest_no);
             // The publish order rules this out, so a manifest behind the
             // position is a bug, and metadata stays due instead of the step
@@ -394,7 +395,7 @@ impl Maintenance {
                     "the current manifest is older than the writer position's manifest"
                 );
             }
-            let objects = position.map(|position| position.wal_tail_objects);
+            let objects = position.map(|position| position.wal_tail_objects());
             return Ok((
                 Some(manifest),
                 objects,
@@ -675,14 +676,14 @@ impl Maintenance {
         if let Some(epoch) = claimed {
             if observed
                 .as_ref()
-                .is_some_and(|basis| epoch != basis.manifest.state.compactor_epoch())
+                .is_some_and(|basis| epoch != basis.manifest.compactor_epoch())
             {
                 self.forget_fenced_compactor_epoch(namespace_id, epoch)
                     .await;
                 return Ok(MetadataCompactionOutcome::Fenced);
             }
         }
-        let due = |manifest: &CurrentManifest| {
+        let due = |manifest: &LoadedManifest| {
             loonfs_core::cache::metadata_compaction_due(manifest, compaction_policy)
         };
         let basis = match observed {
@@ -693,10 +694,7 @@ impl Maintenance {
             None if claimed.is_some() => None,
             None => Some(self.load_live_basis(namespace_id).await?),
         };
-        if basis
-            .as_ref()
-            .is_some_and(|basis| !due(&basis.manifest.state))
-        {
+        if basis.as_ref().is_some_and(|basis| !due(&basis.manifest)) {
             return Ok(MetadataCompactionOutcome::NotNeeded);
         }
         let _permit = tokio::select! {
@@ -710,7 +708,7 @@ impl Maintenance {
         // planned from. The writer position moves onto the claim, so the unit
         // plans from the position, or loads the current manifest itself.
         let in_epoch =
-            |basis: &PublicationBasis| basis.manifest.state.compactor_epoch() == compactor_epoch;
+            |basis: &PublicationBasis| basis.manifest.compactor_epoch() == compactor_epoch;
         let basis = match basis.filter(in_epoch) {
             Some(basis) => Some(basis),
             None => {
@@ -842,13 +840,12 @@ impl Maintenance {
         options: &crate::GcOptions,
     ) -> Result<crate::GcResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let report = self
-            .core
-            .namespace_store(namespace_id)
+        let namespace = self.core.namespace_store(namespace_id);
+        let report = namespace
             .gc(
                 Some(&self.core.inner.completed_upload_sessions),
                 options,
-                &self.core.mutation_context(&self.actor),
+                &namespace.start_clock(),
             )
             .await
             .map_err(Error::Core)?;
@@ -1085,7 +1082,7 @@ impl Maintenance {
                 .map(|report| report.response)
                 .inspect_err(|error| tracing::debug!(%error))
         }
-        .instrument(phase_span!(self.core, "wal_fold", namespace_id))
+        .instrument(phase_span!(self.core, Phase::WalFold, namespace_id))
         .await
     }
 }

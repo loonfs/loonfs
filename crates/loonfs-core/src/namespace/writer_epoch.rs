@@ -1,21 +1,17 @@
 //! Writer acquisition through a manifest epoch and a numbered fence WAL object.
 
-use crate::context::MutationContext;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
-use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::publish::ManifestChange;
 use crate::manifest::{PublicationReport, PublishedManifest};
-use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use crate::time::Deadline;
 use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
+use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{WriterEpoch, WriterId};
-use std::sync::Arc;
 
 /// Captures the writer identity and fencing epoch a session must retain while publishing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,10 +42,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// floor. A writer session with an older epoch returns `writer_fenced`
     /// to its next publication. The report includes the claim manifest.
     pub async fn acquire_writer_epoch(&self) -> Result<PublicationReport<WriterEpoch>> {
-        let acquisition = self
-            .namespace
-            .acquire_writer(&self.mutation_context())
-            .await?;
+        let acquisition = self.namespace.acquire_writer(self.writer_id()).await?;
         Ok(PublicationReport {
             response: acquisition.writer.writer_epoch,
             published: Some(acquisition.claim),
@@ -58,36 +51,31 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Acquires the namespace's writer epoch for `context.writer_id`, as a
-    /// test that needs a fence without a writer session does.
+    /// Acquires the namespace's writer epoch for `writer_id`, as a test that
+    /// needs a fence without a writer session does.
     #[cfg(test)]
     pub(crate) async fn acquire_writer_epoch(
         &self,
-        context: &MutationContext,
+        writer_id: &WriterId,
     ) -> Result<AcquiredWriter> {
-        Ok(self.acquire_writer(context).await?.writer)
+        Ok(self.acquire_writer(writer_id).await?.writer)
     }
 
-    /// Acquires the namespace's writer epoch for `context.writer_id`: publishes
+    /// Acquires the namespace's writer epoch for `writer_id`: publishes
     /// a claim manifest with the next epoch, then writes a fence at the next WAL
     /// number (format spec, "Writer ownership").
     ///
     /// A writer session acquires its epoch here before its first publication,
     /// and a maintainer that acknowledges the retention floor acquires one here
     /// and commits nothing after the fence.
-    pub(crate) async fn acquire_writer(
-        &self,
-        context: &MutationContext,
-    ) -> Result<WriterAcquisition> {
-        let deadline = Deadline::start(Arc::clone(&self.timer));
+    pub(crate) async fn acquire_writer(&self, writer_id: &WriterId) -> Result<WriterAcquisition> {
+        let clock = self.start_clock();
+        let acquired_at_ms = clock.request_at_ms();
         let (acquired, manifest, hint) = self
-            .update_manifest(
+            .update_live_manifest(
                 None,
-                &deadline,
-                MAX_CONTENTION_ATTEMPTS,
-                |current: LoadedManifest| async move {
-                    let mut payload = current.state.envelope.payload().clone();
-                    super::control::ensure_namespace_live(&NamespaceReadState::from(&payload))?;
+                &clock,
+                |mut payload: NamespaceManifestPayload| async move {
                     payload.writer_epoch = payload.writer_epoch.successor().map_err(|_| {
                         CoreError::NamespaceCorrupt(format!(
                             "manifest {} records writer epoch {}, the largest writer epoch, so no \
@@ -96,11 +84,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         ))
                     })?;
                     payload.writer = Some(WriterBlock {
-                        writer_id: context.writer_id.clone(),
-                        acquired_at_ms: context.now_ms,
+                        writer_id: writer_id.clone(),
+                        acquired_at_ms,
                     });
                     let acquired = AcquiredWriter {
-                        writer_id: context.writer_id.clone(),
+                        writer_id: writer_id.clone(),
                         writer_epoch: payload.writer_epoch,
                     };
                     Ok(ManifestChange::Next(Box::new(payload), acquired))
@@ -108,18 +96,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
             )
             .await?;
         let hint = hint.expect("a claim starts from no basis, so it loads the hint");
-        let claim = PublishedManifest::new(&manifest.state.envelope, Some(deadline.origin()));
-        let mut tip = deadline.observe();
+        let claim = PublishedManifest::new(&manifest.envelope, Some(clock.origin()));
+        let mut tip = clock.observe();
         let mut anchor = self
-            .load_read_anchor_from_manifest(manifest, hint, deadline.origin())
+            .load_read_anchor_from_manifest(manifest, hint, clock.origin())
             .await?;
-        // Only the deadline bounds this loop, because a lost fence race means the
+        // Only the publication budget bounds this loop, because a lost fence race means the
         // old writer wrote a WAL object, and stopping after a count would make the
         // caller publish another epoch.
         loop {
             let head = &anchor.read_state;
             ensure_writer_not_fenced(head, &acquired)?;
-            super::control::ensure_namespace_live(head)?;
+            super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
             let fence = prepare_wal_object(
                 self.namespace_id.clone(),
                 acquired.writer_epoch,
@@ -143,9 +131,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 )) => {}
                 Err(error) => return Err(error),
             }
-            deadline.ensure_metadata_publication_budget(&self.namespace_id)?;
-            tip = deadline.observe();
-            anchor = self.load_read_anchor(deadline.observe()).await?;
+            clock.ensure_metadata_publication_budget(&self.namespace_id)?;
+            tip = clock.observe();
+            anchor = self.load_read_anchor(clock.observe()).await?;
         }
     }
 }

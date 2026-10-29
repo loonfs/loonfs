@@ -32,7 +32,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .load_read_anchor(crate::test_support::observed_now())
             .await
             .map_err(CoreError::ControlObjectLoad)?;
-        super::control::ensure_namespace_live(&loaded.read_state)?;
+        super::control::ensure_namespace_live(
+            &loaded.read_state.namespace_id,
+            loaded.read_state.status,
+        )?;
         let basis =
             crate::manifest::load_basis_metadata_segments(&self.store, None, &loaded.basis())
                 .await?;
@@ -54,10 +57,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let anchor = self
             .load_read_anchor(Observation::now(Arc::clone(&self.timer)))
             .await?;
-        super::control::ensure_namespace_live(&anchor.read_state)?;
+        super::control::ensure_namespace_live(
+            &anchor.read_state.namespace_id,
+            anchor.read_state.status,
+        )?;
         Ok(namespace_metadata(
             anchor.read_state,
-            anchor.manifest.state.envelope.payload(),
+            anchor.manifest.payload(),
         ))
     }
 
@@ -124,13 +130,8 @@ impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {
             fork_basis: fork_basis(head.fork_basis.clone()),
             head_seq: head.seq,
             retention_floor_seq: anchor.retention_floor_seq(),
-            acknowledged_floor_seq: anchor
-                .manifest
-                .state
-                .envelope
-                .payload()
-                .acknowledged_floor_seq,
-            current_manifest_no: anchor.manifest.state.manifest().manifest_no,
+            acknowledged_floor_seq: anchor.manifest.payload().acknowledged_floor_seq,
+            current_manifest_no: anchor.manifest.manifest().manifest_no,
             wal_tail_objects: head.unfolded_wal_objects(),
             wal_tail_newest_commit_at_ms: anchor.tail.newest_commit_at_ms(),
         }

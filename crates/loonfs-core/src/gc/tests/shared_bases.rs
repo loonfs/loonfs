@@ -164,7 +164,7 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_across_the_sh
         segment_cache: Arc::clone(&cache),
         ..crate::test_support::namespace_store(&store, &namespace_id)
     }
-    .gc(None, &options, &context(GRACE_MS + 1))
+    .gc(None, &options, &context(GRACE_MS + 1).clock())
     .await
     .expect("pass fits the read budget");
     assert_eq!(report.deleted.content_objects, 8);
@@ -239,7 +239,7 @@ async fn a_shared_base_false_positive_is_collected_with_a_later_pass_seed() {
     for (now_ms, expected) in [(GRACE_MS + 1, 0), (GRACE_MS + 2, 1)] {
         store.reset();
         let report = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(None, &options(), &context(now_ms))
+            .gc(None, &options(), &context(now_ms).clock())
             .await
             .expect("pass");
         assert_eq!(report.deleted.content_objects, expected);
@@ -300,7 +300,7 @@ async fn a_shared_filter_over_its_cap_skips_content_and_still_sweeps_other_famil
     let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
     store.reset();
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(GRACE_MS + 1))
+        .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
         .expect("pass");
     assert_eq!(report.deleted.content_objects, 0);
@@ -347,15 +347,15 @@ async fn shared_filter_growth_over_the_cap_skips_content_before_any_content_requ
     row.size_bytes = row.layout.extents.len() as u64;
     let (manifest, _) = layout_manifest(&store, &namespace_id, [row]).await;
     publish_layout_manifest(&store, manifest).await;
-    let context = context(GRACE_MS + 1);
+    let clock = context(GRACE_MS + 1).clock();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let live = LiveSet::load(&namespace, None, GRACE_MS, &context)
+    let live = LiveSet::load(&namespace, None, GRACE_MS, &clock)
         .await
         .expect("roots");
     let sweep = Sweep {
         namespace: &namespace,
         grace_window_ms: GRACE_MS,
-        mutation: &context,
+        clock: &clock,
         live: &live,
         session_cache: None,
         listed_bytes: AtomicU64::new(0),
@@ -448,7 +448,7 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     let both = superseded.union(&kept).cloned().collect::<BTreeSet<_>>();
     for (pass_store, deleted, survivors) in [(&young_successor, 0, both), (&aged, 1, kept)] {
         let report = crate::test_support::namespace_store(pass_store, &namespace_id)
-            .gc(None, &options(), &context(now_ms))
+            .gc(None, &options(), &context(now_ms).clock())
             .await
             .expect("pass");
         assert_eq!(report.deleted.content_objects, deleted);

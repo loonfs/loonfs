@@ -4,32 +4,31 @@
 //! and an expired one can't, but it stays listed until garbage collection
 //! deletes it.
 
-use super::read_basis::{load_snapshot_read_basis_from_record, SnapshotReadBasis};
+use super::read_basis::load_snapshot_read_basis_from_record;
 use super::record::{encode_pin, LoadedPin};
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
+use crate::namespace::basis::ReadBasis;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use crate::time::Deadline;
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{DeleteSnapshotResponse, PinId, Snapshot};
-use std::sync::Arc;
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Resolves the read basis of an unexpired snapshot.
     ///
     /// A missing snapshot, a fork pin, and a snapshot that expired at or before
-    /// `now_ms` return `snapshot_not_found`.
+    /// the wall-clock time of the call return `snapshot_not_found`.
     pub async fn load_snapshot_read_basis(
         &self,
         live_head: &NamespaceReadState,
         snapshot_id: &PinId,
-        now_ms: u64,
-    ) -> Result<SnapshotReadBasis> {
-        let loaded = self.load_unexpired_snapshot(snapshot_id, now_ms).await?;
+    ) -> Result<ReadBasis> {
+        let now_ms = self.wall_clock.now_ms();
+        let loaded = ensure_unexpired(self.load_user_pin(snapshot_id).await?, now_ms)?;
         load_snapshot_read_basis_from_record(
             &self.store,
             &self.segment_cache,
@@ -37,17 +36,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             loaded.state,
         )
         .await
-    }
-
-    /// Loads a snapshot that hasn't expired at `now_ms`. A missing snapshot, a
-    /// fork pin, and an expired snapshot return `snapshot_not_found`.
-    pub(crate) async fn load_unexpired_snapshot(
-        &self,
-        snapshot_id: &PinId,
-        now_ms: u64,
-    ) -> Result<LoadedPin> {
-        let loaded = self.load_user_pin(snapshot_id).await?;
-        ensure_unexpired(loaded, now_ms)
     }
 }
 
@@ -84,14 +72,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         snapshot_id: &PinId,
         requested_expires_at_ms: u64,
     ) -> Result<Snapshot> {
-        let context = self.mutation_context();
-        let deadline = Deadline::start(Arc::clone(&self.namespace.timer));
+        let clock = self.namespace.start_clock();
         let object_key = pin(&self.namespace.namespace_id, snapshot_id);
         retry_while_contended(|| async {
             // The expiry check reads the clock after the load, so the time the
             // load took counts toward the expiry.
             let loaded = self.namespace.load_user_pin(snapshot_id).await?;
-            let loaded = ensure_unexpired(loaded, context.now_at(&deadline))?;
+            let loaded = ensure_unexpired(loaded, clock.now_ms())?;
             let mut next = loaded.state.clone();
             let PinOwner::User {
                 expires_at_ms: Some(expires_at_ms),
@@ -119,10 +106,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     // This read checks whether an earlier compare-and-swap was
                     // written. It doesn't start a new extension, so an expiry
                     // after that write doesn't turn the success into a failure.
-                    let current = self
-                        .namespace
-                        .load_unexpired_snapshot(snapshot_id, context.now_ms)
-                        .await?;
+                    let current = ensure_unexpired(
+                        self.namespace.load_user_pin(snapshot_id).await?,
+                        clock.request_at_ms(),
+                    )?;
                     if current
                         .state
                         .owner

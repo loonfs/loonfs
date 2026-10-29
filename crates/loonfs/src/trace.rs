@@ -27,11 +27,13 @@ pub(crate) fn store_kind_label(kind: Option<ConfiguredObjectStoreKind>) -> &'sta
     kind.map_or("unknown", ConfiguredObjectStoreKind::as_str)
 }
 
+/// Opens a `loonfs.phase` debug span for `$phase`, a
+/// [`Phase`](loonfs_core::Phase), with the namespace, the runtime's mode and
+/// store kind, and the fields that follow.
 macro_rules! phase_span {
-    ($core:expr, $phase:literal, $namespace_id:expr $(, $($field:tt)+)?) => {
-        tracing::debug_span!(
-            "loonfs.phase",
-            phase = $phase,
+    ($core:expr, $phase:expr, $namespace_id:expr $(, $($field:tt)+)?) => {
+        loonfs_core::phase_span!(
+            $phase,
             namespace_id = %$namespace_id,
             mode = $core.trace_mode(),
             store_kind = $core.trace_store_kind(),
@@ -42,11 +44,13 @@ macro_rules! phase_span {
 
 pub(crate) use phase_span;
 
+/// Records an event of `$phase`, a [`Phase`](loonfs_core::Phase), at
+/// `$level`, with the fields of [`phase_span!`].
 macro_rules! phase_event {
-    ($core:expr, $phase:literal, $namespace_id:expr, $level:expr $(, $($field:tt)+)?) => {
+    ($core:expr, $phase:expr, $namespace_id:expr, $level:expr $(, $($field:tt)+)?) => {
         tracing::event!(
             $level,
-            phase = $phase,
+            phase = loonfs_core::Phase::as_str($phase),
             namespace_id = %$namespace_id,
             mode = $core.trace_mode(),
             store_kind = $core.trace_store_kind(),

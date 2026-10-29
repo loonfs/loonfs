@@ -6,10 +6,10 @@ use super::live_set::{LiveSet, RetirementStatus};
 use super::session_cache::CompletedUploadSessionCache;
 use super::sweep::Sweep;
 use super::GcOptions;
-use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::namespace::store::NamespaceStore;
+use crate::time::OperationClock;
 use futures::{future, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::ObjectStore;
@@ -29,11 +29,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         session_cache: Option<&CompletedUploadSessionCache>,
         options: &GcOptions,
-        context: &MutationContext,
+        clock: &OperationClock,
     ) -> Result<GcResponse> {
         options.validate()?;
         let mut report = GcResponse::empty(self.namespace_id.clone());
-        let live = LiveSet::load(self, session_cache, options.grace_window_ms, context).await?;
+        let live = LiveSet::load(self, session_cache, options.grace_window_ms, clock).await?;
         report.reclaimable_at_ms = live
             .current_tombstone
             .as_ref()
@@ -45,7 +45,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let sweep = Sweep {
             namespace: self,
             grace_window_ms: options.grace_window_ms,
-            mutation: context,
+            clock,
             live: &live,
             session_cache,
             listed_bytes: AtomicU64::new(0),

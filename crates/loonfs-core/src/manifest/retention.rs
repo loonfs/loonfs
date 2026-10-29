@@ -9,12 +9,10 @@ use super::published::{PublicationReport, PublishedManifest};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
-use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
+use crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
-use crate::namespace::state::NamespaceReadState;
 use crate::namespace::PublicationBasis;
-use crate::time::{Deadline, Observation};
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -22,7 +20,6 @@ use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{AdvanceRetentionResponse, ChangeSeq, SetRetentionWindowResponse};
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
-use std::sync::Arc;
 
 /// Where a retention advance moves the floor.
 ///
@@ -110,15 +107,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         target: RetentionTarget,
     ) -> Result<PublicationReport<AdvanceRetentionResponse>> {
-        let now_ms = self.now_ms();
-        let checked = Observation::now(Arc::clone(&self.namespace.timer));
+        let clock = self.namespace.start_clock();
+        let now_ms = clock.request_at_ms();
         let current = self
             .namespace
             .load_current_manifest()
             .await
             .map_err(CoreError::ControlObjectLoad)?;
-        let manifest = current.state.envelope.payload();
-        ensure_namespace_live(&NamespaceReadState::from(manifest))?;
+        let manifest = current.payload();
+        ensure_namespace_live(&manifest.namespace_id, manifest.status)?;
         let grace_cutoff_at_ms = now_ms.saturating_sub(GC_DEFAULT_GRACE_WINDOW_MS);
         let (through, cutoff_at_ms) = match target {
             RetentionTarget::Head => (manifest.head_seq, grace_cutoff_at_ms),
@@ -160,20 +157,17 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 published: None,
             });
         }
-        let deadline = Deadline::start(Arc::clone(&self.namespace.timer));
+        let publication = self.namespace.start_clock();
         let basis = PublicationBasis {
             manifest: current,
-            checked,
+            checked: clock.origin(),
         };
         let ((floor, advanced), current, _) = self
             .namespace
-            .update_manifest(
+            .update_live_manifest(
                 Some(basis),
-                &deadline,
-                MAX_CONTENTION_ATTEMPTS,
-                |current: LoadedManifest| async move {
-                    let mut payload = current.state.envelope.payload().clone();
-                    ensure_namespace_live(&NamespaceReadState::from(&payload))?;
+                &publication,
+                |mut payload: NamespaceManifestPayload| async move {
                     // Another advance can publish a floor at or above `target` after
                     // the first load.
                     if payload.retention_floor_seq >= target {
@@ -194,7 +188,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 retention_floor_seq: floor,
             },
             published: advanced
-                .then(|| PublishedManifest::new(&current.state.envelope, Some(deadline.origin()))),
+                .then(|| PublishedManifest::new(&current.envelope, Some(publication.origin()))),
         })
     }
 
@@ -209,16 +203,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         retention_window_ms: Option<NonZeroU64>,
     ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
-        let deadline = Deadline::start(Arc::clone(&self.namespace.timer));
+        let clock = self.namespace.start_clock();
         let (changed, current, _) = self
             .namespace
-            .update_manifest(
+            .update_live_manifest(
                 None,
-                &deadline,
-                MAX_CONTENTION_ATTEMPTS,
-                |current: LoadedManifest| async move {
-                    let mut payload = current.state.envelope.payload().clone();
-                    ensure_namespace_live(&NamespaceReadState::from(&payload))?;
+                &clock,
+                |mut payload: NamespaceManifestPayload| async move {
                     if payload.retention_window_ms == retention_window_ms {
                         return Ok(ManifestChange::Finished(false));
                     }
@@ -233,7 +224,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 retention_window_ms: retention_window_ms.map(NonZeroU64::get),
             },
             published: changed
-                .then(|| PublishedManifest::new(&current.state.envelope, Some(deadline.origin()))),
+                .then(|| PublishedManifest::new(&current.envelope, Some(clock.origin()))),
         })
     }
 }
@@ -253,7 +244,7 @@ async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
     cutoff_at_ms: u64,
 ) -> Result<ChangeSeq> {
     let basis = metadata_basis_from_manifest(store, Some(segment_cache), current);
-    let mut last = current.state.retention_floor_seq();
+    let mut last = current.retention_floor_seq();
     // One commit per scan, as the change feed reads them: a commit row can
     // be large, and the memo keeps the block for the next call within the
     // caller's read budget.

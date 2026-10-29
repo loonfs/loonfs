@@ -38,11 +38,7 @@ async fn publish<S: ObjectStore>(
     candidate: CommitCandidate,
 ) -> Result<Commit> {
     engine
-        .publish_batch(
-            [candidate],
-            &context("writer"),
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch([candidate], &context("writer").clock())
         .await
         .results
         .pop()
@@ -135,14 +131,16 @@ async fn an_undelete_is_validated_against_the_floor_of_the_sessions_basis() {
         .create()
         .await
         .expect("bootstrap");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context("writer").writer_id,
+    );
     let (restored, restored_seq) = delete(&mut engine, "restored").await;
     let (expired, expired_seq) = delete(&mut engine, "expired").await;
     let folded = crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal_tail(
-            engine.wal_fold_input(),
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            engine.writer_position(),
+            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .expect("fold");
@@ -150,7 +148,7 @@ async fn an_undelete_is_validated_against_the_floor_of_the_sessions_basis() {
     let advanced = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(1_000),
         ),

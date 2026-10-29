@@ -52,8 +52,8 @@ use crate::path::read::{stat_current_files_by_inode, CurrentFile, CurrentFileSta
 use crate::protocol::list_changes_after;
 use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine};
 use crate::storage::content::prepare_stored_content;
-use crate::time::{Deadline, StdMonotonicTimer};
-use crate::MutationContext;
+use crate::test_support::WriterAt;
+use crate::time::{OperationClock, StdMonotonicTimer};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -118,7 +118,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
 pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> crate::error::Result<loonfs_types::Checkpoint> {
     crate::test_support::namespace_store(store, namespace_id)
         .create_pin(
@@ -126,20 +126,20 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
                 name: "test-pin".to_owned(),
                 expires_at_ms: None,
             },
-            context,
+            &context.clock(),
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
 }
 
-pub(crate) use crate::test_support::mutation_context;
+pub(crate) use crate::test_support::writer_at;
 
 pub(crate) async fn write_test_file<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
     path: &str,
     commit_id: &str,
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     let stored = crate::test_support::namespace_store(store, namespace_id)
         .store_bytes_as_content(b"body\n")
@@ -151,50 +151,52 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
         .await
         .expect("load namespace catalog");
     let prepared = prepare_stored_content(&catalog, stored);
-    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
-        .publish_batch(
-            vec![CommitCandidate::prepared(
-                CommitIntent::single(
-                    CommitId::parse(commit_id).expect("commit id"),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::PutFile {
-                        path: AbsolutePath::parse(path).expect("path"),
-                        content: loonfs_types::FileContent::Ref(content_ref),
-                        behavior: DestinationBehavior::NoReplace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-                vec![prepared],
-            )],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("write file");
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        context.writer_id.clone(),
+    )
+    .publish_batch(
+        vec![CommitCandidate::prepared(
+            CommitIntent::single(
+                CommitId::parse(commit_id).expect("commit id"),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::PutFile {
+                    path: AbsolutePath::parse(path).expect("path"),
+                    content: loonfs_types::FileContent::Ref(content_ref),
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+            ),
+            vec![prepared],
+        )],
+        &context.clock(),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("write file");
 }
 
 #[derive(Debug)]
 pub(crate) struct CurrentProjection {
     pub(crate) head: NamespaceReadState,
-    pub(crate) manifest: crate::namespace::control::CurrentManifest,
+    pub(crate) manifest: crate::namespace::control::LoadedManifest,
     pub(crate) metadata_state: MetadataState,
 }
 
 pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> crate::error::Result<loonfs_types::NamespaceMetadata> {
     let summary = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .create()
         .await?;
     crate::test_support::namespace_store(store, namespace_id)
-        .acquire_writer_epoch(context)
+        .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("acquire fixture writer");
     crate::test_support::namespace_store(store, namespace_id)
@@ -219,7 +221,6 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("resolve retention floor")
-        .state
         .retention_floor_seq()
 }
 
@@ -232,8 +233,6 @@ async fn read_acknowledged_floor_seq<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("load the current manifest")
-        .state
-        .envelope
         .payload()
         .acknowledged_floor_seq
 }
@@ -245,7 +244,7 @@ async fn advance_floor_through<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     deletion_seq: ChangeSeq,
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     crate::test_support::namespace_store(store, namespace_id)
         .fold_wal()
@@ -254,7 +253,7 @@ async fn advance_floor_through<S: ObjectStore + ?Sized>(
     let advanced = crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -272,10 +271,10 @@ async fn advance_floor_through<S: ObjectStore + ?Sized>(
 async fn acknowledge_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     crate::test_support::namespace_store(store, namespace_id)
-        .acquire_writer_epoch(context)
+        .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("write a fence");
     crate::test_support::namespace_store(store, namespace_id)
@@ -297,7 +296,7 @@ async fn acknowledge_floor<S: ObjectStore + ?Sized>(
 async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
     policy: MetadataRunPolicy,
 ) -> ManifestNo {
     create_checkpoint(store, namespace_id, context)
@@ -381,7 +380,7 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 store,
                 namespace_id,
-                &crate::test_support::mutation_context("test-writer", 0),
+                &crate::test_support::writer_at("test-writer", 0),
             );
             fixture.namespace.run_policy = policy;
             fixture
@@ -404,7 +403,6 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
                     .load_current_manifest()
                     .await
                     .expect("read metadata manifest")
-                    .state
                     .manifest()
                     .manifest_no;
                 return (manifest_no, published);
@@ -422,7 +420,7 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
 async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    _context: &MutationContext,
+    _context: &WriterAt,
     policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
 ) -> CompactionUnitOutcome {
@@ -477,8 +475,8 @@ async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
             cancellation,
             &CompactionPublication {
                 compactor_epoch: loonfs_types::CompactorEpoch(0),
-                compaction: Deadline::start(Arc::clone(&timer)),
-                publication: Deadline::start(timer),
+                compaction: OperationClock::start(0, Arc::clone(&timer)),
+                publication: OperationClock::start(0, timer),
             },
         )
         .await
@@ -504,8 +502,6 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("read metadata manifest")
-        .state
-        .envelope
         .payload()
         .next_inode_id;
     let inode_ids: Vec<InodeId> = (loonfs_types::ROOT_INODE_ID.0..next_inode_id.0)
@@ -534,7 +530,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
 pub(crate) async fn compact_a_family_group<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> BTreeSet<String> {
     let (policy, spec) = plan_a_family_group_compaction(store, namespace_id, context).await;
     publish_planned_compaction(store, namespace_id, context, policy, &spec).await;
@@ -549,7 +545,7 @@ pub(crate) async fn compact_a_family_group<S: ObjectStore + ?Sized>(
 pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    _context: &MutationContext,
+    _context: &WriterAt,
 ) -> (MetadataRunPolicy, MetadataCompactionSpec) {
     let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
@@ -559,7 +555,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    let payload = current.state.envelope.payload();
+    let payload = current.payload();
     let spec = compaction_step::plan_compaction(
         payload,
         &runs_newest_first(payload),
@@ -600,7 +596,7 @@ pub(crate) async fn segment_keys_of_the_current_manifest<S: ObjectStore + ?Sized
 pub(crate) async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
     policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
 ) {
@@ -620,7 +616,6 @@ async fn current_manifest_number<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("read metadata manifest")
-        .state
         .manifest()
         .manifest_no
 }
@@ -644,8 +639,7 @@ pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
     let manifest = crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
-        .map_err(CoreError::ControlObjectLoad)?
-        .state;
+        .map_err(CoreError::ControlObjectLoad)?;
     Ok(CurrentProjection {
         head,
         manifest,
@@ -765,8 +759,8 @@ fn base_segment_object_keys_for_family(
         .collect()
 }
 
-pub(crate) fn test_context() -> MutationContext {
-    mutation_context("test-writer", 1_000)
+pub(crate) fn test_context() -> WriterAt {
+    writer_at("test-writer", 1_000)
 }
 
 fn manifest_no(seq: ChangeSeq) -> ManifestNo {
@@ -776,7 +770,7 @@ fn manifest_no(seq: ChangeSeq) -> ManifestNo {
 async fn write_file_and_checkpoint(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
     index: u64,
 ) -> ChangeSeq {
     let path = format!("/docs/file-{index}.txt");
@@ -1001,7 +995,7 @@ async fn publish_once<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     publish_once_within(store, manifest, &deadline).await
 }
 
@@ -1009,7 +1003,7 @@ async fn publish_once<S: ObjectStore + ?Sized>(
 async fn publish_once_within<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
-    deadline: &Deadline,
+    deadline: &OperationClock,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
     let checked = deadline.observe();

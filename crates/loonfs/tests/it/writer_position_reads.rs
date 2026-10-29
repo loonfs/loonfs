@@ -551,7 +551,6 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
     .load_current_manifest()
     .await
     .expect("current manifest")
-    .state
     .manifest()
     .manifest_no;
     let fold_manifest = before.successor().expect("next manifest number");

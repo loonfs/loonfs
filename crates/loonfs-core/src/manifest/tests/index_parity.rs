@@ -215,7 +215,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     let advanced = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -959,7 +959,7 @@ async fn manifest_validation_rejects_unsupported_segment_encoding() {
         .load_current_manifest()
         .await
         .expect("valid manifest");
-    let mut payload = manifest.state.envelope.payload().clone();
+    let mut payload = manifest.payload().clone();
     let descriptor = &mut payload.runs[0].segments[0];
     descriptor.encoding = loonfs_types::format::manifest::METADATA_SEGMENT_ENCODING + 1;
     let segment_id = descriptor.segment_id.clone();

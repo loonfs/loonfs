@@ -697,6 +697,18 @@ pub struct SegmentCacheKey {
     pub block_offset: u64,
 }
 
+impl SegmentCacheKey {
+    /// Returns the key of a decoded manifest, which is cached under its
+    /// object key.
+    pub(crate) fn manifest(object_key: &str) -> Self {
+        Self {
+            identity: object_key.to_owned(),
+            block_kind: SegmentBlockKind::Manifest,
+            block_offset: 0,
+        }
+    }
+}
+
 impl DecodedBlockKey for SegmentCacheKey {
     fn heap_bytes(&self) -> usize {
         HeapBytes::heap_bytes(&self.identity)

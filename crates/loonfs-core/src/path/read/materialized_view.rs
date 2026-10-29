@@ -4,23 +4,22 @@
 use super::current_files::resolve_visible_inode;
 use super::listing::{invalid_cursor, validate_cursor_head, DirectoryListingRequest};
 use crate::authorize::{Absence, ReadAccess};
+use crate::engine::RuntimeReadContext;
 #[cfg(test)]
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::manifest::{
-    load_basis_metadata_segments, HeadAndWalTailCache, MetadataSegmentCache,
-    VerifiedMetadataSegments, WalTailCacheKey,
-};
+use crate::manifest::{load_basis_metadata_segments, VerifiedMetadataSegments, WalTailCacheKey};
 use crate::metadata::{
     ancestry_allows_read, ActiveDeletionRange, DirentryBindingRecord, LeafRevisionPreload,
     MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
-use crate::namespace::basis::MetadataBasis;
+use crate::namespace::basis::ReadBasis;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::object_cache::ObjectCache;
 use crate::path::mutation_path::parse_absolute_path_for_core;
+use crate::phase::Phase;
 use crate::storage::content::ContentLocation;
 use crate::storage::content_location::extent_object_key;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
@@ -34,48 +33,12 @@ use loonfs_types::options::ListOptions;
 use loonfs_types::{
     AbsolutePath, AccessRight, AttributeInclusion, ChangeSeq, ContentRef, DirectoryPageCursor,
     DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ListPageCursor,
-    ManifestNo, NameKey, NamespaceId, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo,
-    TrashEntry, TrashPageCursor,
+    ManifestNo, NameKey, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo, TrashEntry,
+    TrashPageCursor,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::Instrument;
-
-#[derive(Clone, Copy)]
-pub(crate) struct ReadLoadContext<'anchor, 'cache> {
-    head: &'anchor NamespaceReadState,
-    /// Basis pinned together with the head when the snapshot was taken. The
-    /// live root may have moved past a pinned head; the pinned pair stays
-    /// consistent (any manifest at or below the pinned seq serves it, with
-    /// WAL replay covering the rest).
-    basis: &'anchor MetadataBasis,
-    /// The projected WAL tail above `basis` at `head`, when the read starts
-    /// from a writer session's position.
-    tail: Option<&'anchor Arc<ProjectedWalTail>>,
-    segment_cache: Option<&'cache MetadataSegmentCache>,
-    head_and_wal_tail_cache: Option<&'cache HeadAndWalTailCache>,
-    object_cache: Option<&'cache ObjectCache>,
-}
-
-impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
-    pub(crate) fn pinned_head(
-        head: &'anchor NamespaceReadState,
-        basis: &'anchor MetadataBasis,
-        tail: Option<&'anchor Arc<ProjectedWalTail>>,
-        segment_cache: Option<&'cache MetadataSegmentCache>,
-        head_and_wal_tail_cache: Option<&'cache HeadAndWalTailCache>,
-        object_cache: Option<&'cache ObjectCache>,
-    ) -> Self {
-        Self {
-            head,
-            basis,
-            tail,
-            segment_cache,
-            head_and_wal_tail_cache,
-            object_cache,
-        }
-    }
-}
 
 /// Identifies the metadata snapshot used by one read.
 ///
@@ -94,20 +57,64 @@ struct ReadAnchor {
 const MAX_TRASH_ROWS_SCANNED_PER_PAGE: usize = 256;
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    pub(crate) async fn load_metadata_view<'a>(
-        &'a self,
-        context: ReadLoadContext<'_, 'a>,
-    ) -> Result<LoadedMetadataView<'a, S>> {
-        crate::namespace::control::ensure_namespace_live(context.head)?;
+    /// Loads the view of a live namespace at `context`'s head, through this
+    /// namespace's caches.
+    pub(crate) async fn load_metadata_view(
+        &self,
+        context: &RuntimeReadContext,
+    ) -> Result<LoadedMetadataView<'_, S>> {
+        let head = &context.read_basis.head;
+        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
         self.load_metadata_view_for_authorization(context).await
     }
 
     /// Loads access rows from a deleted head when deletion does not decide authorization.
-    pub(crate) async fn load_metadata_view_for_authorization<'a>(
-        &'a self,
-        context: ReadLoadContext<'_, 'a>,
-    ) -> Result<LoadedMetadataView<'a, S>> {
-        LoadedMetadataView::load_at_head(&self.store, &self.namespace_id, context).await
+    pub(crate) async fn load_metadata_view_for_authorization(
+        &self,
+        context: &RuntimeReadContext,
+    ) -> Result<LoadedMetadataView<'_, S>> {
+        let ReadBasis { head, basis } = &context.read_basis;
+        crate::namespace::control::ensure_head_identity(head, &self.namespace_id)?;
+        let head = head.clone();
+        let manifest_no = basis.manifest_no();
+        let loaded_basis =
+            load_basis_metadata_segments(&self.store, Some(&self.segment_cache), basis).await?;
+        let manifest_head = loaded_basis.replay_head(&head);
+        let anchor = ReadAnchor {
+            head_seq: head.seq,
+            manifest_no,
+            manifest_head_seq: manifest_head.seq,
+        };
+        let wal_tail = match &context.tail {
+            Some(wal_tail) => Arc::clone(wal_tail),
+            None => {
+                let cache_key = WalTailCacheKey {
+                    namespace_id: self.namespace_id.clone(),
+                    manifest_no,
+                    head_seq: head.seq,
+                };
+                self.head_and_wal_tail_cache
+                    .get_or_load_tail(&cache_key, || async {
+                        load_replayed_wal_tail(
+                            &self.store,
+                            &manifest_head,
+                            &head,
+                            &loaded_basis.base_state,
+                        )
+                        .await
+                        .map(|replayed| Arc::new(replayed.projected_tail))
+                        .map_err(CoreError::MetadataProjection)
+                    })
+                    .await?
+            }
+        };
+        Ok(LoadedMetadataView {
+            head,
+            segments: loaded_basis.segments,
+            wal_tail,
+            anchor,
+            object_cache: &self.object_cache,
+        })
     }
 
     #[cfg(test)]
@@ -116,10 +123,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .load_read_anchor(crate::test_support::observed_now())
             .await
             .map_err(MetadataProjectionLoadError::LoadHead)?;
-        let basis = loaded.basis();
-        let context =
-            ReadLoadContext::pinned_head(&loaded.read_state, &basis, None, None, None, None);
-        self.load_metadata_view(context).await
+        let context = RuntimeReadContext {
+            read_basis: ReadBasis {
+                basis: loaded.basis(),
+                head: loaded.read_state,
+            },
+            tail: None,
+        };
+        self.load_metadata_view(&context).await
     }
 }
 
@@ -195,7 +206,7 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     wal_tail: Arc<ProjectedWalTail>,
     anchor: ReadAnchor,
     /// Where file reads look for content objects before the store.
-    object_cache: Option<&'a ObjectCache>,
+    object_cache: &'a ObjectCache,
 }
 
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
@@ -217,64 +228,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         self.metadata_view()
     }
 
-    async fn load_at_head(
-        store: &'a S,
-        namespace_id: &NamespaceId,
-        load_context: ReadLoadContext<'_, 'a>,
-    ) -> Result<Self> {
-        crate::namespace::control::ensure_head_identity(load_context.head, namespace_id)?;
-        let head = load_context.head.clone();
-        let basis = load_context.basis;
-        let manifest_no = basis.manifest_no();
-        let loaded_basis =
-            load_basis_metadata_segments(store, load_context.segment_cache, basis).await?;
-        let manifest_head = loaded_basis.replay_head(&head);
-        let segments = loaded_basis.segments;
-        let anchor = ReadAnchor {
-            head_seq: head.seq,
-            manifest_no,
-            manifest_head_seq: manifest_head.seq,
-        };
-        if let Some(wal_tail) = load_context.tail {
-            return Ok(Self {
-                head,
-                segments,
-                wal_tail: Arc::clone(wal_tail),
-                anchor,
-                object_cache: load_context.object_cache,
-            });
-        }
-        let cache_key = WalTailCacheKey {
-            namespace_id: namespace_id.clone(),
-            manifest_no,
-            head_seq: head.seq,
-        };
-        let replay = || async {
-            load_replayed_wal_tail(store, &manifest_head, &head, &loaded_basis.base_state)
-                .await
-                .map(|replayed| Arc::new(replayed.projected_tail))
-                .map_err(CoreError::MetadataProjection)
-        };
-        let wal_tail = match load_context.head_and_wal_tail_cache {
-            Some(cache) => cache.get_or_load_tail(&cache_key, replay).await?,
-            None => replay().await?,
-        };
-        Ok(Self {
-            head,
-            segments,
-            wal_tail,
-            anchor,
-            object_cache: load_context.object_cache,
-        })
-    }
-
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
         err(level = "debug"),
         skip_all,
         fields(
-            phase = "walk_path",
+            phase = Phase::WalkPath.as_str(),
             head_seq = self.anchor.head_seq.0,
             manifest_no = self.anchor.manifest_no.0,
             manifest_head_seq = self.anchor.manifest_head_seq.0,
@@ -369,7 +329,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .read_bytes(self.segments.store(), self.object_cache, &content_ref)
+            .read_bytes(self.segments.store(), Some(self.object_cache), &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
@@ -891,7 +851,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .read_bytes(self.segments.store(), self.object_cache, &content_ref)
+            .read_bytes(self.segments.store(), Some(self.object_cache), &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
@@ -912,7 +872,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await?
             .read_bytes(
                 self.segments.store(),
-                self.object_cache,
+                Some(self.object_cache),
                 &revision.content_ref,
             )
             .await?)
@@ -924,7 +884,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         err(level = "debug"),
         skip_all,
         fields(
-            phase = "walk_path",
+            phase = Phase::WalkPath.as_str(),
             head_seq = self.anchor.head_seq.0,
             manifest_no = self.anchor.manifest_no.0,
             manifest_head_seq = self.anchor.manifest_head_seq.0,
@@ -1118,10 +1078,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         start_after: Option<&NameKey>,
         limit: usize,
     ) -> Result<Vec<VisibleChildEntry>> {
-        let select_span = tracing::debug_span!(
-            target: "loonfs::page",
-            "loonfs.phase",
-            phase = "list_page_select_children",
+        let select_span = crate::phase_span!(
+            Phase::ListPageSelectChildren,
             list_page_requested_limit = limit as u64,
             list_page_children_returned = tracing::field::Empty,
         );
@@ -1156,9 +1114,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
             Ok::<_, CoreError>(())
         }
-        .instrument(
-            tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "child_access"),
-        )
+        .instrument(crate::phase_span!(Phase::ChildAccess))
         .await?;
         Ok(children
             .into_iter()
@@ -1175,10 +1131,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         children: Vec<ListedChild>,
         attributes: AttributeInclusion,
     ) -> Result<Vec<PathEntry>> {
-        let build_span = tracing::debug_span!(
-            target: "loonfs::page",
-            "loonfs.phase",
-            phase = "list_page_build_entries",
+        let build_span = crate::phase_span!(
+            Phase::ListPageBuildEntries,
             list_page_children_returned = children.len() as u64,
             { METADATA_VIEW_SESSION_COUNTER_FIELDS[0].0 } = tracing::field::Empty,
             { METADATA_VIEW_SESSION_COUNTER_FIELDS[1].0 } = tracing::field::Empty,
@@ -1415,8 +1369,8 @@ fn validate_file_revisions_cursor(
 mod tests {
     use super::*;
     use crate::commit_engine::CommitCandidate;
-    use crate::context::MutationContext;
     use crate::path::write::{CommitIntent, FilesystemOperation};
+    use crate::test_support::WriterAt;
     use bytes::Bytes;
     use futures::poll;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -1424,13 +1378,14 @@ mod tests {
     use loonfs_test_support::stores::{
         replace_object, BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
     };
+    use loonfs_types::NamespaceId;
     use loonfs_types::{AttributeValue, AttributesRevisionNo, CommitId, ErrorCode};
     use std::collections::BTreeMap;
     use std::pin::pin;
     use tempfile::TempDir;
 
-    fn context() -> MutationContext {
-        crate::test_support::mutation_context("reader-tests", 1)
+    fn context() -> WriterAt {
+        crate::test_support::writer_at("reader-tests", 1)
     }
 
     /// Bootstraps a namespace holding `/docs` with one annotated child
@@ -1561,28 +1516,29 @@ mod tests {
             .load_read_anchor(crate::test_support::observed_now())
             .await
             .expect("read anchor");
-        let basis = anchor.basis();
+        let context = RuntimeReadContext {
+            read_basis: ReadBasis {
+                basis: anchor.basis(),
+                head: anchor.read_state,
+            },
+            tail: None,
+        };
         // Once the first load caches the manifest, a load reads nothing from
         // the store before the WAL objects of the tail.
-        let segment_cache = MetadataSegmentCache::unshared(1 << 20);
+        let segment_cache = Arc::new(crate::cache::MetadataSegmentCache::unshared(1 << 20));
         let (alone, shared) = (
-            HeadAndWalTailCache::unshared(1 << 20),
-            HeadAndWalTailCache::unshared(1 << 20),
+            Arc::new(crate::cache::HeadAndWalTailCache::unshared(1 << 20)),
+            Arc::new(crate::cache::HeadAndWalTailCache::unshared(1 << 20)),
         );
-        let context = |cache| {
-            ReadLoadContext::pinned_head(
-                &anchor.read_state,
-                &basis,
-                None,
-                Some(&segment_cache),
-                Some(cache),
-                None,
-            )
+        let namespace = |cache: &Arc<crate::cache::HeadAndWalTailCache>| NamespaceStore {
+            segment_cache: Arc::clone(&segment_cache),
+            head_and_wal_tail_cache: Arc::clone(cache),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
         };
 
         store.reset();
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .load_metadata_view(context(&alone))
+        namespace(&alone)
+            .load_metadata_view(&context)
             .await
             .expect("a load on its own");
         let one_replay = store.counts().gets;
@@ -1590,10 +1546,9 @@ mod tests {
 
         store.reset();
         store.inner().arm();
-        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-        let mut first = pin!(namespace.load_metadata_view(context(&shared)));
-        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-        let mut second = pin!(namespace.load_metadata_view(context(&shared)));
+        let (first_namespace, second_namespace) = (namespace(&shared), namespace(&shared));
+        let mut first = pin!(first_namespace.load_metadata_view(&context));
+        let mut second = pin!(second_namespace.load_metadata_view(&context));
         assert!(poll!(first.as_mut()).is_pending());
         assert!(poll!(pin!(store.inner().wait_until_blocked())).is_ready());
         assert!(poll!(second.as_mut()).is_pending());

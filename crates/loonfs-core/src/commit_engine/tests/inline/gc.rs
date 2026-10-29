@@ -4,12 +4,13 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::GcOptions;
 use crate::storage::content::content_object_key_for_ref;
+use crate::test_support::WriterAt;
 use loonfs_test_support::stores::{BlockingStore, MetadataMapStore, OperationSelector};
 
 async fn collect_aged_wal(
     store: &Arc<RecordingStore<LocalFsStore>>,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     let options = GcOptions::default();
     let aged = MetadataMapStore::aged(
@@ -20,10 +21,11 @@ async fn collect_aged_wal(
         .gc(
             None,
             &options,
-            &MutationContext {
+            &WriterAt {
                 now_ms: options.grace_window_ms + 1,
                 ..context.clone()
-            },
+            }
+            .clock(),
         )
         .await
         .expect("collect aged WAL");
@@ -79,9 +81,9 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
     );
     blocked.block_next();
     let timer = Arc::new(StdMonotonicTimer::default());
-    let deadline = crate::time::Deadline::start(timer.clone());
+    let deadline = crate::time::OperationClock::start(0, timer.clone());
     let namespace = crate::test_support::namespace_store(&blocked, namespace_id);
-    let fold = namespace.fold_wal_tail(engine.wal_fold_input(), &deadline);
+    let fold = namespace.fold_wal_tail(engine.writer_position(), &deadline);
     let collect_during_fold = async {
         blocked.wait_until_blocked().await;
         assert!(store
@@ -126,7 +128,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
     )
     .await
     .expect("publish");
-    let input = engine.wal_fold_input().expect("tail");
+    let input = engine.writer_position().expect("tail");
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::content_blob(),
@@ -134,7 +136,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
     );
     blocked.block_next();
     let timer = Arc::new(StdMonotonicTimer::default());
-    let deadline = crate::time::Deadline::start(timer.clone());
+    let deadline = crate::time::OperationClock::start(0, timer.clone());
     let namespace = crate::test_support::namespace_store(&blocked, namespace_id);
     let loser = namespace.fold_wal_tail(Some(input.clone()), &deadline);
     let winner = async {
@@ -142,7 +144,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         let folded = crate::test_support::namespace_store(&store, namespace_id)
             .fold_wal_tail(
                 Some(input),
-                &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .expect("winning fold");

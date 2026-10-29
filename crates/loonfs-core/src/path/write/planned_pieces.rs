@@ -3,6 +3,7 @@
 use super::session::PublishPlanningSession;
 use crate::wal::{ProjectedContent, ProjectedPiece};
 use bytes::Bytes;
+use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{ChangeSeq, ContentId, ContentRef};
 use std::collections::HashMap;
@@ -47,13 +48,13 @@ impl PlannedPieces {
 
 /// What one commit's content planning reads: its own pieces over the
 /// batch's accepted commits over the tail.
-pub(super) struct CommitPieces<'a> {
-    session: &'a PublishPlanningSession<'a>,
+pub(super) struct CommitPieces<'a, S: ObjectStore + ?Sized> {
+    session: &'a PublishPlanningSession<'a, S>,
     own: PlannedPieces,
 }
 
-impl<'a> CommitPieces<'a> {
-    pub(super) fn new(session: &'a PublishPlanningSession<'a>) -> Self {
+impl<'a, S: ObjectStore + ?Sized> CommitPieces<'a, S> {
+    pub(super) fn new(session: &'a PublishPlanningSession<'a, S>) -> Self {
         Self {
             session,
             own: PlannedPieces::default(),

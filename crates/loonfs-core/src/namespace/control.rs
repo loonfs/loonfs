@@ -10,43 +10,52 @@ use crate::namespace::store::NamespaceStore;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ControlObjectKind, HintPayload, ManifestRef};
+use loonfs_types::format::control::{ControlObjectKind, HintPayload, ManifestRef, NamespaceStatus};
+use loonfs_types::format::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_types::{CompactorEpoch, ManifestNo, NamespaceId};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CurrentManifest {
-    pub envelope: std::sync::Arc<loonfs_types::format::manifest::NamespaceManifestEnvelope>,
-}
-
-impl CurrentManifest {
-    pub fn manifest(&self) -> ManifestRef {
-        crate::manifest::publish::manifest_ref_for(&self.envelope)
-    }
-
-    pub fn retention_floor_seq(&self) -> loonfs_types::ChangeSeq {
-        self.envelope.payload().retention_floor_seq
-    }
-
-    pub fn acknowledged_floor_seq(&self) -> loonfs_types::ChangeSeq {
-        self.envelope.payload().acknowledged_floor_seq
-    }
-
-    pub fn folded_wal_no(&self) -> loonfs_types::WalNo {
-        self.envelope.payload().folded_wal_no
-    }
-
-    pub fn compactor_epoch(&self) -> CompactorEpoch {
-        self.envelope.payload().compactor_epoch
-    }
-}
-
+/// A namespace manifest loaded from the store, with its object key and stored
+/// length.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedManifest {
     pub object_key: String,
     /// Stored length of the manifest object, which is the compressed document.
     pub(crate) manifest_bytes: u64,
-    pub state: CurrentManifest,
+    pub(crate) envelope: Arc<NamespaceManifestEnvelope>,
+}
+
+impl LoadedManifest {
+    /// Returns the manifest's decoded envelope.
+    pub fn envelope(&self) -> &Arc<NamespaceManifestEnvelope> {
+        &self.envelope
+    }
+
+    /// Returns the manifest's payload.
+    pub fn payload(&self) -> &NamespaceManifestPayload {
+        self.envelope.payload()
+    }
+
+    /// Returns the reference that identifies this manifest.
+    pub fn manifest(&self) -> ManifestRef {
+        crate::manifest::publish::manifest_ref_for(&self.envelope)
+    }
+
+    pub fn retention_floor_seq(&self) -> loonfs_types::ChangeSeq {
+        self.payload().retention_floor_seq
+    }
+
+    pub fn acknowledged_floor_seq(&self) -> loonfs_types::ChangeSeq {
+        self.payload().acknowledged_floor_seq
+    }
+
+    pub fn folded_wal_no(&self) -> loonfs_types::WalNo {
+        self.payload().folded_wal_no
+    }
+
+    pub fn compactor_epoch(&self) -> CompactorEpoch {
+        self.payload().compactor_epoch
+    }
 }
 
 pub(crate) fn ensure_head_identity(
@@ -62,10 +71,13 @@ pub(crate) fn ensure_head_identity(
     Ok(())
 }
 
-pub(crate) fn ensure_namespace_live(head: &NamespaceReadState) -> crate::error::Result<()> {
-    if head.status.is_deleted() {
+pub(crate) fn ensure_namespace_live(
+    namespace_id: &NamespaceId,
+    status: NamespaceStatus,
+) -> crate::error::Result<()> {
+    if status.is_deleted() {
         return Err(CoreError::NamespaceDeleted {
-            namespace_id: head.namespace_id.clone(),
+            namespace_id: namespace_id.clone(),
         });
     }
     Ok(())
@@ -78,7 +90,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let Some(current) = self.load_current_manifest_if_present().await? else {
             return Ok(());
         };
-        Err(if current.state.envelope.payload().status.is_deleted() {
+        Err(if current.payload().status.is_deleted() {
             CoreError::NamespaceDeleted {
                 namespace_id: self.namespace_id.clone(),
             }
@@ -156,12 +168,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub async fn load_current_manifest(&self) -> Result<LoadedManifest, ControlObjectLoadError> {
         self.load_current_manifest_if_present()
             .await?
-            .ok_or_else(|| ControlObjectLoadError::MissingObject {
-                object_key: loonfs_objectstore::keys::metadata_manifest_object(
-                    &self.namespace_id,
-                    &loonfs_types::ManifestNo(1),
-                ),
-            })
+            .ok_or_else(|| missing_current_manifest(&self.namespace_id))
     }
 
     pub(crate) async fn load_current_manifest_if_present(
@@ -178,12 +185,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<(LoadedManifest, LoadedHint), ControlObjectLoadError> {
         self.discover_manifest()
             .await?
-            .ok_or_else(|| ControlObjectLoadError::MissingObject {
-                object_key: loonfs_objectstore::keys::metadata_manifest_object(
-                    &self.namespace_id,
-                    &loonfs_types::ManifestNo(1),
-                ),
-            })
+            .ok_or_else(|| missing_current_manifest(&self.namespace_id))
     }
 
     /// Loads the current manifest through the hint (format spec, "Resolving the
@@ -201,8 +203,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let is_deleted =
-            |manifest: &LoadedManifest| manifest.state.envelope.payload().status.is_deleted();
+        let is_deleted = |manifest: &LoadedManifest| manifest.payload().status.is_deleted();
         loop {
             let mut manifest_no = hint.state.manifest_no;
             if manifest_no == loonfs_types::ManifestNo(0) {
@@ -214,7 +215,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             let mut current = self.load_manifest_by_no(manifest_no).await?;
             if let Some(loaded) = current.as_ref().filter(|loaded| !is_deleted(loaded)) {
                 if let Some(newest) = self.find_newest_manifest_above(loaded).await? {
-                    manifest_no = newest.state.envelope.payload().manifest_no;
+                    manifest_no = newest.payload().manifest_no;
                     current = Some(newest);
                 }
             }
@@ -258,7 +259,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         previous: &LoadedManifest,
     ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
-        let Ok(next) = previous.state.envelope.payload().manifest_no.successor() else {
+        let Ok(next) = previous.payload().manifest_no.successor() else {
             return Ok(None);
         };
         if !self.manifest_exists(next).await? {
@@ -299,10 +300,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
             return Ok(None);
         };
         previous
-            .state
-            .envelope
             .payload()
-            .ensure_later(manifest.state.envelope.payload())
+            .ensure_later(manifest.payload())
             .map_err(|error| ControlObjectLoadError::Codec {
                 object_key: manifest.object_key.clone(),
                 message: error.to_string(),
@@ -360,9 +359,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Ok(envelope.map(|(envelope, manifest_bytes)| LoadedManifest {
             object_key,
             manifest_bytes,
-            state: CurrentManifest {
-                envelope: std::sync::Arc::new(envelope),
-            },
+            envelope: Arc::new(envelope),
         }))
     }
 
@@ -373,6 +370,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
 }
 
 pub type LoadedHint = LoadedControl<HintPayload>;
+
+/// Returns the error for a namespace that has no current manifest, with the
+/// key of the namespace's first manifest.
+fn missing_current_manifest(namespace_id: &NamespaceId) -> ControlObjectLoadError {
+    ControlObjectLoadError::MissingObject {
+        object_key: loonfs_objectstore::keys::metadata_manifest_object(
+            namespace_id,
+            &ManifestNo(1),
+        ),
+    }
+}
 
 const _: () = assert!(
     0 < MANIFEST_PROBE_WINDOW && MANIFEST_PROBE_WINDOW <= crate::in_flight::STORE_READS_IN_FLIGHT

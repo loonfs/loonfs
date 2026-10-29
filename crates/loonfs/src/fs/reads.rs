@@ -149,7 +149,7 @@ impl ReadView {
 
     /// Returns the head sequence this view captured.
     pub fn head_seq(&self) -> ChangeSeq {
-        self.context.head.seq
+        self.context.read_basis.head.seq
     }
 
     /// Rejects read options that ask for a state other than the one this
@@ -967,7 +967,7 @@ impl<M: crate::Mode> Namespace<M> {
                     Ok(ListPathEntriesResponse {
                         namespace_id: self.namespace_id.clone(),
                         path: listed_path,
-                        head_seq: pinned.context.head.seq,
+                        head_seq: pinned.context.read_basis.head.seq,
                         entries: page.items,
                         next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
                     })
@@ -1048,7 +1048,7 @@ impl<M: crate::Mode> Namespace<M> {
                         .engine
                         .list_inode_children_page(inode_id, request, options, &pinned.context)
                         .await?;
-                    let head_seq = pinned.context.head.seq;
+                    let head_seq = pinned.context.read_basis.head.seq;
                     let next_cursor = encode_next_list_cursor(page.next_cursor.as_ref())?;
                     Ok(ListInodeChildrenResponse {
                         namespace_id: self.namespace_id.clone(),
@@ -1602,7 +1602,7 @@ impl<M: crate::Mode> Namespace<M> {
                     let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
                     Ok(loonfs_types::ListTrashResponse {
                         namespace_id: self.namespace_id.clone(),
-                        head_seq: pinned.context.head.seq,
+                        head_seq: pinned.context.read_basis.head.seq,
                         entries: page.items,
                         next_cursor,
                     })
@@ -1669,7 +1669,7 @@ impl<M: crate::Mode> Namespace<M> {
                         .await?;
                     Ok(file_revisions_page_response(
                         self.namespace_id.clone(),
-                        pinned.context.head.seq,
+                        pinned.context.read_basis.head.seq,
                         revisions.page,
                         revisions.inode_id,
                     )?)
@@ -1739,7 +1739,7 @@ impl<M: crate::Mode> Namespace<M> {
                         .await?;
                     Ok(file_revisions_page_response(
                         self.namespace_id.clone(),
-                        pinned.context.head.seq,
+                        pinned.context.read_basis.head.seq,
                         page,
                         inode_id,
                     )?)

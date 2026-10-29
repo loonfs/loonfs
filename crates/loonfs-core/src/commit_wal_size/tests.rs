@@ -239,12 +239,11 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         assert!(estimate <= MAX_WAL_OBJECT_BYTES, "{kind}");
         let tail = crate::wal::ProjectedWalTail::default();
         let base = crate::wal::ProjectedWalTail::from_rows(state.clone());
-        let mut session = PublishPlanningSession::new(&head, &tail);
+        let content_writes = crate::test_support::content_writes();
+        let mut session = PublishPlanningSession::new(&head, &tail, &store, &content_writes);
         let mut allocation = session.begin_candidate();
         let plan = session
             .prepare_commit(
-                &store,
-                &crate::test_support::content_writes(),
                 &candidate,
                 candidate.semantic_identity(&namespace_id),
                 InMemoryMetadataView::in_memory(&base, None, head.seq),

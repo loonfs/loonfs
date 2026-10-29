@@ -199,12 +199,11 @@ pub(crate) mod control {
     pub(crate) async fn metadata_manifest(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
-    ) -> loonfs::control::CurrentManifest {
+    ) -> loonfs::control::LoadedManifest {
         loonfs_core::test_support::namespace_store(store.as_ref(), namespace_id)
             .load_current_manifest()
             .await
             .expect("current manifest")
-            .state
     }
 
     pub(crate) async fn pin(

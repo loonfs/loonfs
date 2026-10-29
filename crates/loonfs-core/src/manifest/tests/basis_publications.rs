@@ -29,7 +29,7 @@ async fn claimed_namespace(
         .await
         .expect("create");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context)
+        .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("claim manifest 2");
     if !hint_lags {
@@ -62,7 +62,7 @@ async fn republish<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     basis: Option<PublicationBasis>,
-    deadline: &Deadline,
+    deadline: &OperationClock,
 ) -> LoadedManifest {
     let ((), published, _) = crate::test_support::namespace_store(store, namespace_id)
         .update_manifest(
@@ -71,7 +71,7 @@ async fn republish<S: ObjectStore + ?Sized>(
             MAX_CONTENTION_ATTEMPTS,
             |current: LoadedManifest| async move {
                 Ok(ManifestChange::Next(
-                    Box::new(current.state.envelope.payload().clone()),
+                    Box::new(current.payload().clone()),
                     (),
                 ))
             },
@@ -102,9 +102,9 @@ async fn a_publication_from_a_fresh_basis_sends_only_its_put() {
             crate::test_support::observed_now(),
         )
         .await;
-        let deadline = Deadline::start(crate::test_support::std_timer());
+        let deadline = OperationClock::start(0, crate::test_support::std_timer());
         let published = republish(&store, &namespace_id, Some(basis), &deadline).await;
-        assert_eq!(published.state.manifest().manifest_no, ManifestNo(3));
+        assert_eq!(published.manifest().manifest_no, ManifestNo(3));
         assert_eq!(
             control_requests(&namespace_id, &store.take()),
             vec![(
@@ -137,9 +137,14 @@ async fn a_basis_at_the_revalidation_bound_discovers_through_the_hint() {
         )
         .await;
         clock.advance_ms(age_ms);
-        let published =
-            republish(&store, &namespace_id, Some(basis), &Deadline::start(clock)).await;
-        assert_eq!(published.state.manifest().manifest_no, ManifestNo(3));
+        let published = republish(
+            &store,
+            &namespace_id,
+            Some(basis),
+            &OperationClock::start(0, clock),
+        )
+        .await;
+        assert_eq!(published.manifest().manifest_no, ManifestNo(3));
         let hint = hint(&namespace_id);
         let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
         let mut expected = Vec::new();
@@ -183,7 +188,7 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
     );
     gate.block_next();
     let other = LocalFsStore::new(directory.path()).expect("store");
-    let deadline = Deadline::start(crate::test_support::std_timer());
+    let deadline = OperationClock::start(0, crate::test_support::std_timer());
     let (published, ()) = tokio::join!(
         republish(&gate, &namespace_id, Some(basis), &deadline),
         async {
@@ -192,7 +197,7 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
                 crate::test_support::NamespaceFixture::new(
                     &other,
                     &namespace_id,
-                    &crate::test_support::mutation_context("test-writer", 0),
+                    &crate::test_support::writer_at("test-writer", 0),
                 )
                 .engine()
                 .claim_compactor()
@@ -202,9 +207,9 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
             gate.release();
         }
     );
-    assert_eq!(published.state.manifest().manifest_no, ManifestNo(5));
+    assert_eq!(published.manifest().manifest_no, ManifestNo(5));
     assert_eq!(
-        published.state.compactor_epoch(),
+        published.compactor_epoch(),
         loonfs_types::CompactorEpoch(2),
         "the publication builds on the newest claim"
     );

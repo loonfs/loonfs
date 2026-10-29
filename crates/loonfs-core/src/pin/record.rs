@@ -152,9 +152,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let manifest = self.load_current_manifest().await?;
         let pinned = record.manifest();
         Ok(
-            if manifest.state.envelope.payload().status.is_deleted()
-                || manifest.state.manifest().manifest_no != pinned.manifest_no
-                || manifest.state.manifest().payload_checksum != pinned.payload_checksum
+            if manifest.payload().status.is_deleted()
+                || manifest.manifest().manifest_no != pinned.manifest_no
+                || manifest.manifest().payload_checksum != pinned.payload_checksum
             {
                 PinBasisVerification::Invalid
             } else {

@@ -70,9 +70,9 @@ async fn the_read_position_follows_each_commit() {
             .core
             .writer_position(&namespace_id)
             .expect("a position after a commit");
-        assert_eq!(position.head.seq, commit.committed_seq, "{name}");
+        assert_eq!(position.read_basis.head.seq, commit.committed_seq, "{name}");
         assert_eq!(
-            position.basis.manifest_no(),
+            position.read_basis.basis.manifest_no(),
             current_manifest_no(&store, &namespace_id).await,
             "{name}"
         );
@@ -82,11 +82,11 @@ async fn the_read_position_follows_each_commit() {
         reader
             .core
             .writer_position(&namespace_id)
-            .map(|position| position.head.seq),
+            .map(|position| position.read_basis.head.seq),
         writer
             .core
             .writer_position(&namespace_id)
-            .map(|position| position.head.seq),
+            .map(|position| position.read_basis.head.seq),
         "a read-only view shares the writer's core"
     );
     writer.shutdown().await.expect("shutdown");
@@ -114,10 +114,13 @@ async fn a_fold_moves_the_read_position_to_its_manifest() {
         .core
         .writer_position(&namespace_id)
         .expect("a position after the fold");
-    assert_eq!(after.basis.manifest_no(), folded.manifest_no);
-    assert!(after.basis.manifest_no() > before.basis.manifest_no());
-    assert_eq!(after.head.seq, before.head.seq);
-    assert_eq!(after.head.folded_wal_no, before.head.wal_no);
+    assert_eq!(after.read_basis.basis.manifest_no(), folded.manifest_no);
+    assert!(after.read_basis.basis.manifest_no() > before.read_basis.basis.manifest_no());
+    assert_eq!(after.read_basis.head.seq, before.read_basis.head.seq);
+    assert_eq!(
+        after.read_basis.head.folded_wal_no,
+        before.read_basis.head.wal_no
+    );
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -203,6 +206,7 @@ async fn the_next_wal_object_after_an_advance_records_the_advanced_floor() {
             .core
             .writer_position(&namespace_id)
             .expect("a position after the advance")
+            .read_basis
             .basis
             .manifest_no(),
         current_manifest_no(&store, &namespace_id).await,
@@ -251,7 +255,7 @@ async fn an_unknown_change_drops_the_read_position_until_the_next_commit() {
         writer
             .core
             .writer_position(&namespace_id)
-            .map(|position| position.head.seq),
+            .map(|position| position.read_basis.head.seq),
         Some(commit.committed_seq)
     );
     writer.shutdown().await.expect("shutdown");
@@ -286,7 +290,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
                     bounded(Duration::from_secs(10), async {
                         let shared = store.clone() as SharedStore;
                         while current_manifest_no(&shared, &namespace_id).await
-                            <= before.basis.manifest_no()
+                            <= before.read_basis.basis.manifest_no()
                         {
                             tokio::task::yield_now().await;
                         }
@@ -297,7 +301,10 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
                         .core
                         .writer_position(&namespace_id)
                         .expect("reads keep the position while the publish runs");
-                    assert_eq!(kept.basis.manifest_no(), before.basis.manifest_no());
+                    assert_eq!(
+                        kept.read_basis.basis.manifest_no(),
+                        before.read_basis.basis.manifest_no()
+                    );
                     store.release();
                 });
             checkpoint.expect("checkpoint")
@@ -309,10 +316,10 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         .writer_position(&namespace_id)
         .expect("a position after the publish");
     assert_eq!(
-        after.basis.manifest_no(),
+        after.read_basis.basis.manifest_no(),
         checkpoint.snapshot_id.manifest_no()
     );
-    assert_eq!(after.head.seq, during.committed_seq);
+    assert_eq!(after.read_basis.head.seq, during.committed_seq);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -427,8 +434,8 @@ async fn a_read_during_an_explicit_fold_keeps_the_read_position() {
         .core
         .writer_position(&namespace_id)
         .expect("a position after the fold");
-    assert_eq!(after.basis.manifest_no(), folded.manifest_no);
-    assert_eq!(after.head.seq, before.head.seq);
+    assert_eq!(after.read_basis.basis.manifest_no(), folded.manifest_no);
+    assert_eq!(after.read_basis.head.seq, before.read_basis.head.seq);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -449,7 +456,7 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
     loonfs_core::test_support::NamespaceFixture::new(
         store.as_ref(),
         &namespace_id,
-        &MutationContext {
+        &WriterAt {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
@@ -491,6 +498,6 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
         .core
         .writer_position(&namespace_id)
         .expect("a position after the fold");
-    assert_eq!(after.head.seq, committed.committed_seq);
+    assert_eq!(after.read_basis.head.seq, committed.committed_seq);
     writer.shutdown().await.expect("shutdown");
 }

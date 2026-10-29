@@ -35,7 +35,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<VerifiedNamespaceCatalogEntry, ControlObjectLoadError> {
         let manifest = self.load_current_manifest().await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(
-            &NamespaceReadState::from(manifest.state.envelope.payload()),
+            &NamespaceReadState::from(manifest.payload()),
         ))
     }
 }

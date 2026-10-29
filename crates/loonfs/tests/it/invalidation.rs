@@ -420,7 +420,6 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .load_current_manifest()
         .await
         .expect("current manifest")
-        .state
         .manifest()
         .manifest_no;
     let next_wal_no = head_state(&store, &namespace_id)

@@ -2,7 +2,7 @@
 
 use crate::common::GrepHost;
 use bytes::Bytes;
-use loonfs::engine::{Deadline, SegmentBlockKind};
+use loonfs::engine::{OperationClock, SegmentBlockKind};
 use loonfs::SharedObjectStore;
 use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
 use loonfs_grep::keyspace::{segment_key, segments_prefix};
@@ -131,7 +131,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         &store,
         None,
         &state,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
     )
     .await
     .expect("publish inputs");

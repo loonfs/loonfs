@@ -10,7 +10,7 @@ use super::scan_load::{ScanDescriptor, ScanLoader};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 #[cfg(test)]
 use crate::metadata::MetadataState;
-use crate::namespace::control::{CurrentManifest, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
@@ -48,7 +48,7 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(super) store: &'a S,
     pub(super) segment_cache: Option<&'a MetadataSegmentCache>,
     pub(super) manifest_object_key: String,
-    pub(super) manifest: Option<Arc<NamespaceManifestEnvelope>>,
+    pub(super) manifest: Arc<NamespaceManifestEnvelope>,
     pub(super) manifest_bytes: u64,
     /// The manifest's runs, newest first, grouped once during load
     /// validation and shared through the manifest cache entry. A merge
@@ -73,44 +73,65 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         segment_cache: &'a MetadataSegmentCache,
         scan_runs: Vec<MetadataRunManifest>,
     ) -> Self {
-        Self {
+        let payload = loonfs_types::format::manifest::NamespaceManifestPayload::initial(
+            loonfs_types::NamespaceId::parse("runs").expect("a static namespace id should parse"),
+            0,
+            loonfs_types::ActorId::parse("runs").expect("a static actor id should parse"),
+            loonfs_types::NamespaceAccess::Unrestricted {},
+        );
+        let manifest = loonfs_types::format::manifest::encode_namespace_manifest_json(payload)
+            .expect("an initial manifest should encode")
+            .into_envelope();
+        Self::new(
             store,
-            segment_cache: Some(segment_cache),
-            manifest_object_key: String::new(),
-            manifest: None,
-            manifest_bytes: 0,
-            scan_runs: Arc::new(scan_runs),
-            block_memo: SessionBlockMemo::new(super::cache::read_working_memory(Some(
-                segment_cache,
-            ))),
-            peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
-        }
+            Some(segment_cache),
+            String::new(),
+            Arc::new(manifest),
+            0,
+            Arc::new(scan_runs),
+        )
     }
 }
 
-impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
-    /// The same segments with an empty block memo of their own, so the
-    /// blocks that one pass memoizes are released when the pass ends.
-    pub(super) fn with_empty_block_memo(&self) -> Self {
+impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
+    /// Returns the segments of `manifest`, stored at `manifest_object_key`,
+    /// with an empty block memo.
+    pub(super) fn new(
+        store: &'a S,
+        segment_cache: Option<&'a MetadataSegmentCache>,
+        manifest_object_key: String,
+        manifest: Arc<NamespaceManifestEnvelope>,
+        manifest_bytes: u64,
+        scan_runs: Arc<Vec<MetadataRunManifest>>,
+    ) -> Self {
         Self {
-            store: self.store,
-            segment_cache: self.segment_cache,
-            manifest_object_key: self.manifest_object_key.clone(),
-            manifest: self.manifest.clone(),
-            manifest_bytes: self.manifest_bytes,
-            scan_runs: Arc::clone(&self.scan_runs),
-            block_memo: SessionBlockMemo::new(super::cache::read_working_memory(
-                self.segment_cache,
-            )),
+            store,
+            segment_cache,
+            manifest_object_key,
+            manifest,
+            manifest_bytes,
+            scan_runs,
+            block_memo: SessionBlockMemo::new(super::cache::read_working_memory(segment_cache)),
             #[cfg(test)]
             peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
+    /// The same segments with an empty block memo of their own, so the
+    /// blocks that one pass memoizes are released when the pass ends.
+    pub(super) fn with_empty_block_memo(&self) -> Self {
+        Self::new(
+            self.store,
+            self.segment_cache,
+            self.manifest_object_key.clone(),
+            Arc::clone(&self.manifest),
+            self.manifest_bytes,
+            Arc::clone(&self.scan_runs),
+        )
+    }
+
     pub(crate) fn manifest(&self) -> &NamespaceManifestEnvelope {
-        self.manifest
-            .as_deref()
-            .expect("loaded metadata segments should include their manifest")
+        &self.manifest
     }
 
     /// Returns the manifest that these segments were loaded from.
@@ -118,13 +139,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         LoadedManifest {
             object_key: self.manifest_object_key.clone(),
             manifest_bytes: self.manifest_bytes,
-            state: CurrentManifest {
-                envelope: Arc::clone(
-                    self.manifest
-                        .as_ref()
-                        .expect("loaded metadata segments should include their manifest"),
-                ),
-            },
+            envelope: Arc::clone(&self.manifest),
         }
     }
 

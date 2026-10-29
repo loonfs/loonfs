@@ -213,7 +213,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let context = crate::test_support::mutation_context("tree-listing-tests", 1);
+        let context = crate::test_support::writer_at("tree-listing-tests", 1);
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
             .create()
             .await

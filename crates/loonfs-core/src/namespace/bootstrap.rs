@@ -4,13 +4,11 @@ use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::options::CreateNamespaceOptions;
-use crate::time::Deadline;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_types::{
     AccessRevisionNo, ActorId, ChangeSeq, InodeKind, NamespaceMetadata, ROOT_INODE_ID,
 };
-use std::sync::Arc;
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates the namespace if it does not already exist.
@@ -22,22 +20,19 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &loonfs_types::ActorId,
         options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
-        let context = self.mutation_context();
-        let deadline = Deadline::start(Arc::clone(&self.namespace.timer));
+        let clock = self.namespace.start_clock();
         let start = NamespaceManifestPayload {
             retention_window_ms: options.retention_window_ms,
             ..NamespaceManifestPayload::initial(
                 self.namespace.namespace_id.clone(),
-                context.now_ms,
+                clock.request_at_ms(),
                 actor_id.clone(),
                 options.access.clone(),
             )
         };
         let created = async {
             self.namespace.ensure_absent().await?;
-            self.namespace
-                .create_manifest(start.clone(), &deadline)
-                .await
+            self.namespace.create_manifest(start.clone(), &clock).await
         };
         match created.await {
             Ok(()) => Ok(super::status::created_namespace(&start)),

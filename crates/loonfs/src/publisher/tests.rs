@@ -16,7 +16,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use loonfs_core::MutationContext;
+use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
@@ -1462,9 +1462,8 @@ async fn deletion_folds_the_tail_with_the_configured_run_policy() {
     let deleted = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .load_current_manifest()
         .await
-        .expect("load the deleted manifest")
-        .state;
-    let payload = deleted.envelope.payload();
+        .expect("load the deleted manifest");
+    let payload = deleted.payload();
     assert!(payload.status.is_deleted());
     let row_counts: Vec<u64> = payload
         .runs
@@ -2131,7 +2130,7 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
     loonfs_core::test_support::NamespaceFixture::new(
         store.as_ref(),
         &namespace_id,
-        &MutationContext {
+        &WriterAt {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
@@ -2164,7 +2163,7 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
         .writer_position(&namespace_id)
         .expect("the fold moved the position");
     assert_eq!(
-        Some(position.basis.manifest_no()),
+        Some(position.read_basis.basis.manifest_no()),
         status.current_manifest_no
     );
     writer.shutdown().await.expect("shut down writer");
@@ -2195,7 +2194,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     loonfs_core::test_support::NamespaceFixture::new(
         store.as_ref(),
         &namespace_id,
-        &MutationContext {
+        &WriterAt {
             writer_id: loonfs_types::WriterId::parse("seed").expect("writer"),
             now_ms: 1_000,
         },
@@ -2264,11 +2263,11 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .engine
         .as_ref()
         .expect("engine")
-        .wal_fold_input()
+        .writer_position()
         .expect("reanchored projection");
-    assert_eq!(input.wal_tail_objects, 0);
+    assert_eq!(input.wal_tail_objects(), 0);
     assert_eq!(
-        input.tail_state.decoded_bytes(),
+        input.tail.decoded_bytes(),
         loonfs_core::cache::ProjectedWalTail::default().decoded_bytes()
     );
     store.reset();
@@ -2315,7 +2314,7 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
     loonfs_core::test_support::NamespaceFixture::new(
         failing.as_ref(),
         &namespace_id,
-        &MutationContext {
+        &WriterAt {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
@@ -2361,7 +2360,7 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
     loonfs_core::test_support::namespace_store(failing.inner(), &namespace_id)
         .fold_wal_tail(
             None,
-            &Deadline::start(Arc::new(loonfs_types::StdMonotonicTimer::default())),
+            &OperationClock::start(0, Arc::new(loonfs_types::StdMonotonicTimer::default())),
         )
         .await
         .expect("another process folds the tail");
@@ -2415,7 +2414,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         loonfs_core::test_support::NamespaceFixture::new(
             blocking.as_ref(),
             namespace_id,
-            &MutationContext {
+            &WriterAt {
                 writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
             },
@@ -2507,7 +2506,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         loonfs_core::test_support::NamespaceFixture::new(
             recording.as_ref(),
             namespace_id,
-            &MutationContext {
+            &WriterAt {
                 writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
             },
@@ -2590,7 +2589,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     loonfs_core::test_support::NamespaceFixture::new(
         blocking.inner(),
         &namespace_id,
-        &MutationContext {
+        &WriterAt {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
@@ -2632,7 +2631,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         .load_current_manifest()
         .await
         .expect("manifest during fold");
-    assert!(!manifest.state.envelope.payload().status.is_deleted());
+    assert!(!manifest.payload().status.is_deleted());
 
     blocking.release();
     settle_delete(delete, "delete waiting for the earlier fold")
@@ -2696,7 +2695,7 @@ async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
     loonfs_core::test_support::NamespaceFixture::new(
         blocking.as_ref(),
         &folding,
-        &MutationContext {
+        &WriterAt {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
@@ -3416,7 +3415,6 @@ async fn current_manifest_no(
         .load_current_manifest()
         .await
         .expect("load the current manifest")
-        .state
         .manifest()
         .manifest_no
 }

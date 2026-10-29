@@ -89,7 +89,7 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
         loonfs_core::test_support::NamespaceFixture::new(
             store.as_ref(),
             &namespace_id,
-            &loonfs_core::MutationContext {
+            &loonfs_core::test_support::WriterAt {
                 writer_id: loonfs_types::WriterId::parse("tail-seed").expect("writer id"),
                 now_ms: 1_000,
             },

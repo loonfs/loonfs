@@ -1,8 +1,8 @@
 //! Namespace installation, numbered publication, and fork ownership contracts.
 
 use crate::commit_engine::NamespaceCommitEngine;
-use crate::context::MutationContext;
 use crate::manifest::tests::control_requests;
+use crate::test_support::WriterAt;
 use crate::wal::tests::publish;
 use loonfs_objectstore::{
     keys::{hint, metadata_manifest_object},
@@ -15,8 +15,8 @@ use loonfs_test_support::stores::{
 use loonfs_types::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId};
 use tempfile::tempdir;
 
-fn context() -> MutationContext {
-    crate::test_support::mutation_context("writer", 1_000)
+fn context() -> WriterAt {
+    crate::test_support::writer_at("writer", 1_000)
 }
 
 #[test]
@@ -115,7 +115,10 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
             .expect("load the created namespace")
     );
     publish(
-        &mut NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &source)),
+        &mut NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &source),
+            context().writer_id,
+        ),
         "inherited",
     )
     .await
@@ -151,7 +154,6 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
                 .load_current_manifest()
                 .await
                 .expect("source manifest")
-                .state
                 .manifest()
         )
     );
@@ -216,7 +218,10 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         .await
         .expect("create");
     publish(
-        &mut NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &source)),
+        &mut NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &source),
+            context().writer_id,
+        ),
         "inherited",
     )
     .await
@@ -231,15 +236,16 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         .await
         .expect("target manifest");
     assert!(target_manifest
-        .state
-        .envelope
         .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
         .all(|segment| segment.owner_namespace_id == source));
     publish(
-        &mut NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &target)),
+        &mut NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &target),
+            context().writer_id,
+        ),
         "child",
     )
     .await
@@ -254,8 +260,6 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         .await
         .expect("nested manifest");
     let owners = manifest
-        .state
-        .envelope
         .payload()
         .runs
         .iter()
@@ -334,8 +338,10 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         .load_hint()
         .await
         .expect("initial hint");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context().writer_id,
+    );
     publish(&mut engine, "seed").await.expect("seed");
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -349,7 +355,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
             crate::test_support::NamespaceFixture::new(
                 store.inner(),
                 &namespace_id,
-                &crate::test_support::mutation_context(
+                &crate::test_support::writer_at(
                     "test-writer",
                     crate::test_support::grace_elapsed_after(context().now_ms),
                 ),
@@ -364,12 +370,12 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 .raise_hint(ManifestNo(4), None)
                 .await
                 .expect("raise the hint past the pending raise");
-            let aged = MutationContext {
+            let aged = WriterAt {
                 now_ms: grace + 1,
                 ..context()
             };
             crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .gc(None, &options, &aged)
+                .gc(None, &options, &aged.clock())
                 .await
                 .expect("collect during pending hint");
             store.release();
@@ -384,7 +390,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         .load_current_manifest()
         .await
         .expect("discover past lagging hint");
-    assert_eq!(current.state.manifest().manifest_no, ManifestNo(4));
+    assert_eq!(current.manifest().manifest_no, ManifestNo(4));
     crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_metadata_view()
         .await
@@ -397,12 +403,12 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         .raise_hint(ManifestNo(1), Some(known))
         .await
         .expect("refresh hint");
-    let aged = MutationContext {
+    let aged = WriterAt {
         now_ms: 2 * grace + 2,
         ..context()
     };
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &aged)
+        .gc(None, &options, &aged.clock())
         .await
         .expect("collect after grace");
     assert!(store
@@ -428,10 +434,13 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
             .await
             .expect("bootstrap");
     }
-    NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &target))
-        .delete_namespace(Default::default(), &context)
-        .await
-        .expect("delete target");
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &target),
+        context.writer_id.clone(),
+    )
+    .delete_namespace(Default::default())
+    .await
+    .expect("delete target");
     store.reset();
     let error = crate::test_support::NamespaceFixture::new(&store, &source, &context)
         .engine()

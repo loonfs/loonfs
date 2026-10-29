@@ -107,10 +107,25 @@ pub(crate) fn grace_elapsed_after(committed_at_ms: u64) -> u64 {
     committed_at_ms + crate::limits::GC_DEFAULT_GRACE_WINDOW_MS
 }
 
-/// Builds the context a test mutation runs under: `writer_id` at `now_ms`.
-pub fn mutation_context(writer_id: &str, now_ms: u64) -> crate::MutationContext {
-    crate::MutationContext {
-        writer_id: loonfs_types::WriterId::parse(writer_id).expect("a test writer id should parse"),
+/// A writer ID and the wall-clock time that a test's operations run at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriterAt {
+    pub writer_id: WriterId,
+    pub now_ms: u64,
+}
+
+impl WriterAt {
+    /// Returns an operation clock that starts at the writer's time, on a
+    /// standard monotonic timer.
+    pub fn clock(&self) -> crate::time::OperationClock {
+        crate::time::OperationClock::start(self.now_ms, std_timer())
+    }
+}
+
+/// Returns the writer `writer_id` at `now_ms`.
+pub fn writer_at(writer_id: &str, now_ms: u64) -> WriterAt {
+    WriterAt {
+        writer_id: WriterId::parse(writer_id).expect("a test writer id should parse"),
         now_ms,
     }
 }
@@ -143,13 +158,15 @@ use std::sync::Arc;
 /// Returns `namespace_id`'s components over `store`, for a test whose caches,
 /// clocks, write permits, and run policy don't matter.
 ///
-/// The components are a segment cache that keeps no blocks, the system
-/// clocks, 32 content write permits, and the default run policy.
+/// The components are caches that keep nothing, the system clocks, 32
+/// content write permits, and the default run policy.
 pub fn namespace_store<S>(store: S, namespace_id: &NamespaceId) -> NamespaceStore<S> {
     NamespaceStore::new(
         store,
         namespace_id.clone(),
         Arc::new(MetadataSegmentCache::unshared(0)),
+        Arc::new(crate::cache::HeadAndWalTailCache::unshared(0)),
+        Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
         Arc::new(crate::time::SystemWallClock),
         std_timer(),
         Arc::new(content_writes()),
@@ -189,17 +206,17 @@ pub struct NamespaceFixture<S> {
 }
 
 impl<S: ObjectStore + Clone> NamespaceFixture<S> {
-    /// Returns a fixture over `store` whose clock reads `context.now_ms` and
-    /// whose writer is `context.writer_id`, with the other components of
+    /// Returns a fixture over `store` whose clock reads `writer.now_ms` and
+    /// whose writer is `writer.writer_id`, with the other components of
     /// [`namespace_store`].
-    pub fn new(store: S, namespace_id: &NamespaceId, context: &crate::MutationContext) -> Self {
+    pub fn new(store: S, namespace_id: &NamespaceId, writer: &WriterAt) -> Self {
         Self {
             namespace: namespace_store_with_wall_clock(
                 store,
                 namespace_id,
-                Arc::new(FixedWallClock(context.now_ms)),
+                Arc::new(FixedWallClock(writer.now_ms)),
             ),
-            writer_id: context.writer_id.clone(),
+            writer_id: writer.writer_id.clone(),
         }
     }
 
@@ -207,13 +224,5 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
     /// as the fixture's writer at the fixture's time.
     pub fn engine(&self) -> NamespaceWriterEngine<S> {
         NamespaceWriterEngine::writer(self.namespace.clone(), self.writer_id.clone())
-    }
-
-    /// Returns the context the fixture's commits run under.
-    pub fn context(&self) -> crate::MutationContext {
-        crate::MutationContext {
-            writer_id: self.writer_id.clone(),
-            now_ms: self.namespace.wall_clock.now_ms(),
-        }
     }
 }

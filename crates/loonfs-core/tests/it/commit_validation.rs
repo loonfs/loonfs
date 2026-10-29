@@ -7,21 +7,18 @@ use loonfs_core::content::{mint_content_token, verify_content_token, ContentToke
 use loonfs_core::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::time::Deadline;
 use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::api::v0::CompleteUploadBody;
-use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     api::v0::{FilesystemChange, UploadSessionStatus},
     AbsolutePath, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, InodeId, NamespaceId,
     RevisionNo,
 };
 use std::assert_matches;
-use std::sync::Arc;
 use tempfile::tempdir;
 
 fn put_file(absolute_path: &str, content_ref: loonfs_types::ContentRef) -> FilesystemOperation {
@@ -54,7 +51,7 @@ async fn unadmitted_content_fails_every_candidate_without_being_read() {
     let temp_dir = tempdir().expect("tempdir");
     let store = content_blob_counting_store(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
@@ -121,7 +118,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         loonfs_test_support::stores::KeyPredicate::content_blob(),
     );
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
@@ -169,8 +166,10 @@ async fn valid_content_admission_skips_durable_content_validation() {
     )
     .expect("verify token");
 
-    let mut publisher =
-        loonfs_core::publish::NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
+    let mut publisher = loonfs_core::publish::NamespaceCommitEngine::new(
+        namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
     store.reset();
     let responses = publisher
         .publish_batch(
@@ -183,8 +182,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
                 ),
                 vec![prepared.clone()],
             )],
-            &context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &context.clock(),
         )
         .await
         .results;
@@ -222,8 +220,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
                 ),
                 vec![prepared.clone()],
             )],
-            &context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &context.clock(),
         )
         .await
         .results;
@@ -249,7 +246,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
     let temp_dir = tempdir().expect("tempdir");
     let store = content_blob_counting_store(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
@@ -284,7 +281,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         .content_ref()
         .expect("completed content ref")
         .clone();
-    let expired_context = loonfs_core::MutationContext {
+    let expired_context = loonfs_core::test_support::WriterAt {
         writer_id: context.writer_id.clone(),
         now_ms: completed_at_ms
             .saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS)
@@ -315,7 +312,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -381,7 +378,7 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -436,7 +433,7 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -499,7 +496,7 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
 async fn restore_revision_does_not_revalidate_retained_content_before_publish() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -563,7 +560,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
 async fn metadata_only_mutation_does_not_validate_content_refs() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -604,7 +601,7 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
 ) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -658,7 +655,7 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
 async fn restore_revision_missing_source_is_revision_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -692,7 +689,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -759,7 +756,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -822,7 +819,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -896,7 +893,7 @@ async fn operation_order_decides_the_outcome() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -961,7 +958,7 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -1051,7 +1048,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await

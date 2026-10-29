@@ -33,7 +33,7 @@ fn administrator() -> Subject {
 async fn bootstrap_restricted_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
@@ -55,7 +55,7 @@ async fn bootstrap_restricted_namespace<S: ObjectStore + ?Sized>(
         .await
         .expect("bootstrap a restricted namespace");
     crate::test_support::namespace_store(store, namespace_id)
-        .acquire_writer_epoch(context)
+        .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("acquire the writer");
     crate::test_support::namespace_store(store, namespace_id)
@@ -70,7 +70,7 @@ async fn commit<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     operation: FilesystemOperation,
     prepared: Vec<PreparedContent>,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> crate::error::Result<loonfs_types::Commit> {
     let intent = CommitIntent::single(
         CommitId::generate(),
@@ -84,16 +84,15 @@ async fn commit<S: ObjectStore + ?Sized>(
     } else {
         CommitCandidate::prepared(intent, prepared)
     };
-    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
-        .publish_batch(
-            vec![candidate],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        context.writer_id.clone(),
+    )
+    .publish_batch(vec![candidate], &context.clock())
+    .await
+    .results
+    .pop()
+    .expect("one result")
 }
 
 /// Writes `bytes` at `path` as the administrator, replacing any file there.
@@ -102,7 +101,7 @@ async fn put<S: ObjectStore>(
     namespace_id: &NamespaceId,
     path: &str,
     bytes: &[u8],
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     let stored = crate::test_support::namespace_store(store, namespace_id)
         .store_bytes_as_content(bytes)
@@ -130,7 +129,7 @@ async fn set_attribute<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     path: &str,
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     let operation = FilesystemOperation::UpdateAttributes {
         path: AbsolutePath::parse(path).expect("path"),
@@ -156,7 +155,7 @@ async fn grant_read<S: ObjectStore + ?Sized>(
     path: &str,
     principal: &str,
     boundary: bool,
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     let operation = FilesystemOperation::UpdateAccess {
         path: AbsolutePath::parse(path).expect("path"),
@@ -178,7 +177,7 @@ async fn delete_recursively<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     path: &str,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> ChangeSeq {
     let operation = FilesystemOperation::DeletePath {
         path: AbsolutePath::parse(path).expect("path"),
@@ -218,7 +217,7 @@ impl ExpiredDocs {
 async fn expire_docs_beside_recoverable_trash<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> ExpiredDocs {
     bootstrap_restricted_namespace(store, namespace_id, context).await;
     put(store, namespace_id, "/docs/notes.txt", b"one", context).await;
@@ -434,7 +433,7 @@ async fn a_base_compaction_of_each_group_removes_every_row_an_expired_deletion_h
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let namespace_id = NamespaceId::parse("expired-rows").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     let docs = expire_docs_beside_recoverable_trash(&store, &namespace_id, &context).await;
     let before = rows_of(&store, &namespace_id, &docs.hidden).await;
     for family in INODE_FAMILIES {
@@ -501,7 +500,7 @@ async fn a_recoverable_deletion_keeps_every_row_while_an_expired_one_loses_its_r
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let namespace_id = NamespaceId::parse("recoverable-rows").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     let docs = expire_docs_beside_recoverable_trash(&store, &namespace_id, &context).await;
     let kept = [docs.recoverable.as_slice(), docs.visible.as_slice()].concat();
     let before = rows_of(&store, &namespace_id, &kept).await;
@@ -580,7 +579,7 @@ struct NestedDeletions {
 async fn delete_nested<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> NestedDeletions {
     bootstrap_restricted_namespace(store, namespace_id, context).await;
     put(
@@ -679,7 +678,7 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let namespace_id = NamespaceId::parse("nested-deletions").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     let nested = delete_nested(&store, &namespace_id, &context).await;
     assert!(nested.inner_seq < nested.outer_seq);
     let outer = [nested.outer, nested.inner_parent, nested.kept_file];
@@ -781,7 +780,7 @@ fn delta_window(
 async fn expire_old<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> (InodeId, InodeId) {
     bootstrap_namespace(store, namespace_id, context)
         .await
@@ -823,7 +822,7 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let namespace_id = NamespaceId::parse("delta-only").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     let (old, a) = expire_old(&store, &namespace_id, &context).await;
     let hidden = [old, a];
     let before = rows_of(&store, &namespace_id, &hidden).await;
@@ -834,7 +833,7 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
             .load_current_manifest()
             .await
             .expect("load the current manifest");
-        let window = delta_window(&current.state.envelope, group);
+        let window = delta_window(&current.envelope, group);
         assert!(window.len() >= 2, "{group:?} has a delta-only window");
         let spec = MetadataCompactionSpec::new(
             group,
@@ -927,7 +926,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
     let namespace_id = NamespaceId::parse("filter-limit").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     let (_, a) = expire_old(&store, &namespace_id, &context).await;
     assert_eq!(
         rows_of(&store, &namespace_id, &[a]).await[&ApiMetadataRowFamily::Revisions].len(),
@@ -957,7 +956,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
         }
         basis.scan_runs = Arc::new(runs.clone());
         let spec = compaction_step::plan_group(
-            current.state.envelope.payload(),
+            current.payload(),
             &runs,
             group,
             policy,
@@ -1000,7 +999,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
 /// The current manifest with `next_run_no` set to `seed`, which seeds the
 /// kept inode filter of a compaction over it.
 fn seeded_manifest(current: &LoadedManifest, seed: RunNo) -> Arc<NamespaceManifestEnvelope> {
-    let mut payload = current.state.envelope.payload().clone();
+    let mut payload = current.payload().clone();
     payload.next_run_no = seed;
     Arc::new(encode_manifest(payload).into_envelope())
 }
@@ -1018,7 +1017,7 @@ async fn compact_with_seed<S: ObjectStore + ?Sized>(
         .await
         .expect("load the current manifest");
     let mut basis = crate::manifest::metadata_basis_from_manifest(store, None, &current).segments;
-    basis.manifest = Some(seeded_manifest(&current, seed));
+    basis.manifest = seeded_manifest(&current, seed);
     let input_keys = input_segment_keys(&basis.scan_runs, spec).expect("the spec's runs");
     let cancellation = MetadataCompactionCancellation::default();
     let merged = run_metadata_compaction(
@@ -1043,8 +1042,8 @@ async fn compact_with_seed<S: ObjectStore + ?Sized>(
             &cancellation,
             &CompactionPublication {
                 compactor_epoch: loonfs_types::CompactorEpoch(0),
-                compaction: Deadline::start(Arc::clone(&timer)),
-                publication: Deadline::start(timer),
+                compaction: OperationClock::start(0, Arc::clone(&timer)),
+                publication: OperationClock::start(0, timer),
             },
         )
         .await
@@ -1077,7 +1076,7 @@ async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
         .await
         .expect("load the current manifest");
     let mut basis = crate::manifest::metadata_basis_from_manifest(store, None, &current).segments;
-    basis.manifest = Some(seeded_manifest(&current, seed));
+    basis.manifest = seeded_manifest(&current, seed);
     load_kept_inode_filter(
         &basis,
         namespace_id,
@@ -1086,7 +1085,7 @@ async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
             vec![RunNo(0)],
             0,
             MergePlacement::Base {
-                output_seq: current.state.envelope.payload().head_seq,
+                output_seq: current.payload().head_seq,
             },
             ChangeSeq(0),
         ),
@@ -1105,7 +1104,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let namespace_id = NamespaceId::parse("false-positive").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     let (_, a) = expire_old(&store, &namespace_id, &context).await;
     let hidden_row = family_rows(&store, &namespace_id, ApiMetadataRowFamily::Inodes)
         .await
@@ -1122,7 +1121,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    let payload = current.state.envelope.payload();
+    let payload = current.payload();
     let spec = compaction_step::plan_group(
         payload,
         &runs_newest_first(payload),
@@ -1144,7 +1143,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    let payload = current.state.envelope.payload();
+    let payload = current.payload();
     let base = runs_newest_first(payload)
         .into_iter()
         .find(|run| {
@@ -1195,7 +1194,7 @@ async fn kept_inode_filter_and_walk_reads(
             vec![RunNo(0)],
             0,
             MergePlacement::Base {
-                output_seq: current.state.envelope.payload().head_seq,
+                output_seq: current.payload().head_seq,
             },
             ChangeSeq(0),
         ),
@@ -1211,14 +1210,14 @@ async fn kept_inode_filter_and_walk_reads(
 async fn compact_group<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
     group: MetadataFamilyGroup,
 ) {
     let current = crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    let payload = current.state.envelope.payload();
+    let payload = current.payload();
     let spec = compaction_step::plan_group(
         payload,
         &runs_newest_first(payload),
@@ -1275,7 +1274,7 @@ async fn a_base_compaction_walks_the_tree_once_the_acknowledged_floor_is_above_z
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
     let namespace_id = NamespaceId::parse("acknowledged-walk").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     bootstrap_restricted_namespace(&store, &namespace_id, &context).await;
     put(&store, &namespace_id, "/old/a.txt", b"old", &context).await;
     put(&store, &namespace_id, "/recoverable.txt", b"kept", &context).await;
@@ -1346,7 +1345,7 @@ async fn a_group_compacted_after_the_trash_still_removes_an_expired_deletions_ro
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let namespace_id = NamespaceId::parse("trash-first").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     let (old, a) = expire_old(&store, &namespace_id, &context).await;
     let hidden = [old, a];
     let before = rows_of(&store, &namespace_id, &hidden).await;

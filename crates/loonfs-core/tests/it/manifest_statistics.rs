@@ -3,7 +3,6 @@
 use crate::common::*;
 use loonfs_core::publish::{CommitIntent, FilesystemOperation, NamespaceCommitEngine};
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{commit_id, namespace_id};
@@ -17,7 +16,6 @@ use loonfs_types::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -29,7 +27,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             KeyPredicate::any(),
         );
         let ns = namespace_id("activity");
-        let context = mutation_context();
+        let context = default_writer();
         NamespaceFixture::new(&store, &ns, &context)
             .create()
             .await
@@ -80,7 +78,8 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                 expected_revision_no: None,
             },
         ];
-        let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &ns));
+        let mut engine =
+            NamespaceCommitEngine::new(namespace_store(&store, &ns), context.writer_id.clone());
         for (index, operation) in operations.into_iter().enumerate() {
             let request = CommitIntent::single(
                 CommitId::parse(format!("activity-{index}")).expect("id"),
@@ -90,21 +89,13 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             );
             let candidate = prepared_candidate(&store, &ns, request).await;
             let first = engine
-                .publish_batch(
-                    vec![candidate.clone()],
-                    &context,
-                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                )
+                .publish_batch(vec![candidate.clone()], &context.clock())
                 .await
                 .results
                 .remove(0)
                 .expect("commit");
             let retry = engine
-                .publish_batch(
-                    vec![candidate],
-                    &context,
-                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                )
+                .publish_batch(vec![candidate], &context.clock())
                 .await
                 .results
                 .remove(0)
@@ -120,13 +111,14 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                 .activity,
             initial.activity
         );
-        let input = cached.then(|| engine.wal_fold_input().expect("the position's tail"));
+        let input = cached.then(|| engine.writer_position().expect("the position's tail"));
         namespace_store(&store, &ns)
             .fold_wal_tail(
                 input.clone(),
-                &loonfs_core::time::Deadline::start(std::sync::Arc::new(
-                    StdMonotonicTimer::default(),
-                )),
+                &loonfs_core::time::OperationClock::start(
+                    0,
+                    std::sync::Arc::new(StdMonotonicTimer::default()),
+                ),
             )
             .await
             .expect("fold");
@@ -146,9 +138,10 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         namespace_store(&store, &ns)
             .fold_wal_tail(
                 input,
-                &loonfs_core::time::Deadline::start(std::sync::Arc::new(
-                    StdMonotonicTimer::default(),
-                )),
+                &loonfs_core::time::OperationClock::start(
+                    0,
+                    std::sync::Arc::new(StdMonotonicTimer::default()),
+                ),
             )
             .await
             .expect("repeat fold");
@@ -176,14 +169,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         assert_eq!(current.statistics().expect("loaded activity"), observed);
         assert!(store.take().is_empty());
         let mut stored_bytes = 0;
-        for segment in current
-            .state
-            .envelope
-            .payload()
-            .runs
-            .iter()
-            .flat_map(|run| &run.segments)
-        {
+        for segment in current.payload().runs.iter().flat_map(|run| &run.segments) {
             let key = loonfs_objectstore::keys::metadata_segment_object_key(segment);
             stored_bytes += store
                 .get(&key, None)
@@ -203,7 +189,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     let parent = namespace_id("parent");
     let child = namespace_id("child");
     let grandchild = namespace_id("grandchild");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &parent, &context)
         .create()
         .await
@@ -250,7 +236,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .load_current_manifest()
         .await
         .expect("manifest");
-    assert_eq!(current.state.envelope.payload().runs.len(), 2);
+    assert_eq!(current.payload().runs.len(), 2);
     let written = store
         .get(&current.object_key, None)
         .await
@@ -364,7 +350,7 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     let dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(dir.path()).expect("store");
     let ns = namespace_id("activity");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &ns, &context)
         .create()
         .await
@@ -453,7 +439,7 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
         InjectedError::PermissionDenied("fold unavailable".to_owned()),
     );
     let ns = namespace_id("activity");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &ns, &context)
         .create()
         .await
@@ -472,8 +458,6 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
         .load_current_manifest()
         .await
         .expect("manifest")
-        .state
-        .envelope
         .payload()
         .status
         .is_deleted());
@@ -494,7 +478,7 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
         .load_current_manifest()
         .await
         .expect("deleted manifest");
-    assert!(final_manifest.state.envelope.payload().status.is_deleted());
+    assert!(final_manifest.payload().status.is_deleted());
     assert_eq!(
         final_manifest
             .statistics()
@@ -506,11 +490,8 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
             mutations: ActivityCounter::parse(1).expect("activity")
         }
     );
-    assert_eq!(
-        final_manifest.state.envelope.payload().head_seq,
-        ChangeSeq(1)
-    );
-    assert!(!final_manifest.state.envelope.payload().runs.is_empty());
+    assert_eq!(final_manifest.payload().head_seq, ChangeSeq(1));
+    assert!(!final_manifest.payload().runs.is_empty());
 }
 
 #[tokio::test]
@@ -518,7 +499,7 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
     for applied in [false, true] {
         let dir = tempdir().expect("tempdir");
         let ns = namespace_id("activity");
-        let context = mutation_context();
+        let context = default_writer();
         let inner = LocalFsStore::new(dir.path()).expect("store");
         NamespaceFixture::new(&inner, &ns, &context)
             .create()

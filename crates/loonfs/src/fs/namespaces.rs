@@ -1,6 +1,6 @@
 //! Namespace lifecycle: create, fork, and delete.
 
-use super::core::{RuntimeCore, WriterBits};
+use super::core::RuntimeCore;
 use crate::publisher::NamespaceChange;
 use crate::{
     ActorId, CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse,
@@ -210,16 +210,11 @@ impl Namespace<Writable> {
 /// must go through [`Namespace::delete`] so the barrier holds.
 pub(crate) async fn delete_namespace_with_engine(
     core: &RuntimeCore,
-    writer: &WriterBits,
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine<crate::SharedObjectStore>,
     options: DeleteNamespaceOptions,
 ) -> Result<DeleteNamespaceResponse> {
-    let context = core.mutation_context(&writer.identity);
-    let result = engine
-        .delete_namespace(options, &context)
-        .await
-        .map_err(Error::from);
+    let result = engine.delete_namespace(options).await.map_err(Error::from);
     // What follows a deletion depends on the namespace being deleted, not on
     // which call deleted it.
     if result

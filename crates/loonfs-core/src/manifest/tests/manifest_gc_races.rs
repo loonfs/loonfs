@@ -24,7 +24,7 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
         .expect("bootstrap");
     if start == ManifestNo(2) {
         crate::test_support::namespace_store(&store, &namespace_id)
-            .acquire_writer_epoch(&context)
+            .acquire_writer_epoch(&context.writer_id)
             .await
             .expect("publish manifest 2");
         crate::test_support::namespace_store(&store, &namespace_id)
@@ -36,7 +36,7 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
     // the reader below has read it.
     for _ in start.0..4 {
         crate::test_support::namespace_store(&store, &namespace_id)
-            .acquire_writer_epoch(&context)
+            .acquire_writer_epoch(&context.writer_id)
             .await
             .expect("publish without a hint raise");
     }
@@ -44,7 +44,7 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
         .load_current_manifest_with_hint()
         .await
         .expect("current manifest");
-    assert_eq!(expected.state.manifest().manifest_no, ManifestNo(4));
+    assert_eq!(expected.manifest().manifest_no, ManifestNo(4));
     assert_eq!(initial_hint.state.manifest_no, start);
     let blocked_number = ManifestNo(start.0 + u64::from(block_probe));
     let blocked_key = metadata_manifest_object(&namespace_id, &blocked_number);
@@ -62,7 +62,7 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
     let (discovered, ()) = tokio::join!(namespace.load_current_manifest_with_hint(), async {
         blocked.wait_until_blocked().await;
         crate::test_support::namespace_store(blocked.inner(), &namespace_id)
-            .raise_hint(expected.state.manifest().manifest_no, None)
+            .raise_hint(expected.manifest().manifest_no, None)
             .await
             .expect("raise discovery hint");
         let options = crate::gc::GcOptions::default();
@@ -70,10 +70,11 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
             .gc(
                 None,
                 &options,
-                &MutationContext {
+                &WriterAt {
                     now_ms: options.grace_window_ms + 1,
                     ..context.clone()
-                },
+                }
+                .clock(),
             )
             .await
             .expect("collect old manifests");
@@ -87,7 +88,7 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
         blocked.release();
     });
     let (discovered, hint) = discovered.expect("reload the advanced hint after collection");
-    assert_eq!(discovered.state, expected.state);
+    assert_eq!(discovered, expected);
     assert_eq!(hint.state.manifest_no, ManifestNo(4));
 }
 
@@ -123,7 +124,7 @@ async fn discovery_still_rejects_a_missing_manifest_when_the_hint_has_not_advanc
         .load_current_manifest()
         .await
         .expect("current manifest");
-    assert!(selected.state.manifest().manifest_no > ManifestNo(1));
+    assert!(selected.manifest().manifest_no > ManifestNo(1));
     store
         .delete(&selected.object_key)
         .await
@@ -155,7 +156,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         .load_current_manifest()
         .await
         .expect("current");
-    let mut payload = current.state.envelope.payload().clone();
+    let mut payload = current.payload().clone();
     payload.manifest_no = ManifestNo(2);
     let manifest = encode_manifest(payload.clone());
     let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
@@ -174,7 +175,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         OperationSelector::PutCreateIfAbsent,
     );
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let deadline = Deadline::start(timer.clone());
+    let deadline = OperationClock::start(0, timer.clone());
     blocked.block_next();
     let (outcome, ()) = tokio::join!(
         publish_once_within(&blocked, manifest.clone(), &deadline),
@@ -200,10 +201,11 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             .gc(
                 None,
                 &options,
-                &MutationContext {
+                &WriterAt {
                     now_ms: timer.now_ms(),
                     ..context.clone()
-                },
+                }
+                .clock(),
             )
             .await
             .expect("collect old manifests");
@@ -239,7 +241,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         .load_current_manifest_with_hint()
         .await
         .expect("current manifest");
-    assert_eq!(current.state.manifest().manifest_no, ManifestNo(3));
+    assert_eq!(current.manifest().manifest_no, ManifestNo(3));
     assert_eq!(hint.state.manifest_no, ManifestNo(3));
 }
 
@@ -265,7 +267,7 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
         .await
         .expect("create");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context)
+        .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("publish manifest 2");
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
@@ -281,7 +283,7 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
     // the hint.
     for _ in 3..=5 {
         crate::test_support::namespace_store(&store, &namespace_id)
-            .acquire_writer_epoch(&context)
+            .acquire_writer_epoch(&context.writer_id)
             .await
             .expect("another process publishes");
     }
@@ -294,10 +296,11 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
         .gc(
             None,
             &options,
-            &MutationContext {
+            &WriterAt {
                 now_ms: options.grace_window_ms + 1,
                 ..context.clone()
-            },
+            }
+            .clock(),
         )
         .await
         .expect("collect old manifests");
@@ -312,18 +315,18 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
     let ((), published, hint) = crate::test_support::namespace_store(&store, &namespace_id)
         .update_manifest(
             Some(basis),
-            &Deadline::start(clock),
+            &OperationClock::start(0, clock),
             crate::limits::MAX_CONTENTION_ATTEMPTS,
             |current: crate::namespace::control::LoadedManifest| async move {
                 Ok(crate::manifest::publish::ManifestChange::Next(
-                    Box::new(current.state.envelope.payload().clone()),
+                    Box::new(current.payload().clone()),
                     (),
                 ))
             },
         )
         .await
         .expect("publish");
-    assert_eq!(published.state.manifest().manifest_no, ManifestNo(6));
+    assert_eq!(published.manifest().manifest_no, ManifestNo(6));
     assert_eq!(hint.expect("discovery").state.manifest_no, ManifestNo(5));
     assert!(
         store

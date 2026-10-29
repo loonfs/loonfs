@@ -206,7 +206,7 @@ pub(crate) fn replay_discovered_tail(
     base_metadata_state: &MetadataState,
     tail: &ValidatedWalTail,
 ) -> Result<ReplayedWalTail, MetadataProjectionLoadError> {
-    let _span = tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
+    let _span = crate::phase_span!(crate::Phase::ProjectMetadataState).entered();
     project_validated_wal_tail(
         base_head,
         super::ProjectedWalTail::from_rows(base_metadata_state.clone()),

@@ -2,12 +2,12 @@
 
 use super::live_set::{LiveSet, RetirementStatus};
 use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
-use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::CONTENT_RECLAMATION_GRACE_WINDOW_MS;
 use crate::namespace::store::NamespaceStore;
 use crate::protocol::AbandonedUpload;
+use crate::time::OperationClock;
 use crate::upload_records::{OutcomeCreation, UploadSessionState};
 use futures::{future, Stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::upload_session_prefix;
@@ -215,7 +215,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         grace_window_ms: u64,
         live: &LiveSet,
-        context: &MutationContext,
+        clock: &OperationClock,
         state: &UploadSessionState,
     ) -> Result<UploadSessionSweep> {
         if let RetirementStatus::Retained { reclaimable_at_ms } = live.retirement_status() {
@@ -223,11 +223,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         match &state.outcome {
             None => {
-                self.abort_expired_session(grace_window_ms, context, &state.session)
+                self.abort_expired_session(grace_window_ms, clock, &state.session)
                     .await
             }
             Some(UploadOutcome::Aborted { aborted_at_ms }) => {
-                if context.now_ms.saturating_sub(*aborted_at_ms) < grace_window_ms {
+                if clock.request_at_ms().saturating_sub(*aborted_at_ms) < grace_window_ms {
                     return Ok(retain_until(aborted_at_ms.saturating_add(grace_window_ms)));
                 }
                 // Repeat provider cleanup so a later pass completes work left by a crash
@@ -245,7 +245,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 completed_at_ms, ..
             }) => Ok(sweep_completed_session(
                 live,
-                context.now_ms,
+                clock.request_at_ms(),
                 *completed_at_ms,
             )),
         }
@@ -261,21 +261,23 @@ impl<S: ObjectStore> NamespaceStore<S> {
     async fn abort_expired_session(
         &self,
         grace_window_ms: u64,
-        context: &MutationContext,
+        clock: &OperationClock,
         session: &UploadSessionPayload,
     ) -> Result<UploadSessionSweep> {
         let expires_at_ms = session.expires_at_ms;
-        if context.now_ms.saturating_sub(expires_at_ms) < grace_window_ms {
+        if clock.request_at_ms().saturating_sub(expires_at_ms) < grace_window_ms {
             return Ok(retain_until(expires_at_ms.saturating_add(grace_window_ms)));
         }
         let aborted = UploadOutcome::Aborted {
-            aborted_at_ms: context.now_ms,
+            aborted_at_ms: clock.request_at_ms(),
         };
         match self.create_upload_outcome(session, &aborted).await {
             // Keep the newly aborted session until its post-abort grace period expires.
             Ok(OutcomeCreation::Created) => {
                 let _ = AbandonedUpload::of(session).release(&self.store).await;
-                Ok(retain_until(context.now_ms.saturating_add(grace_window_ms)))
+                Ok(retain_until(
+                    clock.request_at_ms().saturating_add(grace_window_ms),
+                ))
             }
             Ok(OutcomeCreation::Existing(_)) => {
                 tracing::debug!(

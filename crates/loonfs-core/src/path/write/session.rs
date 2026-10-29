@@ -12,6 +12,7 @@ use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
+use crate::PermitPool;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalCommitPayload;
 #[cfg(test)]
@@ -26,7 +27,7 @@ use loonfs_types::NamespaceId;
 ///
 /// The session keeps accepted rows and resident pieces so later candidates
 /// can resolve earlier candidates and materialize references to them.
-pub(crate) struct PublishPlanningSession<'a> {
+pub(crate) struct PublishPlanningSession<'a, S: ObjectStore + ?Sized> {
     head: NamespaceReadState,
     inode_allocator: InodeAllocator,
     tail: &'a ProjectedWalTail,
@@ -36,10 +37,19 @@ pub(crate) struct PublishPlanningSession<'a> {
     /// accepted-rows overlay is the only layer that changes between
     /// candidates and is composed per lookup.
     durable_cache: DurableVisibilityCache,
+    /// The store that planning writes content objects to.
+    store: &'a S,
+    /// Where each content write that planning sends takes its permit.
+    content_writes: &'a PermitPool,
 }
 
-impl<'a> PublishPlanningSession<'a> {
-    pub(crate) fn new(head: &NamespaceReadState, tail: &'a ProjectedWalTail) -> Self {
+impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
+    pub(crate) fn new(
+        head: &NamespaceReadState,
+        tail: &'a ProjectedWalTail,
+        store: &'a S,
+        content_writes: &'a PermitPool,
+    ) -> Self {
         Self {
             head: head.clone(),
             inode_allocator: InodeAllocator::new(head.next_inode_id),
@@ -47,11 +57,21 @@ impl<'a> PublishPlanningSession<'a> {
             accepted_rows: MetadataState::default(),
             accepted_pieces: PlannedPieces::default(),
             durable_cache: DurableVisibilityCache::default(),
+            store,
+            content_writes,
         }
     }
 
     pub(super) fn head(&self) -> &NamespaceReadState {
         &self.head
+    }
+
+    pub(super) fn store(&self) -> &'a S {
+        self.store
+    }
+
+    pub(super) fn content_writes(&self) -> &'a PermitPool {
+        self.content_writes
     }
 
     pub(super) fn accepted_rows(&self) -> &MetadataState {
@@ -76,14 +96,8 @@ impl<'a> PublishPlanningSession<'a> {
 
     /// Plans and validates a mutation request in one pass, producing the
     /// validated plan that only awaits the accepted allocation position.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "planning carries the store and shared content write permits"
-    )]
-    pub(crate) async fn prepare_commit<S: ObjectStore + ?Sized>(
+    pub(crate) async fn prepare_commit(
         &self,
-        store: &S,
-        content_writes: &crate::PermitPool,
         candidate: &CommitCandidate,
         semantic_identity: CommitFingerprint,
         base_view: MetadataView<'_, '_, S>,
@@ -95,13 +109,11 @@ impl<'a> PublishPlanningSession<'a> {
         evaluate_preconditions(
             &candidate.intent().preconditions,
             candidate.authority(),
-            &self.head,
+            self,
             &pre_state,
         )
         .await?;
         prepare_commit_against_publish_view(
-            store,
-            content_writes,
             candidate,
             semantic_identity,
             self,
@@ -144,24 +156,19 @@ mod tests {
     use super::super::intent::FilesystemOperation;
     use super::*;
     use crate::commit_engine::CommitCandidate;
-    use crate::context::MutationContext;
     use crate::error::{CoreError, ErrorCode};
     use crate::storage::content_admission::PreparedContent;
+    use crate::test_support::WriterAt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
     use std::assert_matches;
     use tempfile::tempdir;
 
-    fn test_context() -> MutationContext {
-        crate::test_support::mutation_context("writer", 1)
+    fn test_context() -> WriterAt {
+        crate::test_support::writer_at("writer", 1)
     }
 
-    async fn setup_namespace() -> (
-        tempfile::TempDir,
-        LocalFsStore,
-        NamespaceId,
-        MutationContext,
-    ) {
+    async fn setup_namespace() -> (tempfile::TempDir, LocalFsStore, NamespaceId, WriterAt) {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -269,12 +276,16 @@ mod tests {
             }],
         ] {
             let request = request.clone().preconditions(preconditions);
-            let mut session = PublishPlanningSession::new(view.head(), view.wal_tail());
+            let content_writes = crate::test_support::content_writes();
+            let mut session = PublishPlanningSession::new(
+                view.head(),
+                view.wal_tail(),
+                &namespace.store,
+                &content_writes,
+            );
             let mut allocation = session.begin_candidate();
             let plan = session
                 .prepare_commit(
-                    &namespace.store,
-                    &crate::test_support::content_writes(),
                     &CommitCandidate::new(request.clone()),
                     commit_fingerprint(&namespace_id, &request, &std::collections::BTreeMap::new()),
                     view.projected_metadata_view(),
@@ -321,7 +332,13 @@ mod tests {
             .load_current_metadata_view()
             .await
             .expect("load metadata view");
-        let session = PublishPlanningSession::new(view.head(), view.wal_tail());
+        let content_writes = crate::test_support::content_writes();
+        let session = PublishPlanningSession::new(
+            view.head(),
+            view.wal_tail(),
+            &namespace.store,
+            &content_writes,
+        );
 
         let first_request = CommitIntent::single(
             CommitId::parse("plan-a").expect("valid commit id"),
@@ -338,8 +355,6 @@ mod tests {
         let mut first_allocation = session.begin_candidate();
         session
             .prepare_commit(
-                &namespace.store,
-                &crate::test_support::content_writes(),
                 &CommitCandidate::new(first_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),
@@ -365,8 +380,6 @@ mod tests {
         let mut second_allocation = session.begin_candidate();
         session
             .prepare_commit(
-                &namespace.store,
-                &crate::test_support::content_writes(),
                 &CommitCandidate::new(second_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),

@@ -33,7 +33,7 @@ impl SweepServer {
                 .load_current_manifest()
                 .await
                 .expect("load the current manifest");
-        let payload = manifest.state.envelope.payload();
+        let payload = manifest.payload();
         (
             payload.writer_epoch,
             payload

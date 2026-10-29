@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::{InlineContentPolicy, MetadataCompactionOutcome};
-use loonfs_core::control::CurrentManifest;
+use loonfs_core::control::LoadedManifest;
 use loonfs_types::format::manifest::RunTier;
 use loonfs_types::format::segment_blocks::{DEFAULT_MAX_DELTA_RUNS, DEFAULT_MIN_COMPACTION_RUNS};
 
@@ -38,12 +38,11 @@ async fn write_and_settle(
 async fn current_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> CurrentManifest {
+) -> LoadedManifest {
     loonfs_core::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
         .expect("load the current manifest")
-        .state
 }
 
 /// Writes until a write's fold leaves fewer delta runs than the one before,
@@ -88,7 +87,6 @@ async fn session_one_fold_short<S: ObjectStore + ?Sized>(
     for write in 0..DEFAULT_MIN_COMPACTION_RUNS {
         let runs = current_manifest(store, &namespace_id)
             .await
-            .envelope
             .payload()
             .runs
             .len();
@@ -107,9 +105,8 @@ fn one_merge_at_a_time() -> ExecutionBudget {
         .build()
 }
 
-fn delta_runs(manifest: &CurrentManifest) -> usize {
+fn delta_runs(manifest: &LoadedManifest) -> usize {
     manifest
-        .envelope
         .payload()
         .runs
         .iter()
@@ -171,7 +168,7 @@ struct ParkedCompaction {
 }
 
 impl ParkedCompaction {
-    async fn manifest(&self) -> CurrentManifest {
+    async fn manifest(&self) -> LoadedManifest {
         current_manifest(self.store.inner(), &self.namespace_id).await
     }
 }

@@ -465,8 +465,10 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
         current_state.segments().to_vec(),
     )
     .expect("valid manifest at the public maximum");
-    let deadline =
-        loonfs::engine::Deadline::start(Arc::new(loonfs_types::StdMonotonicTimer::default()));
+    let deadline = loonfs::engine::OperationClock::start(
+        0,
+        Arc::new(loonfs_types::StdMonotonicTimer::default()),
+    );
     let maximum = publish_grep_manifest(&*store, Some(&current), &maximum_state, &deadline)
         .await
         .expect("install manifest at the public maximum");

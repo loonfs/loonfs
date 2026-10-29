@@ -1,18 +1,16 @@
 //! Folds the WAL and creates a verified pin for the resulting manifest.
 
 use super::record::{write_pin, PinBasisVerification};
-use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::manifest::PublicationReport;
 use crate::namespace::store::NamespaceStore;
-use crate::time::Deadline;
+use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{PinOwner, PinPayload};
 use loonfs_types::{PinId, Snapshot};
-use std::sync::Arc;
 
 /// Longest accepted snapshot name. A label bound, not a durable format
 /// limit.
@@ -33,14 +31,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         name: String,
         expires_at_ms: Option<u64>,
     ) -> Result<PublicationReport<Snapshot>> {
-        let context = self.mutation_context();
         self.namespace
             .create_pin(
                 PinOwner::User {
                     name,
                     expires_at_ms,
                 },
-                &context,
+                &self.namespace.start_clock(),
             )
             .await
             .map(|report| report.map(super::snapshot_summary))
@@ -53,18 +50,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn create_pin(
         &self,
         owner: PinOwner,
-        context: &MutationContext,
+        clock: &OperationClock,
     ) -> Result<PublicationReport<PinPayload>> {
         validate_pin_owner(&owner)?;
-        let deadline = Deadline::start(Arc::clone(&self.timer));
-        let deadline = &deadline;
         let owner = &owner;
         // An attempt can publish its fold and then fail to write the pin, so the
         // report keeps the newest fold any attempt published.
         let published_slot = std::sync::Mutex::new(None);
         let published = &published_slot;
         let created = retry_while_contended(|| async move {
-            let folded = self.fold_wal_tail(None, deadline).await?;
+            let folded = self.fold_wal_tail(None, clock).await?;
             if let Some(manifest) = folded.published() {
                 *published
                     .lock()
@@ -72,7 +67,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }
 
             match self
-                .create_pin_at_basis(owner.clone(), folded.manifest.manifest, context)
+                .create_pin_at_basis(owner.clone(), folded.manifest.manifest, clock)
                 .await
             {
                 Ok(pin) => Ok(CasOutcome::Settled(pin)),
@@ -95,7 +90,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         owner: PinOwner,
         manifest: loonfs_types::format::control::ManifestRef,
-        context: &MutationContext,
+        clock: &OperationClock,
     ) -> Result<PinPayload> {
         validate_pin_owner(&owner)?;
         let pin_id = PinId::generate(manifest.manifest_no);
@@ -104,7 +99,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             namespace_id: self.namespace_id.clone(),
             head_seq: manifest.head_seq,
             payload_checksum: manifest.payload_checksum,
-            created_at_ms: context.now_ms,
+            created_at_ms: clock.request_at_ms(),
             owner,
         };
         let verification = async {

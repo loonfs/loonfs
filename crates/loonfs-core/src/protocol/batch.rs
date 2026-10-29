@@ -10,11 +10,11 @@ use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
 use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
 use crate::commit_engine::CommitCandidate;
-use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
-use crate::time::{Deadline, Observation};
+use crate::phase::Phase;
+use crate::time::{Observation, OperationClock};
 use crate::wal::WalPublishError;
 use crate::wal::{prepare_wal_object_from_payloads, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
@@ -80,7 +80,7 @@ impl BatchOutcomeSlot {
 }
 
 pub(crate) struct PublicationClock<'a> {
-    pub(crate) batch: &'a Deadline,
+    pub(crate) batch: &'a OperationClock,
     pub(crate) attempt: Observation,
     pub(crate) tip: Observation,
 }
@@ -88,55 +88,49 @@ pub(crate) struct PublicationClock<'a> {
 pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
-    store: &S,
     candidates: &[CommitCandidate],
-    context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
-    content_writes: &crate::PermitPool,
 ) -> PublishBatchReport {
     if candidates.is_empty() {
         return PublishBatchReport::unchanged(Vec::new());
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let namespace_id = &view.head().namespace_id;
-    let elapsed_before_attempt_ms = clock.batch.elapsed_at(&clock.attempt);
-    let admission_now_ms = context
-        .now_ms
-        .checked_add(elapsed_before_attempt_ms)
-        .expect("the admission time should fit in `u64` milliseconds");
+    let committed_at_ms = clock.batch.request_at_ms();
+    let admission_now_ms = clock.batch.observed_at_ms(&clock.attempt);
     let mut slots = Vec::with_capacity(candidates.len());
-    let mut session = PublishPlanningSession::new(view.head(), view.wal_tail());
+    let mut session = PublishPlanningSession::new(
+        view.head(),
+        view.wal_tail(),
+        view.store(),
+        view.content_writes(),
+    );
     let mut accepted_payloads = Vec::new();
     let mut next_inode_id = view.head().next_inode_id;
     let mut wal_bytes = WAL_OBJECT_OVERHEAD_BYTES;
     let mut wal_inline_bytes = 0_usize;
     let mut dedup = BatchDedup::default();
 
-    let prepare_span = tracing::debug_span!(
-        "loonfs.phase",
-        phase = "prepare_batch",
+    let prepare_span = crate::phase_span!(
+        Phase::PrepareBatch,
         batch_size,
         accepted_count = tracing::field::Empty
     );
     async {
         for (index, candidate) in candidates.iter().enumerate() {
             let admission = prepare_candidate_request(
-                content_writes,
                 view,
                 &session,
                 candidate,
                 index,
                 CandidateTime {
-                    committed_at_ms: context.now_ms,
+                    committed_at_ms,
                     admission_now_ms,
                 },
                 &mut dedup,
             )
-            .instrument(tracing::debug_span!(
-                "loonfs.phase",
-                phase = "prepare_commit"
-            ))
+            .instrument(crate::phase_span!(Phase::PrepareCommit))
             .await;
             let candidate_request = match admission {
                 CandidateAdmission::Prepared(candidate_request) => candidate_request,
@@ -178,8 +172,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let allocation = candidate_request.allocation;
             let resulting_next_inode_id = session.commit_candidate(allocation);
             let plan = {
-                let _span =
-                    tracing::debug_span!("loonfs.phase", phase = "finish_commit_plan").entered();
+                let _span = crate::phase_span!(Phase::FinishCommitPlan).entered();
                 validated.finish(resulting_next_inode_id)
             };
             assert_eq!(
@@ -188,18 +181,15 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             );
             let prepared = PreparedCommit {
                 commit: plan,
-                committed_at_ms: context.now_ms,
+                committed_at_ms,
                 inline_content: candidate.inline_content().to_vec(),
             };
             let preview = {
-                let _span =
-                    tracing::debug_span!("loonfs.phase", phase = "build_wal_payload").entered();
+                let _span = crate::phase_span!(Phase::BuildWalPayload).entered();
                 wal_payload_from_prepared_commit(&prepared)
             };
             {
-                let _span =
-                    tracing::debug_span!("loonfs.phase", phase = "apply_committed_wal_record")
-                        .entered();
+                let _span = crate::phase_span!(Phase::ApplyCommittedWalRecord).entered();
                 session.apply_accepted_commit(&preview, &prepared.commit);
             }
             slots.push(BatchOutcomeSlot::Accepted);
@@ -232,11 +222,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         Err(error) => return abort_batch(slots, &error),
     };
     let resulting_head = view.head().after_wal_object(wal.envelope().payload());
-    let elapsed_ms = clock.batch.elapsed_ms();
-    let publication_now_ms = context
-        .now_ms
-        .checked_add(elapsed_ms)
-        .expect("the publication time should fit in `u64` milliseconds");
+    let publication_now_ms = clock.batch.now_ms();
     for (candidate, slot) in candidates.iter().zip(&mut slots) {
         if matches!(slot, BatchOutcomeSlot::Accepted) {
             if let Err(error) =
@@ -250,7 +236,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             }
         }
     }
-    if let Err(error) = publish_wal_object(store, &wal, &clock.tip).await {
+    if let Err(error) = publish_wal_object(view.store(), &wal, &clock.tip).await {
         return abort_batch(slots, &error);
     }
 
@@ -348,7 +334,8 @@ fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<Commit>> {
 mod tests {
     use super::*;
     use crate::path::write::{CommitIntent, FilesystemOperation};
-    use crate::time::StdMonotonicTimer;
+    use crate::test_support::WriterAt;
+
     use loonfs_objectstore::keys::{hint, wal_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
@@ -368,7 +355,7 @@ mod tests {
             KeyPredicate::any(),
         );
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let context = MutationContext {
+        let context = WriterAt {
             writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
@@ -377,7 +364,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let acquired = crate::test_support::namespace_store(&store, &namespace_id)
-            .acquire_writer_epoch(&context)
+            .acquire_writer_epoch(&context.writer_id)
             .await
             .expect("acquire writer");
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -415,20 +402,17 @@ mod tests {
         });
         store.reset();
         let timer = std::sync::Arc::new(ManualClock::new(0));
-        let batch = Deadline::start(timer.clone());
+        let batch = OperationClock::start(context.now_ms, timer.clone());
         let attempt = batch.observe();
         timer.advance_ms(1);
         let result = publish_namespace_commits_batch_against_publish_view(
-            view.store(),
             &candidates,
-            &context,
             &view,
             PublicationClock {
                 batch: &batch,
                 tip: attempt.clone(),
                 attempt,
             },
-            &crate::test_support::content_writes(),
         )
         .await;
 
@@ -453,7 +437,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let context = MutationContext {
+        let context = WriterAt {
             writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
@@ -462,7 +446,7 @@ mod tests {
             .await
             .expect("bootstrap namespace");
         let acquired_writer = crate::test_support::namespace_store(&store, &namespace_id)
-            .acquire_writer_epoch(&context)
+            .acquire_writer_epoch(&context.writer_id)
             .await
             .expect("acquire writer");
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -484,7 +468,7 @@ mod tests {
 
         // Change only the in-memory head so this exercises the sequence limit
         // without modifying the stored metadata.
-        view.position.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
+        view.position.read_basis.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
         let candidate = CommitCandidate::new(CommitIntent::single(
             CommitId::parse("past-sequence-limit").expect("commit id"),
             loonfs_test_support::test_actor(),
@@ -494,18 +478,15 @@ mod tests {
                 parents: false,
             },
         ));
-        let batch = Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default()));
+        let batch = context.clock();
         let result = publish_namespace_commits_batch_against_publish_view(
-            view.store(),
             &[candidate],
-            &context,
             &view,
             PublicationClock {
                 batch: &batch,
                 attempt: batch.observe(),
                 tip: batch.observe(),
             },
-            &crate::test_support::content_writes(),
         )
         .await;
 

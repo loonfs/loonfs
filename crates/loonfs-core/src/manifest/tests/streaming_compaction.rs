@@ -15,7 +15,7 @@ use super::super::streaming_compaction::{
 };
 use super::*;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::{OperationClock, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
@@ -157,7 +157,7 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -248,7 +248,7 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -460,8 +460,8 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
         compactor_epoch: loonfs_types::CompactorEpoch(0),
-        compaction: Deadline::start(timer.clone()),
-        publication: Deadline::start(timer.clone()),
+        compaction: OperationClock::start(0, timer.clone()),
+        publication: OperationClock::start(0, timer.clone()),
     };
     crate::test_support::namespace_store(store, namespace_id)
         .finalize_metadata_compaction(
@@ -527,7 +527,6 @@ async fn current_metadata_state<S: ObjectStore + ?Sized>(
             .load_current_manifest()
             .await
             .expect("read manifest")
-            .state
             .manifest()
             .manifest_no,
     )
@@ -577,7 +576,7 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
         let mut fixture = crate::test_support::NamespaceFixture::new(
             store,
             namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = merge_everything_policy();
         fixture
@@ -723,7 +722,7 @@ async fn compact_unit_with<S: ObjectStore + ?Sized>(
         let mut fixture = crate::test_support::NamespaceFixture::new(
             store,
             namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = policy;
         fixture
@@ -1007,7 +1006,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -1333,7 +1332,7 @@ async fn seed_binding_history(
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -2284,7 +2283,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
 async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    _context: &MutationContext,
+    _context: &WriterAt,
     policy: MetadataRunPolicy,
 ) -> MetadataCompactionSpec {
     for _step in 0..64 {
@@ -2585,7 +2584,7 @@ impl Interceptor for RivalDuringPublication {
                 crate::test_support::NamespaceFixture::new(
                     rival,
                     namespace_id,
-                    &crate::test_support::mutation_context(
+                    &crate::test_support::writer_at(
                         "test-writer",
                         crate::test_support::grace_elapsed_after(test_context().now_ms),
                     ),
@@ -2638,7 +2637,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             .load_current_manifest()
             .await
             .expect("current manifest");
-        let payload = before.state.envelope.payload().clone();
+        let payload = before.payload().clone();
         let runs = runs_newest_first(&payload);
         let plan = super::super::compaction_step::plan_compaction(
             &payload,
@@ -2682,7 +2681,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &intercepted,
                 &namespace_id,
-                &crate::test_support::mutation_context("test-writer", 0),
+                &crate::test_support::writer_at("test-writer", 0),
             );
             fixture.namespace.run_policy = policy;
             fixture
@@ -2712,7 +2711,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             .load_current_manifest()
             .await
             .expect("current manifest");
-        let after_payload = after.state.envelope.payload();
+        let after_payload = after.payload();
         let referenced = referenced_segment_keys(&store, &namespace_id).await;
         if let RivalPublication::SameGroup(_) = publication {
             assert_eq!(outcome, CompactionUnitOutcome::Abandoned, "{publication:?}");
@@ -2727,9 +2726,9 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             panic!("{publication:?}: the unit must publish over the winner, got {outcome:?}");
         };
         assert_eq!(merged, group);
-        assert_eq!(manifest.manifest, after.state.manifest(), "{publication:?}");
+        assert_eq!(manifest.manifest, after.manifest(), "{publication:?}");
         assert!(
-            manifest.manifest.manifest_no.0 > before.state.manifest().manifest_no.0 + 1,
+            manifest.manifest.manifest_no.0 > before.manifest().manifest_no.0 + 1,
             "{publication:?}: the unit's first put lost"
         );
         assert!(
@@ -2742,7 +2741,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
                 assert!(after_payload.retention_floor_seq > payload.retention_floor_seq)
             }
             RivalPublication::OtherGroup(other) => {
-                let other_runs = input_runs_for_group(after.state.envelope.as_ref(), other);
+                let other_runs = input_runs_for_group(after.envelope.as_ref(), other);
                 assert_eq!(
                     other_runs.len(),
                     1,
@@ -2781,7 +2780,7 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
         .load_current_manifest()
         .await
         .expect("current manifest");
-    let payload = before.state.envelope.payload();
+    let payload = before.payload();
     let runs = runs_newest_first(payload);
     let due_groups = MetadataFamilyGroup::ALL
         .into_iter()
@@ -2813,7 +2812,7 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &intercepted,
                 &namespace_id,
-                &crate::test_support::mutation_context("test-writer", 0),
+                &crate::test_support::writer_at("test-writer", 0),
             );
             fixture.namespace.run_policy = policy;
             fixture
@@ -2848,7 +2847,7 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
         .load_current_manifest()
         .await
         .expect("current manifest");
-    let fold_run = runs_newest_first(after.state.envelope.payload())
+    let fold_run = runs_newest_first(after.payload())
         .into_iter()
         .find(|run| run.run_no == payload.next_run_no)
         .expect("the fold's run is still listed");
@@ -2952,7 +2951,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         .load_current_manifest()
         .await
         .expect("current manifest");
-    let mut winner = current.state.envelope.payload().clone();
+    let mut winner = current.payload().clone();
     winner.manifest_no = winner.manifest_no.successor().expect("next manifest");
     let recorded = Arc::new(RecordingStore::new(
         store.clone(),
@@ -2995,8 +2994,6 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
             .load_current_manifest()
             .await
             .expect("current manifest")
-            .state
-            .envelope
             .payload(),
         &winner,
     );
@@ -3063,7 +3060,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let epoch = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .claim_compactor()
@@ -3085,13 +3082,13 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let timer = Arc::new(ManualClock::stepping(1_000));
     let mut publication = CompactionPublication {
         compactor_epoch: epoch,
-        compaction: Deadline::start(timer.clone()),
-        publication: Deadline::start(timer.clone()),
+        compaction: OperationClock::start(0, timer.clone()),
+        publication: OperationClock::start(0, timer.clone()),
     };
     let next_epoch = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .claim_compactor()
@@ -3131,7 +3128,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &store,
                 &namespace,
-                &crate::test_support::mutation_context("test-writer", 0),
+                &crate::test_support::writer_at("test-writer", 0),
             );
             fixture.namespace.run_policy = merge_everything_policy();
             fixture
@@ -3167,17 +3164,16 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     assert_eq!(store.counts().puts, 0);
 
     timer.set_ms(0);
-    crate::commit_engine::NamespaceCommitEngine::new(crate::test_support::namespace_store(
-        store.inner(),
-        &namespace,
-    ))
-    .delete_namespace(
-        Default::default(),
-        &crate::MutationContext {
+    crate::commit_engine::NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store.inner(), &namespace),
+        (crate::test_support::WriterAt {
             writer_id: loonfs_types::WriterId::parse("deleter").expect("writer"),
             now_ms: 5_000,
-        },
+        })
+        .writer_id
+        .clone(),
     )
+    .delete_namespace(Default::default())
     .await
     .expect("delete while the job runs");
     store.reset();
@@ -3191,12 +3187,12 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         .load_current_manifest()
         .await
         .expect("tombstone");
-    let mut successor = tombstone.state.envelope.payload().clone();
+    let mut successor = tombstone.payload().clone();
     successor.manifest_no = successor.manifest_no.successor().expect("next number");
     let error = publish_once_within(
         &store,
         super::super::publish::encode_manifest(successor),
-        &Deadline::start(timer.clone()),
+        &OperationClock::start(0, timer.clone()),
     )
     .await
     .expect_err("a tombstone ends the namespace");
@@ -3214,7 +3210,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     let epoch = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .claim_compactor()
@@ -3231,8 +3227,8 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
         compactor_epoch: epoch,
-        compaction: Deadline::start(timer.clone()),
-        publication: Deadline::start(timer.clone()),
+        compaction: OperationClock::start(0, timer.clone()),
+        publication: OperationClock::start(0, timer.clone()),
     };
     let first_output = run_compaction(
         &store,
@@ -3315,7 +3311,6 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
             .load_current_manifest()
             .await
             .expect("manifest")
-            .state
             .compactor_epoch(),
         epoch
     );
@@ -3416,7 +3411,7 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &store,
                 &namespace,
-                &crate::test_support::mutation_context("test-writer", 0),
+                &crate::test_support::writer_at("test-writer", 0),
             );
             fixture.namespace.run_policy = merge_everything_policy();
             fixture
@@ -3530,7 +3525,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     let epoch = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .claim_compactor()
@@ -3543,7 +3538,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = small_segment_policy();
         fixture
@@ -3611,7 +3606,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &failing,
             &namespace,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = small_segment_policy();
         fixture
@@ -3644,7 +3639,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     ] {
         crate::test_support::namespace_store(&store, &namespace)
-            .gc(None, &options, &mutation_context("collector", age_ms))
+            .gc(None, &options, &writer_at("collector", age_ms).clock())
             .await
             .expect("collect");
         for key in &orphans {
@@ -3731,7 +3726,7 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_even_past_the_filter
     let cache = MetadataSegmentCache::unshared(8 * 1024 * 1024);
     let runs = runs_newest_first(manifest.payload());
     let mut basis = VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
-    basis.manifest = Some(Arc::new(manifest));
+    basis.manifest = Arc::new(manifest);
     let revision_key = metadata_segment_object_key(
         group_run_descriptors(&runs[0], MetadataFamilyGroup::Revisions)
             .next()

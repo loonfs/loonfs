@@ -8,20 +8,18 @@ use loonfs_core::content::prepare_existing_content_ref;
 use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
-use loonfs_core::test_support::mutation_context;
 use loonfs_core::test_support::namespace_store;
-use loonfs_core::time::Deadline;
+use loonfs_core::test_support::writer_at;
+use loonfs_core::test_support::WriterAt;
+use loonfs_core::CreateNamespaceOptions;
 use loonfs_core::GcOptions;
-use loonfs_core::{CreateNamespaceOptions, MutationContext};
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::api::v0::CompleteUploadBody;
 use loonfs_types::AbsolutePath;
-use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{ChangeSeq, NamespaceId};
-use std::sync::Arc;
 use tempfile::tempdir;
 
 async fn put_file<S: ObjectStore + ?Sized>(
@@ -29,7 +27,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     bytes: &[u8],
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     let content = namespace_store(store, namespace_id)
         .store_bytes_as_content(bytes)
@@ -43,31 +41,33 @@ async fn put_file<S: ObjectStore + ?Sized>(
         .await
         .expect("prepare existing content");
     let content_ref = prepared.content_ref().clone();
-    NamespaceCommitEngine::new(namespace_store(store, namespace_id))
-        .publish_batch(
-            vec![CommitCandidate::prepared(
-                CommitIntent::single(
-                    loonfs_types::CommitId::generate(),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::PutFile {
-                        path: AbsolutePath::parse(absolute_path).expect("path"),
-                        content: loonfs_types::FileContent::Ref(content_ref),
-                        behavior: loonfs_types::DestinationBehavior::NoReplace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-                vec![prepared],
-            )],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("put file");
+    NamespaceCommitEngine::new(
+        namespace_store(store, namespace_id),
+        context.writer_id.clone(),
+    )
+    .publish_batch(
+        vec![CommitCandidate::prepared(
+            CommitIntent::single(
+                loonfs_types::CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::PutFile {
+                    path: AbsolutePath::parse(absolute_path).expect("path"),
+                    content: loonfs_types::FileContent::Ref(content_ref),
+                    behavior: loonfs_types::DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+            ),
+            vec![prepared],
+        )],
+        &context.clock(),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("put file");
 }
 
 #[tokio::test]
@@ -78,7 +78,7 @@ async fn reads_commits_and_change_feed_never_list() {
         KeyPredicate::any(),
     );
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let context = mutation_context("acceptance", 1_000);
+    let context = writer_at("acceptance", 1_000);
     let engine = namespace_engine(&store, &namespace_id, &context);
     engine
         .bootstrap_namespace(
@@ -173,7 +173,7 @@ async fn maintenance_preserves_writer_and_logical_head() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let context = mutation_context("acceptance", 1_000);
+    let context = writer_at("acceptance", 1_000);
     let engine = namespace_engine(&store, &namespace_id, &context);
     engine
         .bootstrap_namespace(
@@ -205,7 +205,7 @@ async fn maintenance_preserves_writer_and_logical_head() {
         .await
         .expect("advance floor");
     namespace_store(&store, &namespace_id)
-        .gc(None, &GcOptions::default(), &context)
+        .gc(None, &GcOptions::default(), &context.clock())
         .await
         .expect("gc pass");
     let staged = engine.begin_upload().await.expect("second upload");

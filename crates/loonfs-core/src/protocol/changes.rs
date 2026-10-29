@@ -19,7 +19,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     let head = view.head();
     let retention_floor_seq = view.retention_floor_seq();
     let namespace_id = &head.namespace_id;
-    crate::namespace::control::ensure_namespace_live(head)?;
+    crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
 
     if after_seq < retention_floor_seq {
         return Err(CoreError::RebootstrapRequired {
@@ -281,9 +281,9 @@ fn binding_version(
 #[cfg(test)]
 mod tests {
     use super::event_from_op_deltas;
-    use crate::context::MutationContext;
     use crate::error::CoreError;
-    use crate::manifest::{HeadAndWalTailCache, MetadataSegmentCache};
+
+    use crate::test_support::WriterAt;
     use crate::{NamespaceEngine, RuntimeReadContext};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::api::v0::FilesystemChange;
@@ -294,7 +294,7 @@ mod tests {
     };
     use std::assert_matches;
     use std::num::NonZeroU32;
-    use std::sync::Arc;
+
     use tempfile::tempdir;
 
     fn namespace_id() -> NamespaceId {
@@ -326,7 +326,7 @@ mod tests {
         crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &MutationContext {
+            &WriterAt {
                 writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
                 now_ms: 1,
             },
@@ -340,11 +340,10 @@ mod tests {
             .await
             .expect("load read basis");
         let context = RuntimeReadContext {
-            basis: loaded.basis(),
-            head: loaded.read_state,
-            segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
-            head_and_wal_tail_cache: Arc::new(HeadAndWalTailCache::unshared(usize::MAX)),
-            object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+            read_basis: crate::control::ReadBasis {
+                basis: loaded.basis(),
+                head: loaded.read_state,
+            },
             tail: None,
         };
         let engine =
@@ -375,7 +374,7 @@ mod tests {
         let directory = tempdir().expect("tempdir");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let namespace_id = namespace_id();
-        let context = MutationContext {
+        let context = WriterAt {
             writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1,
         };

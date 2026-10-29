@@ -4,11 +4,11 @@ use super::publish_path_planning::{
     ensure_binding_version, hidden_inode_binding_error, is_missing_visible_path,
     resolve_visible_inode, PublishPathPlanningView,
 };
+use super::session::PublishPlanningSession;
 use crate::authorize::{Absence, Authorizer, CommitAuthority};
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
-use crate::namespace::state::NamespaceReadState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AbsolutePath, AccessRevisionNo, AccessRight, AttributesRevisionNo, BindingVersion,
@@ -19,15 +19,18 @@ use loonfs_types::{
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
     preconditions: &[CommitPrecondition],
     authority: CommitAuthority<'_>,
-    head: &NamespaceReadState,
+    session: &PublishPlanningSession<'_, S>,
     pre_state: &MetadataView<'_, '_, S>,
 ) -> Result<()> {
+    let head = session.head();
     let authorizer = Authorizer::for_request(&head.namespace_id, &head.access, authority)?;
     let view = PublishPathPlanningView {
         namespace_id: &head.namespace_id,
         access: &head.access,
         authorizer: &authorizer,
         view: pre_state,
+        store: session.store(),
+        content_writes: session.content_writes(),
     };
     for (index, precondition) in preconditions.iter().enumerate() {
         let precondition_index = u32::try_from(index).ok();

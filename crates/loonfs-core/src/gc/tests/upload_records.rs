@@ -18,31 +18,33 @@ async fn commit_upload<S: ObjectStore>(
     prepared: PreparedContent,
 ) {
     let content_ref = prepared.content_ref().clone();
-    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
-        .publish_batch(
-            vec![CommitCandidate::prepared(
-                CommitIntent::single(
-                    loonfs_types::CommitId::generate(),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::PutFile {
-                        path: loonfs_types::AbsolutePath::parse(path).expect("path"),
-                        content: loonfs_types::FileContent::Ref(content_ref),
-                        behavior: loonfs_types::DestinationBehavior::Replace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-                vec![prepared],
-            )],
-            &context(2_000),
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("published");
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        context(2_000).writer_id.clone(),
+    )
+    .publish_batch(
+        vec![CommitCandidate::prepared(
+            CommitIntent::single(
+                loonfs_types::CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::PutFile {
+                    path: loonfs_types::AbsolutePath::parse(path).expect("path"),
+                    content: loonfs_types::FileContent::Ref(content_ref),
+                    behavior: loonfs_types::DestinationBehavior::Replace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+            ),
+            vec![prepared],
+        )],
+        &context(2_000).clock(),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("published");
 }
 
 async fn complete_proxied<S: ObjectStore + ?Sized>(
@@ -96,7 +98,7 @@ async fn pass<S: ObjectStore + ?Sized>(
     now_ms: u64,
 ) -> crate::error::Result<GcResponse> {
     crate::test_support::namespace_store(store, namespace_id)
-        .gc(None, &options(), &context(now_ms))
+        .gc(None, &options(), &context(now_ms).clock())
         .await
 }
 
@@ -225,7 +227,7 @@ async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_r
         crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 4_000),
+            &crate::test_support::writer_at("test-writer", 4_000),
         )
         .engine()
         .get_upload(&upload_id)

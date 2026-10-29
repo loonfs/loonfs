@@ -4,7 +4,7 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::GcOptions;
 use crate::manifest::{CompactionUnitOutcome, MetadataCompactionPolicy, RetentionTarget};
-use crate::path::read::ReadLoadContext;
+use crate::test_support::WriterAt;
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::control::PinOwner;
 use std::assert_matches;
@@ -40,7 +40,7 @@ async fn compact_and_check_pair(
         let outcome = crate::test_support::NamespaceFixture::new(
             store,
             namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
         .compact_metadata_unit(
@@ -99,7 +99,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
                 name: "before reuse".into(),
                 expires_at_ms: Some(u64::MAX),
             },
-            &context,
+            &context.clock(),
         )
         .await
         .expect("pin the original history")
@@ -107,7 +107,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let floor = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -167,7 +167,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context(
+            &crate::test_support::writer_at(
                 "test-writer",
                 crate::test_support::grace_elapsed_after(context.now_ms)
             )
@@ -230,10 +230,11 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .gc(
             None,
             &GcOptions::default(),
-            &MutationContext {
+            &WriterAt {
                 now_ms: crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
                 ..context.clone()
-            },
+            }
+            .clock(),
         )
         .await
         .expect("collect old WAL and unpinned segments");
@@ -265,20 +266,18 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .load_current_metadata_view()
         .await
         .expect("fresh current view");
-    let pinned = crate::test_support::namespace_store(&store, &current.head().namespace_id)
-        .load_snapshot_read_basis(current.head(), &snapshot.pin_id, context.now_ms)
-        .await
-        .expect("snapshot still pins original history");
+    let pinned =
+        crate::test_support::NamespaceFixture::new(&store, &current.head().namespace_id, &context)
+            .namespace
+            .load_snapshot_read_basis(current.head(), &snapshot.pin_id)
+            .await
+            .expect("snapshot still pins original history");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let old = namespace
-        .load_metadata_view(ReadLoadContext::pinned_head(
-            &pinned.head,
-            &pinned.basis,
-            None,
-            None,
-            None,
-            None,
-        ))
+        .load_metadata_view(&crate::RuntimeReadContext {
+            read_basis: pinned,
+            tail: None,
+        })
         .await
         .expect("fresh snapshot view");
     let old_receipt = old

@@ -67,16 +67,10 @@ pub(crate) fn commit_fingerprint(
 /// the head is the validated source of the namespace and writer epoch
 /// (`load_publish_metadata_view` fences on epoch equality, and the batch
 /// rejects namespace mismatches before admission).
-#[allow(
-    clippy::too_many_arguments,
-    reason = "planning carries the store and shared content write permits"
-)]
 pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_writes: &crate::PermitPool,
     candidate: &CommitCandidate,
     semantic_identity: CommitFingerprint,
-    session: &PublishPlanningSession<'_>,
+    session: &PublishPlanningSession<'_, S>,
     base_view: MetadataView<'_, '_, S>,
     committed_at_ms: u64,
     allocation: &mut CandidateAllocation,
@@ -120,8 +114,10 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                 access: &head.access,
                 authorizer: &authorizer,
                 view: &resolution_view,
+                store: session.store(),
+                content_writes: session.content_writes(),
             };
-            plan_operation(store, content_writes, operation, &view, &pieces, allocation)
+            plan_operation(operation, &view, &pieces, allocation)
                 .await
                 .map_err(|error| error.at_operation(index))?
         };
@@ -169,8 +165,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             .collect(),
     };
     carry_revision_layouts(
-        store,
-        content_writes,
+        session,
         &resolved.view(),
         &base_view.with_overlay(None, session.accepted_rows(), head.seq),
         &pieces,
@@ -182,11 +177,10 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
 }
 
 async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_writes: &crate::PermitPool,
+    session: &PublishPlanningSession<'_, S>,
     view: &MetadataView<'_, '_, S>,
     before: &MetadataView<'_, '_, S>,
-    pieces: &CommitPieces<'_>,
+    pieces: &CommitPieces<'_, S>,
     candidate: &CommitCandidate,
     plan: &mut ValidatedCommitPlan,
 ) -> Result<()> {
@@ -240,11 +234,11 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
             let content = pieces.content(&prefix);
             *layout = Some(
                 crate::storage::tail_content::materialize_content_layout(
-                    store,
+                    session.store(),
                     view,
                     content.as_ref(),
                     &prefix,
-                    content_writes,
+                    session.content_writes(),
                 )
                 .await
                 .map_err(|error| error.at_operation(delta.semantic_operation_index as usize))?,
@@ -256,11 +250,9 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
 }
 
 async fn plan_operation<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_writes: &crate::PermitPool,
     operation: &FilesystemOperation,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-    pieces: &CommitPieces<'_>,
+    pieces: &CommitPieces<'_, S>,
     allocation: &mut CandidateAllocation,
 ) -> Result<CompiledFilesystemOperation> {
     match operation {
@@ -340,8 +332,6 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 inline_content,
                 *expected_inode_id,
                 *expected_revision_no,
-                store,
-                content_writes,
                 view,
                 pieces,
             )
@@ -356,8 +346,6 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 *inode_id,
                 inline_content,
                 *expected_revision_no,
-                store,
-                content_writes,
                 view,
                 pieces,
             )
@@ -559,7 +547,7 @@ fn prepared_reference(content: &FileContent) -> Result<&loonfs_types::ContentRef
 mod tests {
     use super::*;
     use crate::commit::CandidateAllocation;
-    use crate::context::MutationContext;
+    use crate::test_support::WriterAt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::api::v0::FilesystemChange;
     use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
@@ -579,8 +567,8 @@ mod tests {
         allocation: CandidateAllocation,
     }
 
-    fn test_context() -> MutationContext {
-        crate::test_support::mutation_context("writer", 1)
+    fn test_context() -> WriterAt {
+        crate::test_support::writer_at("writer", 1)
     }
 
     fn request(operation: FilesystemOperation) -> CommitIntent {
@@ -642,12 +630,7 @@ mod tests {
         }
     }
 
-    async fn setup_namespace() -> (
-        tempfile::TempDir,
-        LocalFsStore,
-        NamespaceId,
-        MutationContext,
-    ) {
+    async fn setup_namespace() -> (tempfile::TempDir, LocalFsStore, NamespaceId, WriterAt) {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -669,7 +652,9 @@ mod tests {
             .load_current_metadata_view()
             .await
             .expect("metadata view");
-        let session = PublishPlanningSession::new(view.head(), view.wal_tail());
+        let content_writes = crate::test_support::content_writes();
+        let session =
+            PublishPlanningSession::new(view.head(), view.wal_tail(), &store, &content_writes);
         let mut allocation = session.begin_candidate();
         let content = request
             .operations
@@ -679,8 +664,6 @@ mod tests {
             .map(crate::storage::content_admission::PreparedContent::for_durable_content_write)
             .collect();
         let validated = prepare_commit_against_publish_view(
-            &store,
-            &crate::test_support::content_writes(),
             &CommitCandidate::prepared(request.clone(), content),
             loonfs_test_support::ids::commit_fingerprint("test"),
             &session,

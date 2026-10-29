@@ -45,7 +45,7 @@ pub struct NamespaceStatistics {
 impl LoadedManifest {
     /// Calculates statistics from the loaded manifest without storage requests.
     pub fn statistics(&self) -> Result<NamespaceStatistics> {
-        manifest_statistics(&self.state.envelope, self.manifest_bytes)
+        manifest_statistics(&self.envelope, self.manifest_bytes)
     }
 }
 

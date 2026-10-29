@@ -499,8 +499,7 @@ async fn foreign_metadata_segment_owners(
     let manifest = loonfs_core::test_support::namespace_store(store.as_ref(), namespace_id)
         .load_current_manifest()
         .await
-        .expect("load metadata manifest")
-        .state;
+        .expect("load metadata manifest");
     let key = loonfs_objectstore::keys::metadata_manifest_object(
         namespace_id,
         &manifest.manifest().manifest_no,

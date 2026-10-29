@@ -20,8 +20,7 @@ use crate::block_cache::{
 use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::limits::READAHEAD_WINDOW_BYTES;
-use crate::namespace::basis::MetadataBasis;
-use crate::namespace::state::NamespaceReadState;
+use crate::namespace::basis::ReadBasis;
 use crate::read_working_memory::ReadWorkingMemory;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
@@ -380,8 +379,7 @@ impl DecodedBlockKey for NamespaceId {
 /// the head refreshes.
 #[derive(Debug, Clone)]
 pub struct CachedHead {
-    pub head: NamespaceReadState,
-    pub basis: MetadataBasis,
+    pub read_basis: ReadBasis,
     /// The successor check that last confirmed `basis`. A read trusts the
     /// basis only while this check is younger than the revalidation bound.
     pub basis_checked: Observation,
@@ -396,7 +394,10 @@ impl CachedHead {
     /// The durable order that [`HeadAndWalTailCache::replace_head`] compares
     /// heads in: head sequence, then manifest number.
     fn order(&self) -> (ChangeSeq, ManifestNo) {
-        (self.head.seq, self.basis.manifest_no())
+        (
+            self.read_basis.head.seq,
+            self.read_basis.basis.manifest_no(),
+        )
     }
 
     /// Returns whether this head replaces `cached`: whether it's newer in the
@@ -418,7 +419,7 @@ impl CachedHead {
     }
 
     fn heap_bytes(&self) -> usize {
-        self.head.heap_bytes() + self.basis.0.heap_bytes()
+        self.read_basis.head.heap_bytes() + self.read_basis.basis.manifest().heap_bytes()
     }
 }
 
@@ -593,7 +594,7 @@ impl HeadAndWalTailCache {
     /// invalidation or an eviction of the head passed `start`, the start of
     /// the check that loaded `candidate`.
     fn install_head(&self, start: Option<CheckStart>, candidate: CachedHead) -> Arc<CachedHead> {
-        let key = self.head_key(&candidate.head.namespace_id);
+        let key = self.head_key(&candidate.read_basis.head.namespace_id);
         let next = match self.shared.heads.peek(&key) {
             Some(cached) if cached.order() == candidate.order() => {
                 let basis_checked = later(&cached.basis_checked, candidate.basis_checked);
@@ -667,11 +668,13 @@ impl HeadAndWalTailCache {
 mod tests {
     use super::{
         CacheScope, CachedHead, CoreError, DecodedMetadataSegmentBlock, HeadAndWalTailCache,
-        MetadataBasis, MetadataSegmentCache, MetadataSegmentCacheKey, NamespaceReadState,
-        ObjectStoreScope, Observation, SharedSegmentBlocks, WalTailCacheKey,
+        MetadataSegmentCache, MetadataSegmentCacheKey, ObjectStoreScope, Observation, ReadBasis,
+        SharedSegmentBlocks, WalTailCacheKey,
     };
     use crate::block_cache::{charged_bytes, DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
+    use crate::namespace::basis::MetadataBasis;
+    use crate::namespace::state::NamespaceReadState;
     use crate::wal::ProjectedWalTail;
     use futures::poll;
     use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
@@ -872,34 +875,39 @@ mod tests {
     fn head_of(name: &str, seq: u64, manifest_no: u64, checked: &Observation) -> CachedHead {
         let namespace_id = namespace(name);
         CachedHead {
-            head: NamespaceReadState {
-                namespace_id: namespace_id.clone(),
-                created_at_ms: 1_000,
-                created_by: loonfs_test_support::test_actor(),
-                access: loonfs_types::NamespaceAccess::Unrestricted {},
-                fork_basis: None,
-                status: NamespaceStatus::Active {},
-                writer_epoch: WriterEpoch(1),
-                writer: None,
-                seq: ChangeSeq(seq),
-                next_inode_id: InodeId(2),
-                wal_no: WalNo(seq),
-                folded_wal_no: WalNo(0),
-                basis_floor_seq: ChangeSeq(0),
+            read_basis: ReadBasis {
+                head: NamespaceReadState {
+                    namespace_id: namespace_id.clone(),
+                    created_at_ms: 1_000,
+                    created_by: loonfs_test_support::test_actor(),
+                    access: loonfs_types::NamespaceAccess::Unrestricted {},
+                    fork_basis: None,
+                    status: NamespaceStatus::Active {},
+                    writer_epoch: WriterEpoch(1),
+                    writer: None,
+                    seq: ChangeSeq(seq),
+                    next_inode_id: InodeId(2),
+                    wal_no: WalNo(seq),
+                    folded_wal_no: WalNo(0),
+                    basis_floor_seq: ChangeSeq(0),
+                },
+                basis: MetadataBasis::new(ManifestRef {
+                    owner_namespace_id: namespace_id,
+                    manifest_no: ManifestNo(manifest_no),
+                    head_seq: ChangeSeq(0),
+                    payload_checksum: loonfs_types::sha256_digest(b"checksum"),
+                }),
             },
-            basis: MetadataBasis(ManifestRef {
-                owner_namespace_id: namespace_id,
-                manifest_no: ManifestNo(manifest_no),
-                head_seq: ChangeSeq(0),
-                payload_checksum: loonfs_types::sha256_digest(b"checksum"),
-            }),
             basis_checked: checked.clone(),
             head_confirmed: checked.clone(),
         }
     }
 
     fn order(head: &CachedHead) -> (u64, u64) {
-        (head.head.seq.0, head.basis.manifest_no().0)
+        (
+            head.read_basis.head.seq.0,
+            head.read_basis.basis.manifest_no().0,
+        )
     }
 
     /// Creates a head like [`head_at`] whose namespace grants access to
@@ -915,7 +923,7 @@ mod tests {
             })
             .collect();
         let mut head = head_at(seq, 1, checked);
-        head.head.access = loonfs_types::NamespaceAccess::Acl {
+        head.read_basis.head.access = loonfs_types::NamespaceAccess::Acl {
             principal_scope: loonfs_types::PrincipalScope::parse("org").expect("scope"),
             root_grants: loonfs_types::AccessGrants::new(grants).expect("grants"),
         };

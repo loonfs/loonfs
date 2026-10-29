@@ -19,14 +19,14 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
         .expect("tombstone");
     store.reset();
     let waiting = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(deadline.now_ms - 1))
+        .gc(None, &options(), &context(deadline.now_ms - 1).clock())
         .await
         .expect("before deadline");
     assert_eq!(waiting.reclaimable_at_ms, Some(1_000 + retirement_ms()));
     assert_eq!(waiting.next_reclamation_at_ms, Some(deadline.now_ms));
     assert_eq!(waiting.deleted.retired_content_objects, 0);
     let reclaimed = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &deadline)
+        .gc(None, &options(), &deadline.clock())
         .await
         .expect("at deadline");
     assert_eq!(reclaimed.deleted.retired_content_objects, keys.len() as u64);
@@ -35,10 +35,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
         .load_current_manifest()
         .await
         .expect("same tombstone");
-    assert_eq!(
-        before.state.manifest().manifest_no,
-        after.state.manifest().manifest_no
-    );
+    assert_eq!(before.manifest().manifest_no, after.manifest().manifest_no);
     assert_eq!(store.counts().puts, 0);
 }
 
@@ -74,7 +71,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .load_current_manifest()
         .await
         .expect("target tombstone");
-    let payload = tombstone.state.envelope.payload();
+    let payload = tombstone.payload();
     let source_pin = &payload
         .fork_basis
         .as_ref()
@@ -95,7 +92,11 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         }),
     );
     let first = crate::test_support::namespace_store(&store, &target)
-        .gc(None, &options(), &context(setup.now_ms + retirement_ms()))
+        .gc(
+            None,
+            &options(),
+            &context(setup.now_ms + retirement_ms()).clock(),
+        )
         .await
         .expect("release source pin with retained session");
     assert_eq!(first.deleted.retired_content_objects, 1);
@@ -129,13 +130,13 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     }
     let expired_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS;
     let repeated = crate::test_support::namespace_store(&store, &target)
-        .gc(None, &options(), &context(expired_at_ms))
+        .gc(None, &options(), &context(expired_at_ms).clock())
         .await
         .expect("repeat retirement after source collection");
     assert_eq!(repeated.deleted.retired_content_objects, 0);
     assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
     let finished = crate::test_support::namespace_store(&store, &target)
-        .gc(None, &options(), &context(expired_at_ms + GRACE_MS))
+        .gc(None, &options(), &context(expired_at_ms + GRACE_MS).clock())
         .await
         .expect("finish retirement after session cleanup");
     assert_eq!(finished.deleted.retired_content_objects, 0);
@@ -171,7 +172,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let targets = crate::test_support::NamespaceFixture::new(
         &inner,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", clock.now_ms()),
+        &crate::test_support::writer_at("test-writer", clock.now_ms()),
     )
     .engine()
     .direct_multipart_part_targets(
@@ -203,7 +204,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         ..Default::default()
     };
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &context(clock.now_ms()))
+        .gc(None, &options, &context(clock.now_ms()).clock())
         .await
         .expect("retire");
     let deadline = report.reclaimable_at_ms.expect("deadline");
@@ -214,7 +215,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     assert!(deadline > expires_at_ms);
     clock.advance_ms(deadline - clock.now_ms() - 1);
     let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &context(clock.now_ms()))
+        .gc(None, &options, &context(clock.now_ms()).clock())
         .await
         .expect("before deadline");
     assert_eq!(before.next_reclamation_at_ms, Some(deadline));
@@ -224,7 +225,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     assert_eq!(store.counts().deletes, 0);
     clock.advance_ms(1);
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &context(clock.now_ms()))
+        .gc(None, &options, &context(clock.now_ms()).clock())
         .await
         .expect("owner sweep");
     assert_eq!(store.counts().lists, 3);
@@ -238,14 +239,14 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         setup.now_ms + UPLOAD_SESSION_LEASE_MS + options.grace_window_ms - clock.now_ms(),
     );
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &context(clock.now_ms()))
+        .gc(None, &options, &context(clock.now_ms()).clock())
         .await
         .expect("provider cleanup after retirement");
     assert_eq!(store.inner().aborts(), 1);
     assert_eq!(store.inner().open_uploads(), 0);
     clock.advance_ms(options.grace_window_ms);
     let reaped = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &context(clock.now_ms()))
+        .gc(None, &options, &context(clock.now_ms()).clock())
         .await
         .expect("reap session");
     assert_eq!(reaped.deleted.upload_sessions, 1);
@@ -280,7 +281,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         .load_current_manifest()
         .await
         .expect("target");
-    let mut payload = current.state.envelope.payload().clone();
+    let mut payload = current.payload().clone();
     let basis = payload.fork_basis.as_mut().expect("fork basis");
     basis.manifest.payload_checksum = loonfs_types::sha256_digest(b"retired");
     let pin_id = basis.source_pin_id.clone();
@@ -290,7 +291,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         .expect("corrupt basis");
     store.reset();
     let error = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &options(), &context(setup.now_ms + GRACE_MS))
+        .gc(None, &options(), &context(setup.now_ms + GRACE_MS).clock())
         .await
         .expect_err("corrupt basis");
     assert_matches!(error, CoreError::NamespaceCorrupt(_));

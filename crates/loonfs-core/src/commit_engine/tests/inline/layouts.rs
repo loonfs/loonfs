@@ -4,6 +4,7 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::storage::content::DurableContentValidationError;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
+use crate::test_support::WriterAt;
 use crate::GrantedRange;
 use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_test_support::stores::MetadataMapStore;
@@ -749,10 +750,11 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         .gc(
             None,
             &options,
-            &MutationContext {
+            &WriterAt {
                 now_ms: options.grace_window_ms + 1,
                 ..context.clone()
-            },
+            }
+            .clock(),
         )
         .await
         .expect("collect");
@@ -812,10 +814,11 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         .gc(
             None,
             &options,
-            &MutationContext {
+            &WriterAt {
                 now_ms: options.grace_window_ms + 1,
                 ..context
-            },
+            }
+            .clock(),
         )
         .await
         .expect("collect pruned chains");
@@ -830,7 +833,7 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(1_000),
         ),
@@ -844,7 +847,7 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
             crate::test_support::NamespaceFixture::new(
                 store,
                 namespace_id,
-                &crate::test_support::mutation_context("test-writer", 0)
+                &crate::test_support::writer_at("test-writer", 0)
             )
             .engine()
             .compact_metadata_unit(
@@ -935,7 +938,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         .load_current_manifest()
         .await
         .expect("manifest");
-    assert!(manifest.state.envelope.payload().head_seq < restored.committed_seq);
+    assert!(manifest.payload().head_seq < restored.committed_seq);
     let basis = metadata_basis_from_manifest(&store, None, &manifest);
     let rows = basis
         .segments
@@ -972,10 +975,11 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         .gc(
             None,
             &options,
-            &MutationContext {
+            &WriterAt {
                 now_ms: options.grace_window_ms + 1,
                 ..context
-            },
+            }
+            .clock(),
         )
         .await
         .expect("collect after grace");
@@ -1119,7 +1123,7 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
     blocked.inner().block_next();
     store.reset();
     let pool = Arc::new(crate::PermitPool::new(std::num::NonZeroUsize::MIN, None));
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     let namespace = crate::NamespaceStore {
         content_writes: Arc::clone(&pool),
         ..crate::test_support::namespace_store(&blocked, &namespace_id)
@@ -1174,11 +1178,15 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
             },
         },
     ));
-    let session = PublishPlanningSession::new(view.head(), view.wal_tail());
+    let content_writes = crate::test_support::content_writes();
+    let session = PublishPlanningSession::new(
+        view.head(),
+        view.wal_tail(),
+        &namespace.store,
+        &content_writes,
+    );
     let plan = session
         .prepare_commit(
-            &namespace.store,
-            &crate::test_support::content_writes(),
             &candidate,
             candidate.semantic_identity(&namespace_id),
             view.projected_metadata_view(),
@@ -1370,12 +1378,15 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 }
             },
         ));
-        let session = PublishPlanningSession::new(view.head(), view.wal_tail());
         let content_writes = crate::test_support::content_writes();
+        let session = PublishPlanningSession::new(
+            view.head(),
+            view.wal_tail(),
+            &namespace.store,
+            &content_writes,
+        );
         let mut plan = session
             .prepare_commit(
-                &namespace.store,
-                &content_writes,
                 &candidate,
                 candidate.semantic_identity(&namespace_id),
                 view.projected_metadata_view(),
@@ -1424,7 +1435,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         publish(&mut engine, &context, replacement)
             .await
             .expect("replace source");
-        let fold = engine.wal_fold_input().expect("fold input");
+        let fold = engine.writer_position().expect("fold input");
         if restore {
             for delta in &mut plan.deltas {
                 if let WalDelta::AppendFileRevision { revision_no, .. } = &mut delta.delta {
@@ -1442,7 +1453,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         crate::test_support::namespace_store(&store, &namespace_id)
             .fold_wal_tail(
                 Some(fold),
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .expect("fold captured source");
@@ -1469,10 +1480,11 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             .gc(
                 None,
                 &options,
-                &MutationContext {
+                &WriterAt {
                     now_ms: options.grace_window_ms + 1,
                     ..context
-                },
+                }
+                .clock(),
             )
             .await
             .expect("collect");

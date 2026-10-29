@@ -190,7 +190,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         .expect("folded manifest");
     let manifest_key = loonfs_objectstore::keys::metadata_manifest_object(
         &namespace_id,
-        &manifest.state.manifest().manifest_no,
+        &manifest.manifest().manifest_no,
     );
     recording.reset();
     namespace

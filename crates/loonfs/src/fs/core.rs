@@ -13,7 +13,7 @@ use crate::{Error, Result, SharedObjectStore};
 use loonfs_core::cache::{
     CompletedUploadSessionCache, HeadAndWalTailCache, MetadataSegmentCache, ObjectCache,
 };
-use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceStore, NamespaceWriterEngine};
+use loonfs_core::{NamespaceReaderEngine, NamespaceStore, NamespaceWriterEngine};
 use loonfs_types::{
     decode_cursor, encode_cursor, CapabilityDocument, CompactorEpoch, FileRevision,
     FileRevisionsPageCursor, ListPageCursor, Page, PageCursor, PageRequest, Subject, WriterId,
@@ -130,7 +130,7 @@ impl RuntimeCore {
     pub(crate) fn writer_position(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Option<Arc<loonfs_core::publish::ReadPosition>> {
+    ) -> Option<Arc<loonfs_core::publish::WriterPosition>> {
         self.inner
             .head_positions
             .get()?
@@ -151,14 +151,6 @@ impl RuntimeCore {
     /// Reads the handle's wall clock as unix milliseconds.
     pub(crate) fn now_ms(&self) -> u64 {
         self.inner.wall_clock.now_ms()
-    }
-
-    /// Stamps a mutation by `actor` with the handle's wall clock.
-    pub(crate) fn mutation_context(&self, actor: &WriterIdentity) -> MutationContext {
-        MutationContext {
-            writer_id: actor.writer_id.clone(),
-            now_ms: self.now_ms(),
-        }
     }
 
     /// This runtime's instrument set, for the publication, maintenance, and
@@ -258,7 +250,7 @@ impl RuntimeCore {
         Arc::clone(&self.inner.store)
     }
 
-    /// Returns `namespace_id`'s components: this core's store, segment cache,
+    /// Returns `namespace_id`'s components: this core's store, caches,
     /// clocks, content write permits, and run policy.
     pub(crate) fn namespace_store(
         &self,
@@ -268,6 +260,8 @@ impl RuntimeCore {
             Arc::clone(&self.inner.store),
             namespace_id.clone(),
             self.metadata_segment_cache(),
+            Arc::clone(&self.inner.head_and_wal_tail_cache),
+            Arc::clone(&self.inner.object_cache),
             Arc::clone(&self.inner.wall_clock),
             Arc::clone(&self.inner.timer),
             self.inner.config.execution_budget.content_writes(),

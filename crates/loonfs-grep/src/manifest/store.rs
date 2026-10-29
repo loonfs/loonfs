@@ -8,7 +8,7 @@ use super::state::{GrepHint, GrepManifestState};
 use crate::keyspace::{hint_key, manifest_key};
 use crate::{GrepError, Result};
 use bytes::Bytes;
-use loonfs::engine::{Deadline, Observation, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::engine::{Observation, OperationClock, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs::CoreError;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::{ManifestNo, NamespaceId};
@@ -154,7 +154,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     current: Option<&LoadedGrepManifest>,
     next: &GrepManifestState,
-    deadline: &Deadline,
+    deadline: &OperationClock,
 ) -> Result<LoadedGrepManifest> {
     let namespace_id = next.namespace_id();
     let object_key = manifest_key(namespace_id, &next.manifest_no());
@@ -280,7 +280,7 @@ pub async fn raise_grep_hint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
     mut current: LoadedGrepHint,
-    deadline: &Deadline,
+    deadline: &OperationClock,
 ) -> Result<LoadedGrepHint> {
     let object_key = hint_key(namespace_id);
     while deadline.elapsed_ms() <= METADATA_PUBLICATION_BUDGET_MS {

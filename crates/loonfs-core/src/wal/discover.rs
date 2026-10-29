@@ -3,7 +3,7 @@
 use super::frame::{ValidatedWalTail, WalTailLoadError};
 use super::reader::{load_wal_object, WalWalk};
 use super::replay::project_validated_wal_tail;
-use crate::cache::WalTailCacheKey;
+use crate::cache::{HeadAndWalTailCache, WalTailCacheKey};
 use crate::control_object::ControlObjectLoadError;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
@@ -30,8 +30,8 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &LoadedManifest,
 ) -> Result<DiscoveredTail, ControlObjectLoadError> {
-    let namespace_id = &manifest.state.envelope.payload().namespace_id;
-    let mut head = NamespaceReadState::from(manifest.state.envelope.payload());
+    let namespace_id = &manifest.payload().namespace_id;
+    let mut head = NamespaceReadState::from(manifest.payload());
     let mut objects = Vec::new();
     if head.status.is_deleted() {
         return Ok(DiscoveredTail {
@@ -180,12 +180,13 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
 ///   corruption.
 pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     store: &S,
+    head_and_wal_tail_cache: &HeadAndWalTailCache,
     context: &mut RuntimeReadContext,
 ) -> Result<bool, ControlObjectLoadError> {
-    let mut state = context.head.clone();
+    let mut state = context.read_basis.head.clone();
     let mut cache_key = WalTailCacheKey {
         namespace_id: state.namespace_id.clone(),
-        manifest_no: context.basis.manifest_no(),
+        manifest_no: context.read_basis.basis.manifest_no(),
         head_seq: state.seq,
     };
     let mut tail = None;
@@ -207,13 +208,13 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             return Ok(ControlFlow::Break(()));
         }
         let object = walk.validate(object_key, envelope).map_err(wal_error)?;
-        if state.wal_no == context.head.wal_no {
-            tail = context.head_and_wal_tail_cache.get_tail(&cache_key);
+        if state.wal_no == context.read_basis.head.wal_no {
+            tail = head_and_wal_tail_cache.get_tail(&cache_key);
         }
         let before = state.clone();
         state = state.after_wal_object(object.envelope().payload());
         cache_key.head_seq = state.seq;
-        if let Some(cached) = context.head_and_wal_tail_cache.get_tail(&cache_key) {
+        if let Some(cached) = head_and_wal_tail_cache.get_tail(&cache_key) {
             tail = Some(cached);
             extended = false;
         } else if let Some(current) = tail.take() {
@@ -227,18 +228,19 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         }
         Ok(ControlFlow::Continue(()))
     };
-    let outcome = load_wal_after(store, &namespace_id, context.head.wal_no, visit).await?;
+    let outcome =
+        load_wal_after(store, &namespace_id, context.read_basis.head.wal_no, visit).await?;
     if other_epoch || matches!(outcome, WalReadOutcome::Gap { .. }) {
         return Ok(false);
     }
     if let Some(tail) = tail.filter(|_| extended) {
-        context.head_and_wal_tail_cache.insert_tail(cache_key, tail);
+        head_and_wal_tail_cache.insert_tail(cache_key, tail);
     }
-    if state.seq != context.head.seq {
+    if state.seq != context.read_basis.head.seq {
         // The context's tail is the tail at the head that the probe moved
         // past, so the context's reads look the new head's tail up instead.
         context.tail = None;
     }
-    context.head = state;
+    context.read_basis.head = state;
     Ok(true)
 }

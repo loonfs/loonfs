@@ -61,7 +61,7 @@ fn undelete(
 async fn guarded_mkdir(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
-    context: &loonfs_core::MutationContext,
+    context: &loonfs_core::test_support::WriterAt,
     path: &str,
     precondition: CommitPrecondition,
 ) -> Result<loonfs_types::Commit, CoreError> {
@@ -103,12 +103,12 @@ async fn namespace_with_docs() -> (
     tempfile::TempDir,
     LocalFsStore,
     NamespaceId,
-    loonfs_core::MutationContext,
+    loonfs_core::test_support::WriterAt,
 ) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -128,7 +128,7 @@ async fn namespace_with_docs() -> (
 async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &loonfs_core::MutationContext,
+    context: &loonfs_core::test_support::WriterAt,
 ) -> (InodeId, BindingVersion, BindingVersion) {
     NamespaceFixture::new(store, namespace_id, context)
         .write_file_bytes("/docs/report.txt", b"body", Some(&commit_id("put-report")))

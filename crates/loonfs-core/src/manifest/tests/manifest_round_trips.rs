@@ -80,18 +80,17 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         .expect("load publish position")
         .into_position();
 
-    let input = crate::publish::WalFoldInput {
-        wal_tail_inline_bytes: 0,
-        head: position.head.clone(),
-        basis: position.basis().clone(),
+    let input = crate::publish::WriterPosition {
         basis_checked,
-        tail_state: Arc::clone(&position.tail),
-        wal_tail_objects: position.head.unfolded_wal_objects(),
+        ..position
     };
     let response = crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal_tail(
             Some(input),
-            &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+            &crate::time::OperationClock::start(
+                0,
+                Arc::new(crate::time::StdMonotonicTimer::default()),
+            ),
         )
         .await
         .expect("fold publish projection")
@@ -240,12 +239,11 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let genesis = super::super::load::load_basis_metadata_segments(
         &store,
         None,
-        &crate::namespace::basis::MetadataBasis(
+        &crate::namespace::basis::MetadataBasis::new(
             crate::test_support::namespace_store(&store, &namespace_id)
                 .load_current_manifest()
                 .await
                 .expect("manifest")
-                .state
                 .manifest(),
         ),
     )
@@ -347,12 +345,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
         .expect("manifest");
     let manifest_key = metadata_manifest_object(
         &namespace_id,
-        &current
-            .state
-            .manifest()
-            .manifest_no
-            .successor()
-            .expect("next"),
+        &current.manifest().manifest_no.successor().expect("next"),
     );
     let store = LostCreateStore::new(
         inner,

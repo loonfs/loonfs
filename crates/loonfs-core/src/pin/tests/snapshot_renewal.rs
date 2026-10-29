@@ -12,7 +12,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("snapshot-ack").expect("namespace");
         let inner = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-        let context = mutation_context("writer", 1_000);
+        let context = writer_at("writer", 1_000);
         bootstrap_namespace(&inner, &namespace_id, &context)
             .await
             .expect("bootstrap");
@@ -22,7 +22,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
                     name: "short lease".to_owned(),
                     expires_at_ms: Some(1_001),
                 },
-                &context,
+                &context.clock(),
             )
             .await
             .expect("snapshot")
@@ -86,7 +86,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("snapshot-renewal").expect("namespace");
         let inner = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-        let context = mutation_context("writer", 1_000);
+        let context = writer_at("writer", 1_000);
         bootstrap_namespace(&inner, &namespace_id, &context)
             .await
             .expect("bootstrap");
@@ -96,7 +96,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
                     name: "short lease".to_owned(),
                     expires_at_ms: Some(1_001),
                 },
-                &context,
+                &context.clock(),
             )
             .await
             .expect("snapshot")
@@ -150,7 +150,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("snapshot-retry").expect("namespace");
     let inner = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let context = mutation_context("writer", 1_000);
+    let context = writer_at("writer", 1_000);
     bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap");
@@ -160,7 +160,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
                 name: "short lease".to_owned(),
                 expires_at_ms: Some(1_001),
             },
-            &context,
+            &context.clock(),
         )
         .await
         .expect("snapshot")

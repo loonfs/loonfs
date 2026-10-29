@@ -10,6 +10,9 @@ use super::*;
 use crate::cache::MetadataSegmentCache;
 use crate::error::ErrorCode;
 use crate::limits::{READ_REVALIDATION_BOUND_MS, WAL_PUBLISH_BUDGET_MS};
+use crate::namespace::basis::MetadataBasis;
+use crate::namespace::state::NamespaceReadState;
+use crate::test_support::WriterAt;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use futures::StreamExt;
 use loonfs_objectstore::keys::wal_prefix;
@@ -27,8 +30,8 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
 
-fn context(writer_id: &str) -> MutationContext {
-    crate::test_support::mutation_context(writer_id, 1_000)
+fn context(writer_id: &str) -> WriterAt {
+    crate::test_support::writer_at(writer_id, 1_000)
 }
 
 fn create_dir_request(commit_id: &str, name: &str) -> CommitIntent {
@@ -278,16 +281,12 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
 
     // Engine A reads through the blocking store; nothing blocks until
     // `block_next` arms it.
-    let mut engine_a = NamespaceCommitEngine::new(crate::test_support::namespace_store(
-        StdArc::clone(&store),
-        &namespace_id,
-    ));
+    let mut engine_a = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(StdArc::clone(&store), &namespace_id),
+        writer_a.writer_id.clone(),
+    );
     engine_a
-        .publish_batch(
-            vec![create_dir("from-a-first", "alpha")],
-            &writer_a,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("from-a-first", "alpha")], &writer_a.clock())
         .await
         .results[0]
         .as_ref()
@@ -301,8 +300,7 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
         let result = engine
             .publish_batch(
                 vec![create_dir("from-a-second", "gamma")],
-                &writer_a,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                &writer_a.clock(),
             )
             .await;
         result.results[0].as_ref().err().map(|error| error.code())
@@ -313,16 +311,12 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
     // rechecks the etag.
     store.wait_until_blocked().await;
     let writer_b = context("writer-b");
-    let mut engine_b = NamespaceCommitEngine::new(crate::test_support::namespace_store(
-        store.inner(),
-        &namespace_id,
-    ));
+    let mut engine_b = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store.inner(), &namespace_id),
+        writer_b.writer_id.clone(),
+    );
     engine_b
-        .publish_batch(
-            vec![create_dir("from-b-first", "beta")],
-            &writer_b,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("from-b-first", "beta")], &writer_b.clock())
         .await
         .results[0]
         .as_ref()
@@ -345,29 +339,25 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
         .expect("bootstrap");
 
     let session = SharedWriterSessionStatus::default();
-    let mut engine_a1 =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id))
-            .writer_session(Arc::clone(&session));
+    let mut engine_a1 = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer_a.writer_id.clone(),
+    )
+    .writer_session(Arc::clone(&session));
     engine_a1
-        .publish_batch(
-            vec![create_dir("from-a-first", "alpha")],
-            &writer_a,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("from-a-first", "alpha")], &writer_a.clock())
         .await
         .results
         .remove(0)
         .expect("writer a first commit");
 
     let writer_b = context("writer-b");
-    let mut engine_b =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine_b = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer_b.writer_id.clone(),
+    );
     engine_b
-        .publish_batch(
-            vec![create_dir("from-b-first", "beta")],
-            &writer_b,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("from-b-first", "beta")], &writer_b.clock())
         .await
         .results
         .remove(0)
@@ -377,8 +367,7 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
         let result = engine_a1
             .publish_batch(
                 vec![create_dir("from-a-second", "gamma")],
-                &writer_a,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                &writer_a.clock(),
             )
             .await;
         assert_eq!(
@@ -399,15 +388,13 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
     // the session state, so the session stays terminally fenced and
     // never touches the head.
     drop(engine_a1);
-    let mut engine_a2 =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id))
-            .writer_session(session);
+    let mut engine_a2 = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer_a.writer_id.clone(),
+    )
+    .writer_session(session);
     let still_fenced = engine_a2
-        .publish_batch(
-            vec![create_dir("from-a-third", "delta")],
-            &writer_a,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("from-a-third", "delta")], &writer_a.clock())
         .await;
     let error = still_fenced.results[0]
         .as_ref()
@@ -450,10 +437,13 @@ async fn a_landed_put_refreshes_the_observation_the_next_budget_runs_from() {
         .await
         .expect("bootstrap");
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: timer.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        writer.writer_id.clone(),
+    );
     for (name, advance_ms) in [
         ("alpha", 0),
         ("beta", WAL_PUBLISH_BUDGET_MS - 1),
@@ -464,8 +454,7 @@ async fn a_landed_put_refreshes_the_observation_the_next_budget_runs_from() {
         let published = engine
             .publish_batch(
                 vec![create_dir(name, name)],
-                &writer,
-                &Deadline::start(Arc::clone(&engine.namespace.timer)),
+                &OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer)),
             )
             .await;
         published.results[0].as_ref().expect(name);
@@ -510,12 +499,12 @@ async fn a_landed_put_refreshes_the_observation_the_next_budget_runs_from() {
 
 async fn publish_one<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine<S>,
-    writer: &MutationContext,
+    writer: &WriterAt,
     name: &str,
 ) -> NamespaceCommitEnginePublishResult {
-    let deadline = Deadline::start(Arc::clone(&engine.namespace.timer));
+    let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
     let published = engine
-        .publish_batch(vec![create_dir(name, name)], writer, &deadline)
+        .publish_batch(vec![create_dir(name, name)], &deadline)
         .await;
     published.results[0].as_ref().expect(name);
     published
@@ -535,18 +524,26 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
         .await
         .expect("bootstrap");
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: timer.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        writer.writer_id.clone(),
+    );
     publish_one(&mut engine, &writer, "alpha").await;
-    let basis = engine.read_position().expect("landed").basis.manifest_no();
+    let basis = engine
+        .read_position()
+        .expect("landed")
+        .read_basis
+        .basis
+        .manifest_no();
 
     // Another process folds the tail into the next manifest.
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal_tail(
             None,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .expect("fold");
@@ -556,7 +553,12 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
     store.reset();
     publish_one(&mut engine, &writer, "beta").await;
     assert_eq!(
-        engine.read_position().expect("landed").basis.manifest_no(),
+        engine
+            .read_position()
+            .expect("landed")
+            .read_basis
+            .basis
+            .manifest_no(),
         basis
     );
     assert_eq!(store.count(OperationSelector::Head), 0);
@@ -568,7 +570,12 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
     publish_one(&mut engine, &writer, "gamma").await;
     let operations = store.take();
     assert_eq!(
-        engine.read_position().expect("landed").basis.manifest_no(),
+        engine
+            .read_position()
+            .expect("landed")
+            .read_basis
+            .basis
+            .manifest_no(),
         basis.successor().expect("next manifest number")
     );
     let head = operations
@@ -603,10 +610,13 @@ async fn a_basis_check_answered_outside_the_bound_of_the_last_confirmation_reloa
         .await
         .expect("bootstrap");
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: timer.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        writer.writer_id.clone(),
+    );
     publish_one(&mut engine, &writer, "alpha").await;
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
     publish_one(&mut engine, &writer, "beta").await;
@@ -618,9 +628,9 @@ async fn a_basis_check_answered_outside_the_bound_of_the_last_confirmation_reloa
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
     store.reset();
     store.inner().block_next();
-    let deadline = Deadline::start(Arc::clone(&engine.namespace.timer));
+    let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
     let (published, ()) = futures::join!(
-        engine.publish_batch(vec![create_dir("gamma", "gamma")], &writer, &deadline),
+        engine.publish_batch(vec![create_dir("gamma", "gamma")], &deadline),
         async {
             store.inner().wait_until_blocked().await;
             timer.advance_ms(READ_REVALIDATION_BOUND_MS - 1);
@@ -672,7 +682,7 @@ async fn writer_after_one_publish<'a>(
 ) -> (
     NamespaceCommitEngine<&'a GatedStore>,
     Arc<loonfs_test_support::clock::ManualClock>,
-    MutationContext,
+    WriterAt,
 ) {
     let writer = context("writer-a");
     crate::test_support::NamespaceFixture::new(store, namespace_id, &writer)
@@ -680,11 +690,14 @@ async fn writer_after_one_publish<'a>(
         .await
         .expect("bootstrap");
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: timer.clone(),
-        segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
-        ..crate::test_support::namespace_store(store, namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
+            ..crate::test_support::namespace_store(store, namespace_id)
+        },
+        writer.writer_id.clone(),
+    );
     publish_one(&mut engine, &writer, "alpha").await;
     (engine, timer, writer)
 }
@@ -795,7 +808,7 @@ async fn a_quiet_writer_finds_a_takeover_claim_and_is_fenced() {
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context("writer-b"))
+        .acquire_writer_epoch(&context("writer-b").writer_id)
         .await
         .expect("writer b takes over");
 
@@ -804,8 +817,7 @@ async fn a_quiet_writer_finds_a_takeover_claim_and_is_fenced() {
     let published = engine
         .publish_batch(
             vec![create_dir("beta", "beta")],
-            &writer,
-            &Deadline::start(Arc::clone(&engine.namespace.timer)),
+            &OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer)),
         )
         .await;
     assert_eq!(
@@ -856,13 +868,13 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
         timer.advance_ms(quiet_ms);
         store.reset();
         store.inner().block_next();
-        let deadline = Deadline::start(Arc::clone(&engine.namespace.timer));
+        let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
         let (published, ()) = futures::join!(
-            engine.publish_batch(vec![create_dir("beta", "beta")], &writer, &deadline),
+            engine.publish_batch(vec![create_dir("beta", "beta")], &deadline),
             async {
                 store.inner().wait_until_blocked().await;
                 crate::test_support::namespace_store(store.inner().inner(), &namespace_id)
-                    .acquire_writer_epoch(&context("writer-b"))
+                    .acquire_writer_epoch(&context("writer-b").writer_id)
                     .await
                     .expect("writer b takes over");
                 store.inner().release();
@@ -895,7 +907,7 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
         );
 
         let retried = engine
-            .publish_batch(vec![create_dir("beta", "beta")], &writer, &deadline)
+            .publish_batch(vec![create_dir("beta", "beta")], &deadline)
             .await;
         assert_eq!(
             retried.results[0]
@@ -914,14 +926,15 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     let basis = engine
-        .wal_fold_input()
+        .writer_position()
         .expect("retained view")
+        .read_basis
         .basis
         .manifest_no();
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal_tail(
             None,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .expect("another process folds");
@@ -930,7 +943,12 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
     store.reset();
     publish_one(&mut engine, &writer, "beta").await;
     assert_eq!(
-        engine.read_position().expect("landed").basis.manifest_no(),
+        engine
+            .read_position()
+            .expect("landed")
+            .read_basis
+            .basis
+            .manifest_no(),
         basis.successor().expect("next manifest number")
     );
     let operations = store.take();
@@ -962,18 +980,17 @@ async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail(
     let refused = engine
         .publish_batch(
             vec![create_dir("refused", "refused")],
-            &writer,
-            &Deadline::start(timer.clone()),
+            &OperationClock::start(writer.now_ms, timer.clone()),
         )
         .await;
     assert_matches!(
         refused.results.as_slice(),
         [Err(error)] if error.code() == ErrorCode::MaintenanceRequired
     );
-    let deadline = Deadline::start(timer.clone());
+    let deadline = OperationClock::start(0, timer.clone());
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let fold = |input| namespace.fold_wal_tail(input, &deadline);
-    let input = engine.wal_fold_input().expect("tail");
+    let input = engine.writer_position().expect("tail");
     let other = fold(None).await.expect("another process folds");
     assert_eq!(other.response.outcome, crate::FoldWalOutcome::Published);
     let folded = fold(Some(input)).await.expect("the session's fold");
@@ -983,8 +1000,13 @@ async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail(
     );
     engine.record_manifest_published(folded.manifest);
     assert_eq!(
-        engine.read_position().expect("the position moved").basis.0,
-        other.manifest.manifest
+        engine
+            .read_position()
+            .expect("the position moved")
+            .read_basis
+            .basis
+            .manifest(),
+        &other.manifest.manifest
     );
     assert_eq!(engine.wal_tail_objects(), Some(0));
     publish_one(&mut engine, &writer, "after").await;
@@ -999,7 +1021,7 @@ async fn writer_after_own_compaction<'a>(
 ) -> (
     NamespaceCommitEngine<&'a GatedStore>,
     Arc<loonfs_test_support::clock::ManualClock>,
-    MutationContext,
+    WriterAt,
     PublishedManifest,
 ) {
     use crate::manifest::{CompactionUnitOutcome, MetadataCompactionPolicy};
@@ -1008,14 +1030,14 @@ async fn writer_after_own_compaction<'a>(
     // Move the position after each fold, as the publisher does.
     for name in ["beta", "gamma", "delta"] {
         publish_one(&mut engine, &writer, name).await;
-        let input = engine.wal_fold_input().expect("retained tail");
+        let input = engine.writer_position().expect("retained tail");
         let folded = crate::test_support::namespace_store(store, namespace_id)
-            .fold_wal_tail(Some(input), &Deadline::start(timer.clone()))
+            .fold_wal_tail(Some(input), &OperationClock::start(0, timer.clone()))
             .await
             .expect("own fold");
         engine.record_manifest_published(folded.manifest);
     }
-    let before = engine.wal_fold_input().expect("re-anchored tail");
+    let before = engine.writer_position().expect("re-anchored tail");
     let current = crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
@@ -1024,7 +1046,7 @@ async fn writer_after_own_compaction<'a>(
         let mut fixture = crate::test_support::NamespaceFixture::new(
             store,
             namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.segment_cache = Arc::clone(&engine.namespace.segment_cache);
         fixture
@@ -1034,7 +1056,7 @@ async fn writer_after_own_compaction<'a>(
         None,
         MetadataCompactionPolicy::CompactImmediately,
         crate::manifest::CompactionAdmission::AnySize,
-        current.state.compactor_epoch(),
+        current.compactor_epoch(),
         &crate::manifest::MetadataCompactionCancellation::default(),
     )
     .await
@@ -1046,17 +1068,22 @@ async fn writer_after_own_compaction<'a>(
     .expect("compaction publishes a successor");
     assert_eq!(
         manifest.manifest.manifest_no,
-        before.basis.manifest_no().successor().expect("successor")
+        before
+            .read_basis
+            .basis
+            .manifest_no()
+            .successor()
+            .expect("successor")
     );
     let after = crate::test_support::namespace_store(store, namespace_id)
         .load_read_state()
         .await
         .expect("head");
     assert_eq!(
-        after.wal_no, before.head.wal_no,
+        after.wal_no, before.read_basis.head.wal_no,
         "compaction leaves the tip unchanged"
     );
-    assert_eq!(after.writer_epoch, before.head.writer_epoch);
+    assert_eq!(after.writer_epoch, before.read_basis.head.writer_epoch);
     (engine, timer, writer, manifest)
 }
 
@@ -1076,7 +1103,12 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
         Some(TailSource::Store)
     );
     assert_eq!(
-        engine.read_position().expect("landed").basis.manifest_no(),
+        engine
+            .read_position()
+            .expect("landed")
+            .read_basis
+            .basis
+            .manifest_no(),
         manifest.manifest.manifest_no
     );
     let operations = store.take();
@@ -1104,7 +1136,7 @@ async fn a_compaction_copies_the_read_state_of_the_manifest_it_replaces() {
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (engine, _timer, _writer, compacted) =
         writer_after_own_compaction(&store, &namespace_id).await;
-    let replaced = engine.wal_fold_input().expect("position").basis;
+    let replaced = engine.writer_position().expect("position").read_basis.basis;
 
     let replaced = load_namespace_manifest_envelope(&store, &namespace_id, &replaced.manifest_no())
         .await
@@ -1139,8 +1171,12 @@ async fn a_writer_moved_after_its_own_compaction_keeps_its_tail() {
         Some(TailSource::Cached)
     );
     assert_eq!(
-        engine.read_position().expect("put succeeded").basis,
-        MetadataBasis(manifest.manifest)
+        engine
+            .read_position()
+            .expect("put succeeded")
+            .read_basis
+            .basis,
+        MetadataBasis::new(manifest.manifest)
     );
     let operations = store.take();
     assert!(
@@ -1166,17 +1202,17 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     // A maintenance call folds the tail through beta. The writer then
     // commits gamma on the manifest that the fold replaced.
     let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(None, &Deadline::start(timer.clone()))
+        .fold_wal_tail(None, &OperationClock::start(0, timer.clone()))
         .await
         .expect("fold");
     let published = folded.published().expect("the fold publishes a manifest");
     publish_one(&mut engine, &writer, "gamma").await;
 
     engine.record_manifest_published(published.clone());
-    let moved = engine.wal_fold_input().expect("the position moved");
-    assert_eq!(moved.basis.manifest(), &published.manifest);
-    assert_eq!(moved.wal_tail_objects, 1);
-    assert_eq!(moved.tail_state.chunks().len(), 1);
+    let moved = engine.writer_position().expect("the position moved");
+    assert_eq!(moved.read_basis.basis.manifest(), &published.manifest);
+    assert_eq!(moved.wal_tail_objects(), 1);
+    assert_eq!(moved.tail.chunks().len(), 1);
     let receipt =
         |commit_id| engine.retains_commit_receipt(&CommitId::parse(commit_id).expect("id"));
     assert!(receipt("gamma") && !receipt("beta"));
@@ -1187,7 +1223,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
         Some(TailSource::Cached)
     );
     let written = engine.read_position().expect("put succeeded");
-    assert_eq!(written.basis.manifest(), &published.manifest);
+    assert_eq!(written.read_basis.basis.manifest(), &published.manifest);
     let operations = store.take();
     assert!(
         operations.iter().all(|operation| {
@@ -1202,7 +1238,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
         .await
         .expect("head");
     assert_eq!(
-        written.head, loaded,
+        written.read_basis.head, loaded,
         "a reader loads the head the writer has"
     );
 }
@@ -1218,11 +1254,11 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     publish_one(&mut engine, &writer, "beta").await;
-    let basis = engine.wal_fold_input().expect("position").basis;
+    let basis = engine.writer_position().expect("position").read_basis.basis;
     // Another process folds the tail through beta, and the writer then
     // commits gamma on the manifest that the fold replaced.
     let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(None, &Deadline::start(timer.clone()))
+        .fold_wal_tail(None, &OperationClock::start(0, timer.clone()))
         .await
         .expect("fold");
     assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
@@ -1232,7 +1268,7 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.timer = timer.clone();
         fixture
@@ -1246,14 +1282,22 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
     assert_eq!(claimed.manifest.manifest_no.0, basis.manifest_no().0 + 2);
 
     engine.record_manifest_published(claimed.clone());
-    let moved = engine.wal_fold_input().expect("the position moved");
-    assert_eq!(moved.basis.0, claimed.manifest);
-    assert_eq!(moved.head.folded_wal_no, folded.manifest.folded_wal_no);
-    assert_eq!(moved.wal_tail_objects, 1);
+    let moved = engine.writer_position().expect("the position moved");
+    assert_eq!(moved.read_basis.basis.manifest(), &claimed.manifest);
+    assert_eq!(
+        moved.read_basis.head.folded_wal_no,
+        folded.manifest.folded_wal_no
+    );
+    assert_eq!(moved.wal_tail_objects(), 1);
     let receipt =
         |commit_id| engine.retains_commit_receipt(&CommitId::parse(commit_id).expect("id"));
     assert!(receipt("gamma") && !receipt("beta"));
-    assert_eq!(engine.position.basis_checked, claimed.started);
+    assert_eq!(
+        engine
+            .writer_position()
+            .map(|position| position.basis_checked),
+        claimed.started
+    );
 }
 
 /// Checks that a manifest at the head of a manifest that lists no runs keeps
@@ -1265,12 +1309,12 @@ async fn a_claim_over_a_manifest_without_runs_keeps_the_root_directory() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-    let before = engine.wal_fold_input().expect("position");
+    let before = engine.writer_position().expect("position");
     let claimed = {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.timer = timer.clone();
         fixture
@@ -1283,9 +1327,9 @@ async fn a_claim_over_a_manifest_without_runs_keeps_the_root_directory() {
     .expect("the claim publishes a manifest");
 
     engine.record_manifest_published(claimed.clone());
-    let moved = engine.wal_fold_input().expect("the position moved");
-    assert_eq!(moved.basis.0, claimed.manifest);
-    assert!(Arc::ptr_eq(&moved.tail_state, &before.tail_state));
+    let moved = engine.writer_position().expect("the position moved");
+    assert_eq!(moved.read_basis.basis.manifest(), &claimed.manifest);
+    assert!(Arc::ptr_eq(&moved.tail, &before.tail));
     let published = publish_one(&mut engine, &writer, "beta").await;
     assert_eq!(
         published.wal_tail.map(|tail| tail.source),
@@ -1323,9 +1367,10 @@ async fn a_confirmed_batch_without_a_put_keeps_the_attempt_observation() {
     assert_eq!(
         engine
             .position
-            .basis_checked
+            .current
             .as_ref()
             .expect("basis")
+            .basis_checked
             .age_ms(),
         1_000
     );
@@ -1405,11 +1450,13 @@ async fn publish_over_budget_writes_no_wal_object_and_a_retry_rebuilds() {
         .create()
         .await
         .expect("bootstrap");
-    let mut over_budget =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut over_budget = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer.writer_id.clone(),
+    );
     over_budget
         .position
-        .session_writer_epoch(&over_budget.namespace, &writer)
+        .session_writer_epoch(&over_budget.namespace, &writer.writer_id)
         .await
         .expect("acquire");
     over_budget.namespace.timer = Arc::new(ExpiredBudgetTimer(AtomicU64::new(0)));
@@ -1420,8 +1467,7 @@ async fn publish_over_budget_writes_no_wal_object_and_a_retry_rebuilds() {
     let abandoned = over_budget
         .publish_batch(
             vec![create_dir("budgeted", "alpha")],
-            &writer,
-            &Deadline::start(Arc::clone(&over_budget.namespace.timer)),
+            &OperationClock::start(writer.now_ms, Arc::clone(&over_budget.namespace.timer)),
         )
         .await;
     let error = abandoned.results[0]
@@ -1444,14 +1490,12 @@ async fn publish_over_budget_writes_no_wal_object_and_a_retry_rebuilds() {
     assert_eq!(head_after.wal_no, head_before.wal_no);
     assert_eq!(wal_object_count(&store, &namespace_id).await, 1);
 
-    let mut healthy =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut healthy = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer.writer_id.clone(),
+    );
     let retried = healthy
-        .publish_batch(
-            vec![create_dir("budgeted", "alpha")],
-            &writer,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("budgeted", "alpha")], &writer.clock())
         .await;
     let response = retried.results[0].as_ref().expect("rebuilt publish");
     assert_eq!(response.committed_seq, ChangeSeq(1));
@@ -1477,24 +1521,22 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         .create()
         .await
         .expect("bootstrap");
-    let mut seed =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
-    seed.publish_batch(
-        vec![create_dir("seed-commit", "docs")],
-        &writer,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .remove(0)
-    .expect("seed publish");
+    let mut seed = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer.writer_id.clone(),
+    );
+    seed.publish_batch(vec![create_dir("seed-commit", "docs")], &writer.clock())
+        .await
+        .results
+        .remove(0)
+        .expect("seed publish");
     crate::test_support::namespace_store(&store, &namespace_id)
         .create_pin(
             loonfs_types::format::control::PinOwner::User {
                 name: "test-pin".to_owned(),
                 expires_at_ms: None,
             },
-            &writer,
+            &writer.clock(),
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -1502,15 +1544,13 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
 
     // Without a cache, every publish view re-fetches the segment blocks
     // its validation walks need.
-    let mut uncached =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut uncached = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer.writer_id.clone(),
+    );
     store.reset();
     uncached
-        .publish_batch(
-            vec![create_dir("uncached-a", "alpha")],
-            &writer,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("uncached-a", "alpha")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -1521,11 +1561,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     );
     store.reset();
     uncached
-        .publish_batch(
-            vec![create_dir("uncached-b", "beta")],
-            &writer,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("uncached-b", "beta")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -1536,17 +1572,16 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     );
 
     let cache = Arc::new(MetadataSegmentCache::unshared(usize::MAX));
-    let mut cached = NamespaceCommitEngine::new(crate::NamespaceStore {
-        segment_cache: cache,
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut cached = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            segment_cache: cache,
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        writer.writer_id.clone(),
+    );
     store.reset();
     cached
-        .publish_batch(
-            vec![create_dir("cached-a", "gamma")],
-            &writer,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("cached-a", "gamma")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -1557,11 +1592,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     );
     store.reset();
     cached
-        .publish_batch(
-            vec![create_dir("cached-b", "delta")],
-            &writer,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![create_dir("cached-b", "delta")], &writer.clock())
         .await
         .results
         .remove(0)

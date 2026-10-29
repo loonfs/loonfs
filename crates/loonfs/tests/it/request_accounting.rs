@@ -33,7 +33,7 @@ async fn segment_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> S
         .load_current_manifest()
         .await
         .expect("load metadata root");
-    let manifest_key = metadata_manifest_object(namespace_id, &root.state.manifest().manifest_no);
+    let manifest_key = metadata_manifest_object(namespace_id, &root.manifest().manifest_no);
     let bytes = store
         .get(&manifest_key, None)
         .await

@@ -10,6 +10,7 @@ use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_PENDING_SEGMENT_BYTES;
 use crate::metadata::MetadataState;
 use crate::namespace::store::NamespaceStore;
+use crate::phase::Phase;
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -62,7 +63,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         name = "loonfs.phase",
         err(level = "warn"),
         skip_all,
-        fields(phase = "write_manifest_segments", key_class = "metadata_segment")
+        fields(phase = Phase::WriteManifestSegments.as_str(), key_class = "metadata_segment")
     )]
     pub(super) async fn build_manifest_segments_from_rows<RowsForFamily>(
         &self,

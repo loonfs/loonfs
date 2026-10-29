@@ -604,7 +604,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         name = "loonfs.phase",
         err(level = "warn"),
         skip_all,
-        fields(phase = "write_content_blob", key_class = "content")
+        fields(phase = crate::Phase::WriteContentBlob.as_str(), key_class = "content")
     )]
     #[cfg(any(test, feature = "test-support"))]
     pub async fn store_bytes_as_content(&self, bytes: &[u8]) -> Result<StoredContent> {

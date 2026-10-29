@@ -1,6 +1,6 @@
 //! Listing the namespaces a store holds, including deleted ones.
 
-use crate::common::{mutation_context, namespace_engine};
+use crate::common::{default_writer, namespace_engine};
 use bytes::Bytes;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_objectstore::layout::{list_namespace_ids, NamespacePageCursor};
@@ -13,7 +13,7 @@ use tempfile::tempdir;
 async fn namespace_listing_returns_every_namespace_id_and_skips_other_children() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_ids = ["alpha", "beta", "gamma"].map(namespace_id);
     for namespace_id in &namespace_ids {
         NamespaceFixture::new(&store, namespace_id, &context)
@@ -30,7 +30,7 @@ async fn namespace_listing_returns_every_namespace_id_and_skips_other_children()
     aged.now_ms = u64::MAX / 2;
     for _ in 0..2 {
         namespace_store(&store, deleted)
-            .gc(None, &loonfs_core::GcOptions::default(), &aged)
+            .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
             .await
             .expect("collect the deleted namespace");
     }

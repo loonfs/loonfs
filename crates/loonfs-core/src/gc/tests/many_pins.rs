@@ -57,7 +57,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     .await;
     store.reset();
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(2_000 + GRACE_MS))
+        .gc(None, &options(), &context(2_000 + GRACE_MS).clock())
         .await
         .expect("complete pass");
     assert_eq!(report.deleted.upload_sessions, 1);

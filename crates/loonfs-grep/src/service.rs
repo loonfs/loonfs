@@ -405,7 +405,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let namespace_id = loonfs_test_support::ids::namespace_id("grep-revalidation");
-        let deadline = loonfs::engine::Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let deadline =
+            loonfs::engine::OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
         let manifest = |manifest_no| {
             GrepManifestState::new(
                 namespace_id.clone(),

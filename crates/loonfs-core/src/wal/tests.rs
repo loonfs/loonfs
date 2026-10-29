@@ -4,9 +4,9 @@
 #![allow(clippy::disallowed_methods)]
 
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
-use crate::context::MutationContext;
 use crate::limits::READ_REVALIDATION_BOUND_MS;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::test_support::WriterAt;
+use crate::time::OperationClock;
 use loonfs_objectstore::keys::{metadata_manifest_object, wal_object, wal_prefix};
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
@@ -23,8 +23,8 @@ use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-fn context(now_ms: u64) -> crate::MutationContext {
-    crate::test_support::mutation_context("writer", now_ms)
+fn context(now_ms: u64) -> crate::test_support::WriterAt {
+    crate::test_support::writer_at("writer", now_ms)
 }
 
 #[tokio::test]
@@ -38,7 +38,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
         .expect("create");
     for _ in 0..2 {
         crate::test_support::namespace_store(&store, &namespace_id)
-            .acquire_writer_epoch(&context(1_000))
+            .acquire_writer_epoch(&context(1_000).writer_id)
             .await
             .expect("fence");
     }
@@ -115,7 +115,7 @@ async fn a_wal_object_that_lowers_the_basis_floor_is_corrupt() {
         .expect("create");
     for _ in 0..2 {
         crate::test_support::namespace_store(&store, &fences)
-            .acquire_writer_epoch(&setup)
+            .acquire_writer_epoch(&setup.writer_id)
             .await
             .expect("fence");
     }
@@ -128,8 +128,10 @@ async fn a_wal_object_that_lowers_the_basis_floor_is_corrupt() {
         .create()
         .await
         .expect("create");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &folded));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &folded),
+        context(1_000).writer_id.clone(),
+    );
     publish(&mut engine, "first").await.expect("commit");
     crate::test_support::namespace_store(&store, &folded)
         .fold_wal()
@@ -138,7 +140,7 @@ async fn a_wal_object_that_lowers_the_basis_floor_is_corrupt() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &folded,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(1_000),
         ),
@@ -148,7 +150,7 @@ async fn a_wal_object_that_lowers_the_basis_floor_is_corrupt() {
     .await
     .expect("advance");
     crate::test_support::namespace_store(&store, &folded)
-        .acquire_writer_epoch(&setup)
+        .acquire_writer_epoch(&setup.writer_id)
         .await
         .expect("fence");
     crate::test_support::namespace_store(&store, &folded)
@@ -156,7 +158,7 @@ async fn a_wal_object_that_lowers_the_basis_floor_is_corrupt() {
         .await
         .expect("fold");
     crate::test_support::namespace_store(&store, &folded)
-        .acquire_writer_epoch(&setup)
+        .acquire_writer_epoch(&setup.writer_id)
         .await
         .expect("fence");
     rewrite_basis_floor(&store, &folded, WalNo(4), ChangeSeq(0)).await;
@@ -200,8 +202,10 @@ async fn a_fence_records_the_floor_of_an_advance_published_after_the_claim() {
         .create()
         .await
         .expect("create");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context(1_000).writer_id.clone(),
+    );
     publish(&mut engine, "first").await.expect("commit");
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
@@ -209,12 +213,12 @@ async fn a_fence_records_the_floor_of_an_advance_published_after_the_claim() {
         .expect("fold");
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let (acquired, advanced) = futures::join!(namespace.acquire_writer(&setup), async {
+    let (acquired, advanced) = futures::join!(namespace.acquire_writer(&setup.writer_id), async {
         store.wait_until_blocked().await;
         let advanced = crate::test_support::NamespaceFixture::new(
             store.inner(),
             &namespace_id,
-            &crate::test_support::mutation_context(
+            &crate::test_support::writer_at(
                 "test-writer",
                 crate::test_support::grace_elapsed_after(1_000),
             ),
@@ -233,7 +237,7 @@ async fn a_fence_records_the_floor_of_an_advance_published_after_the_claim() {
         .await
         .expect("load the claim")
         .expect("the claim exists");
-    assert_eq!(claim.state.retention_floor_seq(), ChangeSeq(0));
+    assert_eq!(claim.retention_floor_seq(), ChangeSeq(0));
     assert_eq!(acquisition.anchor.retention_floor_seq(), ChangeSeq(1));
     let fence = acquisition
         .anchor
@@ -259,19 +263,21 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
         .create()
         .await
         .expect("create");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context(1_000).writer_id.clone(),
+    );
     for number in 0..9 {
         publish(&mut engine, &format!("data-{number}"))
             .await
             .expect("data commit");
     }
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context(1_000))
+        .acquire_writer_epoch(&context(1_000).writer_id)
         .await
         .expect("first fence");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context(1_000))
+        .acquire_writer_epoch(&context(1_000).writer_id)
         .await
         .expect("second fence");
     drop(engine);
@@ -334,7 +340,7 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         .await
         .expect("create");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&setup)
+        .acquire_writer_epoch(&setup.writer_id)
         .await
         .expect("first fence");
     crate::test_support::namespace_store(&store, &namespace_id)
@@ -342,22 +348,22 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         .await
         .expect("fold fence");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&setup)
+        .acquire_writer_epoch(&setup.writer_id)
         .await
         .expect("second fence");
     let current = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
         .expect("manifest");
-    assert_eq!(current.state.envelope.payload().head_seq, ChangeSeq(0));
-    assert_eq!(current.state.envelope.payload().folded_wal_no, WalNo(1));
+    assert_eq!(current.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.payload().folded_wal_no, WalNo(1));
     let options = crate::gc::GcOptions {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
         ..Default::default()
     };
     let aged = context(options.grace_window_ms + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &aged)
+        .gc(None, &options, &aged.clock())
         .await
         .expect("collect");
     assert_eq!(report.deleted.wal_objects, 1);
@@ -396,7 +402,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
         .await
         .expect("create");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&setup)
+        .acquire_writer_epoch(&setup.writer_id)
         .await
         .expect("first fence");
     store.block_next();
@@ -404,7 +410,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
     let (folded, acquired) = futures::join!(namespace.fold_wal(), async {
         store.wait_until_blocked().await;
         let acquired = crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .acquire_writer_epoch(&setup)
+            .acquire_writer_epoch(&setup.writer_id)
             .await;
         store.release();
         acquired
@@ -415,8 +421,8 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
         .load_current_manifest()
         .await
         .expect("manifest");
-    assert_eq!(current.state.envelope.payload().head_seq, ChangeSeq(0));
-    assert_eq!(current.state.envelope.payload().folded_wal_no, WalNo(2));
+    assert_eq!(current.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.payload().folded_wal_no, WalNo(2));
 }
 
 /// Checks that an acquisition whose anchor load is held past the revalidation
@@ -440,7 +446,7 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
         .await
         .expect("create");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&setup)
+        .acquire_writer_epoch(&setup.writer_id)
         .await
         .expect("first fence");
     let timer = Arc::new(ManualClock::new(0));
@@ -449,7 +455,7 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
         timer: timer.clone(),
         ..crate::test_support::namespace_store(&store, &namespace_id)
     };
-    let (acquired, ()) = futures::join!(namespace.acquire_writer(&setup), async {
+    let (acquired, ()) = futures::join!(namespace.acquire_writer(&setup.writer_id), async {
         // The claim is written and its first WAL read is held. Meanwhile
         // a fold folds the first fence, a compactor claim supersedes the
         // fold, the runtime that published them raises the hint, and
@@ -459,7 +465,6 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
             .load_current_manifest()
             .await
             .expect("claim")
-            .state
             .manifest()
             .manifest_no;
         crate::test_support::namespace_store(store.inner(), &namespace_id)
@@ -469,7 +474,7 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
         let compactor_claim = crate::test_support::NamespaceFixture::new(
             store.inner(),
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
         .claim_compactor()
@@ -535,7 +540,7 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
         timer,
         ..crate::test_support::namespace_store(&store, &namespace_id)
     }
-    .acquire_writer(&setup)
+    .acquire_writer(&setup.writer_id)
     .await
     .expect_err("the acquisition runs out of budget");
     assert_matches!(
@@ -567,11 +572,7 @@ pub(crate) async fn publish<S: ObjectStore>(
     name: &str,
 ) -> crate::error::Result<loonfs_types::Commit> {
     engine
-        .publish_batch(
-            vec![directory(name)],
-            &context(1_000),
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![directory(name)], &context(1_000).clock())
         .await
         .results
         .remove(0)
@@ -595,15 +596,17 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
         KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
         OperationSelector::PutCreateIfAbsent,
     );
-    let mut first = NamespaceCommitEngine::new(crate::test_support::namespace_store(
-        &blocked,
-        &namespace_id,
-    ))
+    let mut first = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&blocked, &namespace_id),
+        context(1_000).writer_id,
+    )
     .writer_session(Arc::clone(&session));
     publish(&mut first, "seed").await.expect("seed");
-    let mut second =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id))
-            .writer_session(session);
+    let mut second = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context(1_000).writer_id,
+    )
+    .writer_session(session);
     store.reset();
     blocked.block_next();
     let (loser, winner) = futures::join!(publish(&mut first, "left"), async {
@@ -649,11 +652,13 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         .create()
         .await
         .expect("create");
-    let mut stale =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut stale = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context(1_000).writer_id,
+    );
     publish(&mut stale, "old").await.expect("old writer");
     let acquired = crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context(1_000))
+        .acquire_writer_epoch(&context(1_000).writer_id)
         .await
         .expect("takeover fence");
     store.reset();
@@ -676,9 +681,11 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     let session = std::sync::Arc::new(std::sync::Mutex::new(
         crate::commit_engine::WriterSessionStatus::Acquired(acquired),
     ));
-    let mut active =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id))
-            .writer_session(session);
+    let mut active = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context(1_000).writer_id,
+    )
+    .writer_session(session);
     assert_eq!(
         publish(&mut active, "new")
             .await
@@ -701,8 +708,10 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
         .create()
         .await
         .expect("create");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context(1_000).writer_id,
+    );
     for name in ["one", "two", "three"] {
         publish(&mut engine, name).await.expect(name);
     }
@@ -737,8 +746,10 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
         .create()
         .await
         .expect("create");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context(1_000).writer_id,
+    );
     for number in 1..20 {
         publish(&mut engine, &format!("directory-{number}"))
             .await
@@ -795,8 +806,10 @@ async fn a_bounded_tail_load_names_the_missing_wal_object() {
         .create()
         .await
         .expect("create");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context(1_000).writer_id,
+    );
     for name in ["one", "two", "three"] {
         publish(&mut engine, name).await.expect(name);
     }
@@ -864,8 +877,10 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         .create()
         .await
         .expect("create");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context(1_000).writer_id,
+    );
     publish(&mut engine, "seed").await.expect("seed");
     engine.invalidate_projection();
     store.block_next();
@@ -878,7 +893,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         crate::test_support::NamespaceFixture::new(
             store.inner(),
             &namespace_id,
-            &crate::test_support::mutation_context(
+            &crate::test_support::writer_at(
                 "test-writer",
                 crate::test_support::grace_elapsed_after(1_000),
             ),
@@ -887,12 +902,12 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         .advance_retention_floor(crate::manifest::RetentionTarget::Head)
         .await
         .expect("advance floor");
-        let aged = MutationContext {
+        let aged = WriterAt {
             now_ms: grace + 1,
             ..context(1_000)
         };
         crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .gc(None, &options, &aged)
+            .gc(None, &options, &aged.clock())
             .await
             .expect("collect old WAL");
         assert!(store
@@ -942,7 +957,7 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         .await
         .expect("create");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context(1_000))
+        .acquire_writer_epoch(&context(1_000).writer_id)
         .await
         .expect("fence");
     let loaded = crate::test_support::namespace_store(&store, &namespace_id)
@@ -975,20 +990,19 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         .await
         .expect("same-epoch WAL object");
     let mut warm = crate::RuntimeReadContext {
-        basis: loaded.basis(),
-        head: loaded.read_state,
-        segment_cache: std::sync::Arc::new(crate::cache::MetadataSegmentCache::unshared(
-            usize::MAX,
-        )),
-        head_and_wal_tail_cache: std::sync::Arc::new(crate::cache::HeadAndWalTailCache::unshared(
-            usize::MAX,
-        )),
-        object_cache: std::sync::Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        read_basis: crate::control::ReadBasis {
+            basis: loaded.basis(),
+            head: loaded.read_state,
+        },
         tail: None,
     };
-    let error = super::probe_namespace_wal(&store, &mut warm)
-        .await
-        .expect_err("a same-epoch chain break is corruption, not a stale head");
+    let error = super::probe_namespace_wal(
+        &store,
+        &crate::cache::HeadAndWalTailCache::unshared(usize::MAX),
+        &mut warm,
+    )
+    .await
+    .expect_err("a same-epoch chain break is corruption, not a stale head");
     assert_matches!(
         error,
         crate::control_object::ControlObjectLoadError::Codec { .. }
@@ -1006,8 +1020,10 @@ async fn warm_context_behind(
         .create()
         .await
         .expect("create");
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        context(1_000).writer_id,
+    );
     publish(&mut engine, "first").await.expect("first");
     let loaded = crate::test_support::namespace_store(store, namespace_id)
         .load_read_anchor(crate::test_support::observed_now())
@@ -1020,11 +1036,10 @@ async fn warm_context_behind(
     }
     store.reset();
     crate::RuntimeReadContext {
-        basis: loaded.basis(),
-        head: loaded.read_state,
-        segment_cache: Arc::new(crate::cache::MetadataSegmentCache::unshared(usize::MAX)),
-        head_and_wal_tail_cache: Arc::new(crate::cache::HeadAndWalTailCache::unshared(usize::MAX)),
-        object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        read_basis: crate::control::ReadBasis {
+            basis: loaded.basis(),
+            head: loaded.read_state,
+        },
         tail: None,
     }
 }
@@ -1040,11 +1055,15 @@ async fn a_warm_probe_reads_in_widening_windows_and_sends_one_get_at_the_tip() {
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
     );
     let mut warm = warm_context_behind(&store, &namespace_id, 40).await;
-    let cached = warm.head.wal_no.0;
-    assert!(super::probe_namespace_wal(&store, &mut warm)
-        .await
-        .expect("probe 40 objects behind"));
-    assert_eq!(warm.head.wal_no, WalNo(cached + 40));
+    let cached = warm.read_basis.head.wal_no.0;
+    assert!(super::probe_namespace_wal(
+        &store,
+        &crate::cache::HeadAndWalTailCache::unshared(usize::MAX),
+        &mut warm
+    )
+    .await
+    .expect("probe 40 objects behind"));
+    assert_eq!(warm.read_basis.head.wal_no, WalNo(cached + 40));
     // A window starts only after the one before it ends, so each window's
     // reads are the next ones in the log, in any order.
     let mut gets = store.take_get_keys().into_iter();
@@ -1064,9 +1083,13 @@ async fn a_warm_probe_reads_in_widening_windows_and_sends_one_get_at_the_tip() {
     }
     assert_eq!(gets.next(), None);
 
-    assert!(super::probe_namespace_wal(&store, &mut warm)
-        .await
-        .expect("probe at the tip"));
+    assert!(super::probe_namespace_wal(
+        &store,
+        &crate::cache::HeadAndWalTailCache::unshared(usize::MAX),
+        &mut warm
+    )
+    .await
+    .expect("probe at the tip"));
     assert_eq!(
         store.take_get_keys(),
         [wal_object(&namespace_id, &WalNo(cached + 41))]
@@ -1085,8 +1108,8 @@ async fn a_warm_probe_leaves_a_gap_in_the_wal_to_discovery_which_reports_corrupt
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
     );
     let mut warm = warm_context_behind(&store, &namespace_id, 8).await;
-    assert_eq!(warm.head.wal_no, WalNo(2));
-    let cached = warm.head.clone();
+    assert_eq!(warm.read_basis.head.wal_no, WalNo(2));
+    let cached = warm.read_basis.head.clone();
     // The probe reads WAL 6 to 9 in one window, and discovery reads WAL 4 to 7,
     // so both find WAL 6 missing below a present number.
     let missing = wal_object(&namespace_id, &WalNo(6));
@@ -1094,10 +1117,14 @@ async fn a_warm_probe_leaves_a_gap_in_the_wal_to_discovery_which_reports_corrupt
         .delete(&missing)
         .await
         .expect("remove a WAL object below the tip");
-    assert!(!super::probe_namespace_wal(&store, &mut warm)
-        .await
-        .expect("a gap sends the read to discovery"));
-    assert_eq!(warm.head, cached);
+    assert!(!super::probe_namespace_wal(
+        &store,
+        &crate::cache::HeadAndWalTailCache::unshared(usize::MAX),
+        &mut warm
+    )
+    .await
+    .expect("a gap sends the read to discovery"));
+    assert_eq!(warm.read_basis.head, cached);
     let error = crate::test_support::namespace_store(&store, &namespace_id)
         .load_read_anchor(crate::test_support::observed_now())
         .await
@@ -1200,7 +1227,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
     let timer_a = Arc::new(ManualClock::new(0));
     let timer_b = Arc::new(ManualClock::new(0));
     let context_a = context(store_clock.now_ms());
-    let context_b = MutationContext {
+    let context_b = WriterAt {
         writer_id: WriterId::parse("writer-b").expect("writer"),
         ..context_a.clone()
     };
@@ -1213,35 +1240,39 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
         KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
         OperationSelector::PutCreateIfAbsent,
     );
-    let mut writer_a = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: timer_a.clone(),
-        ..crate::test_support::namespace_store(&blocked, &namespace_id)
-    });
+    let mut writer_a = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer_a.clone(),
+            ..crate::test_support::namespace_store(&blocked, &namespace_id)
+        },
+        context_a.writer_id.clone(),
+    );
     writer_a
         .publish_batch(
             [directory("before-sleep")],
-            &context_a,
-            &Deadline::start(timer_a.clone()),
+            &OperationClock::start(context_a.now_ms, timer_a.clone()),
         )
         .await
         .results
         .remove(0)
         .expect("writer A observes its tip");
     blocked.block_next();
-    let batch = Deadline::start(timer_a.clone());
+    let batch = OperationClock::start(context_a.now_ms, timer_a.clone());
     let (mut resumed, ()) = futures::join!(
-        writer_a.publish_batch([directory("after-sleep")], &context_a, &batch),
+        writer_a.publish_batch([directory("after-sleep")], &batch),
         async {
             blocked.wait_until_blocked().await;
-            let mut writer_b = NamespaceCommitEngine::new(crate::NamespaceStore {
-                timer: timer_b.clone(),
-                ..crate::test_support::namespace_store(blocked.inner(), &namespace_id)
-            });
+            let mut writer_b = NamespaceCommitEngine::new(
+                crate::NamespaceStore {
+                    timer: timer_b.clone(),
+                    ..crate::test_support::namespace_store(blocked.inner(), &namespace_id)
+                },
+                context_b.writer_id.clone(),
+            );
             writer_b
                 .publish_batch(
                     [directory("takeover")],
-                    &context_b,
-                    &Deadline::start(timer_b.clone()),
+                    &OperationClock::start(context_b.now_ms, timer_b.clone()),
                 )
                 .await
                 .results
@@ -1260,7 +1291,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             assert_eq!(fence.payload().writer_epoch, WriterEpoch(2));
             assert!(fence.payload().records.is_empty());
             crate::test_support::namespace_store(blocked.inner(), &namespace_id)
-                .fold_wal_tail(None, &Deadline::start(timer_b.clone()))
+                .fold_wal_tail(None, &OperationClock::start(0, timer_b.clone()))
                 .await
                 .expect("fold takeover and commit");
             let options = crate::gc::GcOptions {
@@ -1272,10 +1303,11 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 .gc(
                     None,
                     &options,
-                    &MutationContext {
+                    &WriterAt {
                         now_ms: store_clock.now_ms(),
                         ..context_b.clone()
-                    },
+                    }
+                    .clock(),
                 )
                 .await
                 .expect("collect folded fence");

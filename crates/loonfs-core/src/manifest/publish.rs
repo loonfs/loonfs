@@ -1,10 +1,12 @@
 //! Publication through the next immutable manifest number.
 
 use crate::error::{CoreError, Result};
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::namespace::basis::PublicationBasis;
-use crate::namespace::control::{CurrentManifest, LoadedHint, LoadedManifest};
+use crate::namespace::control::{ensure_namespace_live, LoadedHint, LoadedManifest};
 use crate::namespace::store::NamespaceStore;
-use crate::time::Deadline;
+use crate::phase::Phase;
+use crate::time::OperationClock;
 use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -70,7 +72,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// An attempt whose check is at the revalidation bound loads the current
     /// manifest through the hint instead. The call returns `store_contention`
     /// once `attempts` attempts have each lost their put or returned `Again`.
-    /// The caller starts `deadline` before the call, so
+    /// The caller starts `clock` before the call, so
     /// `METADATA_PUBLICATION_BUDGET_MS` covers every attempt, from the first
     /// request to the last put.
     ///
@@ -89,7 +91,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn update_manifest<T, F, Fut>(
         &self,
         basis: Option<PublicationBasis>,
-        deadline: &Deadline,
+        clock: &OperationClock,
         attempts: usize,
         mut change: F,
     ) -> Result<(T, LoadedManifest, Option<LoadedHint>)>
@@ -120,21 +122,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
             let current = match found {
                 Some(current) => current,
                 None => {
-                    let checked = deadline.observe();
+                    let checked = clock.observe();
                     let (manifest, loaded) = self.load_current_manifest_with_hint().await?;
                     hint = Some(loaded);
                     PublicationBasis { manifest, checked }
                 }
             };
             let built_on = current.manifest.object_key.clone();
-            let predecessor = current.manifest.state.envelope.payload().manifest_no;
+            let predecessor = current.manifest.payload().manifest_no;
             match change(current.manifest.clone()).await? {
                 ManifestChange::Next(payload, result) => {
                     let mut payload = *payload;
                     payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
                     let manifest = encode_manifest(payload);
                     let outcome = self
-                        .publish_manifest_from(manifest, deadline, Some(&current))
+                        .publish_manifest_from(manifest, clock, Some(&current))
                         .await?;
                     let (lost_to, winner) = match outcome {
                         ManifestPublicationOutcome::Published(published) => {
@@ -169,6 +171,37 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 return Err(CoreError::contention_exhausted(&built_on));
             }
         }
+    }
+
+    /// Publishes the next manifest after the current one of a live namespace,
+    /// through [`Self::update_manifest`] with [`MAX_CONTENTION_ATTEMPTS`]
+    /// attempts.
+    ///
+    /// Each attempt returns `namespace_deleted` when the manifest that the
+    /// attempt builds on is a tombstone, and otherwise passes a copy of that
+    /// manifest's payload to `change`.
+    pub(crate) async fn update_live_manifest<T, F, Fut>(
+        &self,
+        basis: Option<PublicationBasis>,
+        clock: &OperationClock,
+        mut change: F,
+    ) -> Result<(T, LoadedManifest, Option<LoadedHint>)>
+    where
+        F: FnMut(NamespaceManifestPayload) -> Fut,
+        Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
+    {
+        self.update_manifest(
+            basis,
+            clock,
+            MAX_CONTENTION_ATTEMPTS,
+            |current: LoadedManifest| {
+                let payload = current.payload();
+                let changed = ensure_namespace_live(&payload.namespace_id, payload.status)
+                    .map(|()| change(payload.clone()));
+                async move { changed?.await }
+            },
+        )
+        .await
     }
 
     /// Returns the current manifest, found by probing above `basis` with
@@ -208,7 +241,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn create_manifest(
         &self,
         payload: NamespaceManifestPayload,
-        deadline: &Deadline,
+        clock: &OperationClock,
     ) -> Result<()> {
         let namespace_id = payload.namespace_id.clone();
         let first = HintPayload {
@@ -227,13 +260,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
             Err(error) => return Err(CoreError::store(&object_key, &error)),
         }
         match self
-            .publish_manifest_from(encode_manifest(payload), deadline, None)
+            .publish_manifest_from(encode_manifest(payload), clock, None)
             .await?
         {
             ManifestPublicationOutcome::Published(_) => Ok(()),
             ManifestPublicationOutcome::CoveredByCurrent(current)
             | ManifestPublicationOutcome::PredecessorChanged(current) => {
-                Err(if current.state.envelope.payload().status.is_deleted() {
+                Err(if current.payload().status.is_deleted() {
                     CoreError::NamespaceDeleted { namespace_id }
                 } else {
                     CoreError::NamespaceExists { namespace_id }
@@ -254,12 +287,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
         name = "loonfs.phase",
         err(level = "warn"),
         skip_all,
-        fields(phase = "publish_manifest", key_class = "manifest")
+        fields(phase = Phase::PublishManifest.as_str(), key_class = "manifest")
     )]
     pub(super) async fn publish_manifest_from(
         &self,
         manifest: EncodedEnvelope<NamespaceManifestPayload>,
-        deadline: &Deadline,
+        clock: &OperationClock,
         current: Option<&PublicationBasis>,
     ) -> Result<ManifestPublicationOutcome> {
         let namespace_id = manifest.envelope().payload().namespace_id.clone();
@@ -292,7 +325,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             let payload = manifest.envelope().payload();
             let listed = current
                 .iter()
-                .flat_map(|current| &current.manifest.state.envelope.payload().runs)
+                .flat_map(|current| &current.manifest.payload().runs)
                 .flat_map(|run| &run.segments)
                 .map(|segment| &segment.segment_id)
                 .collect::<HashSet<_>>();
@@ -308,27 +341,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let candidate = LoadedManifest {
             object_key: object_key.clone(),
             manifest_bytes: manifest.as_bytes().len() as u64,
-            state: CurrentManifest {
-                envelope: std::sync::Arc::new(manifest.envelope().clone()),
-            },
+            envelope: std::sync::Arc::new(manifest.envelope().clone()),
         };
         if let Some(current) = current.map(|current| &current.manifest) {
             // A tombstone ends its namespace; work that raced the deletion stops here.
-            if current.state.envelope.payload().status.is_deleted()
-                && current.state.manifest() != candidate.state.manifest()
-            {
+            if current.payload().status.is_deleted() && current.manifest() != candidate.manifest() {
                 return Err(CoreError::NamespaceDeleted {
                     namespace_id: namespace_id.clone(),
                 });
             }
-            if manifest.envelope().payload().writer_epoch
-                < current.state.envelope.payload().writer_epoch
-            {
+            if manifest.envelope().payload().writer_epoch < current.payload().writer_epoch {
                 return Ok(ManifestPublicationOutcome::PredecessorChanged(
                     current.clone(),
                 ));
             }
-            match classify_current(current, &candidate.state, expected_predecessor, false) {
+            match classify_current(current, &candidate, expected_predecessor, false) {
                 ManifestKind::Installable => {}
                 ManifestKind::Settled(outcome) => return Ok(outcome),
             }
@@ -337,8 +364,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let legal = match current {
             Some(current) => current
                 .manifest
-                .state
-                .envelope
                 .payload()
                 .ensure_successor(payload)
                 .map_err(|error| error.to_string()),
@@ -348,38 +373,38 @@ impl<S: ObjectStore> NamespaceStore<S> {
             None => Err("has no predecessor".to_owned()),
         };
         legal.expect("a candidate manifest should be a legal successor of the current manifest");
-        deadline.ensure_metadata_publication_budget(namespace_id)?;
+        clock.ensure_metadata_publication_budget(namespace_id)?;
         let outcome = match self
             .store
             .put_if_absent(&object_key, Bytes::from(manifest.into_bytes()))
             .await
         {
             Ok(_) => {
-                ensure_publication_in_budget(&object_key, deadline)?;
+                ensure_publication_in_budget(&object_key, clock)?;
                 ManifestPublicationOutcome::Published(candidate.clone())
             }
             Err(ObjectStoreError::PreconditionFailed { .. }) => self
-                .classify_current_manifest(current, &candidate.state, expected_predecessor, false)
+                .classify_current_manifest(current, &candidate, expected_predecessor, false)
                 .await?
                 .settled_after_conflict(namespace_id)?,
             Err(error @ ObjectStoreError::Transport { .. }) => {
                 // Only the exact manifest at this number confirms the put;
                 // a later manifest may already cover it.
                 let landed = self
-                    .load_manifest_by_no(candidate.state.envelope.payload().manifest_no)
+                    .load_manifest_by_no(candidate.payload().manifest_no)
                     .await
                     .map_err(CoreError::ControlObjectLoad)?;
                 let outcome = match landed {
                     Some(landed) => classify_current(
                         &landed,
-                        &candidate.state,
+                        &candidate,
                         expected_predecessor,
                         names_own_object,
                     ),
                     None => {
                         self.classify_current_manifest(
                             current,
-                            &candidate.state,
+                            &candidate,
                             expected_predecessor,
                             names_own_object,
                         )
@@ -403,7 +428,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     ManifestPublicationOutcome::Published(_)
                         | ManifestPublicationOutcome::CoveredByCurrent(_)
                 ) {
-                    ensure_publication_in_budget(&object_key, deadline)?;
+                    ensure_publication_in_budget(&object_key, clock)?;
                 }
                 outcome
             }
@@ -429,7 +454,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     async fn classify_current_manifest(
         &self,
         basis: Option<&PublicationBasis>,
-        candidate: &CurrentManifest,
+        candidate: &LoadedManifest,
         expected_predecessor: Option<ManifestNo>,
         confirm_authorship: bool,
     ) -> Result<ManifestKind> {
@@ -455,8 +480,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
-fn ensure_publication_in_budget(object_key: &str, deadline: &Deadline) -> Result<()> {
-    let elapsed_ms = deadline.elapsed_ms();
+fn ensure_publication_in_budget(object_key: &str, clock: &OperationClock) -> Result<()> {
+    let elapsed_ms = clock.elapsed_ms();
     // A put that lands after the budget may have landed on a reclaimed number.
     if elapsed_ms > crate::limits::METADATA_PUBLICATION_BUDGET_MS {
         return Err(CoreError::OutcomeUnknown {
@@ -471,20 +496,19 @@ fn ensure_publication_in_budget(object_key: &str, deadline: &Deadline) -> Result
 }
 
 fn classify_current(
-    loaded: &LoadedManifest,
-    candidate: &CurrentManifest,
+    current: &LoadedManifest,
+    candidate: &LoadedManifest,
     expected_predecessor: Option<ManifestNo>,
     confirm_authorship: bool,
 ) -> ManifestKind {
-    let current = &loaded.state;
     let outcome = if current.manifest() == candidate.manifest() {
         if confirm_authorship {
-            ManifestPublicationOutcome::Published(loaded.clone())
+            ManifestPublicationOutcome::Published(current.clone())
         } else {
-            ManifestPublicationOutcome::CoveredByCurrent(loaded.clone())
+            ManifestPublicationOutcome::CoveredByCurrent(current.clone())
         }
     } else if current.compactor_epoch() > candidate.compactor_epoch() {
-        ManifestPublicationOutcome::PredecessorChanged(loaded.clone())
+        ManifestPublicationOutcome::PredecessorChanged(current.clone())
     } else if current.folded_wal_no() >= candidate.folded_wal_no()
         && (current.manifest().head_seq, current.manifest().manifest_no)
             >= (
@@ -492,11 +516,11 @@ fn classify_current(
                 candidate.manifest().manifest_no,
             )
     {
-        ManifestPublicationOutcome::CoveredByCurrent(loaded.clone())
+        ManifestPublicationOutcome::CoveredByCurrent(current.clone())
     } else if Some(current.manifest().manifest_no) == expected_predecessor {
         return ManifestKind::Installable;
     } else {
-        ManifestPublicationOutcome::PredecessorChanged(loaded.clone())
+        ManifestPublicationOutcome::PredecessorChanged(current.clone())
     };
     ManifestKind::Settled(outcome)
 }

@@ -16,14 +16,16 @@
 //! which wrap this crate with caching and batching.
 //!
 //! ```no_run
-//! use loonfs_core::cache::MetadataSegmentCache;
+//! use loonfs_core::cache::{
+//!     CacheScope, HeadAndWalTailCache, MetadataSegmentCache, ObjectCache, ObjectStoreScope,
+//!     SharedHeadsAndWalTails, SharedObjects,
+//! };
 //! use loonfs_core::publish::{
 //!     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 //! };
-//! use loonfs_core::time::{Deadline, SystemWallClock};
+//! use loonfs_core::time::SystemWallClock;
 //! use loonfs_core::{
-//!     CreateNamespaceOptions, MetadataRunPolicy, MutationContext, NamespaceEngine,
-//!     NamespaceStore, PermitPool,
+//!     CreateNamespaceOptions, MetadataRunPolicy, NamespaceEngine, NamespaceStore, PermitPool,
 //! };
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
 //! use loonfs_types::StdMonotonicTimer;
@@ -37,6 +39,14 @@
 //!     Arc::new(store),
 //!     NamespaceId::parse("docs").expect("valid namespace id"),
 //!     Arc::new(MetadataSegmentCache::unshared(64 * 1024 * 1024)),
+//!     Arc::new(HeadAndWalTailCache::new(
+//!         Arc::new(SharedHeadsAndWalTails::new(1024 * 1024, 64 * 1024 * 1024)),
+//!         CacheScope::new(0),
+//!     )),
+//!     Arc::new(ObjectCache::new(
+//!         Arc::new(SharedObjects::new(64 * 1024 * 1024, 1024 * 1024)),
+//!         ObjectStoreScope::new(0),
+//!     )),
 //!     Arc::new(SystemWallClock),
 //!     Arc::new(StdMonotonicTimer::default()),
 //!     Arc::new(PermitPool::new(
@@ -51,11 +61,8 @@
 //! let actor_id = ActorId::parse("example-actor").expect("valid actor id");
 //! let _ = engine.bootstrap_namespace(&actor_id, &CreateNamespaceOptions::default());
 //!
-//! let context = MutationContext {
-//!     writer_id,
-//!     now_ms: 0,
-//! };
-//! let mut publisher = NamespaceCommitEngine::new(namespace);
+//! let clock = namespace.start_clock();
+//! let mut publisher = NamespaceCommitEngine::new(namespace, writer_id);
 //! let _ = publisher.publish_batch(
 //!     vec![CommitCandidate::new(CommitIntent::single(
 //!         CommitId::generate(),
@@ -66,8 +73,7 @@
 //!             parents: false,
 //!         },
 //!     ))],
-//!     &context,
-//!     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+//!     &clock,
 //! );
 //! ```
 
@@ -77,7 +83,6 @@ mod block_cache;
 mod bloom_filter;
 mod commit_engine;
 mod commit_wal_size;
-mod context;
 mod control_object;
 mod control_update;
 mod engine;
@@ -90,6 +95,7 @@ mod namespace;
 mod object_cache;
 mod options;
 mod permit_pool;
+mod phase;
 mod pin;
 mod protocol;
 mod read_working_memory;
@@ -163,11 +169,10 @@ pub mod control {
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::manifest::{load_position_basis, NamespaceStatistics};
     pub use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-    pub use crate::namespace::control::{CurrentManifest, LoadedHint, LoadedManifest};
+    pub use crate::namespace::control::{LoadedHint, LoadedManifest};
     pub use crate::namespace::read_anchor::{project_anchor_tail, NamespaceReadAnchor};
     pub use crate::namespace::state::NamespaceReadState;
-    pub use crate::namespace::{MetadataBasis, PublicationBasis};
-    pub use crate::pin::SnapshotReadBasis;
+    pub use crate::namespace::{MetadataBasis, PublicationBasis, ReadBasis};
     pub use crate::wal::probe_namespace_wal;
 }
 
@@ -178,18 +183,18 @@ pub mod publish {
     pub use crate::commit::CommitFingerprint;
     pub use crate::commit_engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
-        NamespaceCommitEnginePublishResult, ReadPosition, SharedWriterSessionStatus, TailSource,
-        WalFoldInput, WalTailReport, WriterSessionStatus,
+        NamespaceCommitEnginePublishResult, SharedWriterSessionStatus, TailSource, WalTailReport,
+        WriterSessionStatus,
     };
     pub use crate::namespace::writer_epoch::AcquiredWriter;
     pub use crate::path::write::{CommitIntent, FilesystemOperation};
+    pub use crate::protocol::WriterPosition;
     pub use crate::storage::content_admission::PreparedContent;
     pub use crate::storage::inline_content::InlineContent;
     pub use crate::wal::{is_retryable_wal_publish, settle_publish_attempt, WalPublishError};
 }
 
 // Crate-root re-exports used by `loonfs` or required by public return types.
-pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{
     NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, RootAccess, Writable,
@@ -214,6 +219,7 @@ pub use path::read::{
     FileRevisionsPage, GrantedRange, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use permit_pool::{BudgetPermit, PermitPool, PermitPoolObserver, PoolCounts};
+pub use phase::Phase;
 pub use pin::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
     ListCheckpointFilesOptions, SnapshotPageCursor,
