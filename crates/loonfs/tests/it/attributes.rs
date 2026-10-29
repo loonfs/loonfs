@@ -327,7 +327,7 @@ fn read_options_project_grouped_attributes_or_none() {
     let opted_out = block_on(namespace.stat_with_options(
         "/docs/report.txt",
         &StatOptions {
-            include_attributes: loonfs_types::AttributeInclusion::Omit,
+            include_attributes: loonfs_types::options::AttributeInclusion::Omit,
             ..Default::default()
         },
     ))
@@ -346,7 +346,7 @@ fn read_options_project_grouped_attributes_or_none() {
             .list_with_options(
                 "/docs",
                 &ListOptions {
-                    include_attributes: loonfs_types::AttributeInclusion::Include,
+                    include_attributes: loonfs_types::options::AttributeInclusion::Include,
                     ..Default::default()
                 },
             )

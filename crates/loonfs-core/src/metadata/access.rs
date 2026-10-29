@@ -1,4 +1,4 @@
-//! Effective access: the rights a set of principals holds on an inode,
+//! Effective access: the rights a set of principals has on an inode,
 //! resolved from the inode's own access row and its ancestors' rows up to
 //! the nearest boundary.
 
@@ -27,7 +27,7 @@ impl AccessChain {
         &self.rows
     }
 
-    /// Rights the principals hold through this chain. `admin` never
+    /// Rights the principals have through this chain. `admin` never
     /// inherits, so it is left out; see [`is_administrator`].
     pub(crate) fn rights_for(&self, principals: &PrincipalSet) -> AccessRights {
         self.rows
@@ -82,7 +82,7 @@ where
     Ok(AccessChain { rows })
 }
 
-/// Whether any of the principals holds `admin` on the root row.
+/// Whether any of the principals has `admin` on the root row.
 pub(crate) async fn is_administrator<R: MetadataVisibilityReads>(
     reads: &mut R,
     principals: &PrincipalSet,
@@ -97,7 +97,7 @@ pub(crate) async fn is_administrator<R: MetadataVisibilityReads>(
         }))
 }
 
-/// The rights `principals` hold on `inode_id`: every right for an
+/// The rights `principals` have on `inode_id`: every right for an
 /// administrator, otherwise the union over the inheritance chain.
 pub(crate) async fn effective_rights<R: MetadataVisibilityReads>(
     reads: &mut R,

@@ -69,7 +69,7 @@ struct ServiceAccountKey {
 impl fmt::Debug for GcsV4Presigner {
     /// Renders no key material and no service-account identity. A signing key
     /// is a bearer credential for the whole bucket, so nothing about it
-    /// reaches a log through a `Debug` of the store that holds it.
+    /// reaches a log through a `Debug` of the store that contains it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GcsV4Presigner")
             .field("bucket", &self.bucket)
@@ -262,9 +262,9 @@ pub(crate) fn read_service_account_key(config: &GcpGcsStoreConfig) -> Result<Str
 /// Reads the stored CRC-32C out of a GCS `x-goog-hash` header value.
 ///
 /// The header lists one or more `<algorithm>=<base64>` pairs in an
-/// unspecified order and may carry algorithms this format does not name, so
+/// unspecified order and may include algorithms this format does not define, so
 /// the CRC-32C is selected rather than positioned. An absent or unusable
-/// crc32c answers `None`, and the caller treats that as a failure: an object
+/// crc32c returns `None`, and the caller treats that as a failure: an object
 /// GCS will not describe is never completed on its size alone.
 pub(crate) fn stored_crc32c(header_value: &str) -> Option<Checksum> {
     for pair in header_value.split(',') {
@@ -280,7 +280,7 @@ pub(crate) fn stored_crc32c(header_value: &str) -> Option<Checksum> {
 
 /// Decodes a PEM-wrapped PKCS#8 private key into DER.
 ///
-/// Service-account JSON carries the key as a PEM block with escaped
+/// Service-account JSON contains the key as a PEM block with escaped
 /// newlines, which JSON decoding has already turned back into real ones.
 fn pkcs8_der(private_key_pem: &str) -> Result<Vec<u8>> {
     const BEGIN: &str = "-----BEGIN PRIVATE KEY-----";

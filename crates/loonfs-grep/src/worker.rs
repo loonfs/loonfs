@@ -13,10 +13,10 @@ use crate::{GrepError, GrepPassBudget, Result};
 use loonfs::engine::{next_run_no_after, Observation, OperationClock};
 use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, ReadOnly, Writable};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
+use loonfs_types::GrepIndex;
 use loonfs_types::MonotonicTimer;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, PinId, RunNo};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -35,13 +35,14 @@ const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
 /// This budgets ingestion, not LSM merging — it happens to share a value
 /// with the metadata reorganization input limit, and must stay independent
 /// so a compaction policy change cannot silently change backfill behavior.
-const GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP: u64 = 64 * 1024 * 1024;
+const GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP: NonZeroU64 =
+    NonZeroU64::new(64 * 1024 * 1024).unwrap();
 /// Content reads and index segment writes the worker runs at once. Eight
-/// reads of files at the 8 MiB eligibility cap hold at most 64 MiB, the same
+/// reads of files at the 8 MiB eligibility cap keep at most 64 MiB, the same
 /// as one backfill step's content budget.
 pub(crate) const GREP_WORKER_REQUESTS_IN_FLIGHT: usize = 8;
 // Keep grep's fold threshold independent of metadata reorganization limits.
-const GREP_MAX_MID_RUNS: usize = 8;
+const GREP_MAX_MID_RUNS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 
 /// Writer-side budgets for one grep build or reorganize step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,22 +66,18 @@ impl Default for GramIndexBuildPolicy {
     fn default() -> Self {
         Self {
             max_files_per_step: const { NonZeroUsize::new(256).unwrap() },
-            max_content_bytes_per_step: const {
-                NonZeroU64::new(GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP).unwrap()
-            },
-            max_rows_per_segment: const { NonZeroUsize::new(DEFAULT_MAX_ROWS_PER_SEGMENT).unwrap() },
-            max_delta_runs: const { NonZeroUsize::new(DEFAULT_MAX_DELTA_RUNS).unwrap() },
-            max_mid_runs: const { NonZeroUsize::new(GREP_MAX_MID_RUNS).unwrap() },
-            max_decoded_input_rows_per_step: const {
-                NonZeroUsize::new(DEFAULT_MAX_COMPACTION_INPUT_ROWS).unwrap()
-            },
+            max_content_bytes_per_step: GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP,
+            max_rows_per_segment: DEFAULT_MAX_ROWS_PER_SEGMENT,
+            max_delta_runs: DEFAULT_MAX_DELTA_RUNS,
+            max_mid_runs: GREP_MAX_MID_RUNS,
+            max_decoded_input_rows_per_step: DEFAULT_MAX_COMPACTION_INPUT_ROWS,
         }
     }
 }
 
 /// Result of enabling grep for one namespace.
 ///
-/// Both settled outcomes answer with the durable lifecycle itself rather
+/// Both settled outcomes return the durable lifecycle itself rather
 /// than a sequence number, because the two phases do not have the same
 /// number to give: a fresh enable publishes a backfill with a target, and an
 /// already-enabled namespace may be backfilling or active.
@@ -294,11 +291,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let manifest = self.manifest_state(namespace_id).await?;
         let (status, next_run_no, reorganize_pending) = match &manifest {
             Some(manifest) => (
-                v0::GrepIndexStatus::from(manifest.status()),
+                loonfs_types::GrepIndexStatus::from(manifest.status()),
                 manifest.index().next_run_no,
                 manifest.index().reorganize.is_some(),
             ),
-            None => (v0::GrepIndexStatus::Disabled, RunNo(0), false),
+            None => (loonfs_types::GrepIndexStatus::Disabled, RunNo(0), false),
         };
         Ok(GrepIndex {
             namespace_id: namespace_id.clone(),
@@ -412,7 +409,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 Ok(None)
             }
             // A non-conflict failure may be an acknowledgement failure after
-            // the manifest landed. Keep the checkpoint because it
+            // the manifest was published. Keep the checkpoint because it
             // may already reference it.
             Err(error) => Err(error),
         }

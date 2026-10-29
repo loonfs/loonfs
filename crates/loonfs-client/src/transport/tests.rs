@@ -1,10 +1,27 @@
 //! Transport retry, identity, streaming, and timeout contracts.
 
 use super::*;
+use crate::namespace_path::NamespacePath;
 use crate::operations::Operation;
 use crate::{scripted_transport, ClientConfig};
+use crate::{CommitOptions, CreateDirectoryOptions, DeleteNamespaceOptions};
 use futures::FutureExt as _;
 use loonfs_test_support::clock::ManualClock;
+use loonfs_types::ChangeSeq;
+use loonfs_types::Commit;
+use loonfs_types::CommitId;
+use loonfs_types::CompleteUploadBody;
+use loonfs_types::ContentId;
+use loonfs_types::ContentRef;
+use loonfs_types::CreateUploadBody;
+use loonfs_types::DeleteSnapshotResponse;
+use loonfs_types::NamespaceDiagnostics;
+use loonfs_types::NamespaceMetadata;
+use loonfs_types::ObjectTransferAccess;
+use loonfs_types::PinId;
+use loonfs_types::UploadId;
+use loonfs_types::UploadSession;
+use loonfs_types::UploadSessionStatus;
 use std::assert_matches;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -530,4 +547,402 @@ async fn response_progress_resets_inactivity_without_resetting_total_deadlines()
             assert_eq!(clock.now_ms(), 160_000);
         }
     }
+}
+
+fn test_content_ref(bytes: &[u8]) -> ContentRef {
+    ContentRef::blob_v1(
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        bytes,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
+    )
+}
+
+#[test]
+fn retryable_transport_failure_covers_transport_and_unavailability_only() {
+    let api = |code: &str| ClientError::Api {
+        status: 503,
+        response: Box::new(ErrorResponse {
+            code: code.to_owned(),
+            feature: None,
+            message: String::new(),
+            param: None,
+            request_id: None,
+            details: None,
+        }),
+    };
+    assert!(retryable_transport_failure(
+        FailureSource::Network,
+        &ClientError::Http("reset".to_owned())
+    ));
+    assert!(retryable_transport_failure(
+        FailureSource::Response,
+        &api("server_busy")
+    ));
+    assert!(retryable_transport_failure(
+        FailureSource::Response,
+        &api("commit_queue_full")
+    ));
+    assert!(retryable_transport_failure(
+        FailureSource::Response,
+        &api("shutting_down")
+    ));
+    assert!(!retryable_transport_failure(
+        FailureSource::Response,
+        &api("server_error")
+    ));
+    assert!(!retryable_transport_failure(
+        FailureSource::Response,
+        &api("checkpoint_unavailable")
+    ));
+    assert!(!retryable_transport_failure(
+        FailureSource::Response,
+        &api("maintenance_required")
+    ));
+    assert!(!retryable_transport_failure(
+        FailureSource::Response,
+        &api("index_lagging")
+    ));
+    // A server deadline uses 503 but is not safe to retry automatically.
+    // The caller must first determine whether a mutation completed.
+    assert!(!retryable_transport_failure(
+        FailureSource::Response,
+        &api("deadline_exceeded")
+    ));
+    assert!(!retryable_transport_failure(
+        FailureSource::Response,
+        &ClientError::Http("http status 502 with a non-envelope body".to_owned())
+    ));
+}
+
+#[tokio::test]
+async fn transport_failures_resend_up_to_the_attempt_cap() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let max_attempts = DEFAULT.max_retries as usize + 1;
+    let transport = crate::scripted_transport::failures(max_attempts);
+    let retrying = Client::with_transport(
+        ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        transport.clone(),
+    )
+    .expect("valid client config");
+    let error = retrying
+        .get_namespace(&namespace_id)
+        .await
+        .expect_err("dropped connections must fail");
+    assert_matches!(error, ClientError::Http(_));
+    assert_eq!(transport.attempts(), max_attempts);
+
+    let transport = crate::scripted_transport::failures(1);
+    let single_shot = Client::with_transport(
+        ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: true,
+            ca_cert_path: None,
+        },
+        transport.clone(),
+    )
+    .expect("valid client config");
+    single_shot
+        .get_namespace(&namespace_id)
+        .await
+        .expect_err("dropped connection must fail without retry");
+    assert_eq!(transport.attempts(), 1);
+}
+
+pub(crate) fn retry_policy_client(
+    transport: &crate::scripted_transport::ScriptedTransport,
+) -> Client {
+    Client::with_transport(
+        ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        transport.clone(),
+    )
+    .expect("valid client config")
+}
+
+fn single_attempt_probe() -> (crate::scripted_transport::ScriptedTransport, Client) {
+    let transport = crate::scripted_transport::failure_then_success(b"{}".to_vec());
+    let client = retry_policy_client(&transport);
+    (transport, client)
+}
+
+fn assert_single_attempt<T>(
+    result: Result<T>,
+    transport: &crate::scripted_transport::ScriptedTransport,
+) {
+    assert!(
+        matches!(result, Err(ClientError::Http(_))),
+        "expected the first transport failure to surface"
+    );
+    assert_eq!(transport.attempts(), 1);
+}
+
+#[tokio::test]
+async fn retry_policy_lifecycle_mutations_are_single_attempt() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let fork_id = NamespaceId::parse("fork").expect("valid id");
+
+    let (transport, client) = single_attempt_probe();
+    assert_single_attempt(
+        client
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .await,
+        &transport,
+    );
+
+    let (transport, client) = single_attempt_probe();
+    assert_single_attempt(
+        client
+            .fork_namespace(&namespace_id, &fork_id, &loonfs_test_support::test_actor())
+            .await,
+        &transport,
+    );
+
+    let (transport, client) = single_attempt_probe();
+    assert_single_attempt(
+        client
+            .delete_namespace_with_options(
+                &namespace_id,
+                &DeleteNamespaceOptions {
+                    expected_head_seq: Some(ChangeSeq(7)),
+                },
+            )
+            .await,
+        &transport,
+    );
+}
+
+#[tokio::test]
+async fn retry_policy_matches_snapshot_and_maintenance_operation_classes() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+
+    let (transport, client) = single_attempt_probe();
+    assert_single_attempt(
+        client
+            .create_snapshot_with_options(
+                &namespace_id,
+                "backup",
+                &crate::CreateSnapshotOptions {
+                    ttl_ms: std::num::NonZeroU64::new(10_000),
+                },
+            )
+            .await,
+        &transport,
+    );
+
+    let snapshot_id =
+        PinId::parse("pin_00000000000000000001-0000000000000001").expect("valid pin id");
+    let deleted = DeleteSnapshotResponse {
+        namespace_id: namespace_id.clone(),
+        snapshot_id: snapshot_id.clone(),
+    };
+    let transport = crate::scripted_transport::failure_then_success(
+        serde_json::to_vec(&deleted).expect("serialize response"),
+    );
+    let client = retry_policy_client(&transport);
+    let actual = client
+        .delete_snapshot(&namespace_id, &snapshot_id)
+        .await
+        .expect("an idempotent snapshot delete should retry");
+    assert_eq!(actual, deleted);
+    assert_eq!(transport.attempts(), 2);
+
+    let response = NamespaceDiagnostics {
+        created_at_ms: 1_000,
+        created_by: loonfs_test_support::test_actor(),
+        fork_basis: None,
+        namespace_id: namespace_id.clone(),
+        head_seq: ChangeSeq(3),
+        retention_floor_seq: ChangeSeq(1),
+        acknowledged_floor_seq: ChangeSeq(1),
+        current_manifest_no: None,
+        wal_tail_objects: 2,
+        live_snapshots: 3,
+    };
+    let transport = crate::scripted_transport::failure_then_success(
+        serde_json::to_vec(&response).expect("serialize response"),
+    );
+    let client = retry_policy_client(&transport);
+
+    let actual = client
+        .get_namespace_diagnostics(&namespace_id)
+        .await
+        .expect("safe maintenance read should retry");
+    assert_eq!(actual, response);
+    assert_eq!(transport.attempts(), 2);
+}
+
+#[tokio::test]
+async fn retry_policy_commit_id_filesystem_mutation_retries() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let commit_id = CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id");
+    let response = Commit {
+        namespace_id: namespace_id.clone(),
+        commit_id: commit_id.clone(),
+        committed_seq: ChangeSeq(1),
+        committed_by: loonfs_test_support::test_actor(),
+        committed_at_ms: 1_752_624_000_000,
+        message: None,
+        events: Vec::new(),
+    };
+    let transport = crate::scripted_transport::failure_then_success(
+        serde_json::to_vec(&response).expect("serialize response"),
+    );
+    let client = retry_policy_client(&transport);
+    let spec = NamespacePath::parse("demo", "/docs").expect("valid namespace path");
+
+    let actual = client
+        .create_directory_with_options(
+            &spec,
+            &loonfs_test_support::test_actor(),
+            &CreateDirectoryOptions {
+                commit: CommitOptions {
+                    commit_id: Some(commit_id),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("commit-id mutation should retry");
+    assert_eq!(actual, response);
+    assert_eq!(transport.attempts(), 2);
+}
+
+#[tokio::test]
+async fn retry_policy_read_retries() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let response = NamespaceMetadata {
+        access: loonfs_types::NamespaceAccessMode::Unrestricted {},
+        created_at_ms: 1_000,
+        created_by: loonfs_test_support::test_actor(),
+        fork_basis: None,
+        namespace_id: namespace_id.clone(),
+        head_seq: ChangeSeq(0),
+        retention_floor_seq: ChangeSeq(0),
+        retention_window_ms: None,
+    };
+    let transport = crate::scripted_transport::failure_then_success(
+        serde_json::to_vec(&response).expect("serialize response"),
+    );
+    let client = retry_policy_client(&transport);
+
+    let actual = client
+        .get_namespace(&namespace_id)
+        .await
+        .expect("read should retry");
+    assert_eq!(actual, response);
+    assert_eq!(transport.attempts(), 2);
+}
+
+#[tokio::test]
+async fn retry_policy_upload_begins_are_single_attempt() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+
+    let (transport, client) = single_attempt_probe();
+    assert_single_attempt(
+        client
+            .create_upload(&namespace_id, &CreateUploadBody::ServiceProxied {})
+            .await,
+        &transport,
+    );
+
+    let (transport, client) = single_attempt_probe();
+    assert_single_attempt(
+        client
+            .create_direct_put_upload_target(&namespace_id, Some(b"direct".len() as u64))
+            .await,
+        &transport,
+    );
+}
+
+#[tokio::test]
+async fn retry_policy_presigned_upload_is_single_attempt() {
+    let transport = crate::scripted_transport::failure_then_success(Vec::new());
+    let client = retry_policy_client(&transport);
+    let access = ObjectTransferAccess::PresignedUrl {
+        method: "PUT".to_owned(),
+        url: "http://example.invalid/upload".to_owned(),
+        headers: std::collections::BTreeMap::new(),
+        expires_at_ms: 1,
+    };
+
+    let result = client.upload_via_presigned_url(&access, b"direct").await;
+
+    assert_matches!(result, Err(ClientError::Http(_)));
+    assert_eq!(transport.attempts(), 1);
+}
+
+#[tokio::test]
+async fn retry_policy_proxied_upload_content_retries() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("valid upload id");
+    let response = UploadSession {
+        namespace_id: namespace_id.clone(),
+        upload_id: upload_id.clone(),
+        mode: loonfs_types::UploadMode::ServiceProxied,
+        status: UploadSessionStatus::Open {
+            expires_at_ms: 1000,
+            checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
+            part_size_bytes: None,
+            access: None,
+            content_ref: Some(test_content_ref(b"content")),
+        },
+    };
+    let transport = crate::scripted_transport::failure_then_success(
+        serde_json::to_vec(&response).expect("serialize response"),
+    );
+    let client = retry_policy_client(&transport);
+
+    let actual = client
+        .put_upload_content(&namespace_id, &upload_id, b"content")
+        .await
+        .expect("identical content staging should retry");
+    assert_eq!(actual, response);
+    assert_eq!(transport.attempts(), 2);
+}
+
+#[tokio::test]
+async fn retry_policy_upload_completion_retries() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("valid upload id");
+    let content_ref = test_content_ref(b"content");
+    let response = UploadSession {
+        namespace_id: namespace_id.clone(),
+        upload_id: upload_id.clone(),
+        mode: loonfs_types::UploadMode::ServiceProxied,
+        status: UploadSessionStatus::Completed {
+            completed_at_ms: 1,
+            content_ref: content_ref.clone(),
+            content_token: None,
+        },
+    };
+    let transport = crate::scripted_transport::failure_then_success(
+        serde_json::to_vec(&response).expect("serialize response"),
+    );
+    let client = retry_policy_client(&transport);
+
+    let actual = client
+        .complete_upload(
+            &namespace_id,
+            &upload_id,
+            &CompleteUploadBody::ServiceProxied {},
+        )
+        .await
+        .expect("completed-session replay should retry");
+    assert_eq!(actual, response);
+    assert_eq!(transport.attempts(), 2);
 }

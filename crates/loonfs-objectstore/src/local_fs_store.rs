@@ -28,8 +28,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 /// Lock file serializing mutations across processes sharing one store root.
-/// Held only for the duration of each write; the OS releases it if the
-/// holding process dies. Never listed as an object (see `is_scratch_name`).
+/// Locked only for the duration of each write; the OS releases it if the
+/// locking process dies. Never listed as an object (see `is_scratch_name`).
 const STORE_LOCK_FILE_NAME: &str = ".loonfs-store.lock";
 
 /// Supplies the root directory and key scoping for the local filesystem store.
@@ -58,7 +58,7 @@ pub struct LocalFsStore {
     identity: StoreIdentity,
     checksum_algorithm: ChecksumAlgorithm,
     key_scope: KeyScope,
-    /// A Tokio mutex, because a write holds it across the awaits that take
+    /// A Tokio mutex, because a write keeps it locked across the awaits that take
     /// the cross-process lock and then check and move the staged file.
     write_lock: Mutex<()>,
     #[cfg(test)]
@@ -121,7 +121,7 @@ impl LocalFsStore {
 
     /// Extends the in-process write mutex across processes with an advisory
     /// file lock on the store root. Check-then-act writes (compare-and-swap,
-    /// delete-then-prune) are only safe while both are held.
+    /// delete-then-prune) are only safe while both are locked.
     async fn acquire_cross_process_write_lock(&self, key: &str) -> Result<std::fs::File> {
         let lock_path = self.root.join(STORE_LOCK_FILE_NAME);
         let lock_key = key.to_owned();
@@ -235,7 +235,7 @@ impl LocalFsStore {
     /// A hard link or a rename makes the bytes visible at the final key
     /// atomically, so a reader never observes a partial object and a crash
     /// never leaves a torn file at the key. Nothing but the current chunk is
-    /// ever held: the staging file is the buffer. The payload is fully
+    /// ever kept in memory: the staging file is the buffer. The payload is fully
     /// written and fsynced before the mode's precondition is evaluated, which
     /// is the contract a caller folding a digest over the same stream
     /// depends on.
@@ -301,7 +301,7 @@ impl LocalFsStore {
     }
 
     /// Moves a fully written staging file to its key under `mode`'s
-    /// precondition, holding both write locks while it checks and acts.
+    /// precondition, with both write locks locked while it checks and acts.
     async fn publish_staged_object(
         &self,
         key: &str,
@@ -406,9 +406,9 @@ impl ObjectStore for LocalFsStore {
     /// Reads the whole object, or exactly one range of it.
     ///
     /// A ranged read seeks to its start and reads only its length, so it
-    /// holds the range and never the object. That is what a caller reading a
+    /// keeps the range and never the object in memory. That is what a caller reading a
     /// large object in bounded chunks is promised, and a store that
-    /// materialized the whole object to answer each chunk would break the
+    /// materialized the whole object to return each chunk would break the
     /// promise on this provider alone.
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         let path = self.resolve_key(key)?;
@@ -614,7 +614,7 @@ async fn list_prefix_for_root(
 }
 
 /// Creates the parent directory chain. Returns whether anything was created,
-/// so callers know the new directory entries also need to be made durable.
+/// so callers can tell that the new directory entries also need to be made durable.
 async fn create_parent_directory(key: &str, path: &Path) -> Result<bool> {
     match path.parent() {
         Some(parent) => {
@@ -636,7 +636,7 @@ async fn create_parent_directory(key: &str, path: &Path) -> Result<bool> {
     }
 }
 
-/// Fsyncs the directory holding `path`, making a rename, create, or unlink
+/// Fsyncs the directory that contains `path`, making a rename, create, or unlink
 /// of that entry durable. Without this, the file data can survive a crash
 /// while the directory entry pointing at it does not.
 async fn sync_parent_directory(key: &str, path: &Path) -> Result<()> {
@@ -776,7 +776,7 @@ async fn directory_entries(prefix: &str, directory: &Path) -> Result<Vec<PathBuf
 
 /// Whether an object lives anywhere under `path`. A failed write or a delete
 /// race can leave a directory with no object in it, and a provider never
-/// lists a prefix that holds no object.
+/// lists a prefix that contains no object.
 async fn holds_object(prefix: &str, path: PathBuf) -> Result<bool> {
     let mut directories = vec![path];
     while let Some(directory) = directories.pop() {

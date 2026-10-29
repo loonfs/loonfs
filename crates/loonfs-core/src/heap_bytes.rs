@@ -8,7 +8,6 @@
 
 use crate::gc::CompletedUploadSession;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_types::api::v0::FilesystemChange;
 use loonfs_types::format::control::{ForkBasis, ManifestRef, WriterBlock};
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
@@ -19,6 +18,7 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::FilesystemChange;
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,
     Checksum, ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName,
@@ -28,7 +28,7 @@ use loonfs_types::{
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 
-/// Heap a value owns outside its own inline size. Whatever holds the value
+/// Heap a value owns outside its own inline size. Whatever contains the value
 /// charges that inline size itself.
 pub(crate) trait HeapBytes {
     fn heap_bytes(&self) -> usize;
@@ -55,7 +55,7 @@ pub(crate) fn index_block_heap_bytes(entries: &Vec<SegmentIndexEntry>) -> usize 
 }
 
 /// The table `std`'s hash map allocates for its capacity. The map keeps
-/// eight buckets for every seven entries it can hold (four or eight buckets
+/// eight buckets for every seven entries it can contain (four or eight buckets
 /// below fourteen), one control byte per bucket, and one trailing group of
 /// control bytes.
 pub(crate) fn hash_map_table_bytes<K, V>(map: &HashMap<K, V>) -> usize {
@@ -81,7 +81,7 @@ fn hash_table_bytes<Entry>(capacity: usize) -> usize {
 /// The nodes of a B-tree map filled by sorted inserts, which is how
 /// decoding fills one. A full node of eleven slots splits into six and five
 /// and moves one entry up to its parent. So each node after the first on a
-/// level takes seven entries: six it keeps and one its parent holds. The
+/// level takes seven entries: six it keeps and one its parent keeps. The
 /// parents form the next level and fill the same way, up to a single root.
 fn btree_map_node_bytes<K, V>(map: &BTreeMap<K, V>) -> usize {
     const NODE_SLOTS: usize = 11;
@@ -130,7 +130,7 @@ impl<A: HeapBytes, B: HeapBytes> HeapBytes for (A, B) {
     }
 }
 
-// Validated text copies its input once validated, so it holds exactly its
+// Validated text copies its input once validated, so it keeps exactly its
 // length.
 macro_rules! text_heap_bytes {
     ($($text:ty),+ $(,)?) => {

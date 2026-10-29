@@ -50,7 +50,7 @@ pub(crate) async fn submit_commit<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     request: CommitIntent,
     context: &WriterAt,
-) -> Result<loonfs_types::api::v0::Commit, CoreError> {
+) -> Result<loonfs_types::Commit, CoreError> {
     let candidate = prepared_candidate(store, namespace_id, request).await;
     NamespaceFixture::new(store, namespace_id, context)
         .publish_candidates(vec![candidate])
@@ -67,7 +67,7 @@ pub(crate) async fn submit_commits_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     requests: Vec<CommitIntent>,
     context: &WriterAt,
-) -> Vec<Result<loonfs_types::api::v0::Commit, CoreError>> {
+) -> Vec<Result<loonfs_types::Commit, CoreError>> {
     let mut candidates = Vec::with_capacity(requests.len());
     for request in requests {
         candidates.push(prepared_candidate(store, namespace_id, request).await);
@@ -125,7 +125,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
-) -> Result<loonfs_types::api::v0::ListChangesResponse, CoreError> {
+) -> Result<loonfs_types::ListChangesResponse, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &default_writer())
         .list_changes_after(

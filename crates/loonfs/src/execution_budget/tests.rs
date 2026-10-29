@@ -477,10 +477,10 @@ async fn a_runtime_without_a_budget_reports_the_default_limits_to_its_recorder()
         work.push(gated.start_merge(namespace_id));
     }
     let expected = ExecutionBudgetStats {
-        folds_running: crate::DEFAULT_MAX_CONCURRENT_FOLDS,
-        folds_waiting: namespaces.len() - crate::DEFAULT_MAX_CONCURRENT_FOLDS,
-        compactions_running: crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
-        compactions_waiting: namespaces.len() - crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+        folds_running: crate::DEFAULT_MAX_CONCURRENT_FOLDS.get(),
+        folds_waiting: namespaces.len() - crate::DEFAULT_MAX_CONCURRENT_FOLDS.get(),
+        compactions_running: crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS.get(),
+        compactions_waiting: namespaces.len() - crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS.get(),
         ..ExecutionBudgetStats::default()
     };
     wait_for_stats(gated.runtime.execution_budget(), expected).await;
@@ -671,7 +671,7 @@ async fn content_write_permits_default_to_32_and_count_what_holds_and_waits() {
     let budget = ExecutionBudget::default();
     let pool = budget.content_writes();
     let held = futures::future::join_all(
-        (0..crate::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).map(|_| pool.acquire()),
+        (0..crate::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES.get()).map(|_| pool.acquire()),
     )
     .await;
     let mut waiting = Box::pin(pool.acquire());

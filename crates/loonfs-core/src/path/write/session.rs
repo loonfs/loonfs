@@ -5,10 +5,10 @@ use super::planned_pieces::{CommitPieces, PlannedPieces};
 use super::planner::OperationPlanningSession;
 use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
+use crate::commit::engine::CommitCandidate;
 use crate::commit::{
     AppendedContent, CandidateAllocation, CommitFingerprint, CommitPlan, CommitValidationSession,
 };
-use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
@@ -319,7 +319,7 @@ mod tests {
     use super::super::intent::CommitIntent;
     use super::super::intent::FilesystemOperation;
     use super::*;
-    use crate::commit_engine::CommitCandidate;
+    use crate::commit::engine::CommitCandidate;
     use crate::error::{CoreError, ErrorCode};
     use crate::storage::content_admission::PreparedContent;
     use crate::test_support::WriterAt;
@@ -414,7 +414,7 @@ mod tests {
             .expect("load view")
             .resolve_path(
                 absolute_path,
-                loonfs_types::AttributeInclusion::Omit,
+                loonfs_types::options::AttributeInclusion::Omit,
                 &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
             )
             .await
@@ -713,7 +713,7 @@ mod tests {
             .expect("load view")
             .resolve_path(
                 "/docs/doomed.txt",
-                loonfs_types::AttributeInclusion::Omit,
+                loonfs_types::options::AttributeInclusion::Omit,
                 &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
             )
             .await

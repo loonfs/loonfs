@@ -1,10 +1,10 @@
 //! A fold that loses its manifest number to another publication.
 
+use super::super::PublishedManifest;
 use super::fold::{FoldWalResponse, FoldedWalTail};
 use super::*;
 use crate::error::Result;
 use crate::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
-use crate::manifest::PublishedManifest;
 use crate::namespace::control::LoadedManifest;
 use crate::publish::{InlineContent, WriterPosition};
 use crate::time::Observation;
@@ -53,9 +53,9 @@ impl Rival {
                     .compact_metadata_unit(
                         None,
                         MetadataCompactionPolicy::CompactImmediately,
-                        crate::manifest::CompactionAdmission::AnySize,
+                        crate::compaction::CompactionAdmission::AnySize,
                         CompactorEpoch(0),
-                        &crate::manifest::MetadataCompactionCancellation::default(),
+                        &crate::compaction::MetadataCompactionCancellation::default(),
                     )
                     .await
                     .expect("merge")

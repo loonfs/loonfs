@@ -1,4 +1,4 @@
-//! Shared reservations for bytes that reads hold: metadata block memos and
+//! Shared reservations for bytes that reads keep: metadata block memos and
 //! the collector's table of content roots.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,7 +38,7 @@ impl ReadWorkingMemory {
         self.in_use.load(Ordering::SeqCst)
     }
 
-    /// The most bytes reservations may hold at once.
+    /// The most bytes reservations may reserve at once.
     pub fn limit(&self) -> usize {
         self.limit
     }

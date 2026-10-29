@@ -9,11 +9,11 @@ use loonfs::{
     ListCheckpointFilesOptions, Namespace, NamespaceMetadata, ReadAt, ReadOnly, ReadView,
     StatOptions, MAX_CURRENT_FILES_PER_STAT,
 };
-use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_types::{
     AbsolutePath, ChangeSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
     PathEntry, PinId, RevisionNo, Subject,
 };
+use loonfs_types::{FilesystemChange, ListChangesResponse};
 
 /// Filesystem reads for one namespace.
 ///
@@ -63,7 +63,7 @@ impl NamespaceReads {
 
     /// Lists the files a snapshot pins, in ascending inode-id order.
     /// Deleted files are included so an undelete needs no new postings;
-    /// queries decide visibility.
+    /// queries determine visibility.
     ///
     /// A page returns `snapshot_not_found` if the snapshot was deleted,
     /// expired, or collected, and `checkpoint_unavailable` if its manifest is
@@ -106,7 +106,7 @@ impl NamespaceReads {
     }
 }
 
-/// Filesystem reads held to one namespace head for a single grep query.
+/// Filesystem reads pinned to one namespace head for a single grep query.
 pub(crate) struct NamespaceReadView<'a> {
     namespace: &'a Namespace<ReadOnly>,
     view: ReadView,
@@ -180,7 +180,7 @@ impl NamespaceReadView<'_> {
             .stat_with_options(
                 absolute_path.as_str(),
                 &StatOptions {
-                    include_attributes: loonfs_types::AttributeInclusion::Omit,
+                    include_attributes: loonfs_types::options::AttributeInclusion::Omit,
                     ..Default::default()
                 },
             )
@@ -194,7 +194,7 @@ impl NamespaceReadView<'_> {
             .stat_by_inode_with_options(
                 inode_id,
                 &StatOptions {
-                    include_attributes: loonfs_types::AttributeInclusion::Omit,
+                    include_attributes: loonfs_types::options::AttributeInclusion::Omit,
                     ..Default::default()
                 },
             )
@@ -235,7 +235,7 @@ impl NamespaceReadView<'_> {
     }
 }
 
-/// Ids one [`NamespaceReads::stat_current_files_by_inode`] call answers.
+/// Ids one [`NamespaceReads::stat_current_files_by_inode`] call returns.
 pub(crate) fn effective_batch_size(wanted: usize) -> usize {
     wanted.clamp(1, MAX_CURRENT_FILES_PER_STAT)
 }

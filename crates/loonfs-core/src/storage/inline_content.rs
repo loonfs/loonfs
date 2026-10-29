@@ -1,4 +1,4 @@
-//! Content bytes carried by a commit with their ordinary blob reference.
+//! Content bytes that a commit includes, with their ordinary blob reference.
 
 use bytes::Bytes;
 use loonfs_types::{ChecksumAlgorithm, ContentId, ContentRef, NamespaceId};

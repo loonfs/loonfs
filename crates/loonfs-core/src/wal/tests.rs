@@ -3,7 +3,7 @@
 // This module is the physical WAL boundary.
 #![allow(clippy::disallowed_methods)]
 
-use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
+use crate::commit::engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::limits::READ_REVALIDATION_BOUND_MS;
 use crate::test_support::WriterAt;
 use crate::time::OperationClock;
@@ -16,9 +16,10 @@ use loonfs_test_support::stores::{
     MetadataMapStore, OperationSelector, RecordingStore,
 };
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
+use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
-    NamespaceId, WalNo, WriterEpoch, WriterId,
+    AbsolutePath, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo, NamespaceId, WalNo,
+    WriterEpoch, WriterId,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -593,7 +594,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
         .create()
         .await
         .expect("create");
-    let session = crate::commit_engine::SharedWriterSessionStatus::default();
+    let session = crate::commit::engine::SharedWriterSessionStatus::default();
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
@@ -682,7 +683,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         .expect("next")
         .is_none());
     let session = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::commit_engine::WriterSessionStatus::Acquired(acquired),
+        crate::commit::engine::WriterSessionStatus::Acquired(acquired),
     ));
     let mut active = NamespaceCommitEngine::new(
         crate::test_support::namespace_store(&store, &namespace_id),

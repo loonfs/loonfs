@@ -12,7 +12,7 @@ use std::sync::Mutex;
 /// Minimum interval between progress reports.
 const MIN_REPORT_INTERVAL_MS: u64 = 250;
 
-/// How a running transfer is described, decided once per invocation.
+/// How a running transfer is described, set once per invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProgressMode {
     /// Redraw one line on standard error.
@@ -110,7 +110,7 @@ impl ProgressState {
 ///
 /// Shared behind an `Arc` by recursive transfers, whose per-file jobs run
 /// several at a time, so the accounting is one operation's and not one
-/// file's. The lock is never held across an await.
+/// file's. The lock never stays locked across an await.
 #[derive(Debug)]
 pub(crate) struct ProgressReporter {
     mode: ProgressMode,
@@ -420,7 +420,7 @@ enum Event<'a> {
 }
 
 /// Whole bytes a second, averaged over the transfer so far. Zero until a
-/// millisecond has passed, which is the only honest answer before then.
+/// millisecond has passed, which is the only honest result before then.
 fn rate_bps(bytes_done: u64, elapsed_ms: u64) -> u64 {
     if elapsed_ms == 0 {
         return 0;

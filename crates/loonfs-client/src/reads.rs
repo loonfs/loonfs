@@ -1,25 +1,19 @@
-//! Namespace lifecycle, path reads, revision history, trash, and change feeds.
+//! Path reads, revision history, trash, and change feeds.
 
 use crate::operations::{self, Operation};
 use crate::read_at_fields::ReadAtFields;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, NamespacePath, PayloadStream, Result};
-use loonfs_types::api::v0::{
-    CreateSnapshotRequest, DeleteSnapshotResponse, ExtendSnapshotRequest, ListChangesResponse,
-    ListSnapshotsResponse, Snapshot,
-};
 use loonfs_types::options::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, ForkNamespaceOptions,
     ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions, ReadAt,
     ReadConsistency, ReadFileOptions, StatOptions,
 };
+use loonfs_types::ListChangesResponse;
 use loonfs_types::{
-    headers, ActorId, ChangeSeq, CreateNamespaceRequest, DeleteNamespaceResponse, EffectiveLimit,
-    ErrorCode, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListTrashResponse, NamespaceId, NamespaceMetadata, PageRequest, Pager,
-    PathEntry, PinId, RevisionNo,
+    ChangeSeq, EffectiveLimit, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    ListPathEntriesResponse, ListTrashResponse, NamespaceId, PageRequest, Pager, PathEntry,
+    RevisionNo,
 };
-use std::num::NonZeroU64;
 
 /// Adds the query parameters that say what a read reads at.
 fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
@@ -51,233 +45,8 @@ pub type FileRevisionsPager = Pager<ListFileRevisionsResponse, ClientError>;
 pub type TrashPager = Pager<ListTrashResponse, ClientError>;
 /// A pager over committed changes.
 pub type ChangesPager = Pager<ListChangesResponse, ClientError>;
-/// A pager over snapshots.
-pub type SnapshotsPager = Pager<ListSnapshotsResponse, ClientError>;
 
 impl Client {
-    /// Saves the namespace's current state as a snapshot that doesn't expire.
-    ///
-    /// See [`Self::create_snapshot_with_options`].
-    pub async fn create_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        name: &str,
-    ) -> Result<Snapshot> {
-        self.create_snapshot_with_options(namespace_id, name, &CreateSnapshotOptions::default())
-            .await
-    }
-
-    /// Saves the namespace's current state as a snapshot. With
-    /// `options.ttl_ms`, the snapshot expires that many milliseconds from the
-    /// server's current time, and without it, the snapshot doesn't expire.
-    ///
-    /// Retrying this request starts a distinct attempt.
-    pub async fn create_snapshot_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        name: &str,
-        options: &CreateSnapshotOptions,
-    ) -> Result<Snapshot> {
-        let url = self.namespace_url(namespace_id, "/snapshots");
-        self.send_json(self.request(operations::CREATE_SNAPSHOT, &url).json(
-            &CreateSnapshotRequest {
-                name: name.to_owned(),
-                ttl_ms: options.ttl_ms,
-            },
-        )?)
-        .await
-    }
-
-    /// Lists snapshots, including expired snapshots that garbage collection
-    /// hasn't deleted.
-    pub fn list_snapshots(&self, namespace_id: &NamespaceId) -> SnapshotsPager {
-        Pager::with_state(
-            (self.clone(), namespace_id.clone()),
-            |(client, namespace_id), request| async move {
-                client.snapshots_page(&namespace_id, request).await
-            },
-        )
-    }
-
-    async fn snapshots_page(
-        &self,
-        namespace_id: &NamespaceId,
-        request: PageRequest<String>,
-    ) -> Result<ListSnapshotsResponse> {
-        let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/snapshots"));
-        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
-        self.send_json(self.request(operations::LIST_SNAPSHOTS, &query.build()))
-            .await
-    }
-
-    /// Returns one snapshot, as the listing returns it.
-    ///
-    /// A missing id returns `snapshot_not_found`.
-    pub async fn get_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &PinId,
-    ) -> Result<Snapshot> {
-        let url = self.namespace_url(namespace_id, &format!("/snapshots/{snapshot_id}"));
-        self.send_json(self.request(operations::GET_SNAPSHOT, &url))
-            .await
-    }
-
-    /// Extends an unexpired snapshot's lifetime to `ttl_ms` from the
-    /// server's current time. The expiry never moves earlier.
-    ///
-    /// Repeating the same request is safe.
-    pub async fn extend_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &PinId,
-        ttl_ms: NonZeroU64,
-    ) -> Result<Snapshot> {
-        let url = self.namespace_url(namespace_id, &format!("/snapshots/{snapshot_id}/extend"));
-        self.send_json(
-            self.request(operations::EXTEND_SNAPSHOT, &url)
-                .json(&ExtendSnapshotRequest { ttl_ms })?,
-        )
-        .await
-    }
-
-    /// Deletes the snapshot record.
-    ///
-    /// Deleting a missing snapshot succeeds, so repeating the request is
-    /// safe.
-    pub async fn delete_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &PinId,
-    ) -> Result<DeleteSnapshotResponse> {
-        let url = self.namespace_url(namespace_id, &format!("/snapshots/{snapshot_id}"));
-        self.send_json(self.request(operations::DELETE_SNAPSHOT, &url))
-            .await
-    }
-
-    /// Creates an empty unrestricted namespace with the given ID and returns
-    /// its genesis state.
-    pub async fn create_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        actor: &ActorId,
-    ) -> Result<NamespaceMetadata> {
-        self.create_namespace_with_options(namespace_id, actor, &CreateNamespaceOptions::default())
-            .await
-    }
-
-    /// Creates an empty namespace with the given ID and options and returns
-    /// its genesis state.
-    ///
-    /// With `options.allow_existing`, a namespace that already exists isn't
-    /// an error, and the call returns that namespace's current state.
-    pub async fn create_namespace_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        actor: &ActorId,
-        options: &CreateNamespaceOptions,
-    ) -> Result<NamespaceMetadata> {
-        let url = format!("{}/v0/namespaces", self.base_url);
-        // Namespace creation has no durable request identity to reconcile an ambiguous success.
-        let created = self
-            .send_json(
-                self.request(operations::CREATE_NAMESPACE, &url)
-                    .header(headers::ACTOR, actor.as_str())
-                    .json(&CreateNamespaceRequest {
-                        access: options.access.clone(),
-                        namespace_id: namespace_id.clone(),
-                        retention_window_ms: options.retention_window_ms,
-                    })?,
-            )
-            .await;
-        match created {
-            Err(error)
-                if options.allow_existing && error.code() == Some(ErrorCode::NamespaceExists) =>
-            {
-                self.get_namespace(namespace_id).await
-            }
-            created => created,
-        }
-    }
-
-    /// Returns the namespace's current state.
-    pub async fn get_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceMetadata> {
-        // Validated namespace ids are URL-safe by construction, like the
-        // other parsed id segments interpolated into paths here and below.
-        let url = self.namespace_url(namespace_id, "");
-        self.send_json(self.request(operations::GET_NAMESPACE, &url))
-            .await
-    }
-
-    /// Deletes the namespace.
-    ///
-    /// See [`Self::delete_namespace_with_options`].
-    pub async fn delete_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<DeleteNamespaceResponse> {
-        self.delete_namespace_with_options(namespace_id, &DeleteNamespaceOptions::default())
-            .await
-    }
-
-    /// Deletes the namespace.
-    ///
-    /// Set `options.expected_head_seq` to delete only if the namespace is
-    /// still where you last observed it (`stale_head` on mismatch). Deleting
-    /// an already-deleted namespace fails with `namespace_deleted`.
-    pub async fn delete_namespace_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        options: &DeleteNamespaceOptions,
-    ) -> Result<DeleteNamespaceResponse> {
-        let mut query = QueryBuilder::new(self.namespace_url(namespace_id, ""));
-        if let Some(expected) = options.expected_head_seq {
-            query.push("expected_head_seq", expected.0);
-        }
-        // The expected head is a precondition, not an idempotency key for an ambiguous delete.
-        self.send_json(self.request(operations::DELETE_NAMESPACE, &query.build()))
-            .await
-    }
-
-    /// Creates a new namespace from the source's current head and returns the
-    /// target's state at the fork point.
-    pub async fn fork_namespace(
-        &self,
-        source_namespace_id: &NamespaceId,
-        new_namespace_id: &NamespaceId,
-        actor: &ActorId,
-    ) -> Result<NamespaceMetadata> {
-        self.fork_namespace_with_options(
-            source_namespace_id,
-            new_namespace_id,
-            actor,
-            &ForkNamespaceOptions::default(),
-        )
-        .await
-    }
-
-    /// Creates a new namespace from the selected current head or unexpired snapshot and
-    /// returns the target's state at the fork point.
-    pub async fn fork_namespace_with_options(
-        &self,
-        source_namespace_id: &NamespaceId,
-        new_namespace_id: &NamespaceId,
-        actor: &ActorId,
-        options: &ForkNamespaceOptions,
-    ) -> Result<NamespaceMetadata> {
-        let url = self.namespace_url(source_namespace_id, "/forks");
-        // Namespace forks have no durable request identity to replay after an ambiguous success.
-        self.send_json(
-            self.request(operations::FORK_NAMESPACE, &url)
-                .header(headers::ACTOR, actor.as_str())
-                .json(&ForkNamespaceRequest {
-                    new_namespace_id: new_namespace_id.clone(),
-                    snapshot_id: options.snapshot_id.clone(),
-                })?,
-        )
-        .await
-    }
-
     /// Lists a directory.
     pub fn list(&self, spec: &NamespacePath) -> PathEntriesPager {
         self.list_with_options(spec, &ListOptions::default())
@@ -838,8 +607,9 @@ mod tests {
     use super::*;
     use crate::scripted_transport::{self, Outcome};
     use crate::ClientConfig;
-    use loonfs_types::api::v0::FilesystemChange;
     use loonfs_types::options::Consistency;
+    use loonfs_types::FilesystemChange;
+    use loonfs_types::PinId;
     use loonfs_types::{ContentId, ContentRef, EntryInodeKind, PathEntryKind};
 
     fn client_for(transport: &scripted_transport::ScriptedTransport) -> Client {

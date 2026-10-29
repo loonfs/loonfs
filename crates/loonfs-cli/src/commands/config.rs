@@ -4,15 +4,14 @@ use super::context::Invocation;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::profile_config::build_profile_interactive;
 use crate::args::ConfigCommand;
-use crate::config::{
-    load_config_for_repair, mutate_config, redacted_config_table, ConfigLoad, ProfileConfig,
-};
+use crate::config::{redacted_config_table, ProfileConfig};
+use crate::config_file::{load_config_for_repair, mutate_config, ConfigLoad};
 use crate::error::{CliError, Result};
 use crate::profiles::{add_profile, NamedProfile};
 use crate::prompt;
 
 /// Writes the resolved config file, whichever way it was named, creating
-/// the directories it needs. Naming a path that holds no file yet is the
+/// the directories it needs. Naming a path that has no file yet is the
 /// way back from a default config this build refuses to read: init only
 /// ever touches the file resolution named.
 pub(crate) fn run_config_init(invocation: &Invocation) -> Result<CommandOutput, CommandFailure> {
@@ -59,7 +58,7 @@ pub(crate) fn run_config_command(
     let location = &invocation.config;
     let config_path = location.path.as_path();
     match command {
-        // Path never reads the file: the one command that answers "which
+        // Path never reads the file: the one command that reports "which
         // config is this build even looking at" has to work while that file
         // is one the build refuses to read.
         ConfigCommand::Path => Ok(invocation.output(CommandData::ConfigPath {

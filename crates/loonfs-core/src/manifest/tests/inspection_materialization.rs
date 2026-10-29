@@ -1,29 +1,33 @@
 //! Test-only full-row manifest materialization and metadata-state inspection.
 
-use super::super::block_load::{
-    load_manifest_segment_rows_in_key_range_with_cache, SegmentKeyRangeBlocks, SessionBlockMemo,
-};
-use super::super::cache::MetadataSegmentCache;
 use super::super::error::ManifestLoadError;
 use super::super::load::load_namespace_manifest_envelope_if_present;
-use super::super::row::manifest_row_kind;
-use super::super::runs::{runs_in_materialization_order, MetadataFamilySegments};
-use super::super::scan::{
-    ordered_manifest_segments, ManifestMaterializationForInspection, Readahead,
-};
+use super::super::validate::validate_manifest_row_seq_range;
 use super::super::validate::{
     validate_direntry_child_bind_index, validate_manifest_materialization_ranges,
     validate_revision_rows_have_unique_keys,
 };
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::{MetadataState, MetadataStateBuilder};
+use crate::segment::block_memo::{load_segment_blocks_with_readahead, SessionBlockMemo};
+use crate::segment::cache::read_ahead_window_bytes;
+use crate::segment::cache::MetadataSegmentCache;
+use crate::segment::data_block_load::read_ahead_window_len;
+use crate::segment::index_block_load::load_segment_index;
+use crate::segment::row::manifest_row_kind;
+use crate::segment::runs::{runs_in_materialization_order, MetadataFamilySegments};
+use crate::segment::scan::{
+    ordered_manifest_segments, ManifestMaterializationForInspection, Readahead,
+};
 use futures::future::try_join_all;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
+use loonfs_types::format::segment_blocks::{index_blocks_for_key_range, DecodedDataBlock};
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
+use std::sync::Arc;
 
 #[cfg(test)]
 pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore + ?Sized>(
@@ -267,4 +271,114 @@ pub(crate) fn append_rows_to_metadata(
         }
     }
     Ok(())
+}
+
+/// The data blocks of one segment that can hold keys in
+/// `[lower_bound, upper_bound)`, shared straight from the decoded-block
+/// memo and caches. Row access borrows from the blocks rather than building
+/// an owned row set, which would clone every row and key of every touched
+/// block on every scan.
+#[cfg(test)]
+pub(crate) struct SegmentKeyRangeBlocks {
+    blocks: Vec<Arc<DecodedDataBlock>>,
+}
+
+#[cfg(test)]
+impl SegmentKeyRangeBlocks {
+    /// Rows whose keys fall in `[lower_bound, upper_bound)`, in row order,
+    /// found by binary search over each block's decode-validated key order.
+    /// Express a prefix scan as `[prefix, string_prefix_upper_bound(prefix))`.
+    pub(crate) fn rows_in_key_range<'a>(
+        &'a self,
+        lower_bound: &'a str,
+        upper_bound: Option<&'a str>,
+    ) -> impl Iterator<Item = (&'a str, &'a MetadataRow)> + 'a {
+        self.blocks.iter().flat_map(move |block| {
+            let start = block
+                .row_keys
+                .partition_point(|key| key.as_str() < lower_bound);
+            let end = upper_bound.map_or(block.row_keys.len(), |upper_bound| {
+                block
+                    .row_keys
+                    .partition_point(|key| key.as_str() < upper_bound)
+            });
+            let range = start..end.max(start);
+            block.row_keys[range.clone()]
+                .iter()
+                .zip(&block.rows[range])
+                .map(|(key, row)| (key.as_str(), row))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rows(&self) -> impl Iterator<Item = &MetadataRow> {
+        self.blocks.iter().flat_map(|block| block.rows.iter())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn row_keys(&self) -> impl Iterator<Item = &String> {
+        self.blocks.iter().flat_map(|block| block.row_keys.iter())
+    }
+}
+
+/// Loads the rows of one segment whose keys can fall in
+/// `[lower_bound, upper_bound)`: index first, then only the data blocks the
+/// index says can match. Callers trim edge blocks with
+/// [`SegmentKeyRangeBlocks::rows_in_key_range`].
+#[cfg(test)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the segment scan inputs stay explicit at the shared load boundary"
+)]
+pub(crate) async fn load_manifest_segment_rows_in_key_range_with_cache<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
+    memo: &SessionBlockMemo,
+    descriptor: &MetadataSegmentRef,
+    max_seq: ChangeSeq,
+    lower_bound: &str,
+    upper_bound: Option<&str>,
+    row_limit: usize,
+    readahead: Readahead,
+) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
+    let index = load_segment_index(store, segment_cache, memo, descriptor).await?;
+    let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
+
+    let mut result = SegmentKeyRangeBlocks { blocks: Vec::new() };
+    let mut remaining_rows = row_limit;
+    let mut start = needed.start;
+    while start < needed.end && remaining_rows > 0 {
+        let required_end = if readahead == Readahead::Enabled {
+            start + 1
+        } else if row_limit == usize::MAX {
+            needed.end
+        } else {
+            (start + read_ahead_window_len(&index[start..], read_ahead_window_bytes(segment_cache)))
+                .min(needed.end)
+        };
+        let blocks = load_segment_blocks_with_readahead(
+            store,
+            segment_cache,
+            memo,
+            descriptor,
+            &index,
+            start..required_end,
+            readahead,
+        )
+        .await?;
+        let batch = SegmentKeyRangeBlocks { blocks };
+        if row_limit != usize::MAX {
+            remaining_rows = remaining_rows
+                .saturating_sub(batch.rows_in_key_range(lower_bound, upper_bound).count());
+        }
+        result.blocks.extend(batch.blocks);
+        start = required_end;
+    }
+
+    validate_manifest_row_seq_range(
+        &metadata_segment_object_key(descriptor),
+        result.blocks.iter().flat_map(|block| block.rows.iter()),
+        max_seq,
+    )?;
+    Ok(result)
 }

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 
-/// The two date spellings a V4 signature carries: the credential scope's day
+/// The two date spellings a V4 signature includes: the credential scope's day
 /// and the request's full timestamp, which must agree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SigningDates {

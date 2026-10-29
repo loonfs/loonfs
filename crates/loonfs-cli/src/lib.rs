@@ -19,6 +19,7 @@ mod args;
 mod backend;
 mod commands;
 mod config;
+mod config_file;
 mod error;
 mod payload;
 mod profiles;

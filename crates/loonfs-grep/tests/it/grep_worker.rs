@@ -2385,10 +2385,10 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     else {
         panic!("a fresh enable publishes a backfill");
     };
-    let backfilling = loonfs_types::api::v0::GrepIndexStatus::from(&state);
+    let backfilling = loonfs_types::GrepIndexStatus::from(&state);
     assert_eq!(
         backfilling,
-        loonfs_types::api::v0::GrepIndexStatus::Backfilling {
+        loonfs_types::GrepIndexStatus::Backfilling {
             captured_seq: ChangeSeq(1),
             cursor_inode_id: None,
             checkpoint_id: match &state {
@@ -2425,7 +2425,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     // Once the walk finishes, the API reports the manifest as active with the
     // target it reached as its own watermark, and no target field survives.
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    let active = loonfs_types::api::v0::GrepIndexStatus::from(
+    let active = loonfs_types::GrepIndexStatus::from(
         &worker
             .lifecycle(&namespace_id)
             .await
@@ -2433,7 +2433,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     );
     assert_eq!(
         active,
-        loonfs_types::api::v0::GrepIndexStatus::Active {
+        loonfs_types::GrepIndexStatus::Active {
             built_through_seq: ChangeSeq(1),
             next_event_index: 0,
         }

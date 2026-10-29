@@ -42,7 +42,7 @@ pub(crate) struct WireRequest {
     /// Extra headers beyond authorization, in insertion order.
     headers: Vec<(String, String)>,
     /// Whether the configured bearer token is attached. False only for
-    /// presigned provider URLs, which carry their own signature.
+    /// presigned provider URLs, which include their own signature.
     authenticate: bool,
     /// Whether a failed attempt is sent again.
     policy: SendPolicy,
@@ -426,7 +426,7 @@ fn failed_attempt(url: &str, error: TransportError) -> FailedAttempt {
     }
 }
 
-/// One failed attempt, carrying whether the network layer itself reported it.
+/// One failed attempt, with whether the network layer itself reported it.
 pub(crate) struct FailedAttempt {
     /// Whether a complete response was served. Classified here, before the
     /// error is flattened, because the retry policy keys on it: a served
@@ -449,8 +449,8 @@ pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
     match serde_json::from_slice::<ErrorResponse>(body) {
         Ok(body) => ClientError::from_error_response(status, body),
         // A status with a non-envelope body is most commonly an intermediary
-        // answering for the server (a load balancer's HTML 502): keep the
-        // status — it is the only signal the response carried.
+        // responding for the server (a load balancer's HTML 502): keep the
+        // status — it is the only signal in the response.
         Err(err) => ClientError::Http(format!(
             "http status {status} with a non-envelope body: {err}"
         )),
@@ -542,4 +542,4 @@ impl QueryBuilder {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -19,10 +19,7 @@ fn path(absolute_path: &str) -> NamespacePath {
 
 /// Returns the change at `seq` so tests can compare its timestamp with the
 /// corresponding metadata rows.
-async fn change_at(
-    harness: &crate::common::TestServer,
-    seq: ChangeSeq,
-) -> loonfs_types::api::v0::Commit {
+async fn change_at(harness: &crate::common::TestServer, seq: ChangeSeq) -> loonfs_types::Commit {
     harness
         .client
         .list_changes(&namespace_id("demo"), ChangeSeq(0))

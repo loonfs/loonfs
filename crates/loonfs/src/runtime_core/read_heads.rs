@@ -138,11 +138,11 @@ impl RuntimeCore {
         self.record_head_lookup(cached.is_some());
         let namespace = self.namespace_store(namespace_id);
         if let Some(mut head) = cached {
-            // Measure every answer against the previous check, not against the probe
-            // it answers. A successor published after that check cannot be collected
-            // within the bound. An answer that arrives later may miss one, however
+            // Measure every response against the previous check, not against the probe
+            // it responds to. A successor published after that check cannot be collected
+            // within the bound. A response that arrives later may miss one, however
             // recently its probe was sent, so the new check replaces the previous one
-            // only after both answers are in.
+            // only after both responses are in.
             let checked = head.basis_checked.clone();
             if checked.is_within_revalidation_bound() {
                 let check_due =

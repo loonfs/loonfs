@@ -149,8 +149,8 @@ mod tests {
         CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
         CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, ReadConsistency,
     };
-    use crate::api::v0::{DownloadRange, ObjectTransferAccess};
     use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, PinId, RevisionNo};
+    use crate::{DownloadRange, ObjectTransferAccess};
     use std::collections::BTreeMap;
 
     fn absolute_path() -> AbsolutePath {

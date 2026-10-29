@@ -202,13 +202,13 @@ const ACCEPT_ERROR_LOG_INTERVAL_MS: u64 = 60_000;
 /// One accepted connection, before or after its TLS handshake.
 ///
 /// A handshake failure is this connection's failure and nothing else's: it
-/// surfaces as an `io::Error` to the task serving this socket, which drops
+/// is reported as an `io::Error` to the task serving this socket, which drops
 /// it. The listener keeps accepting, so a plaintext client that reaches the
 /// TLS port loses its own connection and no other.
 pub(super) enum TlsIo {
     Handshaking(Box<Accept<TcpStream>>),
     Ready(Box<RustlsStream<TcpStream>>),
-    /// The handshake failed. Held so a later poll reports the failure again
+    /// The handshake failed. Kept so a later poll reports the failure again
     /// instead of polling a future that has already completed.
     Failed,
 }

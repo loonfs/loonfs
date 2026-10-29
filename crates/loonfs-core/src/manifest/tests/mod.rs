@@ -20,8 +20,6 @@ mod read_ahead_windows;
 mod retention;
 mod streaming_compaction;
 
-use super::cache::{MetadataSegmentCache, ObjectStoreScope, SharedSegmentBlocks};
-use super::compaction_merge::locality_of;
 use super::error::ManifestLoadError;
 use super::load::{
     append_rows_to_metadata, head_from_manifest, load_manifest_materialization_for_inspection,
@@ -30,27 +28,31 @@ use super::load::{
 };
 use super::publish::{encode_manifest, ManifestPublicationOutcome};
 use super::retention::RetentionTarget;
-use super::row::{manifest_rows_for_family, metadata_states_equivalent};
-use super::runs::{
-    flatten_manifest_segments, runs_in_materialization_order, runs_newest_first,
-    MetadataFamilyGroup, MetadataFamilySegments, MetadataRunManifest, MetadataRunPolicy,
-    DEFAULT_MAX_DELTA_RUNS,
-};
-use super::streaming_compaction::{
-    input_segment_keys, retention_clusters, run_metadata_compaction, CompactionPublication,
-    MetadataCompactionCancellation, MetadataCompactionSpec,
-};
-use super::{
-    compaction_step, data_block_load, fold, index_block_load, load, row, scan,
-    CompactionUnitOutcome, MetadataCompactionPolicy,
-};
-use crate::block_cache::SegmentBlockKind;
+use super::{fold, load};
+use crate::block_cache::ObjectStoreScope;
+use crate::changes::list_changes_after;
+use crate::compaction::group_merge::run_metadata_compaction;
+use crate::compaction::merge_iterator::locality_of;
+use crate::compaction::plan;
+use crate::compaction::plan::MetadataCompactionSpec;
+use crate::compaction::publication::{input_segment_keys, CompactionPublication};
+use crate::compaction::retention::retention_clusters;
+use crate::compaction::step::MetadataCompactionCancellation;
+use crate::compaction::{CompactionUnitOutcome, MetadataCompactionPolicy};
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::read::{stat_current_files_by_inode, CurrentFile, CurrentFileState};
-use crate::protocol::list_changes_after;
 use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine};
+use crate::segment::cache::SegmentBlockKind;
+use crate::segment::cache::{MetadataSegmentCache, SharedSegmentBlocks};
+use crate::segment::row::{manifest_rows_for_family, metadata_states_equivalent};
+use crate::segment::runs::{
+    flatten_manifest_segments, runs_in_materialization_order, runs_newest_first,
+    MetadataFamilyGroup, MetadataFamilySegments, MetadataRunManifest, MetadataRunPolicy,
+    DEFAULT_MAX_DELTA_RUNS,
+};
+use crate::segment::{data_block_load, index_block_load, row, scan};
 use crate::storage::content::prepare_stored_content;
 use crate::test_support::WriterAt;
 use crate::time::{OperationClock, StdMonotonicTimer};
@@ -86,6 +88,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use tempfile::tempdir;
+
+impl<S: ObjectStore> crate::namespace::store::NamespaceStore<S> {
+    /// Folds the visible WAL tail into segments and publishes the next manifest.
+    pub(crate) async fn fold_wal(&self) -> crate::error::Result<crate::manifest::FoldWalResponse> {
+        let clock = self.start_clock();
+        self.fold_wal_tail(None, &clock)
+            .await
+            .map(|folded| folded.response)
+    }
+}
 
 async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
@@ -390,9 +402,9 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::default(),
-            crate::manifest::CompactionAdmission::AnySize,
+            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
-            &crate::manifest::MetadataCompactionCancellation::default(),
+            &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await
         .expect("compaction step");
@@ -557,7 +569,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
         .await
         .expect("load the current manifest");
     let payload = current.payload();
-    let spec = compaction_step::plan_compaction(
+    let spec = plan::plan_compaction(
         payload,
         &runs_newest_first(payload),
         policy,
@@ -785,8 +797,8 @@ async fn write_file_and_checkpoint(
         .captured_seq
 }
 
-use super::build::debug_assert_manifest_segments_do_not_overlap;
 use super::fold::next_run_no_after;
+use crate::segment::build::debug_assert_manifest_segments_do_not_overlap;
 use std::assert_matches;
 
 fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {

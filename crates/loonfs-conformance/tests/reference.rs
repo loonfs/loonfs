@@ -12,12 +12,6 @@ use loonfs_client::{
 use loonfs_conformance::server::{start_server, ConformanceServer, StoreShape, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
 use loonfs_test_support::ids::page_limit;
-use loonfs_types::api::v0::{
-    CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
-    DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
-    ListSnapshotsResponse, ObjectTransferAccess, Snapshot, UploadContentClaim, UploadMode,
-    UploadPartChecksumClaim, UploadSessionStatus,
-};
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, BindingVersion,
@@ -25,6 +19,12 @@ use loonfs_types::{
     ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DestinationPrecondition, DisplayName,
     ErrorResponse, FilesystemOperation, NamespaceId, PathEntry, PathEntryKind, RevisionNo,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, ROOT_INODE_ID,
+};
+use loonfs_types::{
+    CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
+    DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
+    ListSnapshotsResponse, ObjectTransferAccess, Snapshot, UploadContentClaim, UploadMode,
+    UploadPartChecksumClaim, UploadSessionStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -825,10 +825,7 @@ async fn run_download(harness: &Harness, case: &Case) {
     assert_eq!(bytes, request.content_utf8.as_bytes());
 }
 
-async fn stream_grant(
-    client: &Client,
-    grant: &loonfs_types::api::v0::CreateDownloadResponse,
-) -> Vec<u8> {
+async fn stream_grant(client: &Client, grant: &loonfs_types::CreateDownloadResponse) -> Vec<u8> {
     let mut stream = client
         .open_direct_download(grant)
         .await
@@ -2240,7 +2237,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         "{}/v0/namespaces/{}/filesystem/entries",
         harness.server_url, request.namespace_id
     );
-    let captured_listing: loonfs_types::api::v0::ListPathEntriesResponse = raw_success_json(
+    let captured_listing: loonfs_types::ListPathEntriesResponse = raw_success_json(
         harness
             .raw_client
             .get(&entries_url)
@@ -2257,7 +2254,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         listed_entry_names(&captured_listing.entries),
         expected.captured_entry_names
     );
-    let current_listing: loonfs_types::api::v0::ListPathEntriesResponse = raw_success_json(
+    let current_listing: loonfs_types::ListPathEntriesResponse = raw_success_json(
         harness
             .raw_client
             .get(&entries_url)

@@ -3,18 +3,17 @@
 //! equivalence, and the resource bounds that make a merge independent of the
 //! size of what it merges.
 
-use super::super::compaction_step::{
-    group_run_descriptors, plan_group, CompactionAdmission, MetadataCompactionPolicy,
-};
-use super::super::row::manifest_row_commit_seq;
-use super::super::runs::MetadataFamilyGroup;
-use super::super::scan::VerifiedMetadataSegments;
-use super::super::streaming_compaction::{
-    input_segment_keys, run_metadata_compaction, CompactionPublication,
-    MetadataCompactionCancellation, MetadataCompactionSpec, MetadataMergeReport,
-};
 use super::*;
+use crate::compaction::group_merge::{run_metadata_compaction, MetadataMergeReport};
+use crate::compaction::plan::MetadataCompactionSpec;
+use crate::compaction::plan::{group_run_descriptors, plan_group};
+use crate::compaction::publication::{input_segment_keys, CompactionPublication};
+use crate::compaction::step::MetadataCompactionCancellation;
+use crate::compaction::step::{CompactionAdmission, MetadataCompactionPolicy};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::segment::row::manifest_row_commit_seq;
+use crate::segment::runs::MetadataFamilyGroup;
+use crate::segment::scan::VerifiedMetadataSegments;
 use crate::time::{OperationClock, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -585,9 +584,9 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        crate::manifest::CompactionAdmission::AnySize,
+        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("merge the group whole");
@@ -1134,7 +1133,7 @@ async fn rewrite_base_segment(
         family,
         descriptor,
         rows,
-        NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).expect("the default target is positive"),
+        DEFAULT_TARGET_BLOCK_BYTES,
     )
     .await;
     *manifest = encode_namespace_manifest_json(payload)
@@ -1792,7 +1791,7 @@ async fn large_compaction_inputs(
 
 #[tokio::test]
 async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decoded_input() {
-    use super::super::compaction_merge::{
+    use crate::compaction::merge_iterator::{
         refill_iterators, MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
         ITERATOR_FETCH_TARGET_BYTES,
     };
@@ -1835,7 +1834,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
             .sum(),
         // A delta merge: these attribute rows have no inodes or bindings,
         // so a base merge's kept inode filter would remove every one.
-        compaction_step::MergePlacement::Delta {
+        plan::MergePlacement::Delta {
             output_seq: ChangeSeq(3),
         },
         ChangeSeq(0),
@@ -2639,7 +2638,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             .expect("current manifest");
         let payload = before.payload().clone();
         let runs = runs_newest_first(&payload);
-        let plan = super::super::compaction_step::plan_compaction(
+        let plan = crate::compaction::plan::plan_compaction(
             &payload,
             &runs,
             policy,
@@ -3164,7 +3163,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     assert_eq!(store.counts().puts, 0);
 
     timer.set_ms(0);
-    crate::commit_engine::NamespaceCommitEngine::new(
+    crate::commit::engine::NamespaceCommitEngine::new(
         crate::test_support::namespace_store(store.inner(), &namespace),
         (crate::test_support::WriterAt {
             writer_id: loonfs_types::WriterId::parse("deleter").expect("writer"),
@@ -3748,11 +3747,11 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_even_past_the_filter
             basis.scan_runs = Arc::new(counted_runs);
         }
         let placement = if bottom {
-            compaction_step::MergePlacement::Base {
+            plan::MergePlacement::Base {
                 output_seq: head.seq,
             }
         } else {
-            compaction_step::MergePlacement::Delta {
+            plan::MergePlacement::Delta {
                 output_seq: head.seq,
             }
         };

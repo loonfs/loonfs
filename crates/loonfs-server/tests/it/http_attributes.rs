@@ -238,7 +238,7 @@ async fn the_client_round_trips_the_read_options() {
         .stat_with_options(
             &path("/docs/report.txt"),
             &StatOptions {
-                include_attributes: loonfs_types::AttributeInclusion::Omit,
+                include_attributes: loonfs_types::options::AttributeInclusion::Omit,
                 ..Default::default()
             },
         )
@@ -258,7 +258,7 @@ async fn the_client_round_trips_the_read_options() {
         &harness.client,
         &path("/docs"),
         &ListOptions {
-            include_attributes: loonfs_types::AttributeInclusion::Include,
+            include_attributes: loonfs_types::options::AttributeInclusion::Include,
             ..Default::default()
         },
     )

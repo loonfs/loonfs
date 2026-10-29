@@ -4,9 +4,10 @@ use super::context::{Invocation, ProfileContext};
 use super::output::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
 use crate::args::{CommandKind, DoctorArgs, Selectors, TransientRetry};
 use crate::config::{
-    load_config, non_empty_env, resolve_config_location, ConfigSource, ProfileConfig,
-    ProfileConnection, ProfileMode, StoreConfig, PROFILE_ENV,
+    non_empty_env, CliConfig, ProfileConfig, ProfileConnection, ProfileMode, StoreConfig,
+    PROFILE_ENV,
 };
+use crate::config_file::{load_config, resolve_config_location, ConfigSource};
 use crate::error::{CliError, Result};
 use crate::profiles::resolve_profile;
 use crate::render::{store_probe_run_outcome, store_probe_summary_line, StoreProbeRunOutcome};
@@ -17,8 +18,7 @@ use loonfs_objectstore::keys::probe_runs_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_types::api::v0::StoreProbeResponse;
-use loonfs_types::{CapabilityDocument, PROTOCOL_VERSION};
+use loonfs_types::{CapabilityDocument, StoreProbeResponse, PROTOCOL_VERSION};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,44 +137,8 @@ pub(crate) async fn run_doctor(
 ) -> Result<CommandOutput, CommandFailure> {
     let mut checks = Vec::with_capacity(if args.write_check { 10 } else { 9 });
 
-    let location = match resolve_config_location(config_flag) {
-        Ok(location) => {
-            checks.push(ok(
-                DoctorCheckName::Config,
-                config_resolution_message(&location),
-            ));
-            location
-        }
-        Err(error) => {
-            checks.push(failed(DoctorCheckName::Config, error));
-            skip_remaining(
-                &mut checks,
-                DoctorCheckName::Config,
-                args.write_check,
-                "config path resolution failed",
-            );
-            return Ok(doctor_output(kind, None, None, checks));
-        }
-    };
-
-    let config = match load_config(&location.path) {
-        Ok(config) => {
-            checks.push(ok(
-                DoctorCheckName::ConfigDecode,
-                format!("decoded and validated {}", location.path.display()),
-            ));
-            config
-        }
-        Err(error) => {
-            checks.push(failed(DoctorCheckName::ConfigDecode, error));
-            skip_remaining(
-                &mut checks,
-                DoctorCheckName::ConfigDecode,
-                args.write_check,
-                "config did not decode",
-            );
-            return Ok(doctor_output(kind, None, None, checks));
-        }
+    let Some(config) = config_checks(&mut checks, config_flag, args.write_check) else {
+        return Ok(doctor_output(kind, None, None, checks));
     };
 
     let explicit_profile = selectors.profile.as_deref();
@@ -208,7 +172,7 @@ pub(crate) async fn run_doctor(
     };
     let mode = profile.mode();
 
-    let mut target = match provider_check(&profile_name, &profile, transient_retry).await {
+    let target = match provider_check(&profile_name, &profile, transient_retry).await {
         Ok((message, target)) => {
             checks.push(ok(DoctorCheckName::ProviderConfig, message));
             target
@@ -225,101 +189,24 @@ pub(crate) async fn run_doctor(
         }
     };
 
-    let remote = mode == ProfileMode::Remote;
-    if remote {
-        let result = target
-            .as_ref()
-            .expect("remote provider validation should construct a target")
-            .remote_connectivity()
-            .await;
-        checks.push(check_from_backend_result(
-            DoctorCheckName::Connectivity,
-            "connected to the server",
-            result,
-        ));
-    } else {
-        checks.push(skipped(
-            DoctorCheckName::Connectivity,
-            "embedded profiles do not use a network connection",
-        ));
-    }
-
-    let mut remote_capabilities = None;
-    if remote {
-        let result = target
-            .as_ref()
-            .expect("remote provider validation should construct a target")
-            .client
-            .get_capabilities()
-            .await
-            .map_err(CliError::from);
-        checks.push(match &result {
-            Ok(_) => ok(
-                DoctorCheckName::Auth,
-                "server accepted the capabilities request",
-            ),
-            Err(error) => failed(DoctorCheckName::Auth, error.clone()),
-        });
-        remote_capabilities = Some(result);
-    } else {
-        checks.push(skipped(
-            DoctorCheckName::Auth,
-            "embedded profiles do not authenticate to a server",
-        ));
-    }
-
-    if remote {
-        let result = target
-            .as_ref()
-            .expect("remote provider validation should construct a target")
-            .remote_health()
-            .await;
-        checks.push(check_from_backend_result(
-            DoctorCheckName::Health,
-            "server health endpoint answered successfully",
-            result,
-        ));
-    } else if local_root_is_missing(&profile) && !args.write_check {
-        checks.push(skipped(
-            DoctorCheckName::Health,
-            "local store root is missing; doctor did not create it",
-        ));
-    } else if let ProfileConnection::Embedded { store, .. } = &profile.connection {
-        match ResolvedTarget::resolve(&profile_name, &profile, transient_retry).await {
-            Ok(resolved) => {
-                let (check, healthy_target) = embedded_health_check(resolved, store).await;
-                checks.push(check);
-                target = healthy_target;
-            }
-            Err(error) => checks.push(failed(DoctorCheckName::Health, error)),
+    let target = match mode {
+        ProfileMode::Remote => {
+            let target = target.expect("remote provider validation should construct a target");
+            remote_checks(&mut checks, &target).await;
+            Some(target)
         }
-    }
-
-    let capability_result = if remote {
-        remote_capabilities.expect("the remote auth check should record its capability result")
-    } else if let Some(target) = &target {
-        target
-            .client
-            .get_capabilities()
+        ProfileMode::Embedded => {
+            embedded_checks(
+                &mut checks,
+                &profile_name,
+                &profile,
+                transient_retry,
+                args.write_check,
+                target,
+            )
             .await
-            .map_err(CliError::from)
-    } else {
-        checks.push(skipped(
-            DoctorCheckName::Capabilities,
-            "embedded store was not opened",
-        ));
-        namespace_check(
-            &mut checks,
-            &profile_name,
-            &profile,
-            selectors,
-            target.as_ref(),
-        )
-        .await;
-        append_write_check(&mut checks, args.write_check, target.as_ref()).await;
-        return Ok(doctor_output(kind, Some(profile_name), Some(mode), checks));
+        }
     };
-    checks.push(capability_document_check(capability_result));
 
     namespace_check(
         &mut checks,
@@ -332,6 +219,138 @@ pub(crate) async fn run_doctor(
     append_write_check(&mut checks, args.write_check, target.as_ref()).await;
 
     Ok(doctor_output(kind, Some(profile_name), Some(mode), checks))
+}
+
+/// Resolves and decodes the config file, and returns `None` after recording
+/// the failed check and skipping the rest.
+fn config_checks(
+    checks: &mut Vec<DoctorCheck>,
+    config_flag: Option<&Path>,
+    write_check: bool,
+) -> Option<CliConfig> {
+    let location = match resolve_config_location(config_flag) {
+        Ok(location) => {
+            checks.push(ok(
+                DoctorCheckName::Config,
+                config_resolution_message(&location),
+            ));
+            location
+        }
+        Err(error) => {
+            checks.push(failed(DoctorCheckName::Config, error));
+            skip_remaining(
+                checks,
+                DoctorCheckName::Config,
+                write_check,
+                "config path resolution failed",
+            );
+            return None;
+        }
+    };
+
+    match load_config(&location.path) {
+        Ok(config) => {
+            checks.push(ok(
+                DoctorCheckName::ConfigDecode,
+                format!("decoded and validated {}", location.path.display()),
+            ));
+            Some(config)
+        }
+        Err(error) => {
+            checks.push(failed(DoctorCheckName::ConfigDecode, error));
+            skip_remaining(
+                checks,
+                DoctorCheckName::ConfigDecode,
+                write_check,
+                "config did not decode",
+            );
+            None
+        }
+    }
+}
+
+/// Checks a remote profile's server: connectivity, authentication, health,
+/// and the capability document.
+async fn remote_checks(checks: &mut Vec<DoctorCheck>, target: &ResolvedTarget) {
+    let result = target.remote_connectivity().await;
+    checks.push(check_from_backend_result(
+        DoctorCheckName::Connectivity,
+        "connected to the server",
+        result,
+    ));
+
+    let capabilities = target
+        .client
+        .get_capabilities()
+        .await
+        .map_err(CliError::from);
+    checks.push(match &capabilities {
+        Ok(_) => ok(
+            DoctorCheckName::Auth,
+            "server accepted the capabilities request",
+        ),
+        Err(error) => failed(DoctorCheckName::Auth, error.clone()),
+    });
+
+    let result = target.remote_health().await;
+    checks.push(check_from_backend_result(
+        DoctorCheckName::Health,
+        "server health endpoint answered successfully",
+        result,
+    ));
+    checks.push(capability_document_check(capabilities));
+}
+
+/// Checks an embedded profile's store by opening and listing it, and returns
+/// the opened target, or `None` when the store wasn't opened.
+async fn embedded_checks(
+    checks: &mut Vec<DoctorCheck>,
+    profile_name: &str,
+    profile: &ProfileConfig,
+    transient_retry: TransientRetry,
+    write_check: bool,
+    mut target: Option<ResolvedTarget>,
+) -> Option<ResolvedTarget> {
+    checks.push(skipped(
+        DoctorCheckName::Connectivity,
+        "embedded profiles do not use a network connection",
+    ));
+    checks.push(skipped(
+        DoctorCheckName::Auth,
+        "embedded profiles do not authenticate to a server",
+    ));
+
+    if local_root_is_missing(profile) && !write_check {
+        checks.push(skipped(
+            DoctorCheckName::Health,
+            "local store root is missing; doctor did not create it",
+        ));
+    } else if let ProfileConnection::Embedded { store, .. } = &profile.connection {
+        match ResolvedTarget::resolve(profile_name, profile, transient_retry).await {
+            Ok(resolved) => {
+                let (check, healthy_target) = embedded_health_check(resolved, store).await;
+                checks.push(check);
+                target = healthy_target;
+            }
+            Err(error) => checks.push(failed(DoctorCheckName::Health, error)),
+        }
+    }
+
+    match &target {
+        Some(target) => {
+            let result = target
+                .client
+                .get_capabilities()
+                .await
+                .map_err(CliError::from);
+            checks.push(capability_document_check(result));
+        }
+        None => checks.push(skipped(
+            DoctorCheckName::Capabilities,
+            "embedded store was not opened",
+        )),
+    }
+    target
 }
 
 async fn embedded_health_check(
@@ -451,7 +470,7 @@ async fn append_write_check(
     };
     match target
         .client
-        .probe_store(&loonfs_types::api::v0::StoreProbeRequest {})
+        .probe_store(&loonfs_types::StoreProbeRequest {})
         .await
     {
         Ok(response) => checks.push(store_probe_check(response)),
@@ -510,7 +529,7 @@ fn local_root_is_missing(profile: &ProfileConfig) -> bool {
     )
 }
 
-fn config_resolution_message(location: &crate::config::ConfigLocation) -> String {
+fn config_resolution_message(location: &crate::config_file::ConfigLocation) -> String {
     match location.source {
         ConfigSource::Flag => format!("resolved {} from --config", location.path.display()),
         ConfigSource::Env => format!("resolved {} from LOONFS_CONFIG", location.path.display()),
@@ -621,7 +640,7 @@ mod tests {
         FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
         RecordingStore,
     };
-    use loonfs_types::api::v0::{StoreProbeCheck, StoreProbeCheckOutcome};
+    use loonfs_types::{StoreProbeCheck, StoreProbeCheckOutcome};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 

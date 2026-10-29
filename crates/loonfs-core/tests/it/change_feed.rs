@@ -5,10 +5,10 @@ use loonfs_core::publish::{CommitIntent, FilesystemOperation};
 use loonfs_core::test_support::NamespaceFixture;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::commit_id;
-use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_types::{
     AbsolutePath, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
 };
+use loonfs_types::{FilesystemChange, ListChangesResponse};
 use tempfile::tempdir;
 
 fn path(value: &str) -> AbsolutePath {

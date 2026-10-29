@@ -60,7 +60,7 @@ pub enum GrepIndexStatus {
     },
     /// Grep indexing and queries are disabled for this namespace.
     ///
-    /// This closed status carries no phase-specific state.
+    /// This closed status has no phase-specific state.
     Disabled {},
 }
 
@@ -85,7 +85,7 @@ impl GrepIndexStatus {
     }
 }
 
-impl From<&GrepIndexStatus> for loonfs_types::api::v0::GrepIndexStatus {
+impl From<&GrepIndexStatus> for loonfs_types::GrepIndexStatus {
     fn from(status: &GrepIndexStatus) -> Self {
         match status {
             GrepIndexStatus::Disabled {} => Self::Disabled,
@@ -130,7 +130,7 @@ pub struct GrepReorganizeState {
 ///
 /// Segments can be written and reorganized during both backfill and active
 /// indexing. Shared state therefore lives here, while phase-specific state
-/// lives in [`GrepIndexStatus`].
+/// is in [`GrepIndexStatus`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepIndexState {

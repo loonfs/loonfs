@@ -59,7 +59,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("fresh-worker"));
-    let idle_ms = loonfs::DEFAULT_IDLE_FOLD_AFTER_MS;
+    let idle_ms = loonfs::DEFAULT_IDLE_FOLD_AFTER_MS.get();
 
     clock.set_ms(COMMITTED_AT_MS + idle_ms - 1);
     assert_eq!(

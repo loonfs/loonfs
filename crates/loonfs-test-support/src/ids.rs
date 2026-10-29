@@ -48,7 +48,7 @@ pub fn commit_fingerprint(label: &str) -> CommitFingerprint {
         .expect("a hashed label should be a valid commit fingerprint")
 }
 
-/// Builds a reference to a fresh content object holding `bytes`, the way
+/// Builds a reference to a fresh content object that contains `bytes`, the way
 /// every production write path does.
 ///
 /// Each call mints a new identity, so two calls with the same bytes give two

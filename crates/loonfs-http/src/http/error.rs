@@ -94,9 +94,9 @@ impl ApiResponseError {
     }
 
     /// Stamps the mutation's idempotency key into the error details, so a
-    /// failed or uncertain outcome carries the caller's reconciliation
+    /// failed or uncertain outcome includes the caller's reconciliation
     /// handle (API spec, "Commit responses and safe retry"). Details the
-    /// error already carries win over the stamp.
+    /// error already includes win over the stamp.
     pub(super) fn with_commit_id(mut self, commit_id: &CommitId) -> Self {
         self.body
             .details
@@ -121,7 +121,7 @@ impl ApiResponseError {
     }
 
     /// Maps a failure from the host's writable handle for `namespace_id`, and
-    /// stops holding it when its session is fenced or its namespace is gone.
+    /// drops the handle when its session is fenced or its namespace is gone.
     pub(super) fn runtime_for_namespace_writer(
         namespaces: &dyn WriterSessions,
         namespace_id: &NamespaceId,
@@ -171,7 +171,7 @@ pub(super) fn status_for(code: ErrorCode) -> StatusCode {
             StatusCode::SERVICE_UNAVAILABLE
         }
         ErrorKind::DataCorruption | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-        // A kind without an explicit arm serves as 500 until someone decides
+        // A kind without an explicit arm serves as 500 until someone chooses
         // its real status. The spec-table test in `super::tests` fails on any
         // code whose served status disagrees with the api.md registry, so new
         // kinds cannot ship on this default silently.

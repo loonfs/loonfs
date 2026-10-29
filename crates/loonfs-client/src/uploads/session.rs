@@ -5,12 +5,12 @@ use crate::operations;
 use crate::transport::{decode_json, SendPolicy, WireRequest};
 use crate::{Client, ClientError, PayloadSource, Result};
 use bytes::Bytes;
-use loonfs_types::api::v0::{
+use loonfs_types::options::DirectMultipartUploadOptions;
+use loonfs_types::{Checksum, NamespaceId, UploadId};
+use loonfs_types::{
     CompleteUploadBody, CompletedUploadPart, CreateUploadBody, ObjectTransferAccess,
     SignUploadPartsRequest, SignUploadPartsResponse, UploadPartChecksumClaim, UploadSession,
 };
-use loonfs_types::options::DirectMultipartUploadOptions;
-use loonfs_types::{Checksum, NamespaceId, UploadId};
 
 impl Client {
     /// Starts an upload session using the transport selected by the request.
@@ -135,7 +135,7 @@ impl Client {
     }
 
     /// Writes one whole object to a presigned URL from a source read in
-    /// pieces, so the payload crosses the network without ever being held.
+    /// pieces, so the payload crosses the network without ever being kept whole in memory.
     ///
     /// Like the buffered form this never retries: a create-only PUT that
     /// succeeded can come back as a provider precondition error on a second
@@ -170,9 +170,9 @@ impl Client {
     /// Stages a payload that arrives in pieces, forwarding it to the server
     /// as it is read.
     ///
-    /// This is [`Self::put_upload_content`] for a caller that does not hold its
+    /// This is [`Self::put_upload_content`] for a caller that does not have its
     /// bytes: the payload crosses the client in bounded chunks and the
-    /// server hashes it as it forwards it on, so neither side ever holds the
+    /// server hashes it as it forwards it on, so neither side ever keeps the
     /// object. A source whose length is unknown is sent with chunked
     /// transfer encoding, and the server's own limit is what bounds it.
     ///
@@ -208,7 +208,7 @@ impl Client {
     ///
     /// Repeating it succeeds and reports the abort that stands. A one-shot
     /// upload calls it when its transfer or completion fails, so the session
-    /// does not hold an object nothing will finish.
+    /// does not keep an object that nothing will finish.
     pub async fn abort_upload(
         &self,
         namespace_id: &NamespaceId,

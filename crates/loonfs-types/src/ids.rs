@@ -248,7 +248,7 @@ string_id! {
     )
 }
 
-/// Most bytes one writer ID may hold.
+/// Most bytes one writer ID may contain.
 pub const MAX_WRITER_ID_BYTES: usize = 256;
 
 string_id! {

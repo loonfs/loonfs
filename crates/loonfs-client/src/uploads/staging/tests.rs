@@ -6,15 +6,19 @@
 
 use super::*;
 use crate::scripted_transport::{self, Outcome};
+use crate::transport::tests::retry_policy_client;
+use crate::uploads::staging::multipart::DIRECT_MULTIPART_PARTS_IN_FLIGHT;
 use crate::{ClientConfig, NamespacePath};
+use bytes::Bytes;
 use futures::stream::StreamExt;
 use loonfs_test_support::ids::content_ref;
-use loonfs_types::api::v0::{Commit, SignUploadPartsResponse};
 use loonfs_types::options::PutFileOptions;
+use loonfs_types::SignedUploadPart;
 use loonfs_types::{
     ChangeSeq, CommitId, ContentId, ContentRefKind, FilesystemOperation, API_GROUP_FILESYSTEM_V0,
     PROTOCOL_VERSION,
 };
+use loonfs_types::{Commit, SignUploadPartsResponse};
 use std::assert_matches;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -598,7 +602,7 @@ async fn a_proxied_put_streams_its_body() {
         json(&UploadSession {
             namespace_id: namespace_id(),
             upload_id: upload_id(),
-            mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
+            mode: loonfs_types::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
                 checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -642,7 +646,7 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
         json(&UploadSession {
             namespace_id: namespace_id(),
             upload_id: upload_id(),
-            mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
+            mode: loonfs_types::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
                 checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -1018,7 +1022,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         json(&UploadSession {
             namespace_id: namespace_id(),
             upload_id: upload_id(),
-            mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
+            mode: loonfs_types::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
                 checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -1226,4 +1230,54 @@ async fn streams_over_the_inline_limit_upload_the_buffered_prefix_and_remainder(
     assert_eq!(sent[2].body_bytes(), bytes.len());
     assert!(sent[1].url.ends_with("/uploads"));
     assert!(sent[4].url.ends_with("/commits"));
+}
+
+#[tokio::test]
+async fn staging_rejects_a_non_completed_completion_response() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("valid upload id");
+    let statuses = [
+        (
+            "open",
+            UploadSessionStatus::Open {
+                expires_at_ms: 1_000,
+                checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
+                part_size_bytes: None,
+                access: None,
+                content_ref: None,
+            },
+        ),
+        (
+            "aborted",
+            UploadSessionStatus::Aborted {
+                aborted_at_ms: 2_000,
+            },
+        ),
+    ];
+
+    for (status_name, status) in statuses {
+        let response = UploadSession {
+            namespace_id: namespace_id.clone(),
+            upload_id: upload_id.clone(),
+            mode: loonfs_types::UploadMode::ServiceProxied,
+            status,
+        };
+        let transport =
+            crate::scripted_transport::script([crate::scripted_transport::Outcome::Success(
+                serde_json::to_vec(&response).expect("serialize response"),
+            )]);
+        let client = retry_policy_client(&transport);
+
+        let error = client
+            .complete_staged(&namespace_id, &upload_id)
+            .await
+            .expect_err("a completion response must report completed");
+        assert_matches!(
+            &error,
+            ClientError::Protocol(message)
+                if message.contains(upload_id.as_str()) && message.contains(status_name),
+            "expected protocol error, got {error:?}"
+        );
+        assert_eq!(transport.attempts(), 1);
+    }
 }

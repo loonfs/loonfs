@@ -1,8 +1,8 @@
 //! Manifest publications that start from a basis the caller already has.
 
+use super::super::publish::ManifestChange;
 use super::*;
 use crate::limits::{MANIFEST_PROBE_WINDOW, MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
-use crate::manifest::publish::ManifestChange;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::PublicationBasis;
 use crate::time::Observation;

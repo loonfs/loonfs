@@ -10,8 +10,8 @@ use loonfs_core::commit::CommitFingerprint;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::WalPublishError;
 use loonfs_core::Phase;
-use loonfs_types::api::v0::Commit;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
+use loonfs_types::Commit;
 use loonfs_types::{u64_from_usize, CommitId, MonotonicTimer, NamespaceId};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -378,7 +378,7 @@ where
                 Ok(response) => {
                     return Err(CoreError::CommitIdReuseConflict {
                         commit_id: commit_id.to_string(),
-                        committed: Some(loonfs_types::api::v0::CommittedReceipt {
+                        committed: Some(loonfs_types::CommittedReceipt {
                             committed_seq: response.committed_seq,
                             committed_fingerprint: primary_identity,
                         }),
@@ -410,7 +410,7 @@ async fn receive_delete(
     })
 }
 
-/// Waiters a landed delete barrier leaves behind, one vector per result
+/// Waiters a published delete barrier leaves behind, one vector per result
 /// type.
 #[derive(Default)]
 pub(super) struct QueuedWaiters {
@@ -418,8 +418,8 @@ pub(super) struct QueuedWaiters {
     pub(super) deletes: Vec<AdmittedWaiter<Result<DeleteNamespaceResponse>>>,
 }
 
-/// Empties the queue and hands back every waiter it held. Called once the
-/// delete barrier lands: nothing queued behind a tombstone may publish.
+/// Empties the queue and hands back every waiter it kept. Called once the
+/// delete barrier is published: nothing queued behind a tombstone may publish.
 pub(super) fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
     let mut waiters = QueuedWaiters::default();
     for item in std::mem::take(&mut state.queue) {

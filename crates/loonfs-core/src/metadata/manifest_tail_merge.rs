@@ -1,11 +1,11 @@
 //! [`ManifestTailMerge`]: merges a paged scan of manifest rows with the rows
-//! that the WAL tail holds in the same range, in row-key order.
+//! that the WAL tail contains in the same range, in row-key order.
 
 use crate::error::Result;
 use std::collections::VecDeque;
 use std::future::Future;
 
-/// Which side a merge takes first when both hold a row with the same key.
+/// Which side a merge takes first when both contain a row with the same key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TieOrder {
     TailFirst,
@@ -15,14 +15,14 @@ pub(super) enum TieOrder {
 /// One page of a manifest scan, in row-key order.
 pub(super) struct ManifestPage<T> {
     pub(super) rows: Vec<(String, T)>,
-    /// Whether the scanned range can hold rows after this page.
+    /// Whether the scanned range can contain rows after this page.
     pub(super) more: bool,
 }
 
 /// A merge of manifest pages, read on demand, with a sorted set of tail
 /// rows.
 ///
-/// The merge buffers one manifest page at a time, so it holds at most one
+/// The merge buffers one manifest page at a time, so it keeps at most one
 /// page of manifest rows beside the tail rows.
 pub(super) struct ManifestTailMerge<T> {
     position: ScanPosition,

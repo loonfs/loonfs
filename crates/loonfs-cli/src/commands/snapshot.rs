@@ -66,7 +66,7 @@ async fn run_snapshot_list(
             .list_snapshots(context.namespace())
             .cursor(args.pagination.cursor),
         &args.pagination.page_limits,
-        |_: &loonfs_types::api::v0::ListSnapshotsResponse| {},
+        |_: &loonfs_types::ListSnapshotsResponse| {},
     )
     .await
     .map_err(|error| context.fail(error))?;

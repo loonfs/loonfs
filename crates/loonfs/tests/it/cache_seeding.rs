@@ -148,7 +148,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     recording.inner().block_next();
-    for number in 0..FOLD_AT_WAL_OBJECTS + 3 {
+    for number in 0..FOLD_AT_WAL_OBJECTS.get() + 3 {
         // The bootstrap leaves one WAL object, and the fold stays blocked.
         let tail_objects = number + 2;
         recording.reset();
@@ -159,7 +159,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
             )
             .await
             .expect("publish directory");
-        if tail_objects == FOLD_AT_WAL_OBJECTS {
+        if tail_objects == FOLD_AT_WAL_OBJECTS.get() {
             recording.inner().wait_until_blocked().await;
         }
         if number > 0 {
@@ -232,7 +232,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         .load_wal_tail_usage()
         .await
         .expect("tail usage after fold");
-    assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS);
+    assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS.get());
     writer.shutdown().await.expect("shutdown");
 }
 

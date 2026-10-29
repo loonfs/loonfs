@@ -7,7 +7,7 @@ use crate::storage::content_admission::PreparedContent;
 use loonfs_objectstore::keys::{
     content_blob, upload_outcome, upload_session, upload_session_prefix,
 };
-use loonfs_types::api::v0::CompleteUploadBody;
+use loonfs_types::CompleteUploadBody;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Commits `prepared` at `path`.
@@ -52,7 +52,7 @@ async fn complete_proxied<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     now_ms: u64,
-) -> crate::error::Result<crate::protocol::CompletedUpload> {
+) -> crate::error::Result<crate::upload::complete::CompletedUpload> {
     crate::test_support::NamespaceFixture::new(store, namespace_id, &context(now_ms))
         .engine()
         .complete_upload(
@@ -71,7 +71,7 @@ async fn abort<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     now_ms: u64,
-) -> crate::error::Result<loonfs_types::api::v0::UploadSession> {
+) -> crate::error::Result<loonfs_types::UploadSession> {
     let catalog = crate::test_support::namespace_store(store, namespace_id)
         .load_catalog_entry()
         .await

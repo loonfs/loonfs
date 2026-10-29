@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::manifest::CompactionUnitOutcome;
+use crate::compaction::CompactionUnitOutcome;
 use crate::namespace::control::LoadedManifest;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_types::MetadataFamilyGroup;
@@ -42,9 +42,9 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        crate::manifest::CompactionAdmission::AnySize,
+        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
-        &crate::manifest::MetadataCompactionCancellation::default(),
+        &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("compact bindings");

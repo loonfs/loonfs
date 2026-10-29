@@ -6,9 +6,9 @@ use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::Json;
 use loonfs_objectstore::probe::run_store_contract_probe;
-use loonfs_types::api::v0::{StoreProbeRequest, StoreProbeResponse};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
+use loonfs_types::{StoreProbeRequest, StoreProbeResponse};
 use std::sync::Arc;
 
 #[cfg_attr(

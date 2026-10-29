@@ -2,9 +2,10 @@
 //! content write permits, and run policy that its operations use. Each
 //! operation is a method in the module that implements it.
 
-use crate::manifest::{HeadAndWalTailCache, MetadataRunPolicy, MetadataSegmentCache};
+use crate::namespace::head_cache::HeadAndWalTailCache;
 use crate::object_cache::ObjectCache;
 use crate::permit_pool::PermitPool;
+use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use crate::time::OperationClock;
 use loonfs_types::{MonotonicTimer, NamespaceId, WallClock};
 use std::sync::Arc;

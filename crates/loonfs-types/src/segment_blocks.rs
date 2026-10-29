@@ -13,32 +13,33 @@ use thiserror::Error;
 use xxhash_rust::xxh64::xxh64;
 
 /// Target uncompressed size of one data block.
-pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 64 * 1024;
+pub const DEFAULT_TARGET_BLOCK_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024).unwrap();
 /// Number of delta runs at which a merge is due, whatever the runs' sizes.
-pub const DEFAULT_MAX_DELTA_RUNS: usize = 8;
+pub const DEFAULT_MAX_DELTA_RUNS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 /// Number of similar-size metadata runs in one family group that makes a
 /// merge due.
-pub const DEFAULT_MIN_COMPACTION_RUNS: usize = 4;
+pub const DEFAULT_MIN_COMPACTION_RUNS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 /// Target number of rows in one immutable segment.
-pub const DEFAULT_MAX_ROWS_PER_SEGMENT: usize = 65_536;
+pub const DEFAULT_MAX_ROWS_PER_SEGMENT: NonZeroUsize = NonZeroUsize::new(65_536).unwrap();
 /// Target decoded data bytes in one metadata segment.
 ///
 /// A row is never split.
 pub const DEFAULT_TARGET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum number of runs read by one compaction unit.
-pub const DEFAULT_MAX_COMPACTION_INPUT_RUNS: usize = 8;
+pub const DEFAULT_MAX_COMPACTION_INPUT_RUNS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 // A merge above a group's oldest run needs two runs, and a group at the delta
 // run limit has enough delta runs for one unit to merge the minimum.
 const _: () = assert!(
-    2 <= DEFAULT_MIN_COMPACTION_RUNS
-        && DEFAULT_MIN_COMPACTION_RUNS <= DEFAULT_MAX_DELTA_RUNS
-        && DEFAULT_MIN_COMPACTION_RUNS <= DEFAULT_MAX_COMPACTION_INPUT_RUNS
+    2 <= DEFAULT_MIN_COMPACTION_RUNS.get()
+        && DEFAULT_MIN_COMPACTION_RUNS.get() <= DEFAULT_MAX_DELTA_RUNS.get()
+        && DEFAULT_MIN_COMPACTION_RUNS.get() <= DEFAULT_MAX_COMPACTION_INPUT_RUNS.get()
 );
 /// Maximum number of rows that one bounded maintenance step reads, such as the
 /// compaction unit of one metadata maintenance pass.
-pub const DEFAULT_MAX_COMPACTION_INPUT_ROWS: usize = 131_072;
+pub const DEFAULT_MAX_COMPACTION_INPUT_ROWS: NonZeroUsize = NonZeroUsize::new(131_072).unwrap();
 /// Maximum decoded input that one build or merge keeps in memory at once.
-pub const DEFAULT_MAX_COMPACTION_INPUT_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_COMPACTION_INPUT_BYTES: NonZeroUsize =
+    NonZeroUsize::new(64 * 1024 * 1024).unwrap();
 /// Maximum stored filter size embedded in a segment descriptor.
 pub const DEFAULT_MAX_INLINE_FILTER_BYTES: u32 = 1024;
 /// Entries between restart points inside a data block.
@@ -53,7 +54,7 @@ const FILTER_HASH_SEED_TWO: u64 = 0x9e37_79b9_7f4a_7c15;
 /// Compression level for every zstd-compressed durable artifact.
 pub(crate) const ZSTD_LEVEL: i32 = 3;
 
-/// Where one stored section lives inside a segment object, and how to
+/// Where one stored section is inside a segment object, and how to
 /// verify it: `stored_bytes`, `decoded_bytes`, and the CRC32C of the stored bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,7 +80,7 @@ pub struct SegmentIndexEntry {
 }
 
 /// A finished segment: the object bytes plus everything the manifest
-/// descriptor must carry to read them back.
+/// descriptor must include to read them back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltSegmentBlocks {
     /// Complete immutable object body, with data sections followed by filter and index sections.
@@ -133,7 +134,7 @@ pub struct DecodedDataBlock<R = MetadataRow> {
     pub rows: Vec<R>,
 }
 
-/// A decoded bloom filter; answers "definitely absent" or "maybe present".
+/// A decoded bloom filter; returns "definitely absent" or "maybe present".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentFilter {
     n_hashes: u32,
@@ -213,7 +214,7 @@ pub struct SegmentBlocksBuilder {
 
 impl Default for SegmentBlocksBuilder {
     fn default() -> Self {
-        Self::new(const { NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).unwrap() })
+        Self::new(DEFAULT_TARGET_BLOCK_BYTES)
     }
 }
 
@@ -239,7 +240,7 @@ impl SegmentBlocksBuilder {
     ///
     /// `filter_key` is the lookup prefix point reads will probe for this row;
     /// the caller derives it per family. The row is any CBOR payload; a segment
-    /// must hold one row type throughout, named by the descriptor family that
+    /// must contain one row type throughout, named by the descriptor family that
     /// references it.
     pub fn push<R: Serialize>(
         &mut self,
@@ -596,7 +597,7 @@ pub fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
     None
 }
 
-/// Returns the index positions of the blocks that can hold keys in `[lower_bound,
+/// Returns the index positions of the blocks that can contain keys in `[lower_bound,
 /// upper_bound)`; `None` bounds the range at the last block.
 pub fn index_blocks_for_key_range(
     index: &[SegmentIndexEntry],
@@ -606,7 +607,7 @@ pub fn index_blocks_for_key_range(
     let start = index.partition_point(|entry| entry.last_row_key.as_str() < lower_bound);
     let end = upper_bound.map_or(index.len(), |upper_bound| {
         // A block whose last row key equals the exclusive upper bound can still
-        // hold keys below it, so the bound block itself is included.
+        // contain keys below it, so the bound block itself is included.
         index
             .partition_point(|entry| entry.last_row_key.as_str() < upper_bound)
             .saturating_add(1)
@@ -660,8 +661,9 @@ fn decode_section(
         });
     }
     let payload = if compressed {
-        let mut payload =
-            Vec::with_capacity((handle.decoded_bytes as usize).min(DEFAULT_TARGET_BLOCK_BYTES));
+        let mut payload = Vec::with_capacity(
+            (handle.decoded_bytes as usize).min(DEFAULT_TARGET_BLOCK_BYTES.get()),
+        );
         zstd::Decoder::new(stored)
             .and_then(|decoder| {
                 decoder

@@ -1,5 +1,5 @@
 //! The base64 checksum spelling that provider headers and request bodies
-//! carry. The wire [`Checksum`] spells the same bytes in lowercase hex.
+//! include. The wire [`Checksum`] spells the same bytes in lowercase hex.
 
 use base64::Engine as _;
 use loonfs_types::format::hex::hex_decode_bytes;

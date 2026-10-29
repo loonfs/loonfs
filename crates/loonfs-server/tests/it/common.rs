@@ -376,10 +376,8 @@ root = "unused"
 pub(crate) mod http_split_support {
     use loonfs_client::{Client, PutFileOptions};
     use loonfs_types::{
-        api::v0::{
-            CompleteUploadBody, ContentToken, CreateUploadBody, UploadMode, UploadSessionStatus,
-        },
-        CommitRequest, ContentRef, DestinationBehavior, NamespaceId,
+        CommitRequest, CompleteUploadBody, ContentRef, ContentToken, CreateUploadBody,
+        DestinationBehavior, NamespaceId, UploadMode, UploadSessionStatus,
     };
 
     use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;

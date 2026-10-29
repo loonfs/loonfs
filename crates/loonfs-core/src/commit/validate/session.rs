@@ -58,7 +58,7 @@ impl<'a, S: ObjectStore + ?Sized> CommitValidationSession<'a, S> {
     /// next operation is validated, and returns the deltas.
     ///
     /// `revision_layout` returns the layout that a revision of a content
-    /// reference carries, when the commit planned one.
+    /// reference includes, when the commit planned a reference.
     pub(crate) async fn validate(
         &mut self,
         ops: &[CommitOperation],

@@ -12,11 +12,10 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
-use loonfs_types::api::v0::CompleteUploadBody;
+use loonfs_types::CompleteUploadBody;
 use loonfs_types::{
-    api::v0::{FilesystemChange, UploadSessionStatus},
-    AbsolutePath, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, InodeId, NamespaceId,
-    RevisionNo,
+    AbsolutePath, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, FilesystemChange,
+    InodeId, NamespaceId, RevisionNo, UploadSessionStatus,
 };
 use std::assert_matches;
 use tempfile::tempdir;

@@ -7,9 +7,9 @@ mod snapshot_fork_gc;
 mod snapshot_renewal;
 
 use super::record;
+use crate::compaction::{CompactionUnitOutcome, MetadataCompactionPolicy};
 use crate::error::{CoreError, ErrorCode};
 use crate::manifest::tests::*;
-use crate::manifest::{CompactionUnitOutcome, MetadataCompactionPolicy};
 use crate::test_support::WriterAt;
 use async_trait::async_trait;
 use bytes::Bytes;

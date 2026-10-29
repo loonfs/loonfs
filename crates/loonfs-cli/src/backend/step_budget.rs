@@ -3,9 +3,7 @@
 use crate::error::Result;
 use crate::resolve::{Backend, ResolvedTarget};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome};
-use loonfs_types::api::v0::GrepIndexStatus;
-use loonfs_types::{ChangeSeq, NamespaceId};
-use loonfs_types::{MonotonicTimer, StdMonotonicTimer};
+use loonfs_types::{ChangeSeq, GrepIndexStatus, MonotonicTimer, NamespaceId, StdMonotonicTimer};
 use std::future::Future;
 
 impl ResolvedTarget {
@@ -130,8 +128,7 @@ pub(super) async fn rest_between_status_checks() {
 #[cfg(test)]
 mod tests {
     use super::{wait_for_grep_index, GrepWaitOutcome, GrepWaitProgress, StepBudget};
-    use loonfs_types::api::v0::GrepIndexStatus;
-    use loonfs_types::ChangeSeq;
+    use loonfs_types::{ChangeSeq, GrepIndexStatus};
     use std::cell::Cell;
 
     #[tokio::test]

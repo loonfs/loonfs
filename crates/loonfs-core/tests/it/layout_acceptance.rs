@@ -18,8 +18,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
-use loonfs_types::api::v0::CompleteUploadBody;
 use loonfs_types::AbsolutePath;
+use loonfs_types::CompleteUploadBody;
 use loonfs_types::{ChangeSeq, NamespaceId};
 use tempfile::tempdir;
 

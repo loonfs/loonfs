@@ -2,13 +2,10 @@
 
 use super::summaries::*;
 use crate::commands::MaintenanceRan;
-use loonfs_types::api::v0::{
-    DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, Snapshot,
-    StoreProbeResponse,
-};
 use loonfs_types::{
-    ChangeSeq, DeleteNamespaceResponse, ListCheckpointsResponse, MetadataMaintenanceOutcome,
-    NamespaceMetadata, RunMaintenanceResponse,
+    ChangeSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
+    ListCheckpointsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome, NamespaceMetadata,
+    RunMaintenanceResponse, Snapshot, StoreProbeResponse,
 };
 
 pub(super) fn human_default_namespace(profile: &str, namespace: &str) -> String {
@@ -24,13 +21,11 @@ pub(super) fn human_current(profile: &str, namespace: Option<&str>) -> String {
 
 pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
     let access = match &namespace.access {
-        loonfs_types::api::v0::NamespaceAccessMode::Unrestricted {} => "unrestricted".to_owned(),
-        loonfs_types::api::v0::NamespaceAccessMode::Acl { principal_scope } => {
+        loonfs_types::NamespaceAccessMode::Unrestricted {} => "unrestricted".to_owned(),
+        loonfs_types::NamespaceAccessMode::Acl { principal_scope } => {
             format!("acl (scope {principal_scope})")
         }
-        loonfs_types::api::v0::NamespaceAccessMode::Unknown => {
-            "access mode unknown to this CLI".to_owned()
-        }
+        loonfs_types::NamespaceAccessMode::Unknown => "access mode unknown to this CLI".to_owned(),
     };
     format!(
         "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}\n\

@@ -7,7 +7,7 @@ use loonfs_types::format::segment_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use std::sync::Arc;
 
 /// Default decoded-byte budget for cached grep manifests and segment blocks.
-pub const DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES: usize = 4_096 * DEFAULT_TARGET_BLOCK_BYTES;
+pub const DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES: usize = 4_096 * DEFAULT_TARGET_BLOCK_BYTES.get();
 
 /// Grep's cache for decoded manifests and segment blocks.
 pub type GrepBlockCache = DecodedBlockCache<SegmentCacheKey, DecodedGrepBlock>;

@@ -40,7 +40,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             .authorize(source.parent_inode_id()?, remove, source.absence())
             .await?;
         // Replace compiles to an atomic delete-plus-rename: the destination
-        // file's delete and the source's rebind land in one commit, and the
+        // file's delete and the source's rebind are written in one commit, and the
         // rename's target-name check observes the in-commit unbind. Mirrors
         // put: only a file destination can be replaced, and a path never
         // replaces itself.
@@ -251,11 +251,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 // A copy to a vacant destination is a new resource that
                 // stands for the source, so it starts with the source's
                 // attributes. The new inode is at revision 0 with an empty
-                // map, so carrying them over is a second internal operation
+                // map, so copying them over is a second internal operation
                 // with its own feed event. Copying over an existing file
                 // changes nothing about that file's attributes: the
                 // destination is a resource that already exists and keeps
-                // what it holds.
+                // what it contains.
                 let source_attributes = self
                     .view
                     .metadata
@@ -263,7 +263,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                     .await?
                     .attributes;
                 if !source_attributes.is_empty() {
-                    // Both operations carry the one identity assigned above,
+                    // Both operations include the one identity assigned above,
                     // so validation cannot allocate a different inode for
                     // either.
                     ops.push(CommitOperation::UpdateAttributes {

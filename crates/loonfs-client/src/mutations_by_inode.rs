@@ -1,11 +1,11 @@
 //! Filesystem mutations addressed by inode ID.
 
 use crate::{Client, Result};
-use loonfs_types::api::v0::Commit;
 use loonfs_types::options::{
     AccessState, AppendFileByInodeOptions, AttributeChanges, CommitOptions, CopyOptions,
     DeleteByInodeOptions, MoveOptions, UpdateAccessByInodeOptions, UpdateAttributesByInodeOptions,
 };
+use loonfs_types::Commit;
 use loonfs_types::{
     ActorId, BindingVersion, CommitRequest, DisplayName, FilesystemOperation, InodeId, NamespaceId,
     RevisionNo,

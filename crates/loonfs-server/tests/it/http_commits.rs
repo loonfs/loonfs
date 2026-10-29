@@ -11,9 +11,9 @@ use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    api::v0::{Commit, FilesystemChange},
-    AbsolutePath, ChangeSeq, CommitId, CommitRequest, ContentRef, DeleteDirectoryBehavior,
-    DestinationBehavior, ErrorCode, ErrorResponse, FilesystemOperation, RevisionNo, ROOT_INODE_ID,
+    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef, DeleteDirectoryBehavior,
+    DestinationBehavior, ErrorCode, ErrorResponse, FilesystemChange, FilesystemOperation,
+    RevisionNo, ROOT_INODE_ID,
 };
 use tempfile::tempdir;
 

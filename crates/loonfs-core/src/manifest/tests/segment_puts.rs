@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
-use crate::manifest::row::manifest_rows_for_family;
-use crate::manifest::runs::MetadataRunPolicy;
+use crate::segment::row::manifest_rows_for_family;
+use crate::segment::runs::MetadataRunPolicy;
 use crate::test_support::WriterAt;
 use crate::time::StdMonotonicTimer;
 use loonfs_objectstore::keys::{

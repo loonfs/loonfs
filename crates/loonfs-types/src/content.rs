@@ -167,7 +167,7 @@ impl Checksum {
     /// Builds the `algorithm` checksum for these complete bytes.
     ///
     /// The one-shot forms below are this with the algorithm spelled out, so
-    /// a payload held whole and one delivered in pieces cannot drift: both
+    /// a payload kept whole in memory and one delivered in pieces cannot drift: both
     /// close the same digest.
     pub fn compute(algorithm: ChecksumAlgorithm, bytes: &[u8]) -> Self {
         let mut digest = ChecksumDigest::new(algorithm);
@@ -237,7 +237,7 @@ pub enum ChecksumValidationError {
 pub struct ChecksumDigest {
     algorithm: ChecksumAlgorithm,
     // Boxed because a `crc_fast::Digest` is about 300 bytes, and every enum
-    // that holds a digest would otherwise be that large.
+    // that contains a digest would otherwise be that large.
     digest: Box<crc_fast::Digest>,
 }
 
@@ -292,7 +292,7 @@ fn crc_fast_algorithm(algorithm: ChecksumAlgorithm) -> crc_fast::CrcAlgorithm {
 /// A streamed read's check against its content reference.
 ///
 /// A read that starts at a nonzero offset first folds in the bytes below that
-/// offset, which the caller already holds, so the checksum covers the whole
+/// offset, which the caller already has, so the checksum covers the whole
 /// content. Each fetched chunk is folded in after that. At the end,
 /// [`Self::finish`] compares the byte count and the checksum with the
 /// reference, and every later call returns the same result.
@@ -328,7 +328,7 @@ impl ContentVerifier {
         }
     }
 
-    /// Folds in held bytes from below the start offset, in order.
+    /// Folds in the caller's bytes from below the start offset, in order.
     ///
     /// A prefix that runs past the start offset, or that arrives after the
     /// first fetched chunk or after [`Self::finish`], is refused, and none of
@@ -503,7 +503,7 @@ pub struct ContentRef {
 }
 
 impl ContentRef {
-    /// Builds a reference to a freshly minted content object holding these bytes.
+    /// Builds a reference to a freshly minted content object that contains these bytes.
     ///
     /// Every caller of this constructor moves the bytes through the LoonFS
     /// write path, so the checksum is trusted by construction.

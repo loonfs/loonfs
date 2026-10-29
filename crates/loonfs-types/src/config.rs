@@ -5,7 +5,7 @@
 use http::Uri;
 use thiserror::Error;
 
-/// A config field that is missing or holds an invalid value.
+/// A config field that is missing or has an invalid value.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ConfigFieldError {

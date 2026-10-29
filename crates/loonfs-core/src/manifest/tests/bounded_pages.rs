@@ -1,9 +1,12 @@
 //! Bounded loading must return the same raw-row prefix as an unbounded scan.
 
-use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
-use super::super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
-use super::super::segment_block_cache::{MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad};
 use super::*;
+use crate::manifest::tests::inspection_materialization::load_manifest_segment_rows_in_key_range_with_cache;
+use crate::segment::block_memo::SessionBlockMemo;
+use crate::segment::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
+use crate::segment::segment_block_cache::{
+    MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad,
+};
 use loonfs_test_support::stores::{replace_object, ConcurrencyWatchStore};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -76,7 +79,7 @@ fn cache_with_window(max_decoded_bytes: usize, window_bytes: usize) -> MetadataS
             max_decoded_bytes,
         )),
         ObjectStoreScope::new(0),
-        crate::manifest::cache::unshared_read_working_memory(),
+        crate::segment::cache::unshared_read_working_memory(),
         window_bytes,
     )
 }
@@ -89,14 +92,10 @@ async fn window_of_blocks(
     start: usize,
     blocks: usize,
 ) -> usize {
-    let index = index_block_load::load_segment_index(
-        store,
-        None,
-        &load::SessionBlockMemo::default(),
-        descriptor,
-    )
-    .await
-    .expect("index");
+    let index =
+        index_block_load::load_segment_index(store, None, &SessionBlockMemo::default(), descriptor)
+            .await
+            .expect("index");
     let window_bytes = index[start + blocks].block.offset - index[start].block.offset;
     usize::try_from(window_bytes).expect("a test window fits usize")
 }
@@ -135,7 +134,7 @@ async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
                 let loaded = load_manifest_segment_rows_in_key_range_with_cache(
                     &store,
                     Some(&cache),
-                    &load::SessionBlockMemo::default(),
+                    &SessionBlockMemo::default(),
                     &descriptor,
                     ChangeSeq(1),
                     &lower,
@@ -261,7 +260,7 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
                 load_manifest_segment_rows_in_key_range_with_cache(
                     &store,
                     Some(&cache),
-                    &load::SessionBlockMemo::default(),
+                    &SessionBlockMemo::default(),
                     &run.segments[0].segments[0],
                     run.run_seq,
                     &lower,
@@ -324,7 +323,7 @@ async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
     let index = index_block_load::load_segment_index(
         &store,
         None,
-        &load::SessionBlockMemo::default(),
+        &SessionBlockMemo::default(),
         &descriptor,
     )
     .await
@@ -373,7 +372,7 @@ async fn bounded_pages_keep_their_window_in_the_memo_of_their_read() {
     let expected = rows(0, 1024, 1);
     let descriptor = segment(&store, &expected).await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
-    let memo = load::SessionBlockMemo::default();
+    let memo = SessionBlockMemo::default();
     let page = |position: usize, memo| {
         let lower = expected[position].row_key_for_family(FAMILY);
         let (store, cache, descriptor) = (&store, &cache, &descriptor);
@@ -410,7 +409,7 @@ async fn bounded_pages_keep_their_window_in_the_memo_of_their_read() {
         0,
         "the read's next page finds its block in the memo"
     );
-    page(2, &load::SessionBlockMemo::default()).await;
+    page(2, &SessionBlockMemo::default()).await;
     assert_eq!(
         store.count(OperationSelector::Read),
         1,
@@ -496,7 +495,7 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
     let index = index_block_load::load_segment_index(
         &store,
         None,
-        &load::SessionBlockMemo::default(),
+        &SessionBlockMemo::default(),
         &descriptor,
     )
     .await
@@ -527,7 +526,7 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
         blocks.clone(),
         shared,
         ObjectStoreScope::new(0),
-        crate::manifest::cache::unshared_read_working_memory(),
+        crate::segment::cache::unshared_read_working_memory(),
         window_of_blocks(&store, &descriptor, 1, 32).await,
     );
     let runs = vec![MetadataRunManifest {
@@ -579,7 +578,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
     let index = index_block_load::load_segment_index(
         &store,
         None,
-        &load::SessionBlockMemo::default(),
+        &SessionBlockMemo::default(),
         &descriptor,
     )
     .await
@@ -600,7 +599,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
     load_manifest_segment_rows_in_key_range_with_cache(
         &store,
         None,
-        &load::SessionBlockMemo::default(),
+        &SessionBlockMemo::default(),
         &descriptor,
         ChangeSeq(1),
         "",
@@ -615,7 +614,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
         load_manifest_segment_rows_in_key_range_with_cache(
             &store,
             None,
-            &load::SessionBlockMemo::default(),
+            &SessionBlockMemo::default(),
             &descriptor,
             ChangeSeq(1),
             &lower,
@@ -661,7 +660,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
         let index = index_block_load::load_segment_index(
             &store,
             None,
-            &load::SessionBlockMemo::default(),
+            &SessionBlockMemo::default(),
             &descriptor,
         )
         .await
@@ -677,7 +676,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
         replace_object(&store, &key, Bytes::from(bytes))
             .await
             .expect("corrupt unrequested block");
-        let memo = load::SessionBlockMemo::default();
+        let memo = SessionBlockMemo::default();
         store.reset();
         for position in [0, 1, 2] {
             let lower = expected[position].row_key_for_family(FAMILY);
@@ -731,7 +730,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
     let mut descriptor = segment(&store, &expected).await;
     descriptor.filter_inline = None;
     let pool = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
-    let memo = load::SessionBlockMemo::new(Arc::clone(&pool));
+    let memo = SessionBlockMemo::new(Arc::clone(&pool));
     store.reset();
     let index = index_block_load::load_segment_index(&store, None, &memo, &descriptor)
         .await

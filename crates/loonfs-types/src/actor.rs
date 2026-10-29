@@ -6,7 +6,7 @@
 use crate::id_macros::{string_id, validation_error};
 use thiserror::Error;
 
-/// Most bytes one actor id may hold.
+/// Most bytes one actor id may contain.
 pub const MAX_ACTOR_ID_BYTES: usize = 256;
 
 validation_error!(

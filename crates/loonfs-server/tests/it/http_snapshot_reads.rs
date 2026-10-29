@@ -6,7 +6,7 @@ use futures::StreamExt;
 use loonfs_client::{DownloadOptions, NamespacePath, ReadAt, ReadFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
-use loonfs_types::api::v0::ListChangesResponse;
+use loonfs_types::ListChangesResponse;
 use loonfs_types::{ChangeSeq, ErrorResponse, ListPathEntriesResponse, PathEntry, Snapshot};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;

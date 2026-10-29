@@ -26,7 +26,7 @@ pub use loonfs_types::FilesystemOperation;
 /// what reaches the planner is the commit itself.
 ///
 /// Paths are parsed once at the surface that accepts the raw string
-/// ([`parse_mutation_path`]); a request always carries validated, normalized
+/// ([`parse_mutation_path`]); a request always contains validated, normalized
 /// paths.
 ///
 /// [`parse_mutation_path`]: crate::path::parse_mutation_path
@@ -60,7 +60,7 @@ impl CommitIntent {
         self
     }
 
-    /// A request carrying exactly one operation.
+    /// A request that contains exactly one operation.
     pub fn single(
         commit_id: CommitId,
         actor: ActorId,

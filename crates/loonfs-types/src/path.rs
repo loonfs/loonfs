@@ -42,9 +42,9 @@ pub const MAX_DISPLAY_NAME_BYTES: usize = 255;
 /// A path derived from stored names may be longer.
 pub const MAX_PATH_BYTES: usize = 4_096;
 
-/// Most components a request path may hold.
+/// Most components a request path may contain.
 ///
-/// A path derived from stored names may hold more.
+/// A path derived from stored names may contain more.
 pub const MAX_PATH_DEPTH: usize = 128;
 
 /// Describes why caller-supplied path or display-name text is not admissible.
@@ -114,7 +114,7 @@ pub enum PathError {
         /// Component count of the rejected path.
         depth: usize,
     },
-    /// Reports a display name no portable target filesystem can hold.
+    /// Reports a display name no portable target filesystem can store.
     #[error("display name {display_name:?} {reason}")]
     UnportableDisplayName {
         /// The rejected spelling.
@@ -122,7 +122,7 @@ pub enum PathError {
         /// Which portability rule it broke.
         reason: &'static str,
     },
-    /// Reports a display name holding a character Windows reserves.
+    /// Reports a display name that contains a character Windows reserves.
     #[error(
         "display name {display_name:?} contains `{character}`, which Windows cannot store; \
          the reserved characters are `:` `?` `*` `|` `\"` `<` `>` `\\`"
@@ -394,7 +394,7 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
             byte_length: value.len(),
         });
     }
-    // Portability floor: names every target filesystem can hold. Windows
+    // Portability floor: names every target filesystem can store. Windows
     // cannot materialize its reserved characters, trailing dots or spaces,
     // or its reserved device names, and an all-whitespace name is invisible
     // in every listing. Enforce this before storing a name so it remains
@@ -444,7 +444,7 @@ fn validate_path_bounds(byte_length: usize, depth: usize) -> Result<(), PathErro
 
 /// Characters Windows reserves inside a path component. Each one means
 /// something else there — a drive or stream separator, a wildcard, a pipe, a
-/// quote, a redirect — so a name holding one cannot be written to an NTFS
+/// quote, a redirect — so a name that contains one cannot be written to an NTFS
 /// volume at all, and a tree containing it could not be materialized,
 /// archived, or synced on Windows.
 ///
@@ -488,7 +488,7 @@ impl PathError {
             | Self::ReservedDisplayName { display_name } => display_name,
             Self::UnportableDisplayName { display_name, .. }
             | Self::UnportableDisplayNameCharacter { display_name, .. } => display_name,
-            // Length and control failures do not carry the offending name:
+            // Length and control failures do not include the offending name:
             // an oversized or hostile name must not ride along in error
             // payloads that serialize onto the wire.
             Self::DisplayNameContainsControlCharacter { .. }

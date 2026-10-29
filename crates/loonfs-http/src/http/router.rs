@@ -14,14 +14,18 @@ use super::handlers_inodes::{
     get_file_content_by_inode, get_file_revision_content_by_inode, get_inode,
     list_file_revisions_by_inode, list_inode_children,
 };
+use super::handlers_maintenance::run_maintenance;
 use super::handlers_namespace::{
-    create_namespace, create_snapshot, delete_namespace, delete_snapshot, extend_snapshot,
-    fork_namespace, get_capabilities, get_checkpoint, get_namespace, get_namespace_diagnostics,
-    get_snapshot, list_checkpoints, list_snapshots, run_maintenance,
+    create_namespace, delete_namespace, fork_namespace, get_capabilities, get_namespace,
+    get_namespace_diagnostics,
 };
 use super::handlers_query::{
     disable_grep_index, enable_grep_index, get_grep_index, grep, grep_index_not_maintained,
     grep_queries_not_served,
+};
+use super::handlers_snapshots::{
+    create_snapshot, delete_snapshot, extend_snapshot, get_checkpoint, get_snapshot,
+    list_checkpoints, list_snapshots,
 };
 use super::handlers_store::probe_store;
 use super::handlers_uploads::{
@@ -105,7 +109,7 @@ routes! {
         GET get_file_content [deadline_exempt],
     },
     // The read this deployment authorizes rather than performs. It sits
-    // beside the proxied read because it answers the same question about
+    // beside the proxied read because it resolves the same question about
     // the same path; the route exists everywhere and refuses with
     // `not_supported` where no issuer does, exactly as the direct upload
     // modes do on `POST .../uploads`.
@@ -136,7 +140,7 @@ routes! {
         POST create_revision_download_by_inode,
     },
     "/v0/namespaces/{namespace_id}/filesystem/trash" => { GET list_trash },
-    // A commit that reaches the deadline may still land. The publisher
+    // A commit request that reaches the deadline may still be committed. The publisher
     // owns an accepted candidate, as after a client disconnect, and the
     // commit receipt makes retry safe.
     "/v0/namespaces/{namespace_id}/commits" => { POST create_commit },
@@ -214,7 +218,7 @@ pub(super) fn find_route_path(path: &str) -> Option<&'static str> {
 }
 
 /// Serves `served` with `handle` as a request extension where the binding
-/// holds the handle, and `denied` where it doesn't.
+/// keeps the handle, and `denied` where it doesn't.
 fn gated<T: Clone + Send + Sync + 'static>(
     handle: Option<T>,
     served: MethodRouter<Arc<BindingState>>,

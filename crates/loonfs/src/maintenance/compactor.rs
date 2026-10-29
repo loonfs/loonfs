@@ -14,7 +14,7 @@ use crate::{
     MetadataMaintenanceOutcome, MetadataMaintenanceResponse, NamespaceId, SharedObjectStore,
     WriterState,
 };
-use loonfs_core::cache::NamespaceStorageDiagnostics;
+use loonfs_core::control::NamespaceStorageDiagnostics;
 use loonfs_core::control::{LoadedManifest, NamespaceReadAnchor, PublicationBasis};
 use loonfs_core::{CoreError, MetadataCompactionCancellation, Phase};
 use loonfs_types::{CompactorEpoch, WriterId};
@@ -29,7 +29,7 @@ const MAX_LOST_COMPACTION_RACES: u32 = 3;
 
 /// Compaction units that one call of [`Compactor::metadata_while_due`]
 /// publishes before it returns,
-/// so a namespace with a backlog cannot hold its caller for long.
+/// so a namespace with a backlog cannot keep its caller waiting for long.
 pub(super) const MAX_COMPACTION_UNITS_PER_CALL: u32 = 16;
 
 /// Whether metadata maintenance folds the WAL tail before it compacts.
@@ -344,7 +344,7 @@ impl Compactor {
                     current_manifest_no: folded.manifest_no,
                 },
             },
-            // The head seq of the anchor the pass decided on is reported when
+            // The head seq of the anchor the pass chose is reported when
             // concurrent updates prevent every fold attempt from publishing.
             Err(Error::Core(error)) if error.code() == ErrorCode::StaleHead => {
                 WalFoldStepOutcome::RetriesExhausted {
@@ -357,7 +357,7 @@ impl Compactor {
         Ok((None, Some(status.wal_tail_objects), wal_fold, folded))
     }
 
-    /// Runs metadata steps while compaction is due, and `tail_fold` decides
+    /// Runs metadata steps while compaction is due, and `tail_fold` determines
     /// whether each step may fold the tail first.
     pub(crate) async fn metadata_while_due(
         &self,
@@ -433,7 +433,7 @@ impl Compactor {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CompactorEpoch> {
-        // Hold the claim lock across publication so concurrent groups share one epoch.
+        // Keep the claim lock locked across publication so concurrent groups share one epoch.
         let mut epochs = self.writer.compactor_epochs.lock().await;
         if let Some(epoch) = epochs.get(namespace_id) {
             return Ok(*epoch);
@@ -508,7 +508,7 @@ impl Compactor {
             }
         }
         let due = |manifest: &LoadedManifest| {
-            loonfs_core::cache::metadata_compaction_due(manifest, compaction_policy)
+            loonfs_core::metadata_compaction_due(manifest, compaction_policy)
         };
         let basis = match observed {
             Some(basis) => Some(basis),

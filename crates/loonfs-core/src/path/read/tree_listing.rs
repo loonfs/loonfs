@@ -1,17 +1,17 @@
 //! Recursive directory listing: a depth-first walk of one directory's
 //! subtree, paged with a cursor that records the walk's stack.
 
-use super::materialized_view::{
-    resolve_visible_child, ListedChild, LoadedMetadataView, ScannedChild,
-};
+use super::listing::{resolve_visible_child, ListedChild, ScannedChild};
+use super::loaded_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::Result;
 use crate::limits::DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 use crate::metadata::{visible_child, MetadataViewSession, ResolvedVisiblePath};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AttributeInclusion, DirectoryTreeFrame, DirectoryTreePageCursor, InodeKind, NameKey, Page,
-    PageRequest, PathEntry, MAX_PATH_DEPTH,
+    DirectoryTreeFrame, DirectoryTreePageCursor, InodeKind, NameKey, Page, PageRequest, PathEntry,
+    MAX_PATH_DEPTH,
 };
 
 /// Most directories on a recursive listing's stack, from the listed
@@ -193,7 +193,7 @@ async fn resume_stack<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use crate::authorize::Authorizer;
-    use crate::commit_engine::CommitCandidate;
+    use crate::commit::engine::CommitCandidate;
     use crate::metadata::LeafRevisionPreload;
     use crate::path::write::{CommitIntent, FilesystemOperation};
     use loonfs_objectstore::local_fs_store::LocalFsStore;

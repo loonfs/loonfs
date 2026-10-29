@@ -1,4 +1,4 @@
-//! Permits for one kind of work, and the counts of the work that holds them
+//! Permits for one kind of work, and the counts of the work that has them
 //! or waits for them.
 
 use std::num::NonZeroUsize;
@@ -10,7 +10,7 @@ pub trait PermitPoolObserver: Send + Sync {
     fn report(&self, running: usize, waiting: usize);
 }
 
-/// The permits for one kind of work, and the count of the work that holds
+/// The permits for one kind of work, and the count of the work that has
 /// them or waits for them.
 ///
 /// Waits are first come, first served.
@@ -20,7 +20,7 @@ pub struct PermitPool {
     observer: Option<Arc<dyn PermitPoolObserver>>,
 }
 
-/// The work that holds a [`PermitPool`]'s permits and the work that waits
+/// The work that has a [`PermitPool`]'s permits and the work that waits
 /// for one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PoolCounts {
@@ -68,7 +68,7 @@ impl PermitPool {
         permit
     }
 
-    /// Snapshots the work that holds a permit and the work that waits for
+    /// Snapshots the work that has a permit and the work that waits for
     /// one.
     pub fn counts(&self) -> PoolCounts {
         *self

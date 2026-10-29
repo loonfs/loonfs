@@ -1,16 +1,14 @@
 //! Reads the state pinned by a snapshot.
 
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::manifest::{
-    head_from_manifest, load_manifest_segments, ManifestLoadError, MetadataSegmentCache,
-    VerifiedMetadataSegments,
-};
+use crate::manifest::{head_from_manifest, load_manifest_segments, ManifestLoadError};
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::state::NamespaceReadState;
+use crate::segment::{MetadataSegmentCache, VerifiedMetadataSegments};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ManifestRef, PinPayload};
 
-/// The manifest a pin holds, loaded and verified.
+/// The manifest a pin protects, loaded and verified.
 pub(crate) struct PinBasis<'a, S: ObjectStore + ?Sized> {
     /// The manifest reference stored in the pin.
     pub(crate) manifest: ManifestRef,

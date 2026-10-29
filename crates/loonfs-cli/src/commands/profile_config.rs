@@ -1,54 +1,22 @@
-//! Builds provider-specific profile configurations and applies validated updates.
+//! Builds provider-specific profile configurations from command flags or
+//! prompts.
 
 use crate::args::{
-    BucketAddressing, GcsStoreArgs, LocalStoreArgs, ProfileActorArgs, ProfileProviderCommand,
-    R2StoreArgs, RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
+    GcsStoreArgs, LocalStoreArgs, ProfileActorArgs, ProfileProviderCommand, R2StoreArgs,
+    RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
+};
+use crate::commands::store_builders::{
+    absolute_local_root, gcs_store, local_store, parse_profile_principal_scope,
+    parse_profile_principals, r2_store, remote_connection, s3_store,
 };
 use crate::config::{
-    absolute_env_path, ensure_subject_pairing, validate_remote_client_config, ProfileConfig,
-    ProfileConnection, ProfileIdentity, StoreConfig,
+    absolute_env_path, ensure_subject_pairing, ProfileConfig, ProfileConnection, ProfileIdentity,
+    StoreConfig,
 };
 use crate::error::{CliError, Result};
 use crate::prompt;
 use crate::resolve::subject_flag_error;
-use loonfs_objectstore::gcs::GcpGcsStoreConfig;
-use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
-use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
-use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
-use loonfs_types::config::non_blank;
-use loonfs_types::{PrincipalId, PrincipalScope, PrincipalSet, SecretString};
-use std::path::{Path, PathBuf};
-
-const AWS_REGIONS: &[&str] = &[
-    "us-east-1",
-    "us-east-2",
-    "us-west-1",
-    "us-west-2",
-    "eu-west-1",
-    "eu-west-2",
-    "eu-west-3",
-    "eu-central-1",
-    "eu-central-2",
-    "eu-north-1",
-    "eu-south-1",
-    "eu-south-2",
-    "ap-southeast-1",
-    "ap-southeast-2",
-    "ap-southeast-3",
-    "ap-northeast-1",
-    "ap-northeast-2",
-    "ap-northeast-3",
-    "ap-south-1",
-    "ap-south-2",
-    "ap-east-1",
-    "ca-central-1",
-    "ca-west-1",
-    "sa-east-1",
-    "me-south-1",
-    "me-central-1",
-    "af-south-1",
-    "il-central-1",
-];
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProfileProvider {
@@ -71,7 +39,7 @@ impl ProfileProviderCommand {
         }
     }
 
-    fn actor(&self) -> &ProfileActorArgs {
+    pub(crate) fn actor(&self) -> &ProfileActorArgs {
         match self {
             Self::S3(args) => &args.actor,
             Self::R2(args) => &args.actor,
@@ -81,7 +49,7 @@ impl ProfileProviderCommand {
         }
     }
 
-    fn provider(&self) -> ProfileProvider {
+    pub(super) fn provider(&self) -> ProfileProvider {
         match self {
             Self::S3(_) => ProfileProvider::S3,
             Self::R2(_) => ProfileProvider::R2,
@@ -134,7 +102,7 @@ impl ProfileIdentity {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum FieldSource {
+pub(crate) enum FieldSource {
     Fail,
     Prompt,
 }
@@ -227,391 +195,7 @@ fn embedded(store: StoreConfig) -> ProfileConnection {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CredentialSource {
-    Ambient,
-    Static,
-}
-
-fn selected_credential_source(
-    source: Option<&str>,
-    has_static_flags: bool,
-) -> Result<CredentialSource> {
-    match source {
-        Some("ambient") if has_static_flags => Err(CliError::invalid_request(
-            "`--credential-source ambient` cannot be combined with static credential flags",
-        )
-        .with_param("--credential-source")),
-        Some("ambient") => Ok(CredentialSource::Ambient),
-        Some("static") => Ok(CredentialSource::Static),
-        Some(other) => Err(CliError::invalid_request(format!(
-            "unknown credential source: `{other}` (expected ambient or static)"
-        ))
-        .with_param("--credential-source")),
-        None if has_static_flags => Ok(CredentialSource::Static),
-        None => Ok(CredentialSource::Ambient),
-    }
-}
-
-fn build_aws_credentials(
-    credential_source: Option<&str>,
-    access_key_id: Option<&String>,
-    secret_access_key: Option<&String>,
-    session_token: Option<&String>,
-    source: FieldSource,
-) -> Result<AwsS3Credentials> {
-    let has_static_flags =
-        access_key_id.is_some() || secret_access_key.is_some() || session_token.is_some();
-    match selected_credential_source(credential_source, has_static_flags)? {
-        CredentialSource::Ambient => Ok(AwsS3Credentials::Ambient {}),
-        CredentialSource::Static => Ok(AwsS3Credentials::Static {
-            access_key_id: required_secret(access_key_id, None, "access-key-id", source)?,
-            secret_access_key: required_secret(
-                secret_access_key,
-                None,
-                "secret-access-key",
-                source,
-            )?,
-            session_token: non_blank(session_token.cloned()).map(SecretString::from),
-        }),
-    }
-}
-
-fn build_r2_credentials(
-    credential_source: Option<&str>,
-    access_key_id: Option<&String>,
-    secret_access_key: Option<&String>,
-    source: FieldSource,
-) -> Result<CloudflareR2Credentials> {
-    let has_static_flags = access_key_id.is_some() || secret_access_key.is_some();
-    match selected_credential_source(credential_source, has_static_flags)? {
-        CredentialSource::Ambient => Ok(CloudflareR2Credentials::Ambient {}),
-        CredentialSource::Static => Ok(CloudflareR2Credentials::Static {
-            access_key_id: required_secret(access_key_id, None, "access-key-id", source)?,
-            secret_access_key: required_secret(
-                secret_access_key,
-                None,
-                "secret-access-key",
-                source,
-            )?,
-        }),
-    }
-}
-
-fn required_field(
-    value: Option<&String>,
-    current: Option<&String>,
-    field: &str,
-    source: FieldSource,
-) -> Result<String> {
-    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
-        return Ok(value.clone());
-    }
-    match (current, source) {
-        (Some(current), FieldSource::Fail) => Ok(current.clone()),
-        (Some(current), FieldSource::Prompt) => prompt::prompt_line_default(field, current),
-        (None, FieldSource::Prompt) => prompt::prompt_line(field),
-        (None, FieldSource::Fail) => Err(CliError::non_interactive_field_required(field)),
-    }
-}
-
-fn optional_field(
-    value: Option<&String>,
-    current: Option<&String>,
-    field: &str,
-    source: FieldSource,
-) -> Result<Option<String>> {
-    if value.is_some() {
-        // An explicitly-blank flag value clears the field rather than storing
-        // the empty string, which would then fail profile validation.
-        return Ok(non_blank(value.cloned()));
-    }
-    match source {
-        FieldSource::Fail => Ok(current.cloned()),
-        FieldSource::Prompt => prompt::prompt_optional(field, current.map(String::as_str)),
-    }
-}
-
-fn required_secret(
-    value: Option<&String>,
-    current: Option<&SecretString>,
-    field: &str,
-    source: FieldSource,
-) -> Result<SecretString> {
-    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
-        return Ok(value.clone().into());
-    }
-    match (current, source) {
-        (Some(current), FieldSource::Fail) => Ok(current.clone()),
-        (Some(current), FieldSource::Prompt) => {
-            prompt::prompt_secret_keep_current(field, current.expose()).map(SecretString::from)
-        }
-        (None, FieldSource::Prompt) => prompt::prompt_secret(field).map(SecretString::from),
-        (None, FieldSource::Fail) => Err(CliError::non_interactive_field_required(field)),
-    }
-}
-
-fn absolute_local_root(root: &Path) -> Result<String> {
-    std::path::absolute(root)
-        .map_err(CliError::io)?
-        .into_os_string()
-        .into_string()
-        .map_err(|_| CliError::invalid_config("local_fs root is not valid UTF-8"))
-}
-
-#[derive(Clone, Copy)]
-struct LocalFsFields<'a> {
-    root: &'a String,
-    key_prefix: Option<&'a String>,
-}
-
-#[derive(Clone, Copy)]
-struct RemoteFields<'a> {
-    server_url: &'a String,
-    auth_token: Option<&'a SecretString>,
-    ca_cert_path: Option<&'a String>,
-}
-
-fn local_store(
-    current: Option<LocalFsFields<'_>>,
-    args: &LocalStoreArgs,
-    source: FieldSource,
-) -> Result<StoreConfig> {
-    let root = required_field(
-        args.root.as_ref(),
-        current.map(|value| value.root),
-        "root",
-        source,
-    )?;
-    let root = if args.root.is_some() || current.is_none() || matches!(source, FieldSource::Prompt)
-    {
-        absolute_local_root(Path::new(&root))?
-    } else {
-        root
-    };
-    Ok(StoreConfig::LocalFs(LocalFsStoreConfig {
-        root,
-        key_prefix: optional_field(
-            args.key_prefix.as_ref(),
-            current.and_then(|value| value.key_prefix),
-            "key prefix",
-            source,
-        )?,
-    }))
-}
-
-fn s3_store(
-    current: Option<&AwsS3StoreConfig>,
-    args: &S3StoreArgs,
-    source: FieldSource,
-) -> Result<StoreConfig> {
-    let credentials = match (current.map(|value| &value.credentials), source) {
-        (Some(current), FieldSource::Prompt) => prompt_aws_credentials(current.clone())?,
-        (Some(current), FieldSource::Fail) => updated_aws_credentials(current.clone(), args)?,
-        (None, _) => build_aws_credentials(
-            args.credential_source.as_deref(),
-            args.access_key_id.as_ref(),
-            args.secret_access_key.as_ref(),
-            args.session_token.as_ref(),
-            source,
-        )?,
-    };
-    let region = match (
-        args.region.as_ref(),
-        current.map(|value| &value.region),
-        source,
-    ) {
-        (Some(region), _, _) if !region.trim().is_empty() => region.clone(),
-        (_, Some(region), FieldSource::Fail) => region.clone(),
-        (_, Some(region), FieldSource::Prompt) => {
-            let index = AWS_REGIONS
-                .iter()
-                .position(|candidate| *candidate == region)
-                .unwrap_or(0);
-            prompt::prompt_fuzzy_choice("region", AWS_REGIONS, index)?
-        }
-        (_, None, FieldSource::Prompt) => prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0)?,
-        (_, None, FieldSource::Fail) => {
-            return Err(CliError::non_interactive_field_required("region"))
-        }
-    };
-    Ok(StoreConfig::AwsS3(AwsS3StoreConfig {
-        bucket: required_field(
-            args.bucket.as_ref(),
-            current.map(|value| &value.bucket),
-            "bucket",
-            source,
-        )?,
-        region,
-        endpoint_url: optional_field(
-            args.endpoint_url.as_ref(),
-            current.and_then(|value| value.endpoint_url.as_ref()),
-            "endpoint url",
-            source,
-        )?,
-        credentials,
-        key_prefix: optional_field(
-            args.key_prefix.as_ref(),
-            current.and_then(|value| value.key_prefix.as_ref()),
-            "key prefix",
-            source,
-        )?,
-        force_path_style: match args.force_path_style {
-            Some(BucketAddressing::Path) => true,
-            Some(BucketAddressing::VirtualHosted) => false,
-            None => current.is_some_and(|value| value.force_path_style),
-        },
-    }))
-}
-
-fn r2_store(
-    current: Option<&CloudflareR2StoreConfig>,
-    args: &R2StoreArgs,
-    source: FieldSource,
-) -> Result<StoreConfig> {
-    let credentials = match (current.map(|value| &value.credentials), source) {
-        (Some(current), FieldSource::Prompt) => prompt_r2_credentials(current.clone())?,
-        (Some(current), FieldSource::Fail) => updated_r2_credentials(current.clone(), args)?,
-        (None, _) => build_r2_credentials(
-            args.credential_source.as_deref(),
-            args.access_key_id.as_ref(),
-            args.secret_access_key.as_ref(),
-            source,
-        )?,
-    };
-    Ok(StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
-        bucket: required_field(
-            args.bucket.as_ref(),
-            current.map(|value| &value.bucket),
-            "bucket",
-            source,
-        )?,
-        account_id: required_field(
-            args.account_id.as_ref(),
-            current.map(|value| &value.account_id),
-            "account-id",
-            source,
-        )?,
-        endpoint_url: required_field(
-            args.endpoint_url.as_ref(),
-            current.map(|value| &value.endpoint_url),
-            "endpoint-url",
-            source,
-        )?,
-        credentials,
-        key_prefix: optional_field(
-            args.key_prefix.as_ref(),
-            current.and_then(|value| value.key_prefix.as_ref()),
-            "key prefix",
-            source,
-        )?,
-    }))
-}
-
-fn gcs_store(
-    current: Option<&GcpGcsStoreConfig>,
-    args: &GcsStoreArgs,
-    source: FieldSource,
-) -> Result<StoreConfig> {
-    let current_key_path = current.map(|value| {
-        let GcpGcsCredentials::ServiceAccountFile { path } = &value.credentials;
-        path
-    });
-    Ok(StoreConfig::GcpGcs(GcpGcsStoreConfig {
-        bucket: required_field(
-            args.bucket.as_ref(),
-            current.map(|value| &value.bucket),
-            "bucket",
-            source,
-        )?,
-        credentials: GcpGcsCredentials::ServiceAccountFile {
-            path: required_field(
-                args.service_account_key_path.as_ref(),
-                current_key_path,
-                "service-account-key-path",
-                source,
-            )?,
-        },
-        key_prefix: optional_field(
-            args.key_prefix.as_ref(),
-            current.and_then(|value| value.key_prefix.as_ref()),
-            "key prefix",
-            source,
-        )?,
-    }))
-}
-
-fn remote_connection(
-    name: &str,
-    current: Option<RemoteFields<'_>>,
-    args: &RemoteServerArgs,
-    source: FieldSource,
-) -> Result<ProfileConnection> {
-    let server_url = required_field(
-        args.server_url.as_ref(),
-        current.map(|value| value.server_url),
-        "server-url",
-        source,
-    )?;
-    let auth_token = if args.auth_token.is_some() {
-        non_blank(args.auth_token.clone()).map(SecretString::from)
-    } else {
-        match source {
-            FieldSource::Fail => current.and_then(|value| value.auth_token).cloned(),
-            FieldSource::Prompt => prompt::prompt_secret_optional(
-                "auth token",
-                current
-                    .and_then(|value| value.auth_token)
-                    .map(SecretString::expose),
-            )?
-            .map(SecretString::from),
-        }
-    };
-    let ca_cert_path = optional_field(
-        args.ca_cert_path.as_ref(),
-        current.and_then(|value| value.ca_cert_path),
-        "ca cert path",
-        source,
-    )?;
-    validate_remote_client_config(
-        name,
-        &server_url,
-        auth_token.as_ref(),
-        ca_cert_path.as_deref(),
-    )?;
-    Ok(ProfileConnection::Remote {
-        server_url,
-        auth_token,
-        ca_cert_path,
-    })
-}
-
-fn parse_profile_principal_scope(principal_scope: Option<&str>) -> Result<Option<PrincipalScope>> {
-    principal_scope
-        .map(|principal_scope| {
-            PrincipalScope::parse(principal_scope).map_err(|error| {
-                CliError::invalid_request(format!("invalid `--principal-scope`: {error}"))
-                    .with_param("--principal-scope")
-            })
-        })
-        .transpose()
-}
-
-fn parse_profile_principals(principals: Option<&str>) -> Result<Option<Vec<PrincipalId>>> {
-    principals
-        .map(|principals| {
-            principals
-                .parse::<PrincipalSet>()
-                .map(|principals| principals.iter().cloned().collect())
-                .map_err(|error| {
-                    CliError::invalid_request(format!("invalid `--principals`: {error}"))
-                        .with_param("--principals")
-                })
-        })
-        .transpose()
-}
-
-fn profile_provider(profile: &ProfileConfig) -> ProfileProvider {
+pub(crate) fn profile_provider(profile: &ProfileConfig) -> ProfileProvider {
     match &profile.connection {
         ProfileConnection::Embedded {
             store: StoreConfig::AwsS3 { .. },
@@ -633,7 +217,7 @@ fn profile_provider(profile: &ProfileConfig) -> ProfileProvider {
     }
 }
 
-fn provider_name(provider: ProfileProvider) -> &'static str {
+pub(crate) fn provider_name(provider: ProfileProvider) -> &'static str {
     match provider {
         ProfileProvider::S3 => "s3",
         ProfileProvider::R2 => "r2",
@@ -643,291 +227,16 @@ fn provider_name(provider: ProfileProvider) -> &'static str {
     }
 }
 
-/// Applies an update's flags to a stored profile, keeping every field that
-/// the update doesn't set.
-pub(super) fn apply_update_flags(
-    existing: ProfileConfig,
-    command: &ProfileProviderCommand,
-    subject: &SubjectSelectors,
-) -> Result<ProfileConfig> {
-    let name = command.name();
-    let stored_provider = profile_provider(&existing);
-    let mismatch = || provider_mismatch(name, stored_provider, command.provider());
-    let identity = existing.identity.merge_flags(command.actor(), subject)?;
-    let connection = match (&existing.connection, command) {
-        (ProfileConnection::Embedded { store, writer_id }, provider) => {
-            let store = match (store, provider) {
-                (
-                    StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }),
-                    ProfileProviderCommand::Local(args),
-                ) => local_store(
-                    Some(LocalFsFields {
-                        root,
-                        key_prefix: key_prefix.as_ref(),
-                    }),
-                    &args.store,
-                    FieldSource::Fail,
-                )?,
-                (StoreConfig::AwsS3(current), ProfileProviderCommand::S3(args)) => {
-                    s3_store(Some(current), &args.store, FieldSource::Fail)?
-                }
-                (StoreConfig::CloudflareR2(current), ProfileProviderCommand::R2(args)) => {
-                    r2_store(Some(current), &args.store, FieldSource::Fail)?
-                }
-                (StoreConfig::GcpGcs(current), ProfileProviderCommand::Gcs(args)) => {
-                    gcs_store(Some(current), &args.store, FieldSource::Fail)?
-                }
-                _ => return Err(mismatch()),
-            };
-            ProfileConnection::Embedded {
-                store,
-                writer_id: writer_id.clone(),
-            }
-        }
-        (
-            ProfileConnection::Remote {
-                server_url,
-                auth_token,
-                ca_cert_path,
-            },
-            ProfileProviderCommand::Remote(args),
-        ) => remote_connection(
-            name,
-            Some(RemoteFields {
-                server_url,
-                auth_token: auth_token.as_ref(),
-                ca_cert_path: ca_cert_path.as_ref(),
-            }),
-            &args.server,
-            FieldSource::Fail,
-        )?,
-        _ => return Err(mismatch()),
-    };
-    Ok(ProfileConfig {
-        identity,
-        default_namespace: existing.default_namespace,
-        connection,
-    })
-}
-
-pub(super) fn validate_update_provider(
-    existing: &ProfileConfig,
-    command: &ProfileProviderCommand,
-) -> Result<()> {
-    let stored = profile_provider(existing);
-    let requested = command.provider();
-    if stored == requested {
-        Ok(())
-    } else {
-        Err(provider_mismatch(command.name(), stored, requested))
-    }
-}
-
-fn provider_mismatch(name: &str, stored: ProfileProvider, requested: ProfileProvider) -> CliError {
-    CliError::invalid_request(format!(
-        "profile `{name}` uses provider `{}` not `{}`",
-        provider_name(stored),
-        provider_name(requested),
-    ))
-    .with_param("provider")
-}
-
-fn updated_aws_credentials(
-    current: AwsS3Credentials,
-    args: &S3StoreArgs,
-) -> Result<AwsS3Credentials> {
-    let has_static_flags = args.access_key_id.is_some()
-        || args.secret_access_key.is_some()
-        || args.session_token.is_some();
-    if args.credential_source.is_none() && !has_static_flags {
-        return Ok(current);
-    }
-    match selected_credential_source(args.credential_source.as_deref(), has_static_flags)? {
-        CredentialSource::Ambient => Ok(AwsS3Credentials::Ambient {}),
-        CredentialSource::Static => Ok(AwsS3Credentials::Static {
-            access_key_id: require_update_static_secret(
-                args.access_key_id.as_ref(),
-                "access-key-id",
-            )?,
-            secret_access_key: require_update_static_secret(
-                args.secret_access_key.as_ref(),
-                "secret-access-key",
-            )?,
-            session_token: non_blank(args.session_token.clone()).map(SecretString::from),
-        }),
-    }
-}
-
-fn updated_r2_credentials(
-    current: CloudflareR2Credentials,
-    args: &R2StoreArgs,
-) -> Result<CloudflareR2Credentials> {
-    let has_static_flags = args.access_key_id.is_some() || args.secret_access_key.is_some();
-    if args.credential_source.is_none() && !has_static_flags {
-        return Ok(current);
-    }
-    match selected_credential_source(args.credential_source.as_deref(), has_static_flags)? {
-        CredentialSource::Ambient => Ok(CloudflareR2Credentials::Ambient {}),
-        CredentialSource::Static => Ok(CloudflareR2Credentials::Static {
-            access_key_id: require_update_static_secret(
-                args.access_key_id.as_ref(),
-                "access-key-id",
-            )?,
-            secret_access_key: require_update_static_secret(
-                args.secret_access_key.as_ref(),
-                "secret-access-key",
-            )?,
-        }),
-    }
-}
-
-fn require_update_static_secret(
-    value: Option<&String>,
-    field: &'static str,
-) -> Result<SecretString> {
-    value
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .map(SecretString::from)
-        .ok_or_else(|| {
-            CliError::invalid_request(format!(
-                "switching to static credentials requires `--access-key-id` and \
-                 `--secret-access-key`; missing `--{field}`"
-            ))
-            .with_param(format!("--{field}"))
-        })
-}
-
-/// Edits a stored profile's connection at prompts, keeping its identity and
-/// default namespace.
-pub(super) fn apply_update_interactive(
-    name: &str,
-    existing: ProfileConfig,
-) -> Result<ProfileConfig> {
-    let connection = match &existing.connection {
-        ProfileConnection::Embedded { store, writer_id } => {
-            let store = match store {
-                StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }) => local_store(
-                    Some(LocalFsFields {
-                        root,
-                        key_prefix: key_prefix.as_ref(),
-                    }),
-                    &LocalStoreArgs::default(),
-                    FieldSource::Prompt,
-                )?,
-                StoreConfig::AwsS3(current) => {
-                    s3_store(Some(current), &S3StoreArgs::default(), FieldSource::Prompt)?
-                }
-                StoreConfig::CloudflareR2(current) => {
-                    r2_store(Some(current), &R2StoreArgs::default(), FieldSource::Prompt)?
-                }
-                StoreConfig::GcpGcs(current) => {
-                    gcs_store(Some(current), &GcsStoreArgs::default(), FieldSource::Prompt)?
-                }
-            };
-            ProfileConnection::Embedded {
-                store,
-                writer_id: writer_id.clone(),
-            }
-        }
-        ProfileConnection::Remote {
-            server_url,
-            auth_token,
-            ca_cert_path,
-        } => remote_connection(
-            name,
-            Some(RemoteFields {
-                server_url,
-                auth_token: auth_token.as_ref(),
-                ca_cert_path: ca_cert_path.as_ref(),
-            }),
-            &RemoteServerArgs::default(),
-            FieldSource::Prompt,
-        )?,
-    };
-    Ok(ProfileConfig {
-        connection,
-        ..existing
-    })
-}
-
-fn prompt_aws_credentials(current: AwsS3Credentials) -> Result<AwsS3Credentials> {
-    let default = usize::from(matches!(&current, AwsS3Credentials::Static { .. }));
-    match prompt::prompt_choice_default("credential source", &["ambient", "static"], default)?
-        .as_str()
-    {
-        "ambient" => Ok(AwsS3Credentials::Ambient {}),
-        _ => match current {
-            AwsS3Credentials::Ambient {} => Ok(AwsS3Credentials::Static {
-                access_key_id: prompt::prompt_secret("access-key-id")?.into(),
-                secret_access_key: prompt::prompt_secret("secret-access-key")?.into(),
-                session_token: prompt::prompt_secret_optional("session token", None)?
-                    .map(SecretString::from),
-            }),
-            AwsS3Credentials::Static {
-                access_key_id,
-                secret_access_key,
-                session_token,
-            } => Ok(AwsS3Credentials::Static {
-                access_key_id: prompt::prompt_secret_keep_current(
-                    "access-key-id",
-                    access_key_id.expose(),
-                )?
-                .into(),
-                secret_access_key: prompt::prompt_secret_keep_current(
-                    "secret-access-key",
-                    secret_access_key.expose(),
-                )?
-                .into(),
-                session_token: prompt::prompt_secret_optional(
-                    "session token",
-                    session_token.as_ref().map(SecretString::expose),
-                )?
-                .map(SecretString::from),
-            }),
-        },
-    }
-}
-
-fn prompt_r2_credentials(current: CloudflareR2Credentials) -> Result<CloudflareR2Credentials> {
-    let default = usize::from(matches!(&current, CloudflareR2Credentials::Static { .. }));
-    match prompt::prompt_choice_default("credential source", &["ambient", "static"], default)?
-        .as_str()
-    {
-        "ambient" => Ok(CloudflareR2Credentials::Ambient {}),
-        _ => match current {
-            CloudflareR2Credentials::Ambient {} => Ok(CloudflareR2Credentials::Static {
-                access_key_id: prompt::prompt_secret("access-key-id")?.into(),
-                secret_access_key: prompt::prompt_secret("secret-access-key")?.into(),
-            }),
-            CloudflareR2Credentials::Static {
-                access_key_id,
-                secret_access_key,
-            } => Ok(CloudflareR2Credentials::Static {
-                access_key_id: prompt::prompt_secret_keep_current(
-                    "access-key-id",
-                    access_key_id.expose(),
-                )?
-                .into(),
-                secret_access_key: prompt::prompt_secret_keep_current(
-                    "secret-access-key",
-                    secret_access_key.expose(),
-                )?
-                .into(),
-            }),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
-
-    use super::{apply_update_flags, build_profile_from_command};
+    use super::build_profile_from_command;
     use crate::args::{
         Cli, Command, LocalStoreArgs, ProfileActorArgs, ProfileCommand, ProfileLocalArgs,
         ProfileProviderCommand, ProfileR2Args, ProfileRemoteArgs, ProfileS3Args, R2StoreArgs,
         RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors, TopLevelCommand,
     };
+    use crate::commands::profile_update::apply_update_flags;
+
     use crate::config::{ProfileConfig, ProfileConnection, ProfileIdentity, StoreConfig};
     use crate::error::Result;
     use clap::Parser;

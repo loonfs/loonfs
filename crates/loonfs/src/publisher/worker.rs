@@ -21,7 +21,7 @@ use loonfs_core::publish::{
 };
 use loonfs_core::time::OperationClock;
 use loonfs_core::Phase;
-use loonfs_types::api::v0::Commit;
+use loonfs_types::Commit;
 use loonfs_types::{u64_from_usize, CommitId, WriterId};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ use tracing::Instrument;
 impl NamespacePublisher {
     /// Makes sure a worker owns this publisher's queue.
     ///
-    /// Callers hold the state lock, so admitting work and installing the
+    /// Callers keep the state lock locked, so admitting work and installing the
     /// task that owns it is atomic: no second worker takes the same queue,
     /// and a shutdown drain that finds no worker cannot miss work an
     /// admission is about to queue.
@@ -55,7 +55,7 @@ impl NamespacePublisher {
             // pacing interval form the next batch.
             self.await_publish_slot().await;
             // Queue ownership and admission remain intact while another
-            // namespace uses the shared publication slots. No engine is held.
+            // namespace uses the shared publication slots. No engine is kept.
             let publication = self.context.admission.publication_permit().await;
             let Some(item) = self.take_next_item() else {
                 self.forget_if_ended();
@@ -101,7 +101,7 @@ impl NamespacePublisher {
                     }
                 }
                 WorkItem::Delete(pending) => {
-                    // A delete is bounded by its fold permit alone. Holding a
+                    // A delete is bounded by its fold permit alone. Keeping a
                     // publication permit while it waits for one would stall
                     // other namespaces' publications behind folds.
                     drop(publication);
@@ -294,7 +294,7 @@ impl NamespacePublisher {
         let write_stopped = publish.results.iter().any(is_maintenance_required);
         let fold_start = if publish.wal_tail.is_some_and(|tail| {
             FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
-                FOLD_AT_WAL_OBJECTS,
+                FOLD_AT_WAL_OBJECTS.get(),
                 tail.objects,
                 tail.inline_bytes,
             )
@@ -356,7 +356,7 @@ impl NamespacePublisher {
         {
             let mut state = self.lock_state();
             // Nothing queued behind this publish means no load to batch, and the
-            // next request may answer these results: it publishes at once.
+            // next request may return these results: it publishes at once.
             if state.queue.is_empty() {
                 state.last_publish = None;
             }

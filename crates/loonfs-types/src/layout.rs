@@ -1,4 +1,4 @@
-//! Ordered immutable objects that hold a content chain.
+//! Ordered immutable objects that store a content chain.
 
 use crate::{ContentId, NamespaceId};
 use serde::{Deserialize, Serialize};
@@ -19,13 +19,13 @@ pub enum ExtentObject {
     },
 }
 
-/// One run of chain bytes held in an immutable object.
+/// One run of chain bytes stored in an immutable object.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContentExtent {
     /// Namespace that owns the object.
     pub owner_namespace_id: NamespaceId,
-    /// Chain whose key holds the object.
+    /// Chain whose key contains the object.
     pub content_id: ContentId,
     /// Object under the chain's key.
     pub object: ExtentObject,

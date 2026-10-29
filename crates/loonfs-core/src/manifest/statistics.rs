@@ -1,11 +1,11 @@
 //! Activity and referenced storage at one immutable manifest.
 
-use super::index_block_load::segment_object_bytes;
 use super::publish::manifest_ref_for;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::pin::load_pin_basis;
+use crate::segment::index_block_load::segment_object_bytes;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::{
@@ -15,7 +15,7 @@ use loonfs_types::{PinId, WalNo};
 use std::collections::BTreeMap;
 
 /// Statistics through the selected manifest's folded head. Newer WAL commits
-/// are excluded. Counters start at zero and comparisons hold within one namespace.
+/// are excluded. Counters start at zero and comparisons are valid within one namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceStatistics {
     /// Namespace, manifest number, head sequence, and checksum of this observation.

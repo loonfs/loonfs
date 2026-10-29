@@ -1,4 +1,4 @@
-//! Bytes a collection pass holds, charged to the read working memory.
+//! Bytes a collection pass keeps, charged to the read working memory.
 
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::{hash_map_table_bytes, hash_set_table_bytes, HeapBytes};
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// The read working memory one collection pass charges, and the bytes all of
-/// the pass's charges hold together, so a failed charge can report the whole
+/// the pass's charges reserve together, so a failed charge can report the whole
 /// live set.
 #[derive(Clone)]
 pub(super) struct PassMemory {
@@ -43,7 +43,7 @@ impl Charge {
     }
 
     /// Adds `bytes` to the reservation, or fails the pass when the memory
-    /// can't fit them. The error reports what the pass's charges would hold
+    /// can't fit them. The error reports what the pass's charges would reserve
     /// together with `bytes` added.
     pub(super) fn add(&mut self, bytes: usize) -> Result<()> {
         if bytes == 0 {

@@ -4,7 +4,7 @@
 //!
 //! This module intentionally does not share code with
 //! `loonfs-core::metadata::visibility`. Differential tests replay the same
-//! commits through both implementations and compare their answers. Merging
+//! commits through both implementations and compare their results. Merging
 //! the implementations would remove the independence those tests require.
 
 use crate::metadata::{
@@ -16,7 +16,7 @@ use loonfs_types::{
 };
 use std::collections::BTreeSet;
 
-/// The answer to resolving a path at one sequence.
+/// The result of resolving a path at one sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedPath<'a> {
     /// Every component named a visible child. `absolute_path` is spelled

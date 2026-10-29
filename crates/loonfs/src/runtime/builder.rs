@@ -127,7 +127,7 @@ impl<M> LoonFsBuilder<M> {
     /// a read permit before loading anything. Publication batches,
     /// session folds and merges, [`LoonFs::maintenance`] work, namespace
     /// deletions, and the creation of checkpoints, snapshots, and forks of
-    /// the current head take their permits from it, and every merge holds at
+    /// the current head take their permits from it, and every merge keeps at
     /// most its merge input size. The per-namespace admission limits stay
     /// with this runtime. The budget
     /// reports its metrics to its own recorder. Without this setting, the
@@ -218,7 +218,7 @@ impl LoonFsBuilder<Writable> {
     ///
     /// Construction runs one way only, so nothing here is cyclic: the read
     /// core opens first, the writer's state is built on top of it, and the
-    /// publication service is created last, holding the core strongly and
+    /// publication service is created last, keeping the core strongly and
     /// the writer's state weakly.
     pub async fn build(self) -> Result<LoonFs<Writable>> {
         let writer_id = self
@@ -244,8 +244,8 @@ impl CoreConfig {
     /// builder was given a recorder, and opens the runtime core.
     ///
     /// A builder given no recorder of either kind wraps nothing: the store
-    /// the core holds is the store it was handed, and the instrument set it
-    /// carries reports nowhere.
+    /// the core keeps is the store it was handed, and the instrument set it
+    /// has reports nowhere.
     fn open(self) -> Result<RuntimeCore> {
         if !loonfs_core::time::system_clock_reads_after_epoch() {
             return Err(Error::Config(

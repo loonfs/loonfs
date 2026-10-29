@@ -3,15 +3,15 @@
 
 use super::active_deletions::inode_id_of;
 use super::*;
-use crate::manifest::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
+use crate::compaction::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use crate::namespace::control::LoadedManifest;
 use crate::storage::content_admission::PreparedContent;
-use compaction_step::MergePlacement;
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, DeleteDirectoryBehavior,
     InodeKind, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
     ROOT_INODE_ID,
 };
+use plan::MergePlacement;
 use std::assert_matches;
 
 const PRINCIPAL_SCOPE: &str = "org_demo";
@@ -279,7 +279,7 @@ async fn family_rows<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    crate::manifest::metadata_basis_from_manifest(store, None, &current)
+    super::super::metadata_basis_from_manifest(store, None, &current)
         .segments
         .scan_prefix(family, "")
         .await
@@ -761,11 +761,7 @@ fn delta_window(
 ) -> Vec<MetadataRunManifest> {
     let mut runs = runs_newest_first(manifest.payload())
         .into_iter()
-        .filter(|run| {
-            compaction_step::group_run_descriptors(run, group)
-                .next()
-                .is_some()
-        })
+        .filter(|run| plan::group_run_descriptors(run, group).next().is_some())
         .collect::<Vec<_>>();
     runs.sort_by_key(|run| (run.tier != RunTier::Base, run.run_seq));
     runs.remove(0);
@@ -840,7 +836,7 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
             window.iter().map(|run| run.run_no).collect(),
             window
                 .iter()
-                .flat_map(|run| compaction_step::group_run_descriptors(run, group))
+                .flat_map(|run| plan::group_run_descriptors(run, group))
                 .map(|descriptor| descriptor.row_count)
                 .sum(),
             MergePlacement::Delta {
@@ -941,8 +937,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
     let group = MetadataFamilyGroup::Revisions;
     // 200 million rows take the whole 64 MiB at about 2.7 bits per row.
     for inode_rows in [None, Some(200_000_000)] {
-        let mut basis =
-            crate::manifest::metadata_basis_from_manifest(&store, None, &current).segments;
+        let mut basis = super::super::metadata_basis_from_manifest(&store, None, &current).segments;
         let mut runs = (*basis.scan_runs).clone();
         if let Some(inode_rows) = inode_rows {
             let inodes = runs
@@ -955,7 +950,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
             inodes.segments[0].row_count = inode_rows;
         }
         basis.scan_runs = Arc::new(runs.clone());
-        let spec = compaction_step::plan_group(
+        let spec = plan::plan_group(
             current.payload(),
             &runs,
             group,
@@ -1016,7 +1011,7 @@ async fn compact_with_seed<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    let mut basis = crate::manifest::metadata_basis_from_manifest(store, None, &current).segments;
+    let mut basis = super::super::metadata_basis_from_manifest(store, None, &current).segments;
     basis.manifest = seeded_manifest(&current, seed);
     let input_keys = input_segment_keys(&basis.scan_runs, spec).expect("the spec's runs");
     let cancellation = MetadataCompactionCancellation::default();
@@ -1075,7 +1070,7 @@ async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    let mut basis = crate::manifest::metadata_basis_from_manifest(store, None, &current).segments;
+    let mut basis = super::super::metadata_basis_from_manifest(store, None, &current).segments;
     basis.manifest = seeded_manifest(&current, seed);
     load_kept_inode_filter(
         &basis,
@@ -1122,7 +1117,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         .await
         .expect("load the current manifest");
     let payload = current.payload();
-    let spec = compaction_step::plan_group(
+    let spec = plan::plan_group(
         payload,
         &runs_newest_first(payload),
         MetadataFamilyGroup::Inodes,
@@ -1147,7 +1142,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
     let base = runs_newest_first(payload)
         .into_iter()
         .find(|run| {
-            compaction_step::group_run_descriptors(run, MetadataFamilyGroup::Inodes)
+            plan::group_run_descriptors(run, MetadataFamilyGroup::Inodes)
                 .next()
                 .is_some()
         })
@@ -1183,7 +1178,7 @@ async fn kept_inode_filter_and_walk_reads(
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    let basis = crate::manifest::metadata_basis_from_manifest(store, None, &current).segments;
+    let basis = super::super::metadata_basis_from_manifest(store, None, &current).segments;
     let slot_index = segment_keys(&basis.scan_runs, ApiMetadataRowFamily::DirentryBinds);
     store.reset();
     let filter = load_kept_inode_filter(
@@ -1218,7 +1213,7 @@ async fn compact_group<S: ObjectStore + ?Sized>(
         .await
         .expect("load the current manifest");
     let payload = current.payload();
-    let spec = compaction_step::plan_group(
+    let spec = plan::plan_group(
         payload,
         &runs_newest_first(payload),
         group,

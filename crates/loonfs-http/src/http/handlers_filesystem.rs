@@ -22,9 +22,8 @@ use loonfs::{
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    api::v0::{Commit, ListChangesResponse},
-    CommitRequest, FileRevisionsPageCursor, FilesystemOperation, ListFileRevisionsResponse,
-    ListTrashResponse, RevisionNo, TrashPageCursor,
+    Commit, CommitRequest, FileRevisionsPageCursor, FilesystemOperation, ListChangesResponse,
+    ListFileRevisionsResponse, ListTrashResponse, RevisionNo, TrashPageCursor,
 };
 use std::sync::Arc;
 
@@ -250,7 +249,7 @@ pub(super) async fn list_path_entries(
     let runtime = state.runtime_for(subject);
     let path = required_query_param(query.path, "path")?;
     // An absent parameter leaves the option type's own default in place, so
-    // the HTTP surface and the in-process one cannot answer differently.
+    // the HTTP surface and the in-process one cannot return different results.
     let mut options = ListOptions::default();
     if let Some(include) = query.include_attributes {
         options.include_attributes = include.into();

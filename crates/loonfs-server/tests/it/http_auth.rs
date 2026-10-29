@@ -6,7 +6,7 @@ use loonfs_client::NamespacePath;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::ContentId;
 use loonfs_types::{
-    api::v0::ContentToken, AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
+    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef, ContentToken,
     DestinationBehavior, ErrorCode, ErrorResponse, FilesystemOperation,
 };
 use serde_json::json;

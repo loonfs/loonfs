@@ -537,7 +537,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
 
 #[tokio::test]
 async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
-    let default_idle_ms = loonfs::DEFAULT_IDLE_FOLD_AFTER_MS;
+    let default_idle_ms = loonfs::DEFAULT_IDLE_FOLD_AFTER_MS.get();
     for (idle_fold_after_ms, expected) in [
         // With the idle rule off, the run leaves both WAL objects in the tail.
         (0, 2),
@@ -699,7 +699,7 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
     ))
     .await;
 
-    let probe: loonfs_types::api::v0::StoreProbeResponse = post_maintenance_json_body(
+    let probe: loonfs_types::StoreProbeResponse = post_maintenance_json_body(
         &format!("{}/v0/maintenance/store/probe", harness.server_url),
         "test-token",
         serde_json::json!({}),
@@ -722,8 +722,8 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
         assert!(
             matches!(
                 check.outcome,
-                loonfs_types::api::v0::StoreProbeCheckOutcome::Passed
-                    | loonfs_types::api::v0::StoreProbeCheckOutcome::Unsupported
+                loonfs_types::StoreProbeCheckOutcome::Passed
+                    | loonfs_types::StoreProbeCheckOutcome::Unsupported
             ),
             "the local filesystem store should honour every contract check: {check:?}"
         );
@@ -761,7 +761,7 @@ async fn http_maintenance_store_probe_requires_a_token_and_accepts_a_bodyless_re
     .await;
     let url = format!("{}/v0/maintenance/store/probe", harness.server_url);
 
-    let unauthorized: ApiResult<loonfs_types::api::v0::StoreProbeResponse> =
+    let unauthorized: ApiResult<loonfs_types::StoreProbeResponse> =
         post_maintenance_json_body(&url, "wrong-token", serde_json::json!({}));
     assert_eq!(
         unauthorized.expect_err("a wrong token is refused").code,
@@ -769,7 +769,7 @@ async fn http_maintenance_store_probe_requires_a_token_and_accepts_a_bodyless_re
     );
 
     // An absent body is treated as an empty object.
-    let bodyless: loonfs_types::api::v0::StoreProbeResponse =
+    let bodyless: loonfs_types::StoreProbeResponse =
         post_maintenance_json(&url, "test-token").expect("probe with no body");
     assert!(
         !bodyless.checks.is_empty(),

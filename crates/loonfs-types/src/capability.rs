@@ -72,7 +72,7 @@ limit_keys! {
     /// which bounds what the service will proxy on a client's behalf. This one is
     /// the provider's own
     /// single-request ceiling, and it is typically far larger; a claim above it
-    /// answers `content_too_large` at begin rather than being signed into a
+    /// returns `content_too_large` at begin rather than being signed into a
     /// write the provider would reject.
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES = "upload.direct_put.max_content_bytes";
     /// Advisory limit: the largest JSON body accepted when completing an upload.
@@ -83,14 +83,14 @@ limit_keys! {
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES = "download.service_proxied.max_content_bytes";
     /// Advisory limit: how many service-proxied upload requests a serving process
     /// streams at once. The cap is shared by all callers and is not a per-caller
-    /// allowance; requests past it answer `server_busy`.
+    /// allowance; requests past it return `server_busy`.
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS = "upload.service_proxied.max_concurrent_requests";
     /// Advisory limit: how many service-proxied content reads a serving process
     /// streams at once. The cap is shared by all callers and is not a per-caller
-    /// allowance; requests past it answer `server_busy`.
+    /// allowance; requests past it return `server_busy`.
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS = "download.service_proxied.max_concurrent_requests";
-    /// Advisory limit: the most path operations one commit may carry; a longer
-    /// list answers `invalid_request` before planning.
+    /// Advisory limit: the most path operations one commit may include; a longer
+    /// list returns `invalid_request` before planning.
     LIMIT_COMMIT_MAX_OPERATIONS = "commit.max_operations";
     /// Advisory limit: the largest `inline_content` value on one commit operation,
     /// measured before base64 encoding.
@@ -100,10 +100,10 @@ limit_keys! {
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES = "commit.max_request_body_bytes";
     /// Advisory limit: the most principal ids one request may act as.
     LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST = "access.max_principals_per_request";
-    /// Counts precondition entries, not resources; a longer list answers
+    /// Counts precondition entries, not resources; a longer list returns
     /// `invalid_request` before planning.
     LIMIT_COMMIT_MAX_PRECONDITIONS = "commit.max_preconditions";
-    /// Advisory limit: the most content tokens one commit may carry.
+    /// Advisory limit: the most content tokens one commit may include.
     LIMIT_COMMIT_MAX_CONTENT_TOKENS = "commit.max_content_tokens";
     /// Advisory limit: the most distinct external content refs one commit's
     /// operations may name.
@@ -115,7 +115,7 @@ limit_keys! {
     /// Advisory capability key for the largest page size accepted by a deployment.
     LIMIT_PAGINATION_MAX_LIMIT = "pagination.max_limit";
     /// Advisory limit: the smallest accepted `grace_window_ms` on a `gc`
-    /// request; smaller values answer `invalid_request`. Derived from the
+    /// request; smaller values return `invalid_request`. Derived from the
     /// publication budgets, not tuned.
     LIMIT_GC_MIN_GRACE_WINDOW_MS = "maintenance.gc.min_grace_window_ms";
     /// Advisory limit: files a plan-less `allow_scan` grep will scan before

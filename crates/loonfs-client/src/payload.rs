@@ -13,21 +13,21 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// Bytes read from a source in one go before they are handed on.
 ///
 /// Sized like an HTTP body's chunk rather than a transfer part: this is the
-/// slack a bounded uploader carries on top of the parts it holds, so it
+/// slack a bounded uploader keeps on top of the parts in memory, so it
 /// should stay small next to a part.
 pub(crate) const SOURCE_CHUNK_BYTES: usize = 64 * 1024;
 
-/// A payload delivered in pieces, for a put that must not hold it whole.
+/// A payload delivered in pieces, for a put that must not keep it whole in memory.
 ///
-/// Chunk boundaries carry no meaning — an uploader regroups them into
+/// Chunk boundaries have no meaning — an uploader regroups them into
 /// whatever units its transport wants. A chunk error ends the upload.
 pub type PayloadStream = BoxStream<'static, io::Result<Bytes>>;
 
-/// Where one put reads its payload, and what it knows about it up front.
+/// Where one put reads its payload, and what the source reports about the payload up front.
 ///
-/// The length is a hint and never a promise: a source that knows it lets the
+/// The length is a hint and never a promise: a source that reports the length lets the
 /// put pick the cheaper transport and declare a `Content-Length`, and a
-/// source that does not know it — a pipe, a socket, standard input — takes
+/// source that can't report the length — a pipe, a socket, standard input — takes
 /// exactly the same path and discovers the length as it goes.
 pub struct PayloadSource {
     pub(crate) stream: PayloadStream,
@@ -71,7 +71,7 @@ impl PayloadSource {
         })
     }
 
-    /// Returns the complete length when the source knows it.
+    /// Returns the complete length when the source reports it.
     pub fn size_bytes(&self) -> Option<u64> {
         self.size_bytes
     }
@@ -109,10 +109,10 @@ where
     .boxed()
 }
 
-/// Cuts a source into fixed-size parts, holding one at a time.
+/// Cuts a source into fixed-size parts, keeping one in memory at a time.
 ///
-/// Chunk boundaries in the source carry no meaning, so a chunk that overruns
-/// the part being cut is split and its tail carried into the next one. The
+/// Chunk boundaries in the source have no meaning, so a chunk that overruns
+/// the part being cut is split and its tail moved into the next one. The
 /// last part is whatever is left when the source ends, and a source that
 /// ends exactly on a boundary produces no final part.
 pub(crate) struct PartReader {

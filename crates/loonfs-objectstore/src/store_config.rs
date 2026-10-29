@@ -190,7 +190,7 @@ impl StoreConfig {
         Ok(())
     }
 
-    /// Returns a copy whose secret fields hold the redaction placeholder, for
+    /// Returns a copy whose secret fields contain the redaction placeholder, for
     /// serialization into `show`-style display output.
     pub fn redacted(&self) -> Self {
         let mut redacted = self.clone();

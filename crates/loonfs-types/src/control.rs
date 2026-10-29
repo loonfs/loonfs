@@ -41,7 +41,7 @@ impl ControlObjectKind {
     ///
     /// Versions are tracked per kind so one kind's payload schema can make a
     /// breaking change without invalidating every other control object.
-    /// Version 1 is a JSON envelope document carrying the current payload as
+    /// Version 1 is a JSON envelope document that contains the current payload as
     /// a raw JSON fragment whose checksum covers its exact bytes.
     pub const fn format_version(self) -> u32 {
         match self {
@@ -211,14 +211,14 @@ pub struct ForkBasis {
     /// Source manifest used as the target's initial state. Its owner must
     /// differ from the target namespace.
     pub manifest: ManifestRef,
-    /// Source pin that holds the basis for as long as the target lives.
+    /// Source pin that keeps the basis for as long as the target lives.
     pub source_pin_id: PinId,
 }
 
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
 
-/// Returns the commit id every namespace's sequence zero carries, before any
-/// commit has landed.
+/// Returns the commit id every namespace's sequence zero has, before any
+/// commit is published.
 pub fn genesis_commit_id() -> CommitId {
     CommitId::parse(GENESIS_COMMIT_ID).expect("the genesis commit ID should parse")
 }
@@ -243,7 +243,7 @@ pub enum UploadSessionMode {
     /// The client uploads parts and the provider assembles the object.
     ///
     /// Multipart sessions do not store a content reference at creation because
-    /// one-pass and streaming clients may not know the final size or checksum.
+    /// one-pass and streaming clients may not have the final size or checksum.
     /// The client supplies those values at completion, when LoonFS verifies the
     /// assembled object.
     DirectMultipart {

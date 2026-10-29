@@ -156,7 +156,6 @@ pub use layout::{ContentExtent, ContentLayout, ContentLayoutError, ExtentObject}
 pub use manifest::NamespaceAccess;
 pub use metadata_rows::MetadataFamilyGroup;
 pub use name_policy::name_key_for_display_name;
-pub use options::AttributeInclusion;
 pub use pagination::{
     decode_cursor, decode_token, decode_token_bytes, encode_cursor, encode_token,
     encode_token_bytes, DirectoryPageCursor, DirectoryTreeFrame, DirectoryTreePageCursor,
@@ -172,21 +171,4 @@ pub use retry::{OperationDeadline, TransportRetryOutcome, TransportRetryPolicy};
 pub use secret::{SecretString, REDACTED};
 pub use widths::{u64_from_usize, usize_from_u64};
 
-// Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
-// in `api::v0`; add here only what most consumers touch.
-pub use api::v0::{
-    headers, AdvanceRetentionRequest, AdvanceRetentionResponse, AttributesProjection, Checkpoint,
-    CheckpointOwner, Commit, CommitPrecondition, CommitRequest, CreateNamespaceRequest,
-    CreateSnapshotRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
-    DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
-    DestinationPrecondition, EntryInodeKind, ErrorDetails, ErrorResponse, ExtendSnapshotRequest,
-    ExtensionGcReports, FileContent, FileRevision, FilesystemOperation, ForkNamespaceRequest,
-    GcRequest, GcResponse, GrepGcReport, GrepMatch, GrepRequest, GrepResponse, GrepScope,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse, MetadataMaintenanceOutcome,
-    MetadataMaintenanceRequest, MetadataMaintenanceResponse, NamespaceAccessMode,
-    NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata, PathEntry, PathEntryKind,
-    RecoverAdministratorRequest, RecoverAdministratorResponse, RetainedCandidates, RetainedReason,
-    RunMaintenanceRequest, RunMaintenanceResponse, SetRetentionWindowRequest,
-    SetRetentionWindowResponse, Snapshot, TrashEntry,
-};
+pub use api::v0::*;

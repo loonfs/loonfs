@@ -20,8 +20,10 @@ const OPENAPI_PATH_SOURCES: &[&str] = &[
     include_str!("../../src/http/handlers_downloads.rs"),
     include_str!("../../src/http/handlers_filesystem.rs"),
     include_str!("../../src/http/handlers_inodes.rs"),
+    include_str!("../../src/http/handlers_maintenance.rs"),
     include_str!("../../src/http/handlers_namespace.rs"),
     include_str!("../../src/http/handlers_query.rs"),
+    include_str!("../../src/http/handlers_snapshots.rs"),
     include_str!("../../src/http/handlers_store.rs"),
     include_str!("../../src/http/handlers_uploads.rs"),
 ];

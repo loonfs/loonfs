@@ -52,7 +52,7 @@ impl Default for MetadataState {
 /// recoverable depends on the view's retention floor, which this rule
 /// doesn't read.
 /// The newest event is authoritative WITHOUT consulting the target of a
-/// revoke: commit validation guarantees a revoke only ever lands against the
+/// revoke: commit validation guarantees a revoke is only ever written against the
 /// position that was recoverable, so for valid histories the two rules
 /// agree, and the recorded target serves as audit metadata and the
 /// projection contract (change-feed consumers reduce with it and can flag a
@@ -75,7 +75,7 @@ pub(crate) fn hiding_tombstone_from_records(
 ///
 /// It reduces target-aware where the newest-event-wins rule in
 /// [`hiding_tombstone_from_records`] reduces target-blind. Commit validation
-/// only ever lands a revoke against the position that was recoverable, so
+/// only ever writes a revoke against the position that was recoverable, so
 /// the two agree on every history a writer can produce; the target is what
 /// lets a removal be derived one event at a time instead of by re-reading a
 /// root's whole history.
@@ -214,9 +214,9 @@ impl MetadataState {
         state
     }
 
-    /// Highest sequence carried by any indexed record.
+    /// Highest sequence of any indexed record.
     ///
-    /// No record carries a larger seq, so a query at `base_seq >=
+    /// No record has a larger seq, so a query at `base_seq >=
     /// indexed_seq()` passes every `seq <= base_seq` filter and is equivalent
     /// to an at-head query. The seq-gated read methods below rely on this to
     /// route to the indexes; only queries strictly below `indexed_seq()` need
@@ -271,7 +271,7 @@ impl MetadataState {
         self.row_count
     }
 
-    /// The heap the state holds outside its own inline size: every slot its
+    /// The heap the state owns outside its own inline size: every slot its
     /// row vectors reserved, what the rows own, and the at-head indexes.
     pub fn decoded_bytes(&self) -> usize {
         self.inodes.capacity() * size_of::<InodeRecord>()

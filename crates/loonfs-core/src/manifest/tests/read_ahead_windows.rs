@@ -2,12 +2,13 @@
 //! lookup's window when the read working memory is short, the blocks of a
 //! window that a scan decodes, and the stored bytes that a visit keeps.
 
-use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
-use super::super::data_block_load::read_ahead_window_len;
 use super::bounded_pages::rows;
 use super::*;
 use crate::cache::ReadWorkingMemory;
 use crate::limits::READAHEAD_WINDOW_BYTES;
+use crate::manifest::tests::inspection_materialization::load_manifest_segment_rows_in_key_range_with_cache;
+use crate::segment::block_memo::SessionBlockMemo;
+use crate::segment::data_block_load::read_ahead_window_len;
 use loonfs_types::format::segment_blocks::index_blocks_for_key_range;
 
 const FAMILY: ApiMetadataRowFamily = ApiMetadataRowFamily::DirentryBinds;
@@ -41,7 +42,7 @@ async fn segment_with_block_target(
     let index = index_block_load::load_segment_index(
         store,
         None,
-        &load::SessionBlockMemo::default(),
+        &SessionBlockMemo::default(),
         &descriptor,
     )
     .await
@@ -160,7 +161,7 @@ async fn a_lookup_window_shrinks_to_the_free_read_working_memory() {
         let free_bytes = limit - held;
         let pool = Arc::new(ReadWorkingMemory::new(limit, None));
         assert!(pool.try_reserve(held));
-        let memo = load::SessionBlockMemo::new(Arc::clone(&pool));
+        let memo = SessionBlockMemo::new(Arc::clone(&pool));
         store.reset();
         let block = data_block_load::load_segment_data_block_with_readahead(
             &store,
@@ -229,7 +230,7 @@ async fn a_bounded_load_returns_its_key_range_and_its_window_stops_at_the_segmen
     let loaded = load_manifest_segment_rows_in_key_range_with_cache(
         &store,
         Some(&cache),
-        &load::SessionBlockMemo::default(),
+        &SessionBlockMemo::default(),
         &descriptor,
         ChangeSeq(1),
         &lower,
@@ -336,10 +337,10 @@ async fn a_visit_keeps_only_the_stored_bytes_of_its_window_while_it_visits_rows(
 
     let mut visited = Vec::new();
     let mut peak_visit_bytes = 0;
-    let flow = super::super::visit_segment_rows(
+    let flow = crate::segment::visit_segment_rows(
         &store,
         Some(&cache),
-        &[super::super::ScanDescriptor {
+        &[crate::segment::ScanDescriptor {
             descriptor: &descriptor,
             max_seq: ChangeSeq(1),
         }],

@@ -1,4 +1,4 @@
-//! Seq-scoped metadata lookups answered from manifest segments via verified
+//! Seq-scoped metadata lookups served from manifest segments via verified
 //! scans.
 
 use super::row_decode::{
@@ -8,12 +8,12 @@ use super::row_decode::{
     revision_from_manifest_row, tombstone_from_manifest_row,
 };
 use crate::error::Result;
-use crate::manifest::{Readahead, VerifiedMetadataSegments};
 use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
     ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
+use crate::segment::{Readahead, VerifiedMetadataSegments};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily};
@@ -416,7 +416,7 @@ pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
 /// The newest whole-state row of `inode_id` at or below `visible_seq` in
 /// a family whose keys invert the revision, the sequence, and the delta
 /// index, so an ascending prefix scan reads one inode's rows newest first
-/// and the first row at or below the sequence is the answer.
+/// and the first row at or below the sequence is the result.
 ///
 /// A read that sees every row of the manifest takes the first row of the
 /// newest run that has one. A read below a run's sequence merges every run,

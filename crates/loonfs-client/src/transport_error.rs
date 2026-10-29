@@ -69,7 +69,7 @@ impl TransportError {
         matches!(self.kind, TransportErrorKind::Body)
     }
 
-    /// Returns `None` because transport failures carry no server error code.
+    /// Returns `None` because transport failures have no server error code.
     pub fn code(&self) -> Option<ErrorCode> {
         None
     }

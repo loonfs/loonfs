@@ -141,7 +141,7 @@ pub fn content_head<S: ObjectStore + ?Sized>(
 ) -> Option<u64> {
     use futures::FutureExt;
     let tail = crate::wal::ProjectedWalTail::from_rows(state.clone());
-    let manifest = crate::manifest::VerifiedMetadataSegments::initial(store);
+    let manifest = crate::segment::VerifiedMetadataSegments::initial(store);
     crate::metadata::MetadataView::in_memory(&manifest, &tail, None, state.indexed_seq())
         .content_head(content_id)
         .now_or_never()
@@ -153,8 +153,8 @@ mod content_write;
 pub mod ops;
 
 use crate::engine::NamespaceWriterEngine;
-use crate::manifest::{MetadataRunPolicy, MetadataSegmentCache};
 use crate::namespace::store::NamespaceStore;
+use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{NamespaceId, WallClock, WriterId};
 use std::sync::Arc;

@@ -16,7 +16,7 @@ use crate::{
     NamespaceDiagnostics, NamespaceId, PinId, SetRetentionWindowResponse, WriterState,
 };
 use crate::{Error, Result};
-use loonfs_core::cache::NamespaceStorageDiagnostics;
+use loonfs_core::control::NamespaceStorageDiagnostics;
 use loonfs_core::{CheckpointPageCursor, MetadataCompactionCancellation};
 use loonfs_types::{u64_from_usize, PageRequest, WriterId};
 use std::num::NonZeroU64;
@@ -79,7 +79,7 @@ impl Maintenance {
         self
     }
 
-    /// Narrows the rows one segment this value's compaction writes may hold,
+    /// Narrows the rows one segment this value's compaction writes may contain,
     /// so a namespace a test can build in seconds compacts into many
     /// segments.
     ///
@@ -175,7 +175,7 @@ impl Maintenance {
     }
 
     /// Folds the WAL tail at `max_wal_tail_objects` WAL objects, at the
-    /// runtime's inline fold size when this runtime's writer session knows
+    /// runtime's inline fold size when this runtime's writer session records
     /// the tail's inline bytes, or once the tail's newest commit reaches the
     /// runtime's idle fold age on this handle's wall clock (see
     /// [`RuntimeConfig::idle_fold_after_ms`](crate::RuntimeConfig::idle_fold_after_ms)).
@@ -228,7 +228,7 @@ impl Maintenance {
     /// compaction due. When a pass reports a window too large for it, runs
     /// [`Self::compact_metadata`].
     ///
-    /// Stops when nothing is due, when another process holds the compactor
+    /// Stops when nothing is due, when another process has the compactor
     /// epoch, when `cancellation` is set, after three abandoned units in a
     /// row, or after it publishes 16 compaction units. Work still due after
     /// the 16th unit waits for the next call. A unit that loses its manifest

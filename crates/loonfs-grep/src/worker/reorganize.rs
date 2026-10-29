@@ -41,7 +41,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Runs one partitioned delta-to-mid or mid-plus-base reorganize step.
     ///
     /// A step that has runs to merge waits for a step permit before it reads
-    /// index segments, and holds it until it publishes. A step with nothing
+    /// index segments, and keeps it until it publishes. A step with nothing
     /// to merge takes no permit.
     pub async fn reorganize_step(
         &self,
@@ -242,7 +242,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
         };
         let mut last_key = String::new();
         while merged.rows < max_rows as u64 {
-            refill_iterators(self, &mut readers, DEFAULT_MAX_COMPACTION_INPUT_BYTES).await?;
+            refill_iterators(self, &mut readers, DEFAULT_MAX_COMPACTION_INPUT_BYTES.get()).await?;
             let Some(position) = select_next_iterator(&readers, |_, row_key| row_key) else {
                 merged.exhausted = true;
                 return Ok(merged);
@@ -256,7 +256,8 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
             let row = readers[position].take_head();
             merge_row(&mut merged, row, &object_key)?;
             loop {
-                refill_iterators(self, &mut readers, DEFAULT_MAX_COMPACTION_INPUT_BYTES).await?;
+                refill_iterators(self, &mut readers, DEFAULT_MAX_COMPACTION_INPUT_BYTES.get())
+                    .await?;
                 let mut found = false;
                 for reader in &mut readers {
                     while reader.head().is_some_and(|(row_key, _)| row_key == key) {
@@ -272,7 +273,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
             }
             last_key = key;
         }
-        refill_iterators(self, &mut readers, DEFAULT_MAX_COMPACTION_INPUT_BYTES).await?;
+        refill_iterators(self, &mut readers, DEFAULT_MAX_COMPACTION_INPUT_BYTES.get()).await?;
         if readers.iter().any(|reader| reader.head().is_some()) {
             merged.next_cursor = format!("{last_key}\0");
         } else {

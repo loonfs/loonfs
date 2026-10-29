@@ -39,7 +39,7 @@ const GCS_JSON_OBJECTS: &str = "https://storage.googleapis.com/storage/v1/b";
 /// Root of the JSON API media and resumable uploads.
 const GCS_JSON_UPLOADS: &str = "https://storage.googleapis.com/upload/storage/v1/b";
 
-/// The header that carries an object's checksums, in requests and responses.
+/// The header that includes an object's checksums, in requests and responses.
 const GCS_HASH_HEADER: &str = "x-goog-hash";
 
 /// Supplies a credential source and key scoping for the native Google Cloud Storage adapter.
@@ -399,7 +399,7 @@ fn gcs_object(key: &str, body: &[u8]) -> Result<ObjectMetadata> {
 ///
 /// GCS reports its hashes either as one comma-joined `x-goog-hash` value or
 /// as a header line per algorithm, and promises no order between them. Every
-/// value is searched, so which spelling arrives cannot decide whether the
+/// value is searched, so which spelling arrives cannot determine whether the
 /// checksum is found — reading only the first header line would miss a
 /// crc32c that happened to follow an md5.
 fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<Checksum> {

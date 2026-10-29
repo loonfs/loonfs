@@ -127,7 +127,7 @@ impl ConfiguredObjectStoreKind {
 
 /// Validated provider client and the direct-transfer issuers it supports.
 ///
-/// Construction decides whether direct transfers are allowed. Unsupported
+/// Construction determines whether direct transfers are allowed. Unsupported
 /// signing behavior or an unvalidated endpoint produces no direct-transfer
 /// issuers, so higher layers do not need to interpret provider configuration.
 #[derive(Debug)]
@@ -207,7 +207,7 @@ impl ConfiguredObjectStore {
     /// Returns the direct transfers this deployment can authorize, or `None`
     /// when every transfer has to be proxied.
     ///
-    /// This is the whole answer: a caller reads the bundle's fields to learn
+    /// This is the whole result: a caller reads the bundle's fields to learn
     /// which directions are offered and never asks configuration a second
     /// question about them.
     pub fn direct_transfers(&self) -> Option<DirectTransferIssuers> {

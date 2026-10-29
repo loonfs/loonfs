@@ -1363,7 +1363,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .await
             .expect("usage");
         assert_eq!(usage.wal_tail_inline_bytes, 4);
-        assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS);
+        assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS.get());
         let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
         let options = MaintainMetadataOptions::default();
         let independent = crate::LoonFs::builder_with_store(store.clone())

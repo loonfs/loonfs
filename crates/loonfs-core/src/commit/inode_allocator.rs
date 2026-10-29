@@ -11,7 +11,7 @@ pub(crate) fn next_inode_after(inode_id: InodeId) -> Option<InodeId> {
 /// A candidate-local fork of the batch's next inode ID.
 ///
 /// Planning advances the fork while it assigns IDs to create operations. An
-/// accepted candidate's plan carries the fork's final position, and a
+/// accepted candidate's plan includes the fork's final position, and a
 /// rejected candidate leaves the batch's position unchanged.
 #[derive(Debug)]
 pub(crate) struct CandidateAllocation {

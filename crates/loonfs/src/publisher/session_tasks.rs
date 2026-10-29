@@ -116,7 +116,7 @@ impl NamespacePublisher {
                 .zip(engine.wal_tail_inline_bytes())
                 .is_some_and(|(objects, inline_bytes)| {
                     FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
-                        FOLD_AT_WAL_OBJECTS,
+                        FOLD_AT_WAL_OBJECTS.get(),
                         objects,
                         inline_bytes,
                     )
@@ -214,7 +214,7 @@ impl NamespacePublisher {
                     .zip(engine.wal_tail_inline_bytes())
                     .is_some_and(|(objects, inline_bytes)| {
                         !FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
-                            FOLD_AT_WAL_OBJECTS,
+                            FOLD_AT_WAL_OBJECTS.get(),
                             objects,
                             inline_bytes,
                         )
@@ -301,7 +301,7 @@ impl NamespacePublisher {
     }
 
     /// Spawns `work` as a task whose exit the drain and close can wait for,
-    /// and that forgets the session if it was the last thing running.
+    /// and that removes the session's entry if it was the last thing running.
     pub(super) fn spawn_session_task(
         &self,
         state: &mut NamespacePublisherState,

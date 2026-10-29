@@ -4,10 +4,10 @@
 //! serde, and once in an `as_str` or `Display` that keys, labels, and
 //! messages use. A rename on one side alone would split the two spellings.
 
-use loonfs_types::api::v0::UploadMode;
 use loonfs_types::format::control::ControlObjectKind;
 use loonfs_types::format::manifest::{MetadataRowFamily, NamespaceManifestKind};
 use loonfs_types::format::wal::WalEnvelopeKind;
+use loonfs_types::UploadMode;
 use loonfs_types::{
     AccessRight, ChecksumAlgorithm, ContentRefKind, EntryInodeKind, InodeKind, MetadataFamilyGroup,
 };

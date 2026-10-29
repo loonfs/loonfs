@@ -17,25 +17,25 @@ mod tests;
 
 /// Default maximum WAL-tail folds that the runtimes sharing one budget run at
 /// once.
-pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
+pub const DEFAULT_MAX_CONCURRENT_FOLDS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 /// Default maximum metadata compaction units that the runtimes sharing one
 /// budget run at once.
-pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 2;
+pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 /// Default maximum public reads that runtimes sharing one budget run at once.
-pub const DEFAULT_MAX_CONCURRENT_READS: usize = 64;
-pub(crate) const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: usize = 8;
+pub const DEFAULT_MAX_CONCURRENT_READS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
+pub(crate) const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 /// Default bytes retained across read, publication, and fold memos.
 pub const DEFAULT_MAX_READ_WORKING_BYTES: usize = 256 * 1024 * 1024;
 /// Default maximum content object writes that the runtimes sharing one
 /// budget run at once.
-pub const DEFAULT_MAX_CONCURRENT_CONTENT_WRITES: usize = 32;
-const DEFAULT_MAX_ADMITTED_REQUESTS: usize = 8192;
-const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_CONCURRENT_CONTENT_WRITES: NonZeroUsize = NonZeroUsize::new(32).unwrap();
+const DEFAULT_MAX_ADMITTED_REQUESTS: NonZeroUsize = NonZeroUsize::new(8192).unwrap();
+const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1024).unwrap();
 
 /// Work in flight that one or more runtimes share.
 ///
 /// It covers admitted publication requests, running reads and publications, WAL
-/// folds, metadata merges, the decoded input one merge may hold, content
+/// folds, metadata merges, the decoded input one merge may keep, content
 /// writes, and retained read working memory.
 ///
 /// Each [`LoonFs`](crate::LoonFs) built with the budget charges the
@@ -44,7 +44,7 @@ const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 /// work of every runtime that shares it. Publication admission never waits: a request
 /// past an admitted total fails at once with `commit_queue_full`. Permit
 /// waits are first come, first served, whichever runtime they belong to. No
-/// runtime has a reserved share, so an idle runtime holds nothing back. A
+/// runtime has a reserved share, so an idle runtime reserves nothing. A
 /// host that wants to isolate runtimes from each other gives them separate
 /// budgets. The per-namespace admission limits stay with each runtime (see
 /// [`PublicationPolicy`](crate::PublicationPolicy)). Clones share the budget.
@@ -87,25 +87,15 @@ impl ExecutionBudget {
     pub fn builder() -> ExecutionBudgetBuilder {
         ExecutionBudgetBuilder {
             max_read_working_bytes: DEFAULT_MAX_READ_WORKING_BYTES,
-            max_admitted_requests: const { NonZeroUsize::new(DEFAULT_MAX_ADMITTED_REQUESTS).unwrap() },
-            max_admitted_bytes: const { NonZeroUsize::new(DEFAULT_MAX_ADMITTED_BYTES).unwrap() },
-            max_concurrent_reads: const { NonZeroUsize::new(DEFAULT_MAX_CONCURRENT_READS).unwrap() },
-            max_concurrent_publications: const {
-                NonZeroUsize::new(DEFAULT_MAX_CONCURRENT_PUBLICATIONS).unwrap()
-            },
-            max_concurrent_folds: const { NonZeroUsize::new(DEFAULT_MAX_CONCURRENT_FOLDS).unwrap() },
-            max_concurrent_compactions: const {
-                NonZeroUsize::new(DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap()
-            },
-            max_merge_input_bytes: const {
-                NonZeroUsize::new(
-                    loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
-                )
-                .unwrap()
-            },
-            max_concurrent_content_writes: const {
-                NonZeroUsize::new(DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).unwrap()
-            },
+            max_admitted_requests: DEFAULT_MAX_ADMITTED_REQUESTS,
+            max_admitted_bytes: DEFAULT_MAX_ADMITTED_BYTES,
+            max_concurrent_reads: DEFAULT_MAX_CONCURRENT_READS,
+            max_concurrent_publications: DEFAULT_MAX_CONCURRENT_PUBLICATIONS,
+            max_concurrent_folds: DEFAULT_MAX_CONCURRENT_FOLDS,
+            max_concurrent_compactions: DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+            max_merge_input_bytes:
+                loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+            max_concurrent_content_writes: DEFAULT_MAX_CONCURRENT_CONTENT_WRITES,
             metrics_recorder: None,
         }
     }
@@ -147,14 +137,14 @@ impl ExecutionBudget {
     /// Charges one admitted publication request of `estimated_bytes` to the
     /// totals. A request past either total is refused, and the change says so
     /// and charges nothing. Pass the change to [`Self::report_admission`]
-    /// once the caller holds no lock.
+    /// once the caller has unlocked every lock.
     pub(crate) fn charge_admission(&self, estimated_bytes: usize) -> AdmissionChange {
         self.inner.admission.charge(estimated_bytes)
     }
 
     /// Returns what [`Self::charge_admission`] charged, once the request's
     /// work settles. Pass the change to [`Self::report_admission`] once the
-    /// caller holds no lock.
+    /// caller has unlocked every lock.
     pub(crate) fn refund_admission(&self, estimated_bytes: usize) -> AdmissionChange {
         self.inner.admission.refund(estimated_bytes)
     }
@@ -173,13 +163,13 @@ impl ExecutionBudget {
         self.inner.reads.acquire().await
     }
 
-    /// Waits for a publication permit. A namespace's worker holds one while
+    /// Waits for a publication permit. A namespace's worker has one while
     /// it publishes a batch.
     pub(crate) async fn publication_permit(&self) -> BudgetPermit<'_> {
         self.inner.publications.acquire().await
     }
 
-    /// Waits for a fold permit. Every fold holds one, and so does every
+    /// Waits for a fold permit. Every fold has one, and so does every
     /// operation that may fold first: a namespace deletion, and the creation
     /// of a checkpoint, a snapshot, or a fork of the current head.
     pub(crate) async fn fold_permit(&self) -> BudgetPermit<'_> {
@@ -191,7 +181,7 @@ impl ExecutionBudget {
         self.inner.compactions.acquire().await
     }
 
-    /// The decoded metadata bytes one merge may hold.
+    /// The decoded metadata bytes one merge may keep.
     pub(crate) fn max_merge_input_bytes(&self) -> NonZeroUsize {
         self.inner.max_merge_input_bytes
     }
@@ -275,7 +265,7 @@ impl ExecutionBudgetBuilder {
     /// Sets the maximum number of metadata compaction units run at once,
     /// whether sessions or [`Maintenance`](crate::Maintenance) calls start
     /// them. A merge never
-    /// holds a fold permit. Defaults to
+    /// has a fold permit. Defaults to
     /// [`DEFAULT_MAX_CONCURRENT_COMPACTIONS`].
     pub fn max_concurrent_compactions(mut self, limit: NonZeroUsize) -> Self {
         self.max_concurrent_compactions = limit;
@@ -359,23 +349,23 @@ pub struct ExecutionBudgetStats {
     /// Estimated retained bytes of the publication requests admitted and not
     /// yet settled.
     pub admitted_bytes: usize,
-    /// Public reads holding a read permit.
+    /// Public reads that have a read permit.
     pub reads_running: usize,
     /// Public reads waiting for a read permit.
     pub reads_waiting: usize,
-    /// Publication batches holding a publication permit.
+    /// Publication batches that have a publication permit.
     pub publications_running: usize,
     /// Namespace publication workers waiting for a publication permit.
     pub publications_waiting: usize,
-    /// Folds, and operations that may fold first, holding a fold permit.
+    /// Folds, and operations that may fold first, that have a fold permit.
     pub folds_running: usize,
     /// Folds, and operations that may fold first, waiting for a fold permit.
     pub folds_waiting: usize,
-    /// Metadata merges holding a compaction permit.
+    /// Metadata merges that have a compaction permit.
     pub compactions_running: usize,
     /// Metadata merges waiting for a compaction permit.
     pub compactions_waiting: usize,
-    /// Content object writes holding a content write permit.
+    /// Content object writes that have a content write permit.
     pub content_writes_running: usize,
     /// Content object writes waiting for a content write permit.
     pub content_writes_waiting: usize,

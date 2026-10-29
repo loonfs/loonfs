@@ -2,9 +2,11 @@
 //! descriptors: identity, checksums, ranges, ordering, and row shape.
 
 use super::error::ManifestLoadError;
-use super::row::manifest_row_commit_seq;
-use super::runs::{runs_in_materialization_order, MetadataFamilyGroup, MetadataRunManifest};
-use super::scan::ordered_manifest_segments;
+use crate::segment::row::manifest_row_commit_seq;
+use crate::segment::runs::{
+    runs_in_materialization_order, MetadataFamilyGroup, MetadataRunManifest,
+};
+use crate::segment::scan::ordered_manifest_segments;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
@@ -340,7 +342,7 @@ fn validate_one_base_run_per_family_group(
     Ok(())
 }
 
-pub(super) fn validate_manifest_row_seq_range<'a>(
+pub(crate) fn validate_manifest_row_seq_range<'a>(
     object_key: &str,
     rows: impl IntoIterator<Item = &'a MetadataRow>,
     max_seq: ChangeSeq,
@@ -360,12 +362,12 @@ pub(super) fn validate_manifest_row_seq_range<'a>(
 }
 
 /// Compares a bind family against its reverse index outright, over rows a
-/// caller holds all of.
+/// caller has all of.
 ///
-/// Only the test-only inspection materialization holds a whole family, so only
-/// it can afford this. A merge never holds one and checks parity by digesting
+/// Only the test-only inspection materialization keeps a whole family, so only
+/// it can afford this. A merge never keeps a whole family and checks parity by digesting
 /// the rows it writes instead
-/// (`super::streaming_compaction::GroupMerge::refuse_a_run_whose_index_disagrees`).
+/// (`crate::compaction::group_merge::GroupMerge::refuse_a_run_whose_index_disagrees`).
 #[cfg(test)]
 pub(super) fn validate_direntry_child_bind_index(
     object_key: &str,

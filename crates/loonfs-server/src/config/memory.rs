@@ -201,48 +201,17 @@ impl ServerConfig {
         let limit = self.memory_limit_bytes.or(cgroup_limit);
         let folds = self
             .max_concurrent_folds
-            .map_or(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS, NonZeroUsize::get);
-        let compactions = self.max_concurrent_compactions.map_or(
-            loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
-            NonZeroUsize::get,
-        );
-        let content_writes = self.max_concurrent_content_writes.map_or(
-            loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES,
-            NonZeroUsize::get,
-        );
-        let fixed = [
-            ("process", (128 * MIB) as u128),
-            (
-                "connections (`max_connections` x 472 KiB)",
-                self.max_connections.get() as u128 * 472 * 1024,
-            ),
-            (
-                "transfers ((`max_concurrent_uploads` + `max_concurrent_downloads`) x 8 MiB)",
-                (self.max_concurrent_uploads.get() as u128
-                    + self.max_concurrent_downloads.get() as u128)
-                    * (8 * MIB) as u128,
-            ),
-            (
-                "segment output ((`max_concurrent_folds` + `max_concurrent_compactions`) x 32 MiB)",
-                (folds as u128 + compactions as u128)
-                    * loonfs::MAX_PENDING_SEGMENT_BYTES as u128,
-            ),
-            (
-                "content writes (`max_concurrent_content_writes` x 16 MiB, or 72 MiB on R2)",
-                content_writes as u128
-                    * u128::from(self.store.kind().max_assembly_buffer_bytes()),
-            ),
-            (
-                "completed upload sessions",
-                loonfs::DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES as u128,
-            ),
-            (
-                "ssd tier (64 MiB write queue + `metadata_cache.ssd.max_segment_bytes` / 4 KiB x 168 B)",
-                self.metadata_cache.ssd.as_ref().map_or(0, |ssd| {
-                    SsdSegmentBlocks::memory_bytes(ssd.max_segment_bytes) as u128
-                }),
-            ),
-        ];
+            .unwrap_or(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS)
+            .get();
+        let compactions = self
+            .max_concurrent_compactions
+            .unwrap_or(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS)
+            .get();
+        let content_writes = self
+            .max_concurrent_content_writes
+            .unwrap_or(loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES)
+            .get();
+        let fixed = self.fixed_memory_terms(folds, compactions, content_writes);
         let fixed_bytes: u128 = fixed.iter().map(|(_, bytes)| bytes).sum();
         // The pools share four fifths of what the limit has left after
         // `fixed` and the floor, so the fifth that the headroom takes is a
@@ -327,7 +296,7 @@ impl ServerConfig {
                 "max_merge_input_bytes",
                 self.max_merge_input_bytes,
                 share(10).map(|bytes| bytes / compactions),
-                loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+                loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES.get(),
             ),
             compactions,
             serves_grep,
@@ -339,6 +308,50 @@ impl ServerConfig {
             None,
         )?;
         Ok(memory)
+    }
+
+    /// Returns the memory terms that don't depend on the memory limit: the
+    /// process, connections, transfers, segment output, content writes,
+    /// completed upload sessions, and the SSD tier's index.
+    fn fixed_memory_terms(
+        &self,
+        folds: usize,
+        compactions: usize,
+        content_writes: usize,
+    ) -> [(&'static str, u128); 7] {
+        [
+            ("process", (128 * MIB) as u128),
+            (
+                "connections (`max_connections` x 472 KiB)",
+                self.max_connections.get() as u128 * 472 * 1024,
+            ),
+            (
+                "transfers ((`max_concurrent_uploads` + `max_concurrent_downloads`) x 8 MiB)",
+                (self.max_concurrent_uploads.get() as u128
+                    + self.max_concurrent_downloads.get() as u128)
+                    * (8 * MIB) as u128,
+            ),
+            (
+                "segment output ((`max_concurrent_folds` + `max_concurrent_compactions`) x 32 MiB)",
+                (folds as u128 + compactions as u128)
+                    * loonfs::MAX_PENDING_SEGMENT_BYTES as u128,
+            ),
+            (
+                "content writes (`max_concurrent_content_writes` x 16 MiB, or 72 MiB on R2)",
+                content_writes as u128
+                    * u128::from(self.store.kind().max_assembly_buffer_bytes()),
+            ),
+            (
+                "completed upload sessions",
+                loonfs::DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES as u128,
+            ),
+            (
+                "ssd tier (64 MiB write queue + `metadata_cache.ssd.max_segment_bytes` / 4 KiB x 168 B)",
+                self.metadata_cache.ssd.as_ref().map_or(0, |ssd| {
+                    SsdSegmentBlocks::memory_bytes(ssd.max_segment_bytes) as u128
+                }),
+            ),
+        ]
     }
 }
 

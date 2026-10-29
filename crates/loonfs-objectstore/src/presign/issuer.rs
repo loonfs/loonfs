@@ -3,8 +3,8 @@
 use crate::object_store::Result;
 use crate::ByteRange;
 use async_trait::async_trait;
-use loonfs_types::api::v0::ObjectTransferAccess;
 use loonfs_types::Checksum;
+use loonfs_types::ObjectTransferAccess;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -27,7 +27,7 @@ pub struct PresignedGetRequest<'a> {
     /// The bytes the capability reads. The issuer signs them as the `Range`
     /// header, so the provider refuses a request for any other bytes. An
     /// empty range signs no `Range`, because HTTP cannot name zero bytes; a
-    /// caller asks for one only for an object that holds none.
+    /// caller asks for one only for an object that has none.
     pub range: ByteRange,
     /// Requested lifetime measured from the supplied signing time. Temporary
     /// credentials can impose an earlier expiry, reported by the issued URL.
@@ -86,7 +86,7 @@ pub(crate) struct PresignedCopyPartRequest<'a> {
     pub(crate) ttl: Duration,
 }
 
-/// Carries a short-lived HTTP capability and every request header covered by its signature.
+/// Contains a short-lived HTTP capability and every request header covered by its signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresignedUrl {
     /// HTTP method the client must use exactly as issued.

@@ -304,7 +304,7 @@ async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
     seed_wal_tail(
         store.inner(),
         &fixture.namespace_id,
-        FOLD_AT_WAL_OBJECTS - 2,
+        FOLD_AT_WAL_OBJECTS.get() - 2,
     )
     .await;
     store.block_next();

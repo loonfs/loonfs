@@ -28,7 +28,7 @@ pub type CheckpointsPager = loonfs_types::Pager<ListCheckpointsResponse, Error>;
 /// A pager over snapshots.
 pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, Error>;
 
-/// Decodes the wire cursor a pager carries into the typed cursor a read
+/// Decodes the wire cursor a pager has into the typed cursor a read
 /// takes.
 pub(crate) fn decode_page_request<C: PageCursor>(
     request: PageRequest<String>,

@@ -204,7 +204,7 @@ async fn ticks_finish_more_than_sixteen_metadata_units_without_another_publish()
         .open(&namespace_id)
         .await
         .expect("open");
-    for index in 0..4 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..4 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() {
         held.put_file(&format!("/file-{index}"), b"data", &test_actor())
             .await
             .expect("publish");
@@ -274,7 +274,7 @@ async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval(
         .open(&namespace_id)
         .await
         .expect("open");
-    for index in 0..2 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..2 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() {
         held.put_file(&format!("/note-{index}"), b"data", &test_actor())
             .await
             .expect("publish");

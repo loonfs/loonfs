@@ -25,7 +25,7 @@ pub(crate) enum CommitOperation {
     /// Create a directory under a parent inode.
     CreateDirectory {
         /// Inode identity assigned once by the candidate allocator during
-        /// planning and carried unchanged through validation.
+        /// planning and passed unchanged through validation.
         child_inode_id: InodeId,
         /// Visible directory that will own the new binding.
         parent_inode_id: InodeId,
@@ -35,7 +35,7 @@ pub(crate) enum CommitOperation {
     /// Create a file under a parent inode.
     CreateFile {
         /// Inode identity assigned once by the candidate allocator during
-        /// planning and carried unchanged through validation.
+        /// planning and passed unchanged through validation.
         child_inode_id: InodeId,
         /// Visible directory that will own the new binding.
         parent_inode_id: InodeId,
@@ -54,7 +54,7 @@ pub(crate) enum CommitOperation {
         base_revision_no: RevisionNo,
         /// Immutable replacement bytes: prepared content, which must have
         /// valid preparation proof before publication, or the reference an
-        /// append builds from the bytes this commit carries.
+        /// append builds from the bytes this commit includes.
         content_ref: ContentRef,
         /// The offset where an append's bytes begin, which is the base
         /// revision's size.
@@ -122,8 +122,8 @@ pub(crate) enum CommitOperation {
     /// Replace an inode's attributes with a new complete map.
     ///
     /// The planner has already applied the caller's writes and removals to
-    /// what it read, so the op carries the result rather than the request.
-    /// It does not carry the revision it publishes: validation derives that
+    /// what it read, so the op contains the result rather than the request.
+    /// It does not include the revision it publishes: validation derives that
     /// from the base.
     UpdateAttributes {
         /// Visible file or directory whose attributes are replaced.
@@ -134,7 +134,7 @@ pub(crate) enum CommitOperation {
         /// The inode's complete attribute map after the update.
         attributes: Attributes,
     },
-    /// Replace an inode's access row. The op carries the complete resulting
+    /// Replace an inode's access row. The op contains the complete resulting
     /// state and the revision it was planned against; validation derives the
     /// revision it publishes.
     UpdateAccess {

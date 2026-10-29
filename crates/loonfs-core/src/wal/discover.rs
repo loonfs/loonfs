@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 /// Largest window of WAL numbers that one round of [`load_wal_after`] reads,
 /// at most 16 GETs in flight. A round is a lockstep wave by design, because
-/// each round's results decide whether the reads stop and how wide the next
+/// each round's results determine whether the reads stop and how wide the next
 /// window is.
 const WAL_DISCOVERY_PROBE_WAVE: usize = 16;
 

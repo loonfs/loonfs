@@ -6,8 +6,9 @@ use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::LeafRevisionPreload;
 use crate::path::read::LoadedMetadataView;
 use loonfs_test_support::stores::ConcurrencyWatchStore;
+use loonfs_types::options::AttributeInclusion;
 use loonfs_types::options::ListOptions;
-use loonfs_types::{AttributeInclusion, InodeKind, ListPageCursor, PageRequest};
+use loonfs_types::{InodeKind, ListPageCursor, PageRequest};
 use std::assert_matches;
 
 #[tokio::test]

@@ -13,7 +13,7 @@ use loonfs_grep::{
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_test_support::clock::ManualClock;
-use loonfs_types::api::v0::{self, GrepIndex};
+use loonfs_types::GrepIndex;
 use loonfs_types::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
 use std::sync::Arc;
 
@@ -130,7 +130,7 @@ impl GrepHost {
     ) -> Result<GrepIndexStatus, GrepError> {
         loop {
             let lifecycle = self.worker.lifecycle(namespace_id).await?;
-            if v0::GrepIndexStatus::from(&lifecycle).is_built_through(captured_seq) {
+            if loonfs_types::GrepIndexStatus::from(&lifecycle).is_built_through(captured_seq) {
                 return Ok(lifecycle);
             }
             match self

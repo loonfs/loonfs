@@ -6,7 +6,7 @@ use loonfs_client::{ClientError, ListOptions, MoveOptions, NamespacePath, PutFil
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::{
-    api::v0::FilesystemChange, ChangeSeq, CommitId, DestinationBehavior, ErrorCode, ErrorResponse,
+    ChangeSeq, CommitId, DestinationBehavior, ErrorCode, ErrorResponse, FilesystemChange,
     ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo, MAX_PAGE_LIMIT,
 };
 use std::assert_matches;

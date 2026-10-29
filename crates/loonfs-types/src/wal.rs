@@ -47,7 +47,7 @@ pub enum WalCodecError {
     },
 }
 
-/// Version 1: a zstd-compressed CBOR envelope document carrying the payload as
+/// Version 1: a zstd-compressed CBOR envelope document that contains the payload as
 /// an opaque CBOR byte string.
 ///
 /// `payload_checksum` covers exactly those bytes, and delta and precondition
@@ -106,7 +106,7 @@ pub const fn cbor_map_bytes(fields: &[(&str, usize)]) -> usize {
     bytes
 }
 
-/// Identifies the durable payload family carried by a WAL envelope.
+/// Identifies the durable payload family in a WAL envelope.
 ///
 /// See [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,7 +167,7 @@ pub enum WalDelta {
         parent_inode_id: InodeId,
         /// Canonical lookup key of the binding being removed.
         name_key: NameKey,
-        /// User-facing spelling the removed binding carried, so feed
+        /// User-facing spelling of the removed binding, so feed
         /// consumers see the name a person typed without a second lookup.
         display_name: DisplayName,
         /// Child identity expected on the targeted binding.
@@ -193,7 +193,7 @@ pub enum WalDelta {
         /// publication; inline bytes travel in this commit's `inline_content`
         /// ([format section 1.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#15-file-contents-and-ownership)).
         content_ref: ContentRef,
-        /// Objects holding the bytes before this commit's pieces.
+        /// Objects that store the bytes before this commit's pieces.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layout: Option<crate::ContentLayout>,
         /// The offset where an append's bytes begin, which is the base
@@ -211,7 +211,7 @@ pub enum WalDelta {
         delta_index: u32,
         /// Inode at the root of the newly hidden subtree.
         root_inode_id: InodeId,
-        /// The binding the delete removed, carried so the deleted name
+        /// The binding the delete removed, included so the deleted name
         /// survives on the immortal tombstone row after unbind rows age out.
         deleted_binding: DeletedBinding,
     },
@@ -229,9 +229,9 @@ pub enum WalDelta {
     },
     /// Publishes the next attribute revision of one inode, as complete state.
     ///
-    /// The delta carries the whole resulting map rather than the changes that
-    /// produced it, so replay never needs an earlier revision to answer what
-    /// an inode holds. An empty map is a real revision: it is the cleared
+    /// The delta contains the whole resulting map rather than the changes that
+    /// produced it, so replay never needs an earlier revision to determine what
+    /// attributes an inode has. An empty map is a real revision: it is the cleared
     /// state, and it hides every earlier map.
     AppendAttributesRevision {
         /// Stable position of this attribute delta within its commit.
@@ -246,7 +246,7 @@ pub enum WalDelta {
     },
     /// Publishes the next access revision of one inode, as complete state.
     ///
-    /// Like an attribute revision, the delta carries the whole resulting
+    /// Like an attribute revision, the delta contains the whole resulting
     /// state. A row with no boundary and no grants is a real revision: it is
     /// the cleared state, and it hides every earlier row.
     AppendAccessRevision {
@@ -322,7 +322,7 @@ pub fn committed_activity(record: &WalCommitPayload) -> Option<crate::manifest::
     Some(activity)
 }
 
-/// Carries bytes of a content object named by a revision delta in the same
+/// Contains bytes of a content object that a revision delta references in the same
 /// commit, starting at `offset`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -336,7 +336,7 @@ pub struct WalInlineContent {
     pub bytes: Vec<u8>,
 }
 
-/// Carries one accepted logical commit inside a WAL object.
+/// Contains one accepted logical commit inside a WAL object.
 ///
 /// See [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,7 +365,7 @@ pub struct WalCommitPayload {
     pub inline_content: Vec<WalInlineContent>,
 }
 
-/// Carries the namespace identity, numbered range, and commits stored in one WAL object.
+/// Contains the namespace identity, numbered range, and commits stored in one WAL object.
 ///
 /// See [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

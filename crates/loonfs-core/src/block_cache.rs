@@ -2,10 +2,8 @@
 
 use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
-use crate::manifest::ManifestLoadError;
 use crate::recency::Recency;
 use crate::shared_check::SharedCheck;
-use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::mem::size_of;
@@ -13,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 pub trait DecodedBlock: Clone {
-    /// The decoded bytes this value holds, charged against the cache budget.
+    /// The decoded bytes this value contains, charged against the cache budget.
     fn weight(&self) -> usize;
 }
 
@@ -681,40 +679,6 @@ fn slot_is_live<K: Eq + Hash, V>(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SegmentBlockKind {
-    Index,
-    Filter,
-    Data,
-    Manifest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SegmentCacheKey {
-    /// The immutable segment id or object key that identifies the cached object.
-    pub identity: String,
-    pub block_kind: SegmentBlockKind,
-    pub block_offset: u64,
-}
-
-impl SegmentCacheKey {
-    /// Returns the key of a decoded manifest, which is cached under its
-    /// object key.
-    pub(crate) fn manifest(object_key: &str) -> Self {
-        Self {
-            identity: object_key.to_owned(),
-            block_kind: SegmentBlockKind::Manifest,
-            block_offset: 0,
-        }
-    }
-}
-
-impl DecodedBlockKey for SegmentCacheKey {
-    fn heap_bytes(&self) -> usize {
-        HeapBytes::heap_bytes(&self.identity)
-    }
-}
-
 impl DecodedBlockKey for String {
     fn heap_bytes(&self) -> usize {
         HeapBytes::heap_bytes(self)
@@ -735,104 +699,48 @@ impl<A: DecodedBlockKey, B: DecodedBlockKey, C: DecodedBlockKey> DecodedBlockKey
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum DecodedSegmentBlock<Row, Manifest> {
-    Index {
-        entries: Arc<Vec<SegmentIndexEntry>>,
-        decoded_bytes: usize,
-    },
-    Filter {
-        filter: Arc<SegmentFilter>,
-        decoded_bytes: usize,
-    },
-    Data {
-        block: Arc<DecodedDataBlock<Row>>,
-        decoded_bytes: usize,
-    },
-    Manifest {
-        manifest: Manifest,
-        decoded_bytes: usize,
-    },
-}
+/// The scope under which a shared cache keeps one runtime's namespace heads,
+/// WAL-tail projections, and completed upload sessions.
+///
+/// The cache mints one scope per runtime, so no runtime reads those entries
+/// of another runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CacheScope(u64);
 
-impl<Row: Clone, Manifest: Clone> DecodedBlock for DecodedSegmentBlock<Row, Manifest> {
-    fn weight(&self) -> usize {
-        match self {
-            Self::Index { decoded_bytes, .. }
-            | Self::Filter { decoded_bytes, .. }
-            | Self::Data { decoded_bytes, .. }
-            | Self::Manifest { decoded_bytes, .. } => *decoded_bytes,
-        }
+impl CacheScope {
+    pub fn new(value: u64) -> Self {
+        Self(value)
     }
 }
 
-impl<Row, Manifest> DecodedSegmentBlock<Row, Manifest> {
-    pub fn index(self) -> Option<Arc<Vec<SegmentIndexEntry>>> {
-        match self {
-            Self::Index { entries, .. } => Some(entries),
-            Self::Filter { .. } | Self::Data { .. } | Self::Manifest { .. } => None,
-        }
-    }
-
-    pub fn filter(self) -> Option<Arc<SegmentFilter>> {
-        match self {
-            Self::Filter { filter, .. } => Some(filter),
-            Self::Index { .. } | Self::Data { .. } | Self::Manifest { .. } => None,
-        }
-    }
-
-    pub fn data(self) -> Option<Arc<DecodedDataBlock<Row>>> {
-        match self {
-            Self::Data { block, .. } => Some(block),
-            Self::Index { .. } | Self::Filter { .. } | Self::Manifest { .. } => None,
-        }
-    }
-
-    pub(crate) fn into_index(
-        self,
-        object_key: &str,
-    ) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
-        match self {
-            Self::Index { entries, .. } => Ok(entries),
-            _ => Err(wrong_kind(object_key, "non-index block for an index key")),
-        }
-    }
-
-    pub(crate) fn into_filter(
-        self,
-        object_key: &str,
-    ) -> Result<Arc<SegmentFilter>, ManifestLoadError> {
-        match self {
-            Self::Filter { filter, .. } => Ok(filter),
-            _ => Err(wrong_kind(object_key, "non-filter block")),
-        }
-    }
-
-    pub(crate) fn into_data(
-        self,
-        object_key: &str,
-    ) -> Result<Arc<DecodedDataBlock<Row>>, ManifestLoadError> {
-        match self {
-            Self::Data { block, .. } => Ok(block),
-            _ => Err(wrong_kind(object_key, "non-data block for a data key")),
-        }
-    }
-
-    pub(crate) fn into_manifest(self, object_key: &str) -> Result<Manifest, ManifestLoadError> {
-        match self {
-            Self::Manifest { manifest, .. } => Ok(manifest),
-            _ => Err(wrong_kind(
-                object_key,
-                "non-manifest entry for a manifest key",
-            )),
-        }
+impl DecodedBlockKey for CacheScope {
+    fn heap_bytes(&self) -> usize {
+        0
     }
 }
 
-fn wrong_kind(object_key: &str, message: &str) -> ManifestLoadError {
-    ManifestLoadError::SegmentCodec {
-        object_key: object_key.to_owned(),
-        message: format!("cache returned a {message}"),
+/// The scope under which a shared cache keeps the segment blocks, manifests,
+/// and content objects read from one object store.
+///
+/// The cache mints one scope per object store, and every runtime over that
+/// object store reads under that scope. Runtimes over one object store can
+/// share these entries because all of these objects are immutable, and
+/// each object key identifies one object within one object store. Two object
+/// stores can contain different objects under the same key (for example, the
+/// first manifest of a namespace with the same ID), so the cache keys every
+/// entry by the object store's scope as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ObjectStoreScope(u64);
+
+impl ObjectStoreScope {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl DecodedBlockKey for ObjectStoreScope {
+    fn heap_bytes(&self) -> usize {
+        0
     }
 }
 

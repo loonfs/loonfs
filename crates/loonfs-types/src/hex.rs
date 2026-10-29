@@ -45,7 +45,7 @@ pub(crate) fn is_lower_hex_byte(byte: u8) -> bool {
 
 /// Decodes lowercase hex.
 ///
-/// Errors carry no input bytes; callers name the field they were decoding.
+/// Errors include no input bytes; callers name the field they were decoding.
 pub fn hex_decode_bytes(encoded: &str) -> Result<Vec<u8>, HexDecodeError> {
     let bytes = encoded.as_bytes();
     if !bytes.len().is_multiple_of(2) {

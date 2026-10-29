@@ -18,7 +18,7 @@ const DEFAULT_MAX_STALENESS_MS: u64 = 1000;
 ///
 /// With the default of
 /// [`DEFAULT_MAX_CONCURRENT_READS`](crate::DEFAULT_MAX_CONCURRENT_READS) reads
-/// at once, the buffered reads under one budget hold at most 16 GiB (64 reads
+/// at once, the buffered reads under one budget keep at most 16 GiB (64 reads
 /// of 256 MiB).
 pub const DEFAULT_MAX_READ_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 /// Default minimum interval, in milliseconds, between publication starts
@@ -30,7 +30,7 @@ pub const DEFAULT_MAX_READ_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// Default age, in milliseconds, of a WAL tail's newest commit at which
 /// maintenance folds a tail that is below the fold thresholds (15 minutes).
-pub const DEFAULT_IDLE_FOLD_AFTER_MS: u64 = 15 * 60 * 1_000;
+pub const DEFAULT_IDLE_FOLD_AFTER_MS: NonZeroU64 = NonZeroU64::new(15 * 60 * 1_000).unwrap();
 
 /// The admission limits one writable runtime applies to each namespace's
 /// publication requests, and how long a commit waits at the write stop.
@@ -71,14 +71,14 @@ impl Default for PublicationPolicy {
     }
 }
 
-/// Writer policy for content carried in WAL objects.
+/// Writer policy for content stored in WAL objects.
 ///
 /// Retrying a completed inline commit does not upload its content again while
 /// the commit receipt is retained. See `docs/specs/api.md`, section 5.2.
 ///
 /// The bytes an append adds always travel in the WAL and never stage. They
 /// count toward the WAL object budget and the unfolded tail, but neither
-/// limit holds an append back: a commit whose appends pass the budget
+/// limit keeps an append back: a commit whose appends pass the budget
 /// publishes in a WAL object of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -265,7 +265,7 @@ impl Default for RuntimeConfig {
             min_publish_interval_ms: DEFAULT_MIN_PUBLISH_INTERVAL_MS,
             publication: PublicationPolicy::default(),
             inline_content: InlineContentPolicy::default(),
-            idle_fold_after_ms: NonZeroU64::new(DEFAULT_IDLE_FOLD_AFTER_MS),
+            idle_fold_after_ms: Some(DEFAULT_IDLE_FOLD_AFTER_MS),
         }
     }
 }

@@ -14,7 +14,7 @@ use futures::future::BoxFuture;
 use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
 use loonfs_core::{Phase, PublicationReport, PublishedManifest};
-use loonfs_types::api::v0::Commit;
+use loonfs_types::Commit;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -48,10 +48,10 @@ pub enum NamespaceSessionStatus {
 /// The live writer sessions of one writer, and the publication admission
 /// they share.
 ///
-/// Clones share the same sessions and worker tasks. The table holds a
-/// session while a writable [`Namespace`](crate::Namespace) holds it or
+/// Clones share the same sessions and worker tasks. The table keeps a
+/// session while a writable [`Namespace`](crate::Namespace) refers to it or
 /// while work it admitted is still running. A fenced session leaves once
-/// its work ends, even while handles still hold it. Nothing here decides how many
+/// its work ends, even while handles still refer to it. Nothing here sets how many
 /// sessions exist or how long they live.
 #[derive(Clone)]
 pub(crate) struct PublisherRegistry {
@@ -117,7 +117,7 @@ pub(super) struct LiveSession {
 /// [`Namespace`](crate::Namespace).
 ///
 /// Dropping the last one ends the session. Work it already admitted still
-/// publishes, and the table forgets the session once that work finishes.
+/// publishes, and the table removes the session's entry once that work finishes.
 pub(crate) struct NamespaceSession {
     pub(super) publisher: NamespacePublisher,
 }
@@ -192,9 +192,9 @@ impl NamespaceSession {
 
     /// Refuses new work from every handle that shares this session, cancels
     /// its compaction, waits for admitted work, the running fold, and the
-    /// compaction, and forgets the session.
+    /// compaction, and removes the session's entry.
     ///
-    /// The worker, the fold task, and the compaction task forget the session
+    /// The worker, the fold task, and the compaction task remove the session's entry
     /// too when they exit, so a cancelled close still leaves the table clean.
     pub(crate) async fn close(&self) -> std::result::Result<CloseNamespaceReport, CoreError> {
         let publisher = &self.publisher;
@@ -343,7 +343,7 @@ impl PublisherRegistry {
     /// admitted work finishes, and an open before then continues it: a
     /// second session would acquire a new epoch and fence that work. A fenced
     /// session cannot continue: an open fails while its work ends, then starts
-    /// a new session even while old handles are held.
+    /// a new session even while old handles still exist.
     pub(crate) fn open_session(
         &self,
         namespace_id: &NamespaceId,
@@ -402,8 +402,8 @@ impl PublisherRegistry {
 
     /// Tells the namespace's publisher how a mutation outside the publisher
     /// changed the namespace, and drops the namespace's cached head when the
-    /// mutation may have changed the namespace in ways this runtime doesn't
-    /// know.
+    /// mutation may have changed the namespace in ways this runtime
+    /// hasn't recorded.
     pub(crate) async fn invalidate_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -429,7 +429,7 @@ impl PublisherRegistry {
 
     /// Runs [`Self::invalidate_namespace`] after a mutation's result when
     /// [`should_invalidate_after_result`] selects it. `change` describes a successful result. A failed result
-    /// may have changed the namespace in ways this runtime doesn't know.
+    /// may have changed the namespace in ways this runtime hasn't recorded.
     pub(crate) async fn finish_namespace_mutation<T>(
         &self,
         namespace_id: &NamespaceId,
@@ -600,7 +600,7 @@ impl PublisherRegistry {
 }
 
 /// Whether a mutation with `result` may have changed the namespace in ways
-/// this runtime doesn't know: a success, or a stale head or a fence that
+/// this runtime hasn't recorded: a success, or a stale head or a fence that
 /// another writer's change caused.
 fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
     match result {
@@ -615,7 +615,7 @@ fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
 }
 
 /// How a mutation outside the publisher, such as a maintenance call, changed
-/// a namespace, as the namespace's publisher needs to know it.
+/// a namespace, as the namespace's publisher needs to record it.
 #[derive(Debug, Clone)]
 pub(crate) enum NamespaceChange {
     /// The mutation published this manifest. The publisher moves to it, or
@@ -627,7 +627,7 @@ pub(crate) enum NamespaceChange {
     /// cached head stays confirmed, because the head didn't move.
     Unchanged,
     /// The mutation may have changed the namespace in ways this runtime
-    /// doesn't know, such as creating it or failing with a stale head. The
+    /// hasn't recorded, such as creating it or failing with a stale head. The
     /// publisher drops its position, and the runtime drops its cached head.
     Unknown,
 }

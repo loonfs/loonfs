@@ -1,5 +1,5 @@
 //! Host-supplied options and handles for HTTP requests, and the table of
-//! writer sessions that a host holds.
+//! writer sessions that a host keeps open.
 
 use crate::http::ApiResponseError;
 use crate::{HttpMetrics, RequestLimit, UsageRecorder};
@@ -24,8 +24,8 @@ pub enum AuthPolicy {
     BearerToken(SecretString),
 }
 
-pub const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 8;
-pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 16;
+pub const DEFAULT_MAX_CONCURRENT_UPLOADS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: NonZeroUsize = NonZeroUsize::new(16).unwrap();
 pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 60_000;
 
 /// Which of two jobs a host does for one subsystem: serve its requests, do
@@ -33,7 +33,7 @@ pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 60_000;
 ///
 /// The two jobs are independent. For grep, a read replica can serve searches
 /// over an index another process maintains, and a write node can maintain
-/// the index for namespaces it never answers searches about. Every
+/// the index for namespaces it never serves searches for. Every
 /// combination is named here, so none has to be validated away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,7 +90,7 @@ pub struct BindingConfig {
     pub auth_policy: AuthPolicy,
 }
 
-/// The grep handles this binding holds, by job: a binding serves
+/// The grep handles this binding has, by job: a binding serves
 /// queries only with a service, and maintains the index only with a
 /// worker, so a capability it advertises always has its handle.
 #[derive(Clone)]
@@ -109,7 +109,7 @@ pub enum GrepBinding {
 }
 
 impl GrepBinding {
-    /// The service that answers grep queries, where this binding serves them.
+    /// The service that serves grep queries, where this binding serves them.
     pub fn service(&self) -> Option<&Arc<GrepService>> {
         match self {
             Self::ServeOnly { service } | Self::ServeAndMaintain { service, .. } => Some(service),
@@ -125,7 +125,7 @@ impl GrepBinding {
         }
     }
 
-    /// Whether this binding answers grep queries.
+    /// Whether this binding serves grep queries.
     pub fn serves(&self) -> bool {
         self.service().is_some()
     }
@@ -239,11 +239,11 @@ impl BindingState {
     }
 }
 
-/// The writer sessions that a host holds for the handlers.
+/// The writer sessions that a host keeps open for the handlers.
 ///
 /// The handlers open a namespace's writable handle through these methods,
 /// and call them when a request finds the namespace gone or the session
-/// fenced, so that the host stops holding the handle.
+/// fenced, so that the host drops the handle.
 pub trait WriterSessions: Send + Sync {
     /// Opens the writable handle of an existing namespace.
     fn open<'a>(
@@ -251,15 +251,15 @@ pub trait WriterSessions: Send + Sync {
         namespace_id: &'a NamespaceId,
     ) -> BoxFuture<'a, loonfs::Result<Namespace<Writable>>>;
 
-    /// Stops holding the handle of a deleted namespace.
+    /// Drops the handle of a deleted namespace.
     fn forget(&self, namespace_id: &NamespaceId);
 
-    /// Stops holding the handle after a request through it found the
+    /// Drops the handle after a request through it found the
     /// namespace missing or deleted. Another writer can delete a namespace
-    /// after this host holds its handle.
+    /// after this host opened its handle.
     fn forget_if_gone(&self, namespace_id: &NamespaceId, code: ErrorCode);
 
-    /// Stops holding the handle when its session is fenced, and returns
+    /// Drops the handle when its session is fenced, and returns
     /// whether a fenced handle was dropped. `error` supplies the winning
     /// writer for the warning.
     fn forget_if_fenced(&self, namespace_id: &NamespaceId, error: &loonfs::Error) -> bool;
@@ -270,7 +270,7 @@ pub trait WriterSessions: Send + Sync {
 }
 
 /// The state that a host keeps beside each writer session that
-/// [`Namespaces`] holds.
+/// [`Namespaces`] keeps.
 pub trait HostState: Send + 'static {
     /// Returns the state of a session that the table opened at
     /// `opened_at_ms`, on the runtime's monotonic timer.
@@ -281,17 +281,17 @@ impl HostState for () {
     fn new(_opened_at_ms: u64) -> Self {}
 }
 
-/// The writable handle this host holds for each namespace.
+/// The writable handle this host keeps for each namespace.
 ///
-/// The host decides which writer sessions stay open and for how long: a
-/// session lives while its handle is held. This reference host holds a
+/// The host sets which writer sessions stay open and for how long: a
+/// session stays open while the host keeps its handle. This reference host keeps a
 /// handle only for a namespace that existed when the handle was first
 /// opened. A sweep can close a caught-up session after its last open is old enough
-/// and no caller holds a clone. A later write opens a new session and acquires
+/// and no caller has a clone. A later write opens a new session and acquires
 /// a new writer epoch. Deletion or a request that finds the namespace gone
-/// also stops holding the handle.
+/// also drops the handle.
 /// A request that finds its session fenced fails with `writer_fenced` and
-/// drops the held handle. The session stays dead. A later request opens a
+/// drops the handle. The session stays dead. A later request opens a
 /// new session, whose first publish takes the namespace back. While the old
 /// session's work ends, an open can fail with retryable `writer_session_closed`.
 /// Sustained fencing of one namespace means two writers receive its traffic.
@@ -301,7 +301,7 @@ pub struct Namespaces<S> {
     timer: Arc<dyn MonotonicTimer>,
 }
 
-/// One writer session that the table holds, and the state that its host
+/// One writer session that the table keeps, and the state that its host
 /// keeps beside the session.
 pub struct HeldNamespace<S> {
     pub handle: Namespace<Writable>,
@@ -428,7 +428,7 @@ impl<S: HostState> Namespaces<S> {
         result
     }
 
-    /// Advances a host walk with one table lookup, without holding the lock between entries.
+    /// Advances a host walk with one table lookup, and unlocks the table between entries.
     pub fn next_held_id(&self, after: Option<&NamespaceId>) -> Option<NamespaceId> {
         use std::ops::Bound::{Excluded, Unbounded};
         let handles = self.lock();

@@ -14,9 +14,9 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::{
-    api::v0::FilesystemChange, AbsolutePath, AttributeKey, AttributeValue, Attributes,
-    AttributesRevisionNo, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
-    NamespaceId, RevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
+    AbsolutePath, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq,
+    DeleteDirectoryBehavior, DestinationBehavior, FilesystemChange, InodeId, NamespaceId,
+    RevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
 };
 use std::assert_matches;
 use std::collections::BTreeMap;

@@ -8,12 +8,9 @@ use loonfs_test_support::http::{
 };
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    api::v0::{
-        CompleteUploadBody, CreateUploadBody, FilesystemChange, UploadMode, UploadSession,
-        UploadSessionStatus,
-    },
-    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef, DestinationBehavior,
-    ErrorCode, ErrorResponse, FilesystemOperation, InodeId, RevisionNo,
+    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, CompleteUploadBody, ContentRef,
+    CreateUploadBody, DestinationBehavior, ErrorCode, ErrorResponse, FilesystemChange,
+    FilesystemOperation, InodeId, RevisionNo, UploadMode, UploadSession, UploadSessionStatus,
     LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
 };
 use std::assert_matches;

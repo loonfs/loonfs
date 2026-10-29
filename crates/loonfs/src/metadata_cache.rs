@@ -42,7 +42,7 @@ pub const DEFAULT_MAX_CACHED_OBJECT_BYTES: u64 = 1024 * 1024;
 /// Whether a cache lookup found its entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CacheLookup {
-    /// The cache held the entry.
+    /// The cache had the entry.
     Hit,
     /// The lookup went to the store.
     Miss,
@@ -444,7 +444,7 @@ impl MetadataCacheBuilder {
 pub struct MetadataCacheStats {
     /// The decoded data, index, and filter blocks of segments in memory.
     pub segment_blocks: DecodedBlockCacheStats,
-    /// The lookups that the segments' bloom filters decided.
+    /// The lookups that the segments' bloom filters settled.
     pub segment_filter: SegmentFilterStats,
     /// The counters and occupancy of the SSD tier of the segment blocks, or
     /// `None` if the cache has no SSD tier.
@@ -469,7 +469,7 @@ pub struct MetadataCacheStats {
     pub completed_upload_sessions: DecodedBlockCacheStats,
 }
 
-/// The lookups that the bloom filters of segments decided.
+/// The lookups that the bloom filters of segments settled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SegmentFilterStats {
     /// Segments skipped because their bloom filter ruled out a lookup before

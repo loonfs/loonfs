@@ -136,7 +136,7 @@ struct ObjectStoreOperationInstruments {
 }
 
 /// One sample's worth of handles, cloned out from under the registry lock so
-/// a recorder's own reporting never runs while the runtime holds it.
+/// a recorder's own reporting never runs while the runtime keeps it locked.
 struct ObjectStoreReading {
     outcome: Arc<dyn CounterHandle>,
     seconds: Arc<dyn HistogramHandle>,

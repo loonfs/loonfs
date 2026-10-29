@@ -44,7 +44,7 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
             }
         })?;
     let elapsed_ms = tip.age_ms();
-    // A put that lands after the budget may have landed on a reclaimed number.
+    // A put that is written after the budget may have been written at a reclaimed number.
     if elapsed_ms > crate::limits::WAL_PUBLISH_BUDGET_MS {
         return Err(WalPublishError::OutcomeUnknown(format!(
             "publication budget exceeded after {elapsed_ms}ms (budget {}ms)",

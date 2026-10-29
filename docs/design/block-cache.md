@@ -34,7 +34,7 @@ For example, a lookup of one name in a directory compares the name with each seg
 
 The interface has two implementations:
 
-- The memory implementation keeps decoded blocks in memory under `metadata_cache.max_segment_bytes`. It's the cache engine (`DecodedBlockCache`, in [`block_cache.rs`](../../crates/loonfs-core/src/block_cache.rs)) that every LoonFS cache is built from, as [One cache type](cache-ownership.md#one-cache-type) describes, and the segment block cache (`SharedSegmentBlocks`, in [`manifest/cache.rs`](../../crates/loonfs-core/src/manifest/cache.rs)) is one instance of that engine. A server uses this implementation by default.
+- The memory implementation keeps decoded blocks in memory under `metadata_cache.max_segment_bytes`. It's the cache engine (`DecodedBlockCache`, in [`block_cache.rs`](../../crates/loonfs-core/src/block_cache.rs)) that every LoonFS cache is built from, as [One cache type](cache-ownership.md#one-cache-type) describes, and the segment block cache (`SharedSegmentBlocks`, in [`segment/cache.rs`](../../crates/loonfs-core/src/segment/cache.rs)) is one instance of that engine. A server uses this implementation by default.
 - The tiered implementation keeps blocks in memory and on the server's local SSD, as one cache with one rule for which blocks go to disk. [Keeping blocks on local SSD](#keeping-blocks-on-local-ssd) describes this implementation.
 
 Why does a get include the handle? A block read back from disk has to be checked before a read uses the block, and the handle records what the bytes have to match. A block in memory doesn't need the check again, because LoonFS checked it when the block was loaded.

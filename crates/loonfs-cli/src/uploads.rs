@@ -5,10 +5,10 @@ use crate::error::{CliError, Result};
 use loonfs_client::{
     CommitOptions, MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions,
 };
-use loonfs_types::api::v0::{CommitRequest, CompletedUploadPart, FilesystemOperation};
 use loonfs_types::{
-    ActorId, ChecksumAlgorithm, Commit, CommitId, CommitPrecondition, DestinationBehavior,
-    ErrorCode, InodeId, RevisionNo, UploadId,
+    ActorId, ChecksumAlgorithm, Commit, CommitId, CommitPrecondition, CommitRequest,
+    CompletedUploadPart, DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
+    UploadId,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -160,7 +160,7 @@ impl UploadJournal {
             return Err(error.into());
         };
         let session = client.get_upload(namespace_id, &upload_id).await?;
-        let loonfs_types::api::v0::UploadSessionStatus::Completed {
+        let loonfs_types::UploadSessionStatus::Completed {
             content_token: Some(token),
             ..
         } = session.status

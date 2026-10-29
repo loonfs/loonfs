@@ -5,6 +5,8 @@ use super::*;
 use crate::metadata::{
     AccessRevisionRecord, AttributesRevisionRecord, MetadataView, RevisionRecord,
 };
+use crate::segment::block_memo::SessionBlockMemo;
+use crate::segment::index_block_load::load_segment_filter;
 use loonfs_test_support::stores::ConcurrencyWatchStore;
 use loonfs_types::format::segment_blocks::key_range_may_intersect;
 use loonfs_types::format::wal::WalDelta;
@@ -460,10 +462,9 @@ async fn a_delta_run_admits(
             )
         });
     for descriptor in descriptors {
-        let filter =
-            load::load_segment_filter(store, None, &load::SessionBlockMemo::default(), descriptor)
-                .await
-                .expect("load a filter");
+        let filter = load_segment_filter(store, None, &SessionBlockMemo::default(), descriptor)
+            .await
+            .expect("load a filter");
         if filter.may_contain(probe) {
             return true;
         }

@@ -126,10 +126,7 @@ root = "/tmp/loonfs-server"
         .expect("valid config")
     };
     for (setting, expected) in [
-        (
-            "",
-            std::num::NonZeroU64::new(loonfs::DEFAULT_IDLE_FOLD_AFTER_MS),
-        ),
+        ("", Some(loonfs::DEFAULT_IDLE_FOLD_AFTER_MS)),
         (
             "idle_fold_after_ms = 60000",
             std::num::NonZeroU64::new(60_000),

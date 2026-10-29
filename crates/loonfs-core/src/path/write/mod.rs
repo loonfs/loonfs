@@ -12,6 +12,7 @@ mod plan_restore;
 mod plan_transfer;
 mod planned_pieces;
 pub(crate) mod planner;
+mod planning_authorization;
 mod preconditions;
 mod publish_path_planning;
 mod session;

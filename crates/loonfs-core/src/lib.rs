@@ -8,7 +8,7 @@
 //!
 //! # Example
 //!
-//! A [`NamespaceStore`] holds one namespace's object store with the caches,
+//! A [`NamespaceStore`] contains one namespace's object store with the caches,
 //! clocks, content write permits, and run policy its operations use. Commits
 //! are published as candidate batches through
 //! [`publish::NamespaceCommitEngine`]; day-to-day reads and writes should go
@@ -81,8 +81,8 @@ pub(crate) mod authorize;
 mod binding_version;
 mod block_cache;
 mod bloom_filter;
-mod commit_engine;
-mod commit_wal_size;
+mod changes;
+mod compaction;
 mod control_object;
 mod control_update;
 mod engine;
@@ -97,15 +97,15 @@ mod options;
 mod permit_pool;
 mod phase;
 mod pin;
-mod protocol;
 mod read_working_memory;
 mod recency;
+mod segment;
 mod shared_check;
 mod storage;
-mod upload_records;
+mod upload;
 mod wal;
 
-/// Commit planning, validation, and materialization. Consumed by the `loonfs`
+/// Commit planning, validation, and publication. Consumed by the `loonfs`
 /// publisher and by this crate's commit-validation integration tests.
 pub mod commit;
 /// Content staging and preparation-token creation used by the `loonfs` write
@@ -138,27 +138,24 @@ pub mod time;
 /// scoped views of them.
 pub mod cache {
     pub use crate::block_cache::{
-        DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
-        DecodedBlockKey, DecodedSegmentBlock, Insertion, SegmentBlockKind, SegmentCacheKey,
+        CacheScope, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig,
+        DecodedBlockCacheStats, DecodedBlockKey, Insertion, ObjectStoreScope,
     };
     pub use crate::gc::{CompletedUploadSessionCache, SharedCompletedUploadSessions};
+    pub use crate::namespace::head_cache::{
+        CachedHead, HeadAndWalTailCache, SharedHeadsAndWalTails, WalTailCacheKey,
+    };
     pub use crate::object_cache::{ObjectCache, SharedObjects};
     pub use crate::read_working_memory::{ReadWorkingMemory, ReadWorkingMemoryObserver};
     pub use crate::recency::Recency;
+    pub use crate::segment::{
+        decode_stored_block, DecodedMetadataSegmentBlock, DecodedSegmentBlock, LoadedSegmentBlock,
+        MemorySegmentBlocks, MetadataRunManifest, MetadataSegmentCache, MetadataSegmentCacheKey,
+        MetadataSegmentCacheStats, SegmentBlockCache, SegmentBlockKind, SegmentBlockLoad,
+        SegmentCacheKey, SharedSegmentBlocks,
+    };
     pub use crate::shared_check::SharedCheck;
     pub use crate::wal::ProjectedWalTail;
-
-    pub use crate::manifest::metadata_compaction_due;
-    pub use crate::manifest::{
-        decode_stored_block, CacheScope, CachedHead, DecodedMetadataSegmentBlock,
-        HeadAndWalTailCache, LoadedSegmentBlock, MemorySegmentBlocks, MetadataRunManifest,
-        MetadataSegmentCache, MetadataSegmentCacheKey, MetadataSegmentCacheStats, ObjectStoreScope,
-        SegmentBlockCache, SegmentBlockLoad, SharedHeadsAndWalTails, SharedSegmentBlocks,
-        WalTailCacheKey,
-    };
-    pub use crate::namespace::status::NamespaceStorageDiagnostics;
-    #[cfg(any(test, feature = "test-support"))]
-    pub use crate::namespace::status::NamespaceWalTailUsage;
 }
 
 /// Namespace control objects and verified catalog state, as the loaders of
@@ -172,6 +169,9 @@ pub mod control {
     pub use crate::namespace::control::{LoadedHint, LoadedManifest};
     pub use crate::namespace::read_anchor::{project_anchor_tail, NamespaceReadAnchor};
     pub use crate::namespace::state::NamespaceReadState;
+    pub use crate::namespace::status::NamespaceStorageDiagnostics;
+    #[cfg(any(test, feature = "test-support"))]
+    pub use crate::namespace::status::NamespaceWalTailUsage;
     pub use crate::namespace::{MetadataBasis, PublicationBasis, ReadBasis};
     pub use crate::wal::probe_namespace_wal;
 }
@@ -180,21 +180,26 @@ pub mod control {
 /// publisher, and re-exported as `loonfs::publish` for the server's
 /// filesystem handlers.
 pub mod publish {
-    pub use crate::commit::CommitFingerprint;
-    pub use crate::commit_engine::{
+    pub use crate::commit::engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, SharedWriterSessionStatus, TailSource, WalTailReport,
         WriterSessionStatus,
     };
+    pub use crate::commit::publish_view::WriterPosition;
+    pub use crate::commit::CommitFingerprint;
     pub use crate::namespace::writer_epoch::AcquiredWriter;
     pub use crate::path::write::{CommitIntent, FilesystemOperation};
-    pub use crate::protocol::WriterPosition;
     pub use crate::storage::content_admission::PreparedContent;
     pub use crate::storage::inline_content::InlineContent;
     pub use crate::wal::{is_retryable_wal_publish, settle_publish_attempt, WalPublishError};
 }
 
 // Crate-root re-exports used by `loonfs` or required by public return types.
+pub use compaction::{
+    metadata_compaction_due, refill_iterators, select_next_iterator, CompactionAdmission,
+    CompactionUnitOutcome, MetadataCompactionCancellation, MetadataCompactionPolicy,
+    SegmentBlockLoader, SegmentRowIterator,
+};
 pub use engine::RuntimeReadContext;
 pub use engine::{
     NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, RootAccess, Writable,
@@ -204,13 +209,9 @@ pub use error::{
     MetadataViewError, Result, WriterFence,
 };
 pub use gc::{grace_age, GcOptions, GraceAge};
-pub use manifest::ManifestLoadError;
 pub use manifest::{
-    next_run_no_after, refill_iterators, select_next_iterator, CompactionAdmission,
-    CompactionUnitOutcome, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
-    MetadataCompactionCancellation, MetadataCompactionPolicy, MetadataFamilyGroup,
-    MetadataRunPolicy, PublicationReport, PublishedManifest, RetentionTarget, SegmentBlockLoader,
-    SegmentRowIterator,
+    next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail, ManifestLoadError,
+    PublicationReport, PublishedManifest, RetentionTarget,
 };
 pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
@@ -224,11 +225,12 @@ pub use pin::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
     ListCheckpointFilesOptions, SnapshotPageCursor,
 };
-pub use protocol::{
+pub use segment::{MetadataFamilyGroup, MetadataRunPolicy};
+pub use upload::{
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
     UploadSessionView,
 };
 // The streaming read `loonfs`'s namespace handle returns, and the chunk size it
 // reads in.
 pub use limits::{CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT};
-pub use storage::content::{FileContentStream, StreamRange};
+pub use storage::content_stream::{FileContentStream, StreamRange};

@@ -27,7 +27,7 @@ impl ResolvedTarget {
             .stat_with_options(
                 spec,
                 &StatOptions {
-                    include_attributes: loonfs_types::AttributeInclusion::Omit,
+                    include_attributes: loonfs_types::options::AttributeInclusion::Omit,
                     at: ReadAt::from(snapshot_id.cloned()),
                 },
             )

@@ -13,7 +13,7 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
 use std::sync::Arc;
 
-/// Holds the WAL tail after a manifest as one chunk per WAL object, oldest
+/// Contains the WAL tail after a manifest as one chunk per WAL object, oldest
 /// first.
 ///
 /// Replay already downloaded the resident bytes, so reads need no content
@@ -42,7 +42,7 @@ pub(crate) struct TailChunk {
 }
 
 /// One content id's unfolded pieces, ordered by offset, with the longest
-/// reference the tail holds to it.
+/// reference the tail has to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectedContent {
     pub(crate) content_ref: ContentRef,
@@ -170,7 +170,7 @@ impl ProjectedWalTail {
     }
 
     /// The unfolded pieces of the content `content_ref` names, when the
-    /// tail holds any.
+    /// tail contains any.
     pub(crate) fn content(&self, content_ref: &ContentRef) -> Option<ProjectedContent> {
         let mut found = self
             .chunks
@@ -263,8 +263,8 @@ impl ProjectedWalTail {
         self.inline_bytes
     }
 
-    /// The heap the projection holds behind the `Arc` every holder shares.
-    /// Each tail counts every chunk it holds, including chunks another tail
+    /// The heap the projection keeps behind the `Arc` that every owner shares.
+    /// Each tail counts every chunk it contains, including chunks another tail
     /// shares.
     pub fn decoded_bytes(&self) -> usize {
         arc_bytes::<Self>()

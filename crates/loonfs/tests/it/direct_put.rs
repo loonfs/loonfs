@@ -9,8 +9,8 @@ use loonfs::{
 };
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_types::api::v0::{UploadContentClaim, UploadSessionStatus};
 use loonfs_types::Checksum;
+use loonfs_types::{UploadContentClaim, UploadSessionStatus};
 
 /// What a direct-put client declares about bytes it already holds.
 fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {

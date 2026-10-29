@@ -8,7 +8,7 @@ pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<Absolu
 }
 
 /// Parses a raw string into the validated, normalized path a
-/// [`CommitIntent`](crate::path::write::CommitIntent) carries:
+/// [`CommitIntent`](crate::path::write::CommitIntent) includes:
 /// absolute, normalized, and not the root.
 ///
 /// Every surface that accepts a raw mutation path parses it here. Planning
@@ -21,11 +21,11 @@ pub fn parse_mutation_path(absolute_path: &str) -> Result<AbsolutePath> {
 
 /// Rejects mutation of the root on an already-parsed path.
 ///
-/// The absolute-path grammar is carried by the type; this rejects the root,
+/// The type enforces the absolute-path grammar; this rejects the root,
 /// which is readable but cannot be mutated. Intents can be built from parsed
 /// paths directly, so planning is where the invariant is enforced, and
 /// planning is the only place: a caller that rejects the root ahead of the
-/// planners answers for the request rather than for the operation that
+/// planners reports the request rather than for the operation that
 /// named it.
 pub(crate) fn ensure_mutation_path(path: &AbsolutePath) -> Result<()> {
     if path.is_root() {

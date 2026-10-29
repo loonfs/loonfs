@@ -11,7 +11,7 @@ use loonfs_types::format::manifest::NamespaceManifestEnvelope;
 use loonfs_types::{ChangeSeq, WalNo, WriterEpoch};
 
 /// A manifest above a writer session's position, with the fields that
-/// decide whether the position can move onto it.
+/// determine whether the position can move onto it.
 ///
 /// The session's commit engine moves its position onto the manifest instead
 /// of reloading the namespace (see

@@ -391,7 +391,7 @@ impl ObjectStore for ProviderObjectStore {
 
     /// Bounded reads issue the ranged GET directly — one round trip, not a
     /// sizing HEAD plus a GET — and pay a single HEAD only on the failure
-    /// path, to decide whether the range or the transport was the problem.
+    /// path, to determine whether the range or the transport was the problem.
     /// The contract matches the local reference provider exactly: a descending
     /// range is `InvalidRange` before existence is consulted, a missing object
     /// is otherwise `Ok(None)` however the request was shaped, an end past the
@@ -417,7 +417,7 @@ impl ObjectStore for ProviderObjectStore {
         }
         if range.end_exclusive == range.start_inclusive {
             // A zero-length request needs no bytes; existence and size
-            // alone answer it.
+            // alone settle it.
             return match self.head(key).await? {
                 None => Ok(None),
                 Some(metadata) if range.start_inclusive > metadata.size_bytes => {
@@ -435,7 +435,7 @@ impl ObjectStore for ProviderObjectStore {
             RangedGet::Bytes(bytes) => Ok(Some(bytes)),
             RangedGet::NotFound => Ok(None),
             RangedGet::Refused(err) => {
-                // The provider refused; one HEAD decides whether the range
+                // The provider refused; one HEAD determines whether the range
                 // was the problem, matching the reference semantics.
                 match self.head(key).await? {
                     None => Ok(None),
@@ -477,7 +477,7 @@ impl ObjectStore for ProviderObjectStore {
         }
         let size_bytes = bytes.len() as u64;
         // A conditional write is one request at every size, so its
-        // precondition failure is never its own landing, and a publication
+        // precondition failure is never its own write, and a publication
         // ends within one request's allowance.
         let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
         let options = PutOptions {
@@ -534,7 +534,7 @@ impl ObjectStore for ProviderObjectStore {
     /// time, so a large object costs one part of memory instead of its own
     /// size. The server budgets a client's upload at that one part.
     ///
-    /// The first part is cut before anything is decided. A payload that
+    /// The first part is cut before anything is determined. A payload that
     /// ends inside it is an ordinary [`ObjectStore::put`] with the caller's
     /// mode enforced by the provider, so a small streamed write behaves
     /// exactly like a small buffered one. A longer create-if-absent

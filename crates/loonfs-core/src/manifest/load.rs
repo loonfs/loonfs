@@ -4,19 +4,20 @@
 //! fetching row data. Other manifest modules load blocks. Full
 //! materialization is available only in tests.
 
-pub(super) use super::block_load::SessionBlockMemo;
-use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
 use super::error::ManifestLoadError;
-use super::runs::{manifest_cache_heap_bytes, runs_newest_first};
-use super::scan::VerifiedMetadataSegments;
 use super::validate::{validate_manifest, validate_namespace_manifest};
+use crate::commit::publish_view::WriterPosition;
 use crate::error::CoreError;
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
-use crate::protocol::WriterPosition;
+use crate::segment::cache::{
+    DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey,
+};
+use crate::segment::runs::{manifest_cache_heap_bytes, runs_newest_first};
+use crate::segment::scan::VerifiedMetadataSegments;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
@@ -25,7 +26,6 @@ use loonfs_types::{ManifestNo, NamespaceId};
 use std::sync::Arc;
 use tracing::Instrument;
 
-pub(super) use super::index_block_load::load_segment_filter;
 #[cfg(test)]
 pub(super) use super::tests::inspection_materialization::append_rows_to_metadata;
 #[cfg(test)]

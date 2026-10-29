@@ -38,7 +38,7 @@ pub struct MaintainMetadataOptions {
 impl Default for MaintainMetadataOptions {
     fn default() -> Self {
         Self {
-            max_wal_tail_objects: const { NonZeroU64::new(FOLD_AT_WAL_OBJECTS).unwrap() },
+            max_wal_tail_objects: FOLD_AT_WAL_OBJECTS,
             compaction_policy: MetadataCompactionPolicy::SizeTiered,
         }
     }
@@ -97,7 +97,7 @@ impl AdvanceRetentionFloorOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadFileStreamOptions {
     /// Bytes one ranged read fetches, which is the most of the file the read
-    /// holds at once. Defaults to
+    /// keeps at once. Defaults to
     /// [`CONTENT_READ_CHUNK_BYTES`](loonfs_core::CONTENT_READ_CHUNK_BYTES);
     /// a caller with a tighter memory budget than that says so here, the way
     /// a caller of [`Namespace::read_content`](crate::Namespace::read_content)
@@ -117,7 +117,7 @@ pub struct ReadFileStreamOptions {
 impl Default for ReadFileStreamOptions {
     fn default() -> Self {
         Self {
-            chunk_bytes: const { NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES).unwrap() },
+            chunk_bytes: loonfs_core::CONTENT_READ_CHUNK_BYTES,
             range: StreamRange::default(),
             at: ReadAt::default(),
         }

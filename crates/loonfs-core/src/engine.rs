@@ -1,10 +1,11 @@
 //! [`NamespaceEngine`]: the namespace-scoped entry point for reads, writes,
-//! uploads, snapshots, and maintenance. This module holds the type, its
+//! uploads, snapshots, and maintenance. This module contains the type, its
 //! constructors, its authorization, and its per-subject reads; each other
 //! operation is a method in the module that implements it.
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
-use crate::commit_engine::NamespaceCommitEngine;
+use crate::commit::engine::NamespaceCommitEngine;
+use crate::commit::publish_view::WriterPosition;
 use crate::error::{CoreError, Result};
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::ReadBasis;
@@ -14,15 +15,14 @@ use crate::path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
     LoadedMetadataView,
 };
-use crate::protocol::WriterPosition;
-use crate::storage::content::{
-    ContentLocation, DurableContentValidationError, FileContentStream, StreamRange,
-};
+use crate::storage::content::DurableContentValidationError;
+use crate::storage::content_location::ContentLocation;
+use crate::storage::content_stream::{FileContentStream, StreamRange};
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::api::v0::ListChangesResponse;
 use loonfs_types::options::{AccessState, ListOptions, StatOptions};
 use loonfs_types::EffectiveLimit;
+use loonfs_types::ListChangesResponse;
 use loonfs_types::{
     ChangeSeq, CommitId, ContentRef, FileRevision, FileRevisionsPageCursor, InodeId,
     ListPageCursor, NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, RevisionNo,
@@ -157,7 +157,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Refuses a reader with no subject on an ACL namespace, for callers
-    /// that could otherwise answer before any per-subject read.
+    /// that could otherwise return before any per-subject read.
     pub fn ensure_subject(&self, context: &RuntimeReadContext) -> Result<()> {
         Authorizer::for_request(
             &self.namespace.namespace_id,
@@ -197,7 +197,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Reads the root's current access row. Refused on an unrestricted
-    /// namespace, which holds no access rows.
+    /// namespace, which has no access rows.
     pub async fn root_access(&self, context: &RuntimeReadContext) -> Result<RootAccess> {
         if matches!(
             context.read_basis.head.access,
@@ -314,7 +314,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Opens a chunked stream for the file resolved from the pinned read context.
     ///
     /// The object prefix is fetched `chunk_bytes` at a time, and pieces the tail
-    /// holds are retained. The buffered-read size limit does not apply. Later
+    /// contains are retained. The buffered-read size limit does not apply. Later
     /// commits cannot change the bytes being read, and the read writes no
     /// content object.
     ///
@@ -473,7 +473,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Resolves the current visibility, revision, and path for each inode ID.
     ///
     /// All results use the same pinned snapshot and preserve input order. Missing
-    /// inode IDs are returned as not visible because callers may hold IDs from an
+    /// inode IDs are returned as not visible because callers may have IDs from an
     /// older listing. Requests above
     /// [`MAX_CURRENT_FILES_PER_STAT`](crate::MAX_CURRENT_FILES_PER_STAT) fail before
     /// reading metadata.
@@ -513,7 +513,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// `max_bytes` is checked against the declared size before the fetch and is
     /// independent of deployment-wide download limits. The method returns an
     /// error if the fetched size or checksum does not match the reference. A
-    /// published reference whose object collection reclaimed answers like an
+    /// published reference whose object collection reclaimed returns the same error as an
     /// unpublished one.
     pub async fn read_content_ref(
         &self,
@@ -613,7 +613,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<ListChangesResponse> {
         let view = self.load_read_view(context).await?;
-        crate::protocol::list_changes_after(&view, after_seq, limit).await
+        crate::changes::list_changes_after(&view, after_seq, limit).await
     }
 
     async fn load_read_view<'a>(
@@ -671,7 +671,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         self
     }
 
-    /// Narrows the rows one segment that this engine writes may hold, so a
+    /// Narrows the rows one segment that this engine writes may contain, so a
     /// namespace a test can build in seconds compacts into many segments.
     ///
     /// The shipped segment target is 8 MiB of decoded rows, which takes over

@@ -3,8 +3,7 @@
 use super::load::{load_basis_metadata_segments, metadata_basis_from_manifest};
 use super::publish::ManifestChange;
 use super::published::{same_head, PublicationReport, PublishedManifest};
-use super::runs::flatten_manifest_segments;
-use super::scan::VerifiedMetadataSegments;
+use crate::commit::publish_view::WriterPosition;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
@@ -15,7 +14,8 @@ use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use crate::protocol::WriterPosition;
+use crate::segment::runs::flatten_manifest_segments;
+use crate::segment::scan::VerifiedMetadataSegments;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
 use crate::time::{Observation, OperationClock};
 use crate::wal::replay_discovered_tail;
@@ -79,15 +79,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Folds the visible WAL tail into segments and publishes the next manifest.
-    #[cfg(test)]
-    pub(crate) async fn fold_wal(&self) -> Result<FoldWalResponse> {
-        let clock = self.start_clock();
-        self.fold_wal_tail(None, &clock)
-            .await
-            .map(|folded| folded.response)
-    }
-
     async fn load_fold_projection(
         &self,
         observed: Observation,
@@ -143,8 +134,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// The manifest copies both epochs from its predecessor (format spec,
     /// "Publishing a materialized file set"). A writer session passes the tail
-    /// it holds as `held`, and every other caller passes `None`, which loads the
-    /// tail from the store. A held tail whose last check is at the revalidation
+    /// it keeps as `held`, and every other caller passes `None`, which loads the
+    /// tail from the store. A tail passed as `held` whose last check is at the revalidation
     /// bound is discarded, and the tail is loaded from the store too: garbage
     /// collection keeps the manifest that the tail was read above for one grace
     /// after a successor, and a check within the bound is younger than that
@@ -404,11 +395,11 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
         }
         // Another manifest followed the fold's own predecessor without
         // folding its tail, such as a compaction or a new writer's claim.
-        // Over a manifest at the same head, everything the fold holds is
+        // Over a manifest at the same head, everything the fold has is
         // still right:
         // - Tail rows: see `same_head`.
         // - Deletion roots: the fold reads each one through the winner's
-        //   runs, which hold the same view at `head_seq`. A compaction keeps
+        //   runs, which contain the same view at `head_seq`. A compaction keeps
         //   every view at or above the floor, and the floor is at most
         //   `head_seq`.
         // - Activity: a successor at the same `head_seq` keeps it, so the
@@ -514,7 +505,7 @@ pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> 
 
 /// Returns the error for a manifest numbered `current`, the largest manifest
 /// number, which no manifest can follow.
-pub(super) fn no_manifest_after(current: ManifestNo) -> CoreError {
+pub(crate) fn no_manifest_after(current: ManifestNo) -> CoreError {
     CoreError::NamespaceCorrupt(format!(
         "the current manifest is number {current}, the largest manifest number, so no \
          manifest can follow it"

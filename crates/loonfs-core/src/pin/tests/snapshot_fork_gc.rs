@@ -7,7 +7,7 @@ use loonfs_objectstore::keys::{pin, pin_prefix};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::{MetadataMapStore, OperationKind};
 use loonfs_types::format::control::{PinOwner, PinPayload};
-use loonfs_types::AttributeInclusion;
+use loonfs_types::options::AttributeInclusion;
 use std::assert_matches;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -76,9 +76,9 @@ impl Fixture {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
-            crate::manifest::CompactionAdmission::AnySize,
+            crate::compaction::CompactionAdmission::AnySize,
             selected.compactor_epoch(),
-            &crate::manifest::MetadataCompactionCancellation::default(),
+            &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await
         .expect("replace old runs");

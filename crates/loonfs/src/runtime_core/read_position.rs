@@ -189,7 +189,7 @@ impl RuntimeCore {
     /// (see [`SharedCheck`]). So a wave of concurrent reads costs at most two
     /// checks.
     ///
-    /// A check is trusted only while its answer arrives less than
+    /// A check is trusted only while its response arrives less than
     /// `READ_REVALIDATION_BOUND_MS` after the position's last check (format
     /// section 4.2), so a position past that bound is dropped without one.
     pub(crate) async fn checked_writer_position(
@@ -253,7 +253,7 @@ impl RuntimeCore {
     /// runtime publishes (see [`HeadPositions::move_position`]). The walk
     /// that ends on the newest manifest is that manifest's successor check,
     /// so a position that moved onto it records the check. Anything else
-    /// the walk finds, or an answer that arrives `READ_REVALIDATION_BOUND_MS`
+    /// the walk finds, or a response that arrives `READ_REVALIDATION_BOUND_MS`
     /// or more after the position's last check, drops the position. A move
     /// or a drop waits for a publish that has the engine locked.
     async fn check_writer_position(
@@ -285,7 +285,7 @@ impl RuntimeCore {
         let Some(moves) = moves.filter(|_| position.basis_checked.is_within_revalidation_bound())
         else {
             // The position becomes the cached head, which a successor or a
-            // late answer makes out of date, so the head is dropped after it,
+            // late response makes out of date, so the head is dropped after it,
             // and the next read loads the namespace by discovery.
             positions.drop_position(namespace_id).await;
             self.invalidate_namespace_read_cache(namespace_id);

@@ -333,7 +333,7 @@ impl SsdSegmentBlocks {
     /// Returns the most memory that a tier with a budget of
     /// `max_segment_bytes` keeps: its full write queue, and an index of one
     /// entry for each [`ASSUMED_STORED_BLOCK_BYTES`] of the budget, which is
-    /// the most entries that the budget can hold.
+    /// the most entries that the budget can fit.
     pub fn memory_bytes(max_segment_bytes: NonZeroUsize) -> usize {
         let entries = max_segment_bytes.get() / ASSUMED_STORED_BLOCK_BYTES;
         SSD_WRITE_QUEUE_BYTES.saturating_add(entries.saturating_mul(SSD_INDEX_ENTRY_BYTES))

@@ -331,7 +331,7 @@ enum ContentRefFingerprintInput<'a> {
     },
 }
 
-/// Canonical preimage for the bytes an append adds. Planning decides which
+/// Canonical preimage for the bytes an append adds. Planning determines which
 /// content object receives them, so the bytes are their only identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

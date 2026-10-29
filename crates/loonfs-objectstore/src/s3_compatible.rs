@@ -259,10 +259,10 @@ impl SignedResponse {
     }
 
     /// Reports the provider's own error code for this response, treating a
-    /// success status carrying an error document as the failure it is.
+    /// success status with an error document as the failure it is.
     ///
-    /// `CompleteMultipartUpload` may answer 200 and then report a failure in
-    /// the body, because the provider holds the connection open while it
+    /// `CompleteMultipartUpload` may return 200 and then report a failure in
+    /// the body, because the provider keeps the connection open while it
     /// assembles the object. Reading only the status would take that for
     /// success.
     fn provider_error_code(&self) -> Option<String> {
@@ -369,7 +369,7 @@ impl ProviderSigner for S3RequestSigner {
             .boxed();
         // Parts are cut, counted, and checksummed in order, and the next one
         // is cut only while the window has room, so the window bounds the
-        // parts held in memory.
+        // parts kept in memory.
         let mut parts: Vec<UploadedPart> = payloads
             .enumerate()
             .map(|(index, payload)| {
@@ -442,7 +442,7 @@ impl ClientMultipart for S3RequestSigner {
             Ok(_) => Ok(()),
             // The key is occupied, most often by this upload's own earlier
             // completion, whose response was lost. The caller's
-            // stored-checksum check decides whether it's the client's object.
+            // stored-checksum check determines whether it's the client's object.
             Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
             Err(error) => Err(error),
         }
@@ -610,7 +610,7 @@ impl S3RequestSigner {
     }
 
     /// Sends a create-only `CompleteMultipartUpload`, returning `None` when
-    /// the provider no longer knows the upload.
+    /// the provider no longer has the upload.
     async fn complete_upload(
         &self,
         key: &str,
@@ -637,7 +637,7 @@ impl S3RequestSigner {
         Ok(Some(response))
     }
 
-    /// Completes an upload this signer started and answers the new ETag.
+    /// Completes an upload this signer started and returns the new ETag.
     async fn complete_started_upload(
         &self,
         key: &str,
@@ -672,9 +672,9 @@ impl S3RequestSigner {
 }
 
 /// Accepts a data response by its status alone. A success body is the bytes
-/// themselves, which may hold anything, so only a failure body is read as
+/// themselves, which may contain anything, so only a failure body is read as
 /// the provider's error document. Control responses go through
-/// `send_checked`, because the provider can answer those with a success
+/// `send_checked`, because the provider can respond to those with a success
 /// status and an error in the body.
 fn checked_data(key: &str, response: SignedResponse) -> Result<SignedResponse> {
     let code = (!response.status.is_success())
@@ -684,7 +684,7 @@ fn checked_data(key: &str, response: SignedResponse) -> Result<SignedResponse> {
     Ok(response)
 }
 
-/// Whether the provider reported that it no longer knows the multipart upload.
+/// Whether the provider reported that it no longer has the multipart upload.
 fn is_unknown_upload(code: Option<&str>) -> bool {
     code == Some("NoSuchUpload")
 }
@@ -695,7 +695,7 @@ fn s3_stored_checksum(headers: &http::HeaderMap) -> Option<Checksum> {
 }
 
 /// Reads the ETag of a part copy or a completion, whose XML escapes the
-/// quotes that the same ETag carries in a response header.
+/// quotes that the same ETag has in a response header.
 fn xml_etag(document: &str) -> Option<String> {
     xml_element(document, "ETag").map(|etag| etag.replace("&quot;", "\""))
 }

@@ -16,7 +16,6 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_types::api::v0;
 use loonfs_types::{Checksum, ProbeRunId};
 
 /// Results from one store probe.
@@ -28,20 +27,22 @@ pub struct StoreProbeReport {
     pub checks: Vec<StoreProbeCheck>,
 }
 
-impl From<StoreProbeReport> for v0::StoreProbeResponse {
+impl From<StoreProbeReport> for loonfs_types::StoreProbeResponse {
     fn from(report: StoreProbeReport) -> Self {
         Self {
             run_id: report.run_id,
             checks: report
                 .checks
                 .into_iter()
-                .map(|check| v0::StoreProbeCheck {
+                .map(|check| loonfs_types::StoreProbeCheck {
                     name: check.name.to_owned(),
                     outcome: match check.outcome {
-                        StoreProbeOutcome::Passed => v0::StoreProbeCheckOutcome::Passed,
-                        StoreProbeOutcome::Unsupported => v0::StoreProbeCheckOutcome::Unsupported,
+                        StoreProbeOutcome::Passed => loonfs_types::StoreProbeCheckOutcome::Passed,
+                        StoreProbeOutcome::Unsupported => {
+                            loonfs_types::StoreProbeCheckOutcome::Unsupported
+                        }
                         StoreProbeOutcome::Failed { message } => {
-                            v0::StoreProbeCheckOutcome::Failed { message }
+                            loonfs_types::StoreProbeCheckOutcome::Failed { message }
                         }
                     },
                 })
@@ -232,7 +233,7 @@ fn expect_error<T>(
 }
 
 /// Requires the store to have refused a write whose precondition did not
-/// hold, as fencing assumes.
+/// apply, as fencing assumes.
 fn refused<T>(what: &str, result: StoreResult<T>) -> CheckResult {
     expect_error(what, result, "a failed precondition", |error| {
         matches!(error, ObjectStoreError::PreconditionFailed { .. })
@@ -378,7 +379,7 @@ async fn get_with_metadata_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -
 /// turns into — hands every object an infinite age and reclamation loses the
 /// window that protects in-flight publications and live readers.
 ///
-/// The write's own result carries no timestamp, so the check heads the
+/// The write's own result includes no timestamp, so the check heads the
 /// object the way the sweep does.
 async fn head_reports_last_modified(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
     let key = run.key("last-modified");
@@ -464,7 +465,7 @@ async fn delete_missing_idempotent(store: &dyn ObjectStore, run: &ProbeRun) -> C
     Ok(())
 }
 
-/// A prefix listing must answer with exactly the objects under it, in
+/// A prefix listing must return exactly the objects under it, in
 /// ascending key order.
 async fn sorted_listing(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
     let prefix = run.listing("sorted");
@@ -508,7 +509,7 @@ async fn sorted_listing(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult 
 }
 
 /// Bounded reads are how metadata segments are read at all: a wrong range
-/// answer is a wrong block, which decodes as corruption rather than as an
+/// result is a wrong block, which decodes as corruption rather than as an
 /// error.
 async fn range_reads(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
     let key = run.key("range");
@@ -713,7 +714,7 @@ async fn stored_checksum_readback(store: &dyn ObjectStore, run: &ProbeRun) -> Ch
 }
 
 /// The run's own cleanup, and a check in its own right: after deleting
-/// everything the run wrote, listing the run's prefix must answer empty.
+/// everything the run wrote, listing the run's prefix must return nothing.
 async fn cleanup_leaves_prefix_empty(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
     let prefix = &run.prefix;
     for key in ok("list", store.list_prefix(prefix).await)? {
@@ -736,7 +737,7 @@ mod tests {
     use crate::{ListedObject, ObjectBody, ObjectMetadata, PutMode};
     use async_trait::async_trait;
     use futures::stream::BoxStream;
-    use loonfs_types::api::v0::StoreProbeResponse;
+    use loonfs_types::StoreProbeResponse;
     use loonfs_types::{EffectiveLimit, Page};
     use std::assert_matches;
     use std::sync::atomic::{AtomicBool, Ordering};

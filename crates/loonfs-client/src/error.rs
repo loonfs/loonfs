@@ -80,3 +80,55 @@ impl ClientError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_errors_keep_the_status_when_the_body_is_not_the_envelope() {
+        let error = crate::transport::map_status_error(502, b"<html>upstream error</html>");
+
+        let ClientError::Http(message) = error else {
+            panic!("expected Http error, got {error:?}");
+        };
+        assert!(message.contains("502"), "{message}");
+        assert!(message.contains("non-envelope body"), "{message}");
+    }
+
+    fn api_error(status: u16, code: &str) -> ClientError {
+        ClientError::Api {
+            status,
+            response: Box::new(ErrorResponse {
+                code: code.to_owned(),
+                feature: None,
+                message: "test".to_owned(),
+                param: None,
+                request_id: None,
+                details: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn api_errors_expose_known_registry_codes() {
+        for (wire, expected) in [
+            ("stale_revision", ErrorCode::StaleRevision),
+            ("content_not_prepared", ErrorCode::ContentNotPrepared),
+            ("namespace_deleted", ErrorCode::NamespaceDeleted),
+            ("commit_outcome_unknown", ErrorCode::CommitOutcomeUnknown),
+            ("index_corrupt", ErrorCode::IndexCorrupt),
+        ] {
+            assert_eq!(api_error(500, wire).code(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn api_errors_tolerate_unknown_registry_codes() {
+        assert_eq!(api_error(503, "code_from_a_newer_server").code(), None);
+        assert_eq!(
+            ClientError::Http("connection refused".to_owned()).code(),
+            None
+        );
+    }
+}
