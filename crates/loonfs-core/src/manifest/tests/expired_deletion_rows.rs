@@ -3,7 +3,7 @@
 
 use super::active_deletions::{expire, inode_id_of};
 use super::*;
-use crate::manifest::kept_inodes::load_kept_inode_filter;
+use crate::manifest::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use crate::namespace::control::LoadedManifest;
 use crate::storage::content_admission::PreparedContent;
 use compaction_step::MergePlacement;
@@ -1008,6 +1008,18 @@ async fn seed_keeps<S: ObjectStore + ?Sized>(
     seed: RunNo,
     row: &MetadataRow,
 ) -> bool {
+    seeded_kept_inode_filter(store, namespace_id, seed)
+        .await
+        .keeps(row)
+}
+
+/// The kept inode filter of a base compaction of the inodes group over the
+/// current manifest, seeded by `seed`.
+async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    seed: RunNo,
+) -> KeptInodeFilter {
     let current = load_current_manifest(store, namespace_id)
         .await
         .expect("load the current manifest");
@@ -1025,7 +1037,6 @@ async fn seed_keeps<S: ObjectStore + ?Sized>(
     .await
     .expect("build the filter")
     .expect("not cancelled")
-    .keeps(row)
 }
 
 /// Checks that a false positive in the kept inode filter keeps a hidden
@@ -1100,4 +1111,66 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
             .contains(&hidden_row),
         "a compaction with another seed removes the row"
     );
+}
+
+/// Checks that a base compaction over a namespace whose floor has never
+/// advanced keeps every inode without a walk, even with a recoverable
+/// deletion in the trash.
+#[tokio::test]
+async fn a_kept_inode_filter_over_a_floor_of_zero_keeps_every_inode() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("zero-floor").expect("namespace id");
+    let context = mutation_context("writer-1", 5_000);
+    bootstrap_restricted_namespace(&store, &namespace_id, &context).await;
+    put(&store, &namespace_id, "/trash/old.txt", b"old", &context).await;
+    delete_recursively(&store, &namespace_id, "/trash", &context).await;
+    fold::fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold the deletion");
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
+
+    assert!(matches!(
+        seeded_kept_inode_filter(&store, &namespace_id, RunNo(0)).await,
+        KeptInodeFilter::EveryInode
+    ));
+}
+
+/// Checks that once the floor of the same namespace advances and the
+/// deletion expires, a base compaction walks the tree and builds a filter of
+/// the inodes that the walk reached.
+#[tokio::test]
+async fn a_kept_inode_filter_after_a_deletion_expires_holds_the_reached_inodes() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("expired-floor").expect("namespace id");
+    let context = mutation_context("writer-1", 5_000);
+    bootstrap_restricted_namespace(&store, &namespace_id, &context).await;
+    put(&store, &namespace_id, "/trash/old.txt", b"old", &context).await;
+    let trash = inode_id_of(&store, &namespace_id, "/trash").await;
+    let deletion_seq = delete_recursively(&store, &namespace_id, "/trash", &context).await;
+    fold::fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold the deletion");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Seq(deletion_seq),
+        crate::test_support::grace_elapsed_after(context.now_ms),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("move the floor to the deletion");
+    expire(&store, &namespace_id, trash, deletion_seq, &context)
+        .await
+        .expect("expire the deletion of /trash");
+    fold::fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold the expiry");
+
+    assert!(matches!(
+        seeded_kept_inode_filter(&store, &namespace_id, RunNo(0)).await,
+        KeptInodeFilter::Reached(_)
+    ));
 }

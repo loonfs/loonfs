@@ -143,9 +143,13 @@ If the filter would be larger than `MAX_BLOOM_FILTER_BYTES` (64 MiB), or the wal
 
 The walk reads the slot-index rows of every directory it reaches, so each base compaction of these groups costs one more pass over the bindings of the visible and recoverable tree.
 
+A base compaction over a manifest whose `retention_floor_seq` is still 0 doesn't build the filter. It keeps every row and doesn't walk the tree, so the base compactions of a namespace whose floor has never advanced skip that extra pass.
+
 Why does the compaction build a filter from a walk, and not an exact set of hidden inodes? A hidden subtree can have more inodes than fit in memory, and so can the visible tree. A filter's size is set before the walk starts, and a filter with no false negatives errs toward keeping a row, so the compaction stays inside its memory limit without removing a row that a view needs.
 
 Why does the filter keep a recoverable deletion's ancestors? LoonFS evaluates a subject's rights on an item under a recoverable deletion through the deletion's saved ancestry (see [Access rows](../specs/format.md#18-access-rows)), so the ancestors' access rows have to stay while base compactions remove the rest of the expired subtree. For example, suppose `/team` grants a team `read`, `/team/hr` has its boundary flag set and grants one person `read`, and `/team/hr/salaries.csv` is deleted on its own before `/team` is deleted. If the deletion of `/team` expires while the deletion of `salaries.csv` is still recoverable, the rights for a read of the deleted file are still evaluated through `/team/hr`. If a compaction removed the access row of `/team/hr`, the evaluation could reach the team's grant on `/team` in a run that no compaction has merged yet, and a team member could read the file.
+
+Why can a base compaction over a floor of 0 skip the walk? A deletion expires only through an `expire` event, and validation rejects an `expire` whose deletion is above the floor of the manifest that the commit is validated against (see [Advancing the retention floor](../specs/format.md#101-advancing-the-retention-floor)). A deletion's sequence is at least 1, so an `expire` needs a floor of at least 1, and the floor never decreases from one manifest to the next. So a manifest whose floor is 0 holds no expired deletion, and every inode in its basis is visible or under a recoverable deletion.
 
 Why does the compaction find hidden inodes by reachability, and not by a flag on each row? A tombstone on a directory is one row that hides the whole subtree, so no row below the directory records that the row is hidden. A flag on every row would turn one delete into a write for every descendant, which is what a subtree tombstone avoids.
 

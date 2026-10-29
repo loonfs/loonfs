@@ -39,8 +39,8 @@ const KEPT_INODE_SCAN_ROWS: usize = DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 /// The inodes whose rows a base merge keeps.
 pub(super) enum KeptInodeFilter {
     /// The merge keeps every row, because it isn't a base merge of a group
-    /// that stores rows by inode, or because the filter or the walk that
-    /// builds it would be over its limit.
+    /// that stores rows by inode, because the basis's retention floor is 0,
+    /// or because the filter or the walk would be over a limit.
     EveryInode,
     /// The inodes that the walk reached. The filter can also match an inode
     /// that the walk didn't reach, which keeps that inode's rows for one
@@ -97,6 +97,11 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
 /// Builds the kept inode filter for a merge of `group` at `placement` over
 /// `basis`, or returns the outcome that stopped the walk.
 ///
+/// A basis whose manifest has a retention floor of 0 keeps every row without
+/// a walk. Validation accepts an `expire` only against a floor at or above
+/// its deletion, and the floor never decreases, so such a basis holds no
+/// expired deletion.
+///
 /// The filter is sized for the basis's `inodes` rows at ten bits each, and
 /// its seed is the output run number, so the next compaction of the group
 /// uses another seed. A filter that would be larger than
@@ -112,6 +117,14 @@ pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     if !placement.may_drop_rows_below_the_retention_floor() || !removes_hidden_rows(group) {
         return Ok(Ok(KeptInodeFilter::EveryInode));
     }
+    let manifest = basis
+        .manifest
+        .as_ref()
+        .expect("a base compaction should have a manifest basis")
+        .payload();
+    if manifest.retention_floor_seq == ChangeSeq(0) {
+        return Ok(Ok(KeptInodeFilter::EveryInode));
+    }
     let expected_inodes = basis
         .scan_runs
         .iter()
@@ -119,13 +132,7 @@ pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
         .fold(0_u64, |count, segment| {
             count.saturating_add(segment.row_count)
         });
-    let seed = basis
-        .manifest
-        .as_ref()
-        .expect("a base compaction should have a manifest basis")
-        .payload()
-        .next_run_no
-        .0;
+    let seed = manifest.next_run_no.0;
     let Some(filter) = BloomFilter::new(expected_inodes, seed) else {
         tracing::info!(namespace_id = %namespace_id, expected_inodes,
             "kept inode filter exceeded its byte limit; kept every row");
