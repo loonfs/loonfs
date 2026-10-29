@@ -4,10 +4,11 @@ use super::error::ApiResponseError;
 use crate::AuthPolicy;
 use crate::BindingState;
 use axum::extract::rejection::PathRejection;
-use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath};
+use axum::extract::{
+    DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, RawPathParams,
+};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
-use axum::Json;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
@@ -30,9 +31,7 @@ pub(super) fn server_busy_error(what: &str) -> ApiResponseError {
 pub(super) fn acquire_download_permit(
     state: &BindingState,
 ) -> Result<OwnedSemaphorePermit, ApiResponseError> {
-    state
-        .download_permits
-        .clone()
+    Arc::clone(state.download_permits())
         .try_acquire_owned()
         .map_err(|_| {
             state.metrics.download_rejected_as_busy();
@@ -174,7 +173,8 @@ fn invalid_path_params(rejection: &PathRejection) -> ApiResponseError {
     )
 }
 
-/// Path extractor whose rejections stay inside the error contract.
+/// Path extractor whose rejections stay inside the error contract and
+/// report the failing segment as `param`.
 pub(super) struct AppPath<T>(pub(super) T);
 
 impl<S, T> FromRequestParts<S> for AppPath<T>
@@ -185,10 +185,20 @@ where
     type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        match AxumPath::<T>::from_request_parts(parts, state).await {
-            Ok(AxumPath(value)) => Ok(Self(value)),
-            Err(rejection) => Err(invalid_path_params(&rejection)),
-        }
+        let segments = RawPathParams::from_request_parts(parts, state)
+            .await
+            .map_err(|rejection| {
+                ApiResponseError::new(
+                    ErrorCode::InvalidRequest,
+                    &format!("invalid path parameters: {rejection}"),
+                )
+            })?;
+        // The segments are decoded as a query string, so a typed segment
+        // parses exactly as the same type does in a query.
+        let encoded = form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(segments.iter())
+            .finish();
+        decode_parameters(&encoded, "path").map(Self)
     }
 }
 
@@ -203,7 +213,7 @@ where
     type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        decode_query(parts.uri.query().unwrap_or_default()).map(Self)
+        decode_parameters(parts.uri.query().unwrap_or_default(), "query").map(Self)
     }
 }
 
@@ -212,18 +222,18 @@ where
 #[serde(deny_unknown_fields)]
 pub(super) struct NoQuery {}
 
-/// Decodes a strict query string and reports the failing parameter when
-/// possible.
-fn decode_query<T>(query: &str) -> Result<T, ApiResponseError>
+/// Decodes strict `location` parameters, encoded as a query string, and
+/// reports the failing parameter when possible.
+fn decode_parameters<T>(encoded: &str, location: &str) -> Result<T, ApiResponseError>
 where
     T: serde::de::DeserializeOwned,
 {
     let deserializer =
-        serde_urlencoded::Deserializer::new(form_urlencoded::parse(query.as_bytes()));
+        serde_urlencoded::Deserializer::new(form_urlencoded::parse(encoded.as_bytes()));
     serde_path_to_error::deserialize(deserializer).map_err(|error| {
         let response = ApiResponseError::new(
             ErrorCode::InvalidRequest,
-            &format!("invalid query parameters: {}", error.inner()),
+            &format!("invalid {location} parameters: {}", error.inner()),
         );
         match failed_query_parameter(error.path()) {
             Some(parameter) => response.with_param(parameter),
@@ -241,38 +251,15 @@ fn failed_query_parameter(path: &serde_path_to_error::Path) -> Option<String> {
     }
 }
 
-/// A `Json` extractor whose rejections stay inside the error contract:
-/// malformed bodies answer 400 with an `invalid_request` `ErrorResponse` body
-/// instead of the raw framework rejection, and authorization runs before
-/// the body is read so a malformed body never turns an unauthorized
-/// request's 401 into a 400.
-pub(super) struct AppJson<T>(pub(super) T);
+/// A JSON body of at most `MAX_BYTES` whose rejections stay inside the
+/// error contract: a body without a JSON content type, or one that doesn't
+/// decode, returns 400 with an `invalid_request` `ErrorResponse` body
+/// instead of the raw framework rejection. Authorization runs before the
+/// body is read, so a malformed body never turns an unauthorized request's
+/// 401 into a 400.
+pub(super) struct AppJson<T, const MAX_BYTES: usize = MAX_JSON_BODY_BYTES>(pub(super) T);
 
 pub(super) const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
-
-async fn extract_json<S, T>(
-    request: axum::extract::Request,
-    state: &S,
-    body_too_large: ApiResponseError,
-) -> Result<T, ApiResponseError>
-where
-    T: serde::de::DeserializeOwned,
-    S: Send + Sync,
-{
-    let body = match Json::<Box<serde_json::value::RawValue>>::from_request(request, state).await {
-        Ok(Json(body)) => body,
-        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-            return Err(body_too_large);
-        }
-        Err(rejection) => {
-            return Err(ApiResponseError::new(
-                ErrorCode::InvalidRequest,
-                &rejection.body_text(),
-            ));
-        }
-    };
-    decode_json(body.get().as_bytes())
-}
 
 pub(super) fn decode_json<T>(body: &[u8]) -> Result<T, ApiResponseError>
 where
@@ -358,20 +345,43 @@ fn json_pointer(path: &serde_path_to_error::Path) -> Option<String> {
     (!pointer.is_empty()).then_some(pointer)
 }
 
-impl<T> FromRequest<BindingState> for AppJson<T>
+impl<T, const MAX_BYTES: usize> FromRequest<Arc<BindingState>> for AppJson<T, MAX_BYTES>
 where
     T: serde::de::DeserializeOwned,
 {
     type Rejection = ApiResponseError;
 
     async fn from_request(
-        mut req: axum::extract::Request,
-        state: &BindingState,
+        req: axum::extract::Request,
+        state: &Arc<BindingState>,
     ) -> Result<Self, Self::Rejection> {
-        DefaultBodyLimit::max(MAX_JSON_BODY_BYTES).apply(&mut req);
-        extract_json(req, state, body_too_large_error(MAX_JSON_BODY_BYTES))
-            .await
-            .map(AppJson)
+        ensure_json_content_type(req.headers())?;
+        let body =
+            extract_body_bytes(req, state, MAX_BYTES, body_too_large_error(MAX_BYTES)).await?;
+        decode_json(&body).map(Self)
+    }
+}
+
+/// Rejects a request body whose `Content-Type` isn't `application/json` or
+/// another `+json` media type.
+fn ensure_json_content_type(headers: &HeaderMap) -> Result<(), ApiResponseError> {
+    let declares_json = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .and_then(|media_type| media_type.trim().split_once('/'))
+        .is_some_and(|(kind, subtype)| {
+            kind.eq_ignore_ascii_case("application")
+                && (subtype.eq_ignore_ascii_case("json")
+                    || subtype.to_ascii_lowercase().ends_with("+json"))
+        });
+    if declares_json {
+        Ok(())
+    } else {
+        Err(ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            "a JSON request body needs `Content-Type: application/json`",
+        ))
     }
 }
 
@@ -411,26 +421,6 @@ const _: () = assert!(
         <= MAX_COMPLETION_BODY_BYTES
 );
 
-/// JSON from an upload route with an explicit body-size limit.
-pub(super) struct UploadControlJson<T, const MAX_BYTES: usize>(pub(super) T);
-
-impl<T, const MAX_BYTES: usize> FromRequest<BindingState> for UploadControlJson<T, MAX_BYTES>
-where
-    T: serde::de::DeserializeOwned,
-{
-    type Rejection = ApiResponseError;
-
-    async fn from_request(
-        mut req: axum::extract::Request,
-        state: &BindingState,
-    ) -> Result<Self, Self::Rejection> {
-        DefaultBodyLimit::max(MAX_BYTES).apply(&mut req);
-        extract_json(req, state, body_too_large_error(MAX_BYTES))
-            .await
-            .map(Self)
-    }
-}
-
 async fn extract_body_bytes<S>(
     mut request: axum::extract::Request,
     state: &S,
@@ -450,28 +440,6 @@ where
             ErrorCode::InvalidRequest,
             &format!("request body unreadable: {}", rejection.body_text()),
         )),
-    }
-}
-
-/// An authorized request body decoded after the upload mode is loaded.
-pub(super) struct UploadBodyBytes<const MAX_BYTES: usize>(Bytes);
-
-impl<const MAX_BYTES: usize> UploadBodyBytes<MAX_BYTES> {
-    pub(super) fn into_bytes(self) -> Bytes {
-        self.0
-    }
-}
-
-impl<const MAX_BYTES: usize> FromRequest<BindingState> for UploadBodyBytes<MAX_BYTES> {
-    type Rejection = ApiResponseError;
-
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &BindingState,
-    ) -> Result<Self, Self::Rejection> {
-        extract_body_bytes(req, state, MAX_BYTES, body_too_large_error(MAX_BYTES))
-            .await
-            .map(Self)
     }
 }
 
@@ -573,16 +541,14 @@ impl UploadStreamOutcome {
     }
 }
 
-impl FromRequest<BindingState> for UploadBodyStream {
+impl FromRequest<Arc<BindingState>> for UploadBodyStream {
     type Rejection = ApiResponseError;
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &BindingState,
+        state: &Arc<BindingState>,
     ) -> Result<Self, Self::Rejection> {
-        let permit = state
-            .upload_permits
-            .clone()
+        let permit = Arc::clone(state.upload_permits())
             .try_acquire_owned()
             .map_err(|_| {
                 state.metrics.upload_rejected_as_busy();
@@ -634,11 +600,12 @@ fn body_too_large_error(limit: usize) -> ApiResponseError {
     )
 }
 
-/// Like [`AppJson`], but an absent (empty) body is `None` rather than an
-/// error, while a present-but-malformed body still answers 400 in-envelope.
+/// Like [`AppJson`], but an empty body is `None` rather than an error,
+/// while a body that is present still needs a JSON content type and
+/// decodes the way [`AppJson`] decodes a body.
 pub(super) struct OptionalAppJson<T>(pub(super) Option<T>);
 
-impl<T> FromRequest<BindingState> for OptionalAppJson<T>
+impl<T> FromRequest<Arc<BindingState>> for OptionalAppJson<T>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -646,8 +613,9 @@ where
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &BindingState,
+        state: &Arc<BindingState>,
     ) -> Result<Self, Self::Rejection> {
+        let declared_json = ensure_json_content_type(req.headers());
         let body = extract_body_bytes(
             req,
             state,
@@ -658,8 +626,8 @@ where
         if body.is_empty() {
             return Ok(OptionalAppJson(None));
         }
-        let value = decode_json(&body)?;
-        Ok(OptionalAppJson(Some(value)))
+        declared_json?;
+        decode_json(&body).map(|value| OptionalAppJson(Some(value)))
     }
 }
 
@@ -667,12 +635,12 @@ where
 /// passes.
 pub(super) struct NoBody;
 
-impl FromRequest<BindingState> for NoBody {
+impl FromRequest<Arc<BindingState>> for NoBody {
     type Rejection = ApiResponseError;
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &BindingState,
+        state: &Arc<BindingState>,
     ) -> Result<Self, Self::Rejection> {
         let unexpected_body = ApiResponseError::new(
             ErrorCode::InvalidRequest,
@@ -841,11 +809,11 @@ mod tests {
 
     #[test]
     fn query_decode_reports_the_unknown_parameter() {
-        let error = decode_query::<ListingQuery>("limit=10&curser=abc")
+        let error = decode_parameters::<ListingQuery>("limit=10&curser=abc", "query")
             .expect_err("`curser` is not a parameter of this listing");
         assert_eq!(error.param(), Some("curser"));
 
-        let error = decode_query::<NoQuery>("verbose=true")
+        let error = decode_parameters::<NoQuery>("verbose=true", "query")
             .expect_err("an operation with no parameters accepts none");
         assert_eq!(error.param(), Some("verbose"));
     }
@@ -854,7 +822,7 @@ mod tests {
     fn query_decode_accepts_an_empty_query_string() {
         assert!(
             matches!(
-                decode_query::<ListingQuery>(""),
+                decode_parameters::<ListingQuery>("", "query"),
                 Ok(ListingQuery {
                     limit: None,
                     cursor: None
@@ -863,14 +831,14 @@ mod tests {
             "a query string that names no parameter leaves every parameter absent"
         );
         assert!(
-            decode_query::<NoQuery>("").is_ok(),
+            decode_parameters::<NoQuery>("", "query").is_ok(),
             "an operation with no parameters accepts a request that sends none"
         );
     }
 
     #[test]
     fn a_repeated_query_parameter_is_rejected_and_blames_no_one_parameter() {
-        let error = decode_query::<ListingQuery>("cursor=a&cursor=b")
+        let error = decode_parameters::<ListingQuery>("cursor=a&cursor=b", "query")
             .expect_err("one parameter cannot carry two values");
         assert_eq!(error.param(), None);
     }

@@ -7,24 +7,6 @@
 
 mod host;
 
-use loonfs_types::ChangeSeq;
-use loonfs_types::{
-    api::v0::{
-        Commit, CompleteUploadBody, ContentToken, CreateDownloadByInodeResponse,
-        CreateDownloadRequest, CreateDownloadResponse, CreateUploadBody, DirectoryBinding,
-        ListChangesResponse, ObjectTransferAccess, UploadMode, UploadSession, UploadSessionStatus,
-    },
-    AdvanceRetentionRequest, AdvanceRetentionResponse, Checkpoint, CheckpointOwner, CommitRequest,
-    ContentRef, CreateNamespaceRequest, CreateSnapshotRequest, DeleteSnapshotResponse,
-    DeletedCheckpointsByOwner, DeletedObjectCounts, ErrorResponse, ExtendSnapshotRequest,
-    ExtensionGcReports, FilesystemOperation, ForkNamespaceRequest, GcRequest, GcResponse,
-    GrepGcReport, ListCheckpointsResponse, ListFileRevisionsResponse, ListSnapshotsResponse,
-    ListTrashResponse, MetadataMaintenanceOutcome, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, PinId, RetainedCandidates, RevisionNo, RunMaintenanceRequest,
-    RunMaintenanceResponse, SetRetentionWindowRequest, SetRetentionWindowResponse, Snapshot,
-    TrashEntry,
-};
-
 /// Builds the static OpenAPI document for the v0 HTTP API.
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
     let mut document = <LoonfsOpenApi as utoipa::OpenApi>::openapi();
@@ -91,97 +73,6 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         crate::http::handlers_store::probe_store
     ),
     components(
-        schemas(
-        loonfs_types::CapabilityDocument,
-        ErrorResponse,
-        loonfs_types::ErrorDetails,
-        loonfs_types::WriterEpoch,
-        CreateNamespaceRequest,
-        ForkNamespaceRequest,
-        loonfs_types::NamespaceMetadata,
-        loonfs_types::NamespaceDiagnostics,
-        loonfs_types::DeleteNamespaceResponse,
-        loonfs_types::DestinationBehavior,
-        loonfs_types::DeleteDirectoryBehavior,
-        FilesystemOperation,
-        CommitRequest,
-        loonfs_types::FileRevision,
-        ListFileRevisionsResponse,
-        ListTrashResponse,
-        TrashEntry,
-        Checkpoint,
-        PinId,
-        CheckpointOwner,
-        ListCheckpointsResponse,
-        CreateSnapshotRequest,
-        ExtendSnapshotRequest,
-        Snapshot,
-        ListSnapshotsResponse,
-        DeleteSnapshotResponse,
-        RunMaintenanceRequest,
-        MetadataMaintenanceRequest,
-        AdvanceRetentionRequest,
-        MetadataMaintenanceResponse,
-        MetadataMaintenanceOutcome,
-        AdvanceRetentionResponse,
-        SetRetentionWindowRequest,
-        SetRetentionWindowResponse,
-        RunMaintenanceResponse,
-        GcRequest,
-        GcResponse,
-        ExtensionGcReports,
-        GrepGcReport,
-        DeletedObjectCounts,
-        DeletedCheckpointsByOwner,
-        RetainedCandidates,
-        ContentRef,
-        loonfs_types::Checksum,
-        loonfs_types::ChecksumAlgorithm,
-        loonfs_types::ContentId,
-        loonfs_types::api::v0::UploadContentClaim,
-        loonfs_types::NamespaceId,
-        loonfs_types::CommitId,
-        RevisionNo,
-        ChangeSeq,
-        loonfs_types::ManifestNo,
-        loonfs_types::NameKey,
-        loonfs_types::AttributeKey,
-        loonfs_types::AttributeValue,
-        loonfs_types::Attributes,
-        loonfs_types::AttributesRevisionNo,
-        loonfs_types::PathEntry,
-        loonfs_types::PathEntryKind,
-        loonfs_types::AttributesProjection,
-        loonfs_types::ListPathEntriesResponse,
-        loonfs_types::ListInodeChildrenResponse,
-        UploadMode,
-        CreateUploadBody,
-        CompleteUploadBody,
-        UploadSession,
-        UploadSessionStatus,
-        loonfs_types::api::v0::UploadPartChecksumClaim,
-        loonfs_types::api::v0::SignUploadPartsRequest,
-        loonfs_types::api::v0::SignedUploadPart,
-        loonfs_types::api::v0::SignUploadPartsResponse,
-        loonfs_types::api::v0::CompletedUploadPart,
-        CreateDownloadRequest,
-        CreateDownloadResponse,
-        CreateDownloadByInodeResponse,
-        ObjectTransferAccess,
-        ContentToken,
-        Commit,
-        loonfs_types::api::v0::FilesystemChange,
-        DirectoryBinding,
-        ListChangesResponse,
-        loonfs_types::api::v0::GrepMatch,
-        loonfs_types::api::v0::GrepResponse,
-        loonfs_types::api::v0::GrepIndexStatus,
-        loonfs_types::api::v0::GrepIndex,
-        loonfs_types::api::v0::StoreProbeRequest,
-        loonfs_types::api::v0::StoreProbeCheckOutcome,
-        loonfs_types::api::v0::StoreProbeCheck,
-        loonfs_types::api::v0::StoreProbeResponse
-        ),
         responses(UnavailableResponse)
     ),
     // Applies to every operation that does not override it. `/health` and
@@ -210,7 +101,7 @@ struct LoonfsOpenApi;
     dead_code,
     reason = "used only to generate the reusable OpenAPI response schema"
 )]
-pub(super) struct UnavailableResponse(#[to_schema] ErrorResponse);
+pub(super) struct UnavailableResponse(#[to_schema] loonfs_types::ErrorResponse);
 
 /// Adds the shared 503 response to an OpenAPI operation.
 pub(super) struct UnavailableResponses;

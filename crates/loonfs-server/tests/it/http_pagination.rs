@@ -319,7 +319,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     );
     let error = nonnumeric_limit.expect_err("nonnumeric limit rejected");
     assert_eq!(error.code, "invalid_request");
-    assert!(error.message.contains("invalid limit"));
+    assert_eq!(error.param.as_deref(), Some("limit"));
 
     harness.server.abort();
 }

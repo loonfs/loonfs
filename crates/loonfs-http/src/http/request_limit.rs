@@ -35,11 +35,11 @@ impl RequestLimit {
 }
 
 pub(super) async fn admit_request(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     request: Request,
     next: Next,
 ) -> Response {
-    let Some(limit) = &state.request_limit else {
+    let Some(limit) = state.request_limit() else {
         return next.run(request).await;
     };
     if matches!(*request.method(), Method::GET | Method::HEAD)

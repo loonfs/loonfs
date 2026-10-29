@@ -492,9 +492,19 @@ impl ReadView {
         absolute_path: &str,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.read_file_stream_with_permit(absolute_path, options, &permit)
+            .await
+    }
+
+    async fn read_file_stream_with_permit(
+        &self,
+        absolute_path: &str,
+        options: &ReadFileStreamOptions,
+        _permit: &BudgetPermit<'_>,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
         self.read(async {
-            self.ensure_read_at(&ReadAt::Live(options.consistency))?;
+            self.ensure_read_at(&options.at)?;
             Ok(self
                 .engine
                 .read_file_stream(
@@ -587,9 +597,19 @@ impl ReadView {
         inode_id: InodeId,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.read_file_stream_by_inode_with_permit(inode_id, options, &permit)
+            .await
+    }
+
+    async fn read_file_stream_by_inode_with_permit(
+        &self,
+        inode_id: InodeId,
+        options: &ReadFileStreamOptions,
+        _permit: &BudgetPermit<'_>,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
         self.read(async {
-            self.ensure_read_at(&ReadAt::Live(options.consistency))?;
+            self.ensure_read_at(&options.at)?;
             Ok(self
                 .engine
                 .read_file_stream_by_inode(
@@ -1142,27 +1162,34 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        let consistency = match (&options.at, revision_no) {
+            (ReadAt::Live(consistency), _) => *consistency,
+            (ReadAt::Snapshot(_), Some(_)) => return Err(revision_at_snapshot()),
+            (ReadAt::Snapshot(snapshot_id), None) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .read_file_stream_with_permit(absolute_path, options, &permit)
+                    .await;
+            }
+        };
         self.core.record_trace_context(&tracing::Span::current());
-        let options = *options;
+        let (chunk_bytes, range) = (options.chunk_bytes, options.range);
         self.core
-            .read(
-                &self.namespace_id,
-                options.consistency,
-                |pinned| async move {
-                    let stream = pinned
-                        .engine
-                        .read_file_stream(
-                            absolute_path,
-                            &pinned.context,
-                            revision_no,
-                            options.chunk_bytes,
-                            options.range,
-                        )
-                        .await?;
-                    Ok(stream)
-                },
-            )
+            .read(&self.namespace_id, consistency, |pinned| async move {
+                let stream = pinned
+                    .engine
+                    .read_file_stream(
+                        absolute_path,
+                        &pinned.context,
+                        revision_no,
+                        chunk_bytes,
+                        range,
+                    )
+                    .await?;
+                Ok(stream)
+            })
             .await
     }
 
@@ -1777,6 +1804,9 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Reads one historical file revision by path as bounded chunks, as
     /// `options` asks. See [`Self::read_file_stream_with_options`].
+    ///
+    /// A snapshot captures one revision of each file, so options that read a
+    /// snapshot return `invalid_request`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.read_file_revision_stream",
@@ -1903,6 +1933,9 @@ impl<M: crate::Mode> Namespace<M> {
     /// Streams a retained inode revision, including content without a visible
     /// path, as `options` asks. Complete verification requires consuming the
     /// stream to its end.
+    ///
+    /// A snapshot captures one revision of each file, so options that read a
+    /// snapshot return `invalid_request`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.read_file_revision_stream_by_inode",
@@ -1931,26 +1964,33 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        let permit = self.core.inner.config.execution_budget.read_permit().await;
+        let consistency = match (&options.at, revision_no) {
+            (ReadAt::Live(consistency), _) => *consistency,
+            (ReadAt::Snapshot(_), Some(_)) => return Err(revision_at_snapshot()),
+            (ReadAt::Snapshot(snapshot_id), None) => {
+                return self
+                    .read_view_at_snapshot_with_permit(snapshot_id, &permit)
+                    .await?
+                    .read_file_stream_by_inode_with_permit(inode_id, options, &permit)
+                    .await;
+            }
+        };
         self.core.record_trace_context(&tracing::Span::current());
-        let options = *options;
+        let (chunk_bytes, range) = (options.chunk_bytes, options.range);
         self.core
-            .read(
-                &self.namespace_id,
-                options.consistency,
-                |pinned| async move {
-                    Ok(pinned
-                        .engine
-                        .read_file_stream_by_inode(
-                            inode_id,
-                            revision_no,
-                            &pinned.context,
-                            options.chunk_bytes,
-                            options.range,
-                        )
-                        .await?)
-                },
-            )
+            .read(&self.namespace_id, consistency, |pinned| async move {
+                Ok(pinned
+                    .engine
+                    .read_file_stream_by_inode(
+                        inode_id,
+                        revision_no,
+                        &pinned.context,
+                        chunk_bytes,
+                        range,
+                    )
+                    .await?)
+            })
             .await
     }
 

@@ -1,10 +1,11 @@
 //! The usage report that the binding records once for each request to a
 //! namespace route, and the recorder trait that embedders implement.
 
+use super::router::find_route;
 use crate::BindingState;
 use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, RawPathParams, Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::RequestExt as _;
@@ -52,201 +53,15 @@ pub trait UsageRecorder: Send + Sync + 'static {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GrantedBytes(pub(super) u64);
 
-/// The operation ID of each route with a `{namespace_id}` parameter, by
-/// method and route template.
-pub(super) const NAMESPACE_OPERATIONS: &[(Method, &str, &str)] = &[
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}",
-        "get_namespace",
-    ),
-    (
-        Method::DELETE,
-        "/v0/namespaces/{namespace_id}",
-        "delete_namespace",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/forks",
-        "fork_namespace",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/snapshots",
-        "create_snapshot",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/snapshots",
-        "list_snapshots",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
-        "extend_snapshot",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
-        "get_snapshot",
-    ),
-    (
-        Method::DELETE,
-        "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
-        "delete_snapshot",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/filesystem/entries",
-        "list_path_entries",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/filesystem/entry",
-        "get_path_entry",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/filesystem/content",
-        "get_file_content",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/filesystem/downloads",
-        "create_download",
-    ),
-    (Method::GET, "/v0/namespaces/{namespace_id}/grep", "grep"),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/filesystem/revisions",
-        "list_file_revisions",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
-        "get_inode",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
-        "list_inode_children",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
-        "get_file_content_by_inode",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
-        "create_download_by_inode",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
-        "list_file_revisions_by_inode",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
-        "get_file_revision_content_by_inode",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
-        "create_revision_download_by_inode",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/filesystem/trash",
-        "list_trash",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/commits",
-        "create_commit",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/uploads",
-        "create_upload",
-    ),
-    (
-        Method::PUT,
-        "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
-        "put_upload_content",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
-        "sign_upload_parts",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
-        "complete_upload",
-    ),
-    (
-        Method::POST,
-        "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
-        "abort_upload",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
-        "get_upload",
-    ),
-    (
-        Method::GET,
-        "/v0/namespaces/{namespace_id}/changes",
-        "list_changes",
-    ),
-    (
-        Method::GET,
-        "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
-        "get_namespace_diagnostics",
-    ),
-    (
-        Method::GET,
-        "/v0/maintenance/namespaces/{namespace_id}/grep/index",
-        "get_grep_index",
-    ),
-    (
-        Method::POST,
-        "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
-        "enable_grep_index",
-    ),
-    (
-        Method::POST,
-        "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
-        "disable_grep_index",
-    ),
-    (
-        Method::GET,
-        "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
-        "list_checkpoints",
-    ),
-    (
-        Method::GET,
-        "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
-        "get_checkpoint",
-    ),
-    (
-        Method::POST,
-        "/v0/maintenance/namespaces/{namespace_id}/runs",
-        "run_maintenance",
-    ),
-];
-
 /// Records one usage report for each request to a namespace route, once the
 /// response body ends, the client goes away, or the request ends before its
 /// response.
 pub(super) async fn report_usage(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let Some(recorder) = state.usage_recorder else {
+    let Some(recorder) = state.usage_recorder.clone() else {
         return next.run(request).await;
     };
     let Some((operation, namespace_id)) = find_namespace_operation(&mut request).await else {
@@ -284,15 +99,8 @@ pub(super) async fn report_usage(
 /// Finds the operation ID of the request's route and the namespace ID in its
 /// path, for a namespace route whose namespace ID parses.
 async fn find_namespace_operation(request: &mut Request) -> Option<(&'static str, NamespaceId)> {
-    let route = request.extensions().get::<MatchedPath>()?.as_str();
-    // axum serves a HEAD request through the route's GET handler.
-    let method = match *request.method() {
-        Method::HEAD => &Method::GET,
-        ref method => method,
-    };
-    let (_, _, operation) = NAMESPACE_OPERATIONS
-        .iter()
-        .find(|(table_method, template, _)| table_method == method && *template == route)?;
+    let path = request.extensions().get::<MatchedPath>()?.as_str();
+    let route = find_route(request.method(), path)?;
     // The handler parses the percent-decoded path parameter, so the report
     // parses the same value. The raw path segment of an encoded namespace ID
     // doesn't parse, and the request would go unreported.
@@ -300,7 +108,7 @@ async fn find_namespace_operation(request: &mut Request) -> Option<(&'static str
     let (_, segment) = parameters
         .iter()
         .find(|(name, _)| *name == "namespace_id")?;
-    Some((*operation, NamespaceId::parse(segment).ok()?))
+    Some((route.operation, NamespaceId::parse(segment).ok()?))
 }
 
 /// A request body that adds the length of each data frame that the handler

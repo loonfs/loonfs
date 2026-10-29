@@ -3,17 +3,17 @@
 use super::*;
 
 #[test]
-fn route_labels_intern_once_and_refuse_to_grow_without_bound() {
-    let mut routes = RouteLabels::default();
-    let first = routes.intern("/v0/namespaces/{namespace_id}/commits");
-    let again = routes.intern("/v0/namespaces/{namespace_id}/commits");
-    assert_eq!(first, again);
-    assert_eq!(first.as_ptr(), again.as_ptr());
-
-    for index in 0..MAX_ROUTE_LABELS {
-        routes.intern(&format!("/synthetic/{index}"));
+fn route_labels_come_from_the_contract_route_table() {
+    for (matched_route, label) in [
+        (
+            Some("/v0/namespaces/{namespace_id}/commits"),
+            "/v0/namespaces/{namespace_id}/commits",
+        ),
+        (Some("/health"), OTHER_ROUTE),
+        (None, UNMATCHED_ROUTE),
+    ] {
+        assert_eq!(route_label(matched_route), label);
     }
-    assert_eq!(routes.intern("/one/too/many"), UNMATCHED_ROUTE);
 }
 
 #[test]

@@ -360,7 +360,6 @@ impl ResolvedTarget {
         let client = crate::backend::client(
             &maintenance,
             GrepService::new(grep_block_cache, maintenance.runtime.monotonic_timer()),
-            store_kind,
             no_retry,
         )?;
         Ok(Self {

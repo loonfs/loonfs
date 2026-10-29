@@ -7,6 +7,7 @@
 mod check_config;
 mod client_transport;
 mod common;
+mod config;
 mod direct_put_real_provider;
 mod grep_modes;
 mod http_attributes;

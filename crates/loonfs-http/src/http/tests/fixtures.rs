@@ -1,8 +1,8 @@
 //! Runtime handles and options for binding tests.
 
 use crate::{
-    AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, JobMode, Namespaces,
-    UsageRecorder,
+    AuthPolicy, BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, JobMode,
+    Namespaces, UsageRecorder,
 };
 use loonfs::{InlineContentPolicy, LoonFs, SharedObjectStore, TraceMode};
 use loonfs_grep::{
@@ -51,9 +51,9 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
             max_download_bytes: Some(256 * 1024 * 1024),
             max_concurrent_uploads: 8,
             max_concurrent_downloads: 16,
+            max_in_flight_requests: None,
             content_token_secret: "test-content-token-secret".into(),
             request_deadline_ms: 60_000,
-            store_kind: ConfiguredObjectStoreKind::LocalFs,
             auth_policy: AuthPolicy::BearerToken("test-token".into()),
         },
         inline_content: InlineContentPolicy::default(),
@@ -67,7 +67,17 @@ pub(super) async fn test_app(
     config: TestOptions,
     inputs: TestAppOptions,
 ) -> loonfs::Result<(axum::Router, BindingState)> {
-    let options = Arc::new(config.binding);
+    let (router, state, _) = test_app_with_sessions(config, inputs).await?;
+    Ok((router, state))
+}
+
+/// Builds the app of [`test_app`], and returns the table of writer sessions
+/// that its binding holds.
+pub(super) async fn test_app_with_sessions(
+    config: TestOptions,
+    inputs: TestAppOptions,
+) -> loonfs::Result<(axum::Router, BindingState, Arc<Namespaces<()>>)> {
+    let options = config.binding;
     let metrics = HttpMetrics::new();
     let builder = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store));
     let builder = match inputs.max_staleness_ms {
@@ -98,7 +108,7 @@ pub(super) async fn test_app(
                 .expect("test bindings should cap proxied reads"),
         )
         .trace_mode(TraceMode::Remote)
-        .store_kind(options.store_kind)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .metrics_recorder(metrics.recorder())
         .build()
         .await?;
@@ -133,19 +143,18 @@ pub(super) async fn test_app(
             worker: grep_worker(),
         },
     };
-    let state = BindingState {
-        request_limit: None,
-        upload_permits: crate::transfer_permits(options.max_concurrent_uploads),
-        download_permits: crate::transfer_permits(options.max_concurrent_downloads),
+    let namespaces = Arc::new(Namespaces::<()>::new(runtime.clone()));
+    let state = BindingState::new(
         options,
-        probe_store: runtime.object_store(),
-        namespaces: Arc::new(Namespaces::new(runtime.clone())),
-        runtime,
-        maintenance,
-        direct_transfers: inputs.direct_transfers,
-        grep,
-        metrics,
-        usage_recorder: inputs.usage_recorder,
-    };
-    Ok((crate::router(state.clone()), state))
+        BindingHandles {
+            namespaces: namespaces.clone(),
+            runtime,
+            maintenance,
+            direct_transfers: inputs.direct_transfers,
+            grep,
+            metrics,
+            usage_recorder: inputs.usage_recorder,
+        },
+    );
+    Ok((crate::router(state.clone()), state, namespaces))
 }

@@ -1,5 +1,4 @@
 bind = "127.0.0.1:9400"
-auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-aws"
 # Derive memory pools from 4 GiB. Omit this to use the Linux cgroup limit.
@@ -13,13 +12,18 @@ memory_limit_bytes = 4294967296
 # have their own window.
 #retention_window_ms = 2592000000
 
-# Serving beyond loopback requires TLS. Either terminate it here by
-# uncommenting [tls] below, or set allow_remote_without_tls = true when a
-# proxy in front of LoonFS terminates it.
-#allow_remote_without_tls = true
+# Requests authenticate with this bearer token. The token may instead come
+# from LOONFS_AUTH_TOKEN.
+[auth]
+kind = "bearer_token"
+token = "dev-token"
 
-# PEM chain (leaf first) and its private key, read once at startup.
-#[tls]
+# Serving beyond loopback requires TLS. Either terminate it here with the PEM
+# chain (leaf first) and its private key, read once at startup, or set
+# `kind = "plaintext_behind_proxy"` when a proxy in front of LoonFS
+# terminates it.
+#[transport]
+#kind = "tls"
 #cert_path = "/etc/loonfs/tls/server.crt"
 #key_path = "/etc/loonfs/tls/server.key"
 

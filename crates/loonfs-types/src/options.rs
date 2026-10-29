@@ -28,6 +28,18 @@ impl std::fmt::Display for AttributeInclusion {
     }
 }
 
+impl From<bool> for AttributeInclusion {
+    /// Returns `Include` for `true`, as a request's `include_attributes`
+    /// parameter spells the choice.
+    fn from(include: bool) -> Self {
+        if include {
+            Self::Include
+        } else {
+            Self::Omit
+        }
+    }
+}
+
 /// How recently a live read confirms the namespace head before it reads.
 ///
 /// A read option that leaves its consistency unset (`None`) takes the

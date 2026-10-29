@@ -185,10 +185,13 @@ fn config_error(error: impl std::fmt::Display) -> ConformanceServerError {
 fn write_server_config(path: &Path, store_root: &Path) -> io::Result<()> {
     let contents = format!(
         r#"bind = "127.0.0.1:0"
-auth_token = "{AUTH_TOKEN}"
 content_token_secret = "conformance-content-token-secret"
 writer_id = "loonfs-conformance"
 max_upload_bytes = {PROXY_UPLOAD_MAX_BYTES}
+
+[auth]
+kind = "bearer_token"
+token = "{AUTH_TOKEN}"
 
 [store]
 kind = "local_fs"

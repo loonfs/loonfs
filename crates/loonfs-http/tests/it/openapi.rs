@@ -994,16 +994,9 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
     ] {
         let consistency = query_parameter(paths, path, "get", "consistency");
         assert_eq!(consistency.get("required"), Some(&Value::Bool(false)));
-        let schema = consistency.get("schema").expect("consistency schema");
-        assert_eq!(schema.get("type").and_then(Value::as_str), Some("string"));
         assert_eq!(
-            schema.get("enum"),
-            Some(&serde_json::json!(["strong", "eventual"]))
-        );
-        assert_eq!(
-            schema.get("default"),
-            None,
-            "the default is the server's `consistency` setting, so the schema declares none"
+            consistency.pointer("/schema/$ref").and_then(Value::as_str),
+            Some("#/components/schemas/ReadConsistency")
         );
         let max_staleness = query_parameter(paths, path, "get", "max_staleness_ms");
         assert_eq!(max_staleness.get("required"), Some(&Value::Bool(false)));
@@ -1042,6 +1035,11 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
     assert_eq!(
         schemas["ReadConsistency"]["enum"],
         json!(["eventual", "strong"])
+    );
+    assert_eq!(
+        schemas["ReadConsistency"].get("default"),
+        None,
+        "the default is the server's `consistency` setting, so the schema declares none"
     );
 
     let grep_path = "/v0/namespaces/{namespace_id}/grep";

@@ -15,7 +15,12 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
         } else {
             crate::JobMode::MaintainOnly
         };
-        let (router, state) = app(config, AppConfig::default()).await.expect("server app");
+        let (router, state) = app(
+            config.validate().expect("validate the test config"),
+            AppConfig::default(),
+        )
+        .await
+        .expect("server app");
         let router = if serves_maintenance {
             router
         } else {
@@ -139,6 +144,11 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
                 StatusCode::NOT_FOUND
             }
         );
-        state.runtime.shutdown().await.expect("writer shutdown");
+        state
+            .binding
+            .runtime
+            .shutdown()
+            .await
+            .expect("writer shutdown");
     }
 }

@@ -763,50 +763,37 @@ async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
     assert_eq!(&body[..], b"fast");
 }
 
-#[tokio::test]
-async fn deadline_exemptions_name_served_routes_and_cover_both_content_spellings() {
-    use tower::ServiceExt;
+#[test]
+fn every_content_route_is_deadline_exempt() {
+    use super::router::{find_route, Deadline};
+    use axum::http::Method;
 
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let router = test_app(
-        test_options(temp_dir.path(), "deadline-exempt-route-writer"),
-        options_with_store(store),
-    )
-    .await
-    .expect("build app")
-    .0;
-
-    for content_route in [
-        "/v0/namespaces/{namespace_id}/filesystem/content",
-        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+    for (method, path) in [
+        (
+            Method::GET,
+            "/v0/namespaces/{namespace_id}/filesystem/content",
+        ),
+        (
+            Method::GET,
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+        ),
+        (
+            Method::GET,
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+        ),
+        (
+            Method::HEAD,
+            "/v0/namespaces/{namespace_id}/filesystem/content",
+        ),
+        (
+            Method::PUT,
+            "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
+        ),
     ] {
-        assert!(
-            super::middleware::DEADLINE_EXEMPT_ROUTES.contains(&content_route),
-            "content route `{content_route}` is not deadline exempt"
-        );
-    }
-
-    for route in super::middleware::DEADLINE_EXEMPT_ROUTES {
-        let uri = route
-            .replace("{namespace_id}", "deadline-exempt")
-            .replace("{upload_id}", "upl_deadline_exempt")
-            .replace("{inode_id}", "ino_1")
-            .replace("{revision_no}", "1");
-        let response = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(&uri)
-                    .body(axum::body::Body::empty())
-                    .expect("route request"),
-            )
-            .await
-            .expect("route response");
-        assert_ne!(
-            response.status(),
-            axum::http::StatusCode::NOT_FOUND,
-            "deadline exemption `{route}` does not match a served route"
+        assert_eq!(
+            find_route(&method, path).map(|route| route.deadline),
+            Some(Deadline::Exempt),
+            "content route `{method} {path}` is not deadline exempt"
         );
     }
 }
@@ -1629,7 +1616,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     assert!(
         body["message"]
             .as_str()
-            .is_some_and(|message| message.starts_with("invalid after_seq `abc`:")),
+            .is_some_and(|message| message.starts_with("invalid query parameters: ")),
         "{body}"
     );
     assert_eq!(body["param"], "after_seq");
@@ -1665,7 +1652,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     );
     assert_eq!(
         body["message"],
-        "invalid after_seq `9007199254740992`: must be an integer from 0 through 9007199254740991"
+        "invalid query parameters: must be an integer from 0 through 9007199254740991"
     );
     assert_eq!(body["param"], "after_seq");
 
@@ -1694,7 +1681,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     assert!(
         body["message"]
             .as_str()
-            .is_some_and(|message| message.starts_with("invalid expected_head_seq `abc`:")),
+            .is_some_and(|message| message.starts_with("invalid query parameters: ")),
         "{body}"
     );
     assert_eq!(body["param"], "expected_head_seq");
@@ -2264,9 +2251,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
 
     // Hold the only buffering slot, standing in for a slow concurrent
     // upload; the next proxied body must be refused before buffering.
-    let held = state
-        .upload_permits
-        .clone()
+    let held = Arc::clone(state.upload_permits())
         .try_acquire_owned()
         .expect("hold the only upload slot");
 
@@ -2350,9 +2335,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         ..
     } = start_server_with_config(store, config).await;
 
-    let held = state
-        .download_permits
-        .clone()
+    let held = Arc::clone(state.download_permits())
         .try_acquire_owned()
         .expect("hold the only download slot");
 
@@ -2459,12 +2442,12 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
     .await;
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.binding.max_concurrent_downloads = 1;
-    let (_, mut state) = test_app(config, options_with_store(store))
+    config.binding.max_in_flight_requests = Some(std::num::NonZeroUsize::MIN);
+    let (_, state) = test_app(config, options_with_store(store))
         .await
         .expect("build app");
 
-    state.request_limit = Some(crate::RequestLimit::new(std::num::NonZeroUsize::MIN));
-    let limit = state.request_limit.as_ref().expect("request limit");
+    let limit = state.request_limit().expect("request limit");
     let response = crate::router(state.clone())
         .oneshot(
             axum::http::Request::builder()
@@ -2483,10 +2466,10 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
             "application/octet-stream"
         ))
     );
-    assert_eq!(state.download_permits.available_permits(), 0);
+    assert_eq!(state.download_permits().available_permits(), 0);
     assert_eq!(limit.in_flight(), 1);
 
-    let next_permit = state.download_permits.clone().acquire_owned();
+    let next_permit = Arc::clone(state.download_permits()).acquire_owned();
     tokio::pin!(next_permit);
     assert_matches!(
         futures::poll!(next_permit.as_mut()),
@@ -2501,7 +2484,7 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
         .await
         .expect("the next download is admitted after full consumption");
     drop(acquired);
-    assert_eq!(state.download_permits.available_permits(), 1);
+    assert_eq!(state.download_permits().available_permits(), 1);
     assert_eq!(limit.in_flight(), 0);
 }
 
@@ -4387,7 +4370,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
         assert_eq!(failed, corrupt, "corruption must abort the HTTP body");
         drop(body);
         assert_eq!(
-            state.download_permits.available_permits(),
+            state.download_permits().available_permits(),
             state.options.max_concurrent_downloads
         );
         assert!(watched.peaks().peak_live_bytes <= loonfs::CONTENT_READ_CHUNK_BYTES);

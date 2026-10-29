@@ -5,9 +5,7 @@ use super::error::ApiResponseError;
 use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, SubjectHeaders};
 use super::handlers_filesystem::PageQuery;
 use super::handlers_query::map_grep_error;
-use super::query_params::{
-    checked_cursor, effective_page_limit, parse_path_id, parse_public_ordinal,
-};
+use super::query_params::{checked_cursor, effective_page_limit};
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
@@ -32,6 +30,7 @@ use loonfs_types::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
+use std::sync::Arc;
 
 /// Advertises a feature, or removes the key: an absent key and an
 /// advertised-false key both mean unsupported, and the document stays small.
@@ -43,12 +42,14 @@ fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: 
     }
 }
 
+/// The query of a namespace delete.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct DeleteNamespaceQuery {
-    /// Delete only if the head is still at this sequence (`stale_head` on
-    /// mismatch).
-    expected_head_seq: Option<String>,
+    /// The head sequence that the namespace must still have for the delete to succeed.
+    expected_head_seq: Option<ChangeSeq>,
 }
 
 /// The capability value for a transfer limit. The API lists these limits on
@@ -76,7 +77,7 @@ fn advertised_limit(limit: Option<u64>) -> u64 {
     )
 )]
 pub(super) async fn get_capabilities(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_types::CapabilityDocument>, ApiResponseError> {
     let mut capabilities = state.runtime.capabilities();
@@ -194,7 +195,7 @@ pub(super) async fn get_capabilities(
     )
 )]
 pub(super) async fn create_namespace(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     ActorHeader(actor_id): ActorHeader,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
@@ -249,7 +250,7 @@ pub(super) async fn create_namespace(
     )
 )]
 pub(super) async fn get_namespace(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
@@ -283,7 +284,7 @@ pub(super) async fn get_namespace(
     )
 )]
 pub(super) async fn get_namespace_diagnostics(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_types::NamespaceDiagnostics>, ApiResponseError> {
@@ -307,7 +308,7 @@ pub(super) async fn get_namespace_diagnostics(
         description = "Marks a namespace as deleted. The namespace ID can never be used again to create or fork a namespace.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("expected_head_seq" = Option<ChangeSeq>, Query, description = "The head sequence that the namespace must still have for the delete to succeed.")
+            DeleteNamespaceQuery
         ),
         responses(
             (status = 200, description = "Namespace deleted", body = loonfs_types::DeleteNamespaceResponse),
@@ -321,28 +322,20 @@ pub(super) async fn get_namespace_diagnostics(
     )
 )]
 pub(super) async fn delete_namespace(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DeleteNamespaceQuery>,
 ) -> Result<Json<loonfs_types::DeleteNamespaceResponse>, ApiResponseError> {
     let options = DeleteNamespaceOptions {
-        expected_head_seq: query
-            .expected_head_seq
-            .as_deref()
-            .map(parse_expected_head_seq)
-            .transpose()?,
+        expected_head_seq: query.expected_head_seq,
     };
     let namespace = state.open_writer(&namespace_id, subject).await?;
     let response = namespace.delete_with_options(&options).await.map_err(
-        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
     )?;
     state.namespaces.forget(&namespace_id);
     Ok(Json(response))
-}
-
-fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
-    parse_public_ordinal("expected_head_seq", value, ChangeSeq::parse)
 }
 
 #[cfg_attr(
@@ -373,7 +366,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
     )
 )]
 pub(super) async fn fork_namespace(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     ActorHeader(actor_id): ActorHeader,
     NamespaceIdPath(source_namespace_id): NamespaceIdPath,
@@ -419,7 +412,7 @@ pub(super) async fn fork_namespace(
     )
 )]
 pub(super) async fn create_snapshot(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -435,7 +428,7 @@ pub(super) async fn create_snapshot(
         )
         .await
         .map_err(ApiResponseError::for_namespace_writer(
-            &state.namespaces,
+            state.namespaces.as_ref(),
             &namespace_id,
         ))?;
     Ok(Json(snapshot))
@@ -453,8 +446,7 @@ pub(super) async fn create_snapshot(
         description = "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork pins, which the maintenance checkpoint inventory lists.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
-            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
+            PageQuery
         ),
         responses(
             (status = 200, description = "Snapshots", body = ListSnapshotsResponse),
@@ -466,7 +458,7 @@ pub(super) async fn create_snapshot(
     )
 )]
 pub(super) async fn list_snapshots(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
@@ -510,20 +502,19 @@ pub(super) async fn list_snapshots(
     )
 )]
 pub(super) async fn extend_snapshot(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
-    let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
     let namespace = state.open_writer(&namespace_id, subject).await?;
     let response = namespace
         .extend_snapshot(&snapshot_id, request.ttl_ms)
         .await
         .map_err(ApiResponseError::for_namespace_writer(
-            &state.namespaces,
+            state.namespaces.as_ref(),
             &namespace_id,
         ))?;
     Ok(Json(response))
@@ -553,13 +544,12 @@ pub(super) async fn extend_snapshot(
     )
 )]
 pub(super) async fn get_snapshot(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
-    let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
     let runtime = state.runtime_for(subject);
     let snapshot = runtime
         .namespace(&namespace_id)
@@ -593,13 +583,12 @@ pub(super) async fn get_snapshot(
     )
 )]
 pub(super) async fn delete_snapshot(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<DeleteSnapshotResponse>, ApiResponseError> {
-    let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
     let namespace = match state.namespaces.open(&namespace_id).await {
         // The session registry opens sessions for active namespaces only, but
         // a snapshot without an expiry has to stay deletable after its
@@ -614,14 +603,14 @@ pub(super) async fn delete_snapshot(
     let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let response = namespace.delete_snapshot(&snapshot_id).await.map_err(
-        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
     )?;
     Ok(Json(response))
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct SnapshotPathParams {
-    snapshot_id: String,
+    snapshot_id: PinId,
 }
 
 #[cfg_attr(
@@ -636,8 +625,7 @@ pub(super) struct SnapshotPathParams {
         description = "Lists every pin, snapshots and fork pins, in checkpoint ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of pins.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
-            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
+            PageQuery
         ),
         responses(
             (status = 200, description = "Existing checkpoint objects", body = ListCheckpointsResponse),
@@ -649,7 +637,7 @@ pub(super) struct SnapshotPathParams {
     )
 )]
 pub(super) async fn list_checkpoints(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
@@ -689,12 +677,11 @@ pub(super) async fn list_checkpoints(
     )
 )]
 pub(super) async fn get_checkpoint(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<Checkpoint>, ApiResponseError> {
-    let checkpoint_id = parse_path_id::<PinId>("checkpoint_id", &checkpoint_id)?;
     let checkpoint = state
         .maintenance
         .get_checkpoint(&namespace_id, &checkpoint_id)
@@ -705,7 +692,7 @@ pub(super) async fn get_checkpoint(
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct CheckpointPathParams {
-    checkpoint_id: String,
+    checkpoint_id: PinId,
 }
 
 #[cfg_attr(
@@ -732,7 +719,7 @@ pub(super) struct CheckpointPathParams {
     )
 )]
 pub(super) async fn run_maintenance(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     OptionalActorHeader(actor_id): OptionalActorHeader,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -783,7 +770,7 @@ pub(super) async fn run_maintenance(
                 .await
                 .map(|recovered| Json(RunMaintenanceResponse::RecoverAdministrator(recovered)))
                 .map_err(ApiResponseError::for_namespace_writer(
-                    &state.namespaces,
+                    state.namespaces.as_ref(),
                     &namespace_id,
                 ));
         }

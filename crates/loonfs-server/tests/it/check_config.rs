@@ -19,9 +19,12 @@ fn write_config_with(dir: &Path, bind: &str, store_root: &Path, extra: &str) -> 
     let contents = format!(
         r#"
 bind = "{bind}"
-auth_token = "check-config-token"
 content_token_secret = "check-config-secret"
 writer_id = "check-config-writer"
+
+[auth]
+kind = "bearer_token"
+token = "check-config-token"
 {extra}
 [store]
 kind = "local_fs"
@@ -33,10 +36,10 @@ root = "{}"
     path
 }
 
-/// A `[tls]` table naming the two files.
+/// A `[transport]` table that terminates TLS with the two files.
 fn tls_table(cert_path: &Path, key_path: &Path) -> String {
     format!(
-        "\n[tls]\ncert_path = \"{}\"\nkey_path = \"{}\"\n",
+        "\n[transport]\nkind = \"tls\"\ncert_path = \"{}\"\nkey_path = \"{}\"\n",
         cert_path.display(),
         key_path.display()
     )
@@ -180,9 +183,12 @@ fn check_config_accepts_toml_from_the_environment() {
     let config_toml = format!(
         r#"
 bind = "127.0.0.1:9400"
-auth_token = "inline-config-token"
 content_token_secret = "inline-content-secret"
 writer_id = "inline-config-writer"
+
+[auth]
+kind = "bearer_token"
+token = "inline-config-token"
 
 [store]
 kind = "local_fs"
@@ -267,9 +273,12 @@ fn check_config_reports_an_invalid_config_and_fails() {
         &config_path,
         r#"
 bind = "not-an-address"
-auth_token = "check-config-token"
 content_token_secret = "check-config-secret"
 writer_id = "check-config-writer"
+
+[auth]
+kind = "bearer_token"
+token = "check-config-token"
 
 [store]
 kind = "local_fs"

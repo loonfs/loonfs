@@ -3,22 +3,25 @@
 use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
-use super::handlers_filesystem::{
-    parse_optional_snapshot_id, read_target, reject_snapshot_with_revision, LivePageQuery,
-};
+use super::handlers_filesystem::{reject_snapshot_with_revision, LivePageQuery};
 use super::query_params::{
     checked_cursor, checked_list_cursor, effective_page_limit, invalid_path_id_error,
-    parse_boolean_query_param, parse_consistency, parse_include_attributes, parse_read_at,
-    parse_revision_no,
+    live_consistency, read_at,
 };
 use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
-use loonfs::{ListFileRevisionsOptions, ListOptions, ReadFileStreamOptions, StatOptions};
+use loonfs::{
+    ListFileRevisionsOptions, ListOptions, ReadAt, ReadConsistency, ReadFileStreamOptions,
+    StatOptions,
+};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
-use loonfs_types::{public_inode_id, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse};
+use loonfs_types::{
+    public_inode_id, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, PinId, RevisionNo,
+};
+use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct InodePathParams {
@@ -28,7 +31,7 @@ pub(super) struct InodePathParams {
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct InodeRevisionPathParams {
     pub(super) inode_id: String,
-    pub(super) revision_no: String,
+    pub(super) revision_no: RevisionNo,
 }
 
 pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
@@ -37,25 +40,67 @@ pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
         .map_err(|error| invalid_path_id_error("inode_id", value, error.reason()))
 }
 
-/// The query of the inode content routes. A revision route takes
-/// `snapshot_id` only to refuse a snapshot with the same error that the path
-/// routes return. The consistency parameters apply to both routes, because a
-/// revision read also finds the revision at the live head.
+/// The query of a content read by inode.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct InodeContentQuery {
-    pub(super) snapshot_id: Option<String>,
-    pub(super) consistency: Option<String>,
-    pub(super) max_staleness_ms: Option<String>,
+    /// The snapshot whose captured file revision to read.
+    snapshot_id: Option<PinId>,
+    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
+    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
+    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
+    /// head before the read. It can't be combined with `snapshot_id`.
+    consistency: Option<ReadConsistency>,
+    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
+    /// milliseconds. The default is the server's `max_staleness_ms`.
+    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    max_staleness_ms: Option<u64>,
 }
 
+/// The query of a revision content read by inode. The route takes `snapshot_id` only to refuse a
+/// snapshot with the same error that the path routes return.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[serde(deny_unknown_fields)]
+pub(super) struct InodeRevisionContentQuery {
+    /// A snapshot, which a revision read refuses.
+    #[cfg_attr(feature = "openapi", param(ignore))]
+    snapshot_id: Option<PinId>,
+    /// How recently the read confirms the namespace head that it finds the revision in. `eventual`
+    /// (the default, unless the server's `consistency` setting is `strong`) reads at the head that
+    /// the server confirmed last while that confirmation is younger than the maximum staleness, and
+    /// `strong` confirms the head before the read.
+    consistency: Option<ReadConsistency>,
+    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
+    /// milliseconds. The default is the server's `max_staleness_ms`.
+    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    max_staleness_ms: Option<u64>,
+}
+
+/// The query of an inode stat.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct StatInodeQuery {
-    include_attributes: Option<String>,
-    snapshot_id: Option<String>,
-    consistency: Option<String>,
-    max_staleness_ms: Option<String>,
+    /// Whether the response includes the inode's attribute map and attribute revision. The default
+    /// is `true`, because a stat reads one path and a map is at most 64 KiB.
+    #[cfg_attr(feature = "openapi", param(default = true))]
+    include_attributes: Option<bool>,
+    /// The snapshot whose captured path state to read.
+    snapshot_id: Option<PinId>,
+    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
+    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
+    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
+    /// head before the read. It can't be combined with `snapshot_id`.
+    consistency: Option<ReadConsistency>,
+    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
+    /// milliseconds. The default is the server's `max_staleness_ms`.
+    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    max_staleness_ms: Option<u64>,
 }
 
 #[cfg_attr(
@@ -71,10 +116,7 @@ pub(super) struct StatInodeQuery {
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultTrueBoolean>), Query, description = "Whether the response includes the inode's attribute map and attribute revision. The default is `true`, because a stat reads one path and a map is at most 64 KiB."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured path state to read."),
-            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
-            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
+            StatInodeQuery
         ),
         responses(
             (status = 200, description = "Path entry for the inode", body = loonfs_types::PathEntry),
@@ -87,7 +129,7 @@ pub(super) struct StatInodeQuery {
     )
 )]
 pub(super) async fn get_inode(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -95,33 +137,55 @@ pub(super) async fn get_inode(
 ) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
     let runtime = state.runtime_for(subject);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let mut options = StatOptions::default();
-    if let Some(value) = query.include_attributes.as_deref() {
-        options.include_attributes = parse_include_attributes(value)?;
+    let mut options = StatOptions {
+        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        ..StatOptions::default()
+    };
+    if let Some(include) = query.include_attributes {
+        options.include_attributes = include.into();
     }
-    let at = parse_read_at(
-        parse_optional_snapshot_id(query.snapshot_id)?,
-        query.consistency.as_deref(),
-        query.max_staleness_ms.as_deref(),
-    )?;
-    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
-    let entry = target
+    let entry = runtime
+        .namespace(&namespace_id)
         .stat_by_inode_with_options(inode_id, &options)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(entry))
 }
 
+/// The query of a listing of a directory's children by inode.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct ListInodeChildrenQuery {
-    limit: Option<String>,
+    /// The maximum page size.
+    #[cfg_attr(
+        feature = "openapi",
+        param(minimum = 1, maximum = 1000, default = 1000)
+    )]
+    limit: Option<u32>,
+    /// The opaque cursor that the previous page returned.
     cursor: Option<String>,
-    include_attributes: Option<String>,
-    recursive: Option<String>,
-    snapshot_id: Option<String>,
-    consistency: Option<String>,
-    max_staleness_ms: Option<String>,
+    /// Whether the response includes each entry's attribute map and attribute revision. The default
+    /// is `false`, because a page can have many entries and each map can be up to 64 KiB.
+    #[cfg_attr(feature = "openapi", param(default = false))]
+    include_attributes: Option<bool>,
+    /// Whether the listing includes the directory's whole subtree, depth first, with each
+    /// directory's entry before its descendants. The default is `false`, which lists the
+    /// directory's children only.
+    #[cfg_attr(feature = "openapi", param(default = false))]
+    recursive: Option<bool>,
+    /// The snapshot whose captured directory state to read.
+    snapshot_id: Option<PinId>,
+    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
+    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
+    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
+    /// head before the read. It can't be combined with `snapshot_id`.
+    consistency: Option<ReadConsistency>,
+    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
+    /// milliseconds. The default is the server's `max_staleness_ms`.
+    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    max_staleness_ms: Option<u64>,
 }
 
 #[cfg_attr(
@@ -137,13 +201,7 @@ pub(super) struct ListInodeChildrenQuery {
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The directory's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
-            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
-            ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Whether the response includes each entry's attribute map and attribute revision. The default is `false`, because a page can have many entries and each map can be up to 64 KiB."),
-            ("recursive" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Whether the listing includes the directory's whole subtree, depth first, with each directory's entry before its descendants. The default is `false`, which lists the directory's children only."),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured directory state to read."),
-            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
-            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
+            ListInodeChildrenQuery
         ),
         responses(
             (status = 200, description = "One page of directory children", body = loonfs_types::ListInodeChildrenResponse),
@@ -157,7 +215,7 @@ pub(super) struct ListInodeChildrenQuery {
     )
 )]
 pub(super) async fn list_inode_children(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -166,22 +224,20 @@ pub(super) async fn list_inode_children(
     let runtime = state.runtime_for(subject);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let mut options = ListOptions::default();
-    if let Some(value) = query.include_attributes.as_deref() {
-        options.include_attributes = parse_include_attributes(value)?;
+    if let Some(include) = query.include_attributes {
+        options.include_attributes = include.into();
     }
-    if let Some(value) = query.recursive.as_deref() {
-        options.recursive = parse_boolean_query_param(value, "recursive")?;
+    if let Some(recursive) = query.recursive {
+        options.recursive = recursive;
     }
-    let at = parse_read_at(
-        parse_optional_snapshot_id(query.snapshot_id)?,
-        query.consistency.as_deref(),
-        query.max_staleness_ms.as_deref(),
-    )?;
-    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
-    let listing = target
+    let limit = effective_page_limit(query.limit)?;
+    let cursor = checked_list_cursor(query.cursor, &options)?;
+    options.at = read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?;
+    let listing = runtime
+        .namespace(&namespace_id)
         .list_by_inode_with_options(inode_id, &options)
-        .page_limit(effective_page_limit(query.limit)?)
-        .cursor(checked_list_cursor(query.cursor, &options)?)
+        .page_limit(limit)
+        .cursor(cursor)
         .page()
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -201,10 +257,7 @@ pub(super) async fn list_inode_children(
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "The maximum page size."),
-            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned."),
-            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read."),
-            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`.")
+            LivePageQuery
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
@@ -218,7 +271,7 @@ pub(super) async fn list_inode_children(
     )
 )]
 pub(super) async fn list_file_revisions_by_inode(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -228,10 +281,7 @@ pub(super) async fn list_file_revisions_by_inode(
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let options = ListFileRevisionsOptions {
-        consistency: parse_consistency(
-            query.consistency.as_deref(),
-            query.max_staleness_ms.as_deref(),
-        )?,
+        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
     };
     let response = namespace
         .list_file_revisions_by_inode_with_options(inode_id, &options)
@@ -256,9 +306,7 @@ pub(super) async fn list_file_revisions_by_inode(
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "The snapshot whose captured file revision to read."),
-            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read. It can't be combined with `snapshot_id`."),
-            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`."),
+            InodeContentQuery,
             ("Range" = Option<String>, Header, nullable = false, description = "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.")
         ),
         responses(
@@ -276,7 +324,7 @@ pub(super) async fn list_file_revisions_by_inode(
     )
 )]
 pub(super) async fn get_file_content_by_inode(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -285,15 +333,15 @@ pub(super) async fn get_file_content_by_inode(
 ) -> Result<Response, ApiResponseError> {
     let runtime = state.runtime_for(subject);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let at = parse_read_at(
-        parse_optional_snapshot_id(query.snapshot_id)?,
-        query.consistency.as_deref(),
-        query.max_staleness_ms.as_deref(),
-    )?;
-    let target = read_target(runtime.namespace(&namespace_id), at, "snapshot_id").await?;
+    let options = ReadFileStreamOptions {
+        range: range.stream_range(),
+        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        ..ReadFileStreamOptions::default()
+    };
     let permit = acquire_download_permit(&state)?;
-    let stream = target
-        .read_file_stream_by_inode(inode_id, range.stream_range())
+    let stream = runtime
+        .namespace(&namespace_id)
+        .read_file_stream_by_inode_with_options(inode_id, &options)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)
@@ -313,8 +361,7 @@ pub(super) async fn get_file_content_by_inode(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("revision_no" = loonfs_types::RevisionNo, Path, description = "The revision number."),
-            ("consistency" = inline(Option<super::query_params::OpenApiConsistency>), Query, description = "How recently the read confirms the namespace head that it finds the revision in. `eventual` (the default, unless the server's `consistency` setting is `strong`) reads at the head that the server confirmed last while that confirmation is younger than the maximum staleness, and `strong` confirms the head before the read."),
-            ("max_staleness_ms" = inline(Option<super::query_params::OpenApiMaxStalenessMs>), Query, description = "With `consistency=eventual`, how old the server's last confirmation of the head can be, in milliseconds. The default is the server's `max_staleness_ms`."),
+            InodeRevisionContentQuery,
             ("Range" = Option<String>, Header, nullable = false, description = "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.")
         ),
         responses(
@@ -332,25 +379,21 @@ pub(super) async fn get_file_content_by_inode(
     )
 )]
 pub(super) async fn get_file_revision_content_by_inode(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
-    AppQuery(query): AppQuery<InodeContentQuery>,
+    AppQuery(query): AppQuery<InodeRevisionContentQuery>,
     range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
     let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let revision_no = parse_revision_no(&path.revision_no)?;
-    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no), "snapshot_id")?;
+    let revision_no = path.revision_no;
+    reject_snapshot_with_revision(query.snapshot_id.as_ref(), Some(revision_no), "snapshot_id")?;
     let options = ReadFileStreamOptions {
         range: range.stream_range(),
-        consistency: parse_consistency(
-            query.consistency.as_deref(),
-            query.max_staleness_ms.as_deref(),
-        )?,
+        at: ReadAt::Live(live_consistency(query.consistency, query.max_staleness_ms)?),
         ..ReadFileStreamOptions::default()
     };
     let permit = acquire_download_permit(&state)?;

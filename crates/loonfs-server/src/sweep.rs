@@ -1,6 +1,5 @@
 //! Session ticks and the daily listing pass share namespace visits.
 
-use crate::config::ServerConfigError;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::metrics::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, RESULT_ERROR, RESULT_OK,
@@ -12,13 +11,11 @@ use loonfs::{
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
-    GrepWorkerConfig,
 };
-use loonfs_http::{panic_message, HeldNamespace, Namespaces, SweepRetry};
+use loonfs_http::{panic_message, HeldNamespace, HostState, Namespaces};
 use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::ObjectStoreError;
-use loonfs_types::config::ConfigFieldError;
-use loonfs_types::EffectiveLimit;
+use loonfs_types::{EffectiveLimit, MonotonicTimer};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::future::Future;
@@ -43,6 +40,60 @@ const MAX_SWEEP_BACKOFF_MS: u64 = 60 * 60 * 1000;
 
 const SWEEP_PASS_SECONDS_BOUNDARIES: &[f64] =
     &[1.0, 10.0, 60.0, 300.0, 900.0, 3_600.0, 14_400.0, 86_400.0];
+
+/// The sweep's current values for one held session: the seqs that it last
+/// indexed and collected, and the retry state of each call that ticks
+/// retry.
+pub(crate) struct SweepState {
+    indexed_seq: Option<ChangeSeq>,
+    collected_seq: Option<ChangeSeq>,
+    collected_at_ms: u64,
+    metadata_retry: SweepRetry,
+    index_retry: SweepRetry,
+    gc_retry: SweepRetry,
+}
+
+impl HostState for SweepState {
+    /// Returns the state of a new session, whose collection interval starts
+    /// when the session opens.
+    fn new(opened_at_ms: u64) -> Self {
+        Self {
+            indexed_seq: None,
+            collected_seq: None,
+            collected_at_ms: opened_at_ms,
+            metadata_retry: SweepRetry::default(),
+            index_retry: SweepRetry::default(),
+            gc_retry: SweepRetry::default(),
+        }
+    }
+}
+
+impl SweepState {
+    /// Whether garbage collection is due for a session at `seq`: the seq
+    /// moved since the last collection, and at least `interval_ms` passed
+    /// since that collection.
+    fn collection_pending(&self, seq: Option<ChangeSeq>, now_ms: u64, interval_ms: u64) -> bool {
+        seq != self.collected_seq && now_ms.saturating_sub(self.collected_at_ms) >= interval_ms
+    }
+}
+
+/// Whether the grep index has work for a session at `seq`: the index is
+/// marked dirty, or the sweep last brought the index up to date at another
+/// seq.
+fn index_pending(held: &HeldNamespace<SweepState>, seq: Option<ChangeSeq>) -> bool {
+    held.index_dirty || held.host_state.indexed_seq != seq
+}
+
+/// When a sweep next makes one call on a held namespace, and how many times
+/// in a row that call has failed there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SweepRetry {
+    /// The earliest time the sweep's ticks make the call again, on the
+    /// sweep's monotonic timer.
+    pub(crate) retry_at_ms: u64,
+    /// The call's failures in a row, zero after an attempt that didn't fail.
+    pub(crate) attempts: u32,
+}
 
 /// Whether a sweep pass also collects each namespace's garbage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +182,8 @@ struct SweepInner {
     store: SharedObjectStore,
     maintenance: Maintenance,
     grep: Option<GrepIndexing>,
-    namespaces: Arc<Namespaces>,
+    namespaces: Arc<Namespaces<SweepState>>,
+    timer: Arc<dyn MonotonicTimer>,
     config: SweepConfig,
     /// The namespaces being visited.
     visiting: Mutex<HashMap<NamespaceId, VisitClaim>>,
@@ -193,18 +245,9 @@ pub(crate) struct GrepIndexing {
 }
 
 impl GrepIndexing {
-    /// Builds the indexing of `worker` with the build policy of `config`.
-    pub(crate) fn new(
-        worker: GrepWorker<SharedObjectStore>,
-        config: GrepWorkerConfig,
-    ) -> Result<Self, ServerConfigError> {
-        let policy = config.build_policy().map_err(|error| {
-            ServerConfigError::Field(ConfigFieldError::Invalid {
-                field: "grep",
-                reason: error.to_string(),
-            })
-        })?;
-        Ok(Self { worker, policy })
+    /// Builds the indexing of `worker`, whose steps run under `policy`.
+    pub(crate) fn new(worker: GrepWorker<SharedObjectStore>, policy: GramIndexBuildPolicy) -> Self {
+        Self { worker, policy }
     }
 }
 
@@ -247,34 +290,35 @@ impl SweepCall {
     /// the acknowledgment keep none, because ticks never retry them, so a
     /// failed one waits for the next full pass like a call on a namespace
     /// without a held entry.
-    fn retry(self, held: &HeldNamespace) -> Option<SweepRetry> {
+    fn retry(self, state: &SweepState) -> Option<SweepRetry> {
         match self {
-            Self::Metadata => Some(held.metadata_retry),
-            Self::GrepIndex => Some(held.index_retry),
-            Self::Gc => Some(held.gc_retry),
+            Self::Metadata => Some(state.metadata_retry),
+            Self::GrepIndex => Some(state.index_retry),
+            Self::Gc => Some(state.gc_retry),
             Self::Retention | Self::RetentionAcknowledgment => None,
         }
     }
 
-    fn retry_mut(self, held: &mut HeldNamespace) -> Option<&mut SweepRetry> {
+    fn retry_mut(self, state: &mut SweepState) -> Option<&mut SweepRetry> {
         match self {
-            Self::Metadata => Some(&mut held.metadata_retry),
-            Self::GrepIndex => Some(&mut held.index_retry),
-            Self::Gc => Some(&mut held.gc_retry),
+            Self::Metadata => Some(&mut state.metadata_retry),
+            Self::GrepIndex => Some(&mut state.index_retry),
+            Self::Gc => Some(&mut state.gc_retry),
             Self::Retention | Self::RetentionAcknowledgment => None,
         }
     }
 }
 
 impl Sweep {
-    /// Builds a sweep over `store` with the cadence and limits in `config`.
-    /// `grep` is the indexing of a server that maintains the grep index, and
-    /// `None` otherwise.
+    /// Builds a sweep over `store` with the cadence and limits in `config`,
+    /// which schedules its calls on `timer`. `grep` is the indexing of a
+    /// server that maintains the grep index, and `None` otherwise.
     pub(crate) fn new(
         config: SweepConfig,
         store: SharedObjectStore,
         maintenance: Maintenance,
-        namespaces: Arc<Namespaces>,
+        namespaces: Arc<Namespaces<SweepState>>,
+        timer: Arc<dyn MonotonicTimer>,
         grep: Option<GrepIndexing>,
         recorder: &dyn MetricsRecorder,
     ) -> Self {
@@ -284,6 +328,7 @@ impl Sweep {
                 maintenance,
                 grep,
                 namespaces,
+                timer,
                 config,
                 visiting: Mutex::default(),
                 slots: Semaphore::new(config.max_concurrent_maintenance.get()),
@@ -320,10 +365,10 @@ impl Sweep {
     /// compaction unit stops at its next block.
     pub async fn run_pass(&self, garbage: GarbageCollection) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
-        let started_at_ms = inner.namespaces.now_ms();
+        let started_at_ms = inner.timer.monotonic_now_ms();
         let collect_garbage = garbage == GarbageCollection::Collect;
         let listed = self.visit_every_namespace(garbage).await;
-        let elapsed_ms = inner.namespaces.now_ms().saturating_sub(started_at_ms);
+        let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_at_ms);
         inner
             .metrics
             .pass_seconds
@@ -430,7 +475,7 @@ impl Sweep {
     async fn maintain_metadata(
         &self,
         namespace_id: &NamespaceId,
-        entry: Option<&Mutex<HeldNamespace>>,
+        entry: Option<&Mutex<HeldNamespace<SweepState>>>,
         seq: Option<ChangeSeq>,
     ) {
         let inner = &self.inner;
@@ -465,7 +510,7 @@ impl Sweep {
         &self,
         grep: &GrepIndexing,
         namespace_id: &NamespaceId,
-        entry: Option<&Mutex<HeldNamespace>>,
+        entry: Option<&Mutex<HeldNamespace<SweepState>>>,
         seq: Option<ChangeSeq>,
     ) {
         if let Some(entry) = entry {
@@ -485,7 +530,7 @@ impl Sweep {
             .unwrap_or(false);
         if build.caught_up {
             if let Some(entry) = entry {
-                lock(entry).indexed_seq = seq;
+                lock(entry).host_state.indexed_seq = seq;
             }
         }
     }
@@ -556,7 +601,7 @@ impl Sweep {
     async fn gc(
         &self,
         namespace_id: &NamespaceId,
-        entry: Option<&Mutex<HeldNamespace>>,
+        entry: Option<&Mutex<HeldNamespace<SweepState>>>,
         seq: Option<ChangeSeq>,
     ) {
         let inner = &self.inner;
@@ -577,8 +622,8 @@ impl Sweep {
         let collected = self.record_call(namespace_id, entry, SweepCall::Gc, result, 0);
         if let (Some(_), Some(entry)) = (collected, entry) {
             let mut held = lock(entry);
-            held.collected_seq = seq;
-            held.collected_at_ms = inner.namespaces.now_ms();
+            held.host_state.collected_seq = seq;
+            held.host_state.collected_at_ms = inner.timer.monotonic_now_ms();
         }
     }
 
@@ -600,7 +645,7 @@ impl Sweep {
     async fn advance_retention(
         &self,
         namespace_id: &NamespaceId,
-        entry: Option<&Mutex<HeldNamespace>>,
+        entry: Option<&Mutex<HeldNamespace<SweepState>>>,
     ) {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
@@ -679,7 +724,7 @@ impl Sweep {
     fn record_call<T>(
         &self,
         namespace_id: &NamespaceId,
-        entry: Option<&Mutex<HeldNamespace>>,
+        entry: Option<&Mutex<HeldNamespace<SweepState>>>,
         call: SweepCall,
         result: Result<T, CallFailure>,
         work_wait_ms: u64,
@@ -715,15 +760,15 @@ impl Sweep {
     /// at least `maintenance_interval_ms`.
     fn schedule(
         &self,
-        entry: &Mutex<HeldNamespace>,
+        entry: &Mutex<HeldNamespace<SweepState>>,
         call: SweepCall,
         failed: bool,
         work_wait_ms: u64,
     ) -> Option<Retry> {
-        let now_ms = self.inner.namespaces.now_ms();
+        let now_ms = self.inner.timer.monotonic_now_ms();
         let first_backoff_ms = self.first_backoff_ms();
         let mut held = lock(entry);
-        let state = call.retry_mut(&mut held)?;
+        let state = call.retry_mut(&mut held.host_state)?;
         let failures_before = state.attempts;
         let (attempts, wait_ms) = if failed {
             let attempts = failures_before.saturating_add(1);
@@ -806,7 +851,7 @@ impl Sweep {
 }
 
 struct IndexBuild<'visit> {
-    entry: Option<&'visit Mutex<HeldNamespace>>,
+    entry: Option<&'visit Mutex<HeldNamespace<SweepState>>>,
     caught_up: bool,
 }
 

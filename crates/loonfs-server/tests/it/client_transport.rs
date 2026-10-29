@@ -17,9 +17,12 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
     );
     config.maintenance = loonfs_server::JobMode::ServeOnly;
     config.grep.mode = loonfs_server::JobMode::Disabled;
-    let (router, state) = loonfs_server::app(config, loonfs_server::AppConfig::default())
-        .await
-        .expect("app");
+    let (router, state) = loonfs_server::app(
+        config.validate().expect("validate the test config"),
+        loonfs_server::AppConfig::default(),
+    )
+    .await
+    .expect("app");
     let service = tower::service_fn(move |request: http::Request<Body>| {
         let router = router.clone();
         async move {
@@ -60,5 +63,5 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
         received.extend_from_slice(&chunk.expect("chunk"));
     }
     assert_eq!(received, chunks.concat());
-    state.runtime.shutdown().await.expect("shutdown");
+    state.binding.runtime.shutdown().await.expect("shutdown");
 }

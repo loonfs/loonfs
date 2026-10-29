@@ -1,10 +1,7 @@
 bind = "127.0.0.1:9400"
-# auth_token and content_token_secret may instead come from the
+# The [auth] table's token and content_token_secret may instead come from the
 # LOONFS_AUTH_TOKEN and LOONFS_CONTENT_TOKEN_SECRET environment variables;
 # a non-blank value in this file takes precedence over the environment.
-# A non-loopback bind refuses to load without auth_token unless
-# allow_unauthenticated_remote = true is set explicitly.
-auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-local"
 # Derive memory pools from 4 GiB. Omit this to use the Linux cgroup limit.
@@ -35,13 +32,6 @@ memory_limit_bytes = 4294967296
 # Metadata and query request deadline; streamed content and long-running
 # operator work are exempt. Defaults to 60000 ms.
 #request_deadline_ms = 60000
-
-# Terminating TLS in this process. Uncomment the [tls] table at the bottom of
-# this file to turn it on. A non-loopback bind refuses to load without it,
-# because the wire carries the bearer token and the presigned object-store
-# URLs the upload routes hand back. Set this instead when TLS terminates in
-# front of LoonFS — a load balancer, an ingress controller, a sidecar.
-#allow_remote_without_tls = true
 
 # Whether this server serves the maintenance API group, runs the maintenance
 # sweep, both, or neither. `serve_and_maintain` is the default. The other
@@ -180,12 +170,26 @@ memory_limit_bytes = 4294967296
 #max_concurrent_steps = 2
 # Segment layout and merge policy use engine defaults.
 
-# The server's TLS identity, read once at startup: a file that is missing or
+# Requests authenticate with this bearer token. A non-loopback bind refuses
+# to load without an [auth] table or LOONFS_AUTH_TOKEN. `kind = "open"` serves
+# every request without authentication, on any bind.
+[auth]
+kind = "bearer_token"
+token = "dev-token"
+
+# How the listener carries requests. Without a [transport] table, the server
+# serves plaintext HTTP, which a non-loopback bind refuses to load with,
+# because the wire carries the bearer token and the presigned object-store
+# URLs that the upload routes return. `kind = "tls"` terminates TLS in this
+# process with an identity read once at startup: a file that is missing or
 # is not the PEM it claims to be fails the process rather than falling back
 # to plaintext. The chain is leaf first; the key may be PKCS#8, RSA, or EC.
 # Clients then use an https:// server URL, and a client that must trust a
-# private CA points at its bundle with `ca_cert_path`.
-#[tls]
+# private CA points at its bundle with `ca_cert_path`. Set
+# `kind = "plaintext_behind_proxy"` instead when TLS terminates in front of
+# LoonFS, in a load balancer, an ingress controller, or a sidecar.
+#[transport]
+#kind = "tls"
 #cert_path = "/etc/loonfs/tls/server.crt"
 #key_path = "/etc/loonfs/tls/server.key"
 

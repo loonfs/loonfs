@@ -1,5 +1,6 @@
 //! Shared runtime and HTTP request metrics recorder.
 
+use super::router::find_route_path;
 use axum::http::{Method, StatusCode};
 use loonfs::metrics::{
     CounterHandle, DefaultMetricsRecorder, HistogramHandle, MetricsRecorder, MetricsSnapshot,
@@ -8,20 +9,29 @@ use loonfs::metrics::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// The `route` label for a request that matched no route, and for one whose
-/// template arrived after the intern table filled.
-const UNMATCHED_ROUTE: &str = "unmatched";
+/// The `route` label for a request that matched no route.
+pub(super) const UNMATCHED_ROUTE: &str = "unmatched";
 
-/// Most distinct route templates the intern table will hold.
+/// The `route` label for a request to a route that the host added beside
+/// the contract routes, such as `/health`.
+const OTHER_ROUTE: &str = "other";
+
+/// Returns the `route` label of a request whose matched route template is
+/// `matched_route`.
 ///
-/// The router's route list is fixed at build time and well under this, so
-/// the cap never binds in practice. It exists so the leak below is bounded
-/// by a mechanism rather than by a promise about what axum hands us.
-const MAX_ROUTE_LABELS: usize = 128;
+/// A label is the template, not the request's path: the path includes
+/// namespace and upload IDs, and an ID in a label creates a series for
+/// each ID. A label also has to be `'static`, so it comes from the contract
+/// route table.
+pub(super) fn route_label(matched_route: Option<&str>) -> &'static str {
+    match matched_route {
+        Some(route) => find_route_path(route).unwrap_or(OTHER_ROUTE),
+        None => UNMATCHED_ROUTE,
+    }
+}
 
 pub struct HttpMetrics {
     recorder: Arc<DefaultMetricsRecorder>,
-    routes: Mutex<RouteLabels>,
     requests: Mutex<HashMap<&'static str, RequestInstruments>>,
     busy_requests: Arc<dyn CounterHandle>,
     busy_uploads: Arc<dyn CounterHandle>,
@@ -49,7 +59,6 @@ impl HttpMetrics {
             busy_requests: busy("request"),
             busy_uploads: busy("upload"),
             busy_downloads: busy("download"),
-            routes: Mutex::new(RouteLabels::default()),
             requests: Mutex::new(HashMap::new()),
             recorder,
         })
@@ -60,24 +69,18 @@ impl HttpMetrics {
         Arc::clone(&self.recorder) as Arc<dyn MetricsRecorder>
     }
 
-    /// Reports one served request.
-    ///
-    /// `matched_route` is the template axum matched, not the request's path:
-    /// the path carries namespace and upload ids, and one unbounded label is
-    /// how a metrics backend dies.
+    /// Reports one served request, under its [`route_label`].
     pub(super) fn request_served(
         &self,
-        matched_route: Option<&str>,
+        route: &'static str,
         method: &Method,
         status: StatusCode,
         elapsed_seconds: f64,
-    ) -> &'static str {
-        let route = self.route_label(matched_route);
+    ) {
         let (seconds, served) =
             self.request_handles(route, method_label(method), status_class_label(status));
         served.increment(1);
         seconds.record(elapsed_seconds);
-        route
     }
 
     /// Reports one proxied upload refused for want of a transfer slot.
@@ -138,17 +141,6 @@ impl HttpMetrics {
             .lock()
             .expect("the request metrics lock should not be poisoned")
     }
-
-    fn route_label(&self, matched_route: Option<&str>) -> &'static str {
-        match matched_route {
-            Some(route) => self
-                .routes
-                .lock()
-                .expect("the route metrics lock should not be poisoned")
-                .intern(route),
-            None => UNMATCHED_ROUTE,
-        }
-    }
 }
 
 impl RequestInstruments {
@@ -190,32 +182,6 @@ impl RequestInstruments {
     ) -> Option<(Arc<dyn HistogramHandle>, Arc<dyn CounterHandle>)> {
         let counter = self.served.get(&(method, status_class))?;
         Some((Arc::clone(&self.seconds), Arc::clone(counter)))
-    }
-}
-
-/// The `&'static str` route labels this process has seen.
-///
-/// Route templates arrive borrowed from the router, and a label has to be
-/// `'static` — that is the type-level cardinality rule the runtime's
-/// recorder enforces. Interning leaks each distinct template exactly once,
-/// which is bounded because the router's route list is fixed at build time
-/// and capped besides.
-#[derive(Default)]
-struct RouteLabels {
-    interned: HashMap<String, &'static str>,
-}
-
-impl RouteLabels {
-    fn intern(&mut self, route: &str) -> &'static str {
-        if let Some(label) = self.interned.get(route) {
-            return label;
-        }
-        if self.interned.len() >= MAX_ROUTE_LABELS {
-            return UNMATCHED_ROUTE;
-        }
-        let label: &'static str = Box::leak(route.to_owned().into_boxed_str());
-        self.interned.insert(route.to_owned(), label);
-        label
     }
 }
 

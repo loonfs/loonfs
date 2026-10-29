@@ -5,9 +5,8 @@
 //! `off` means no output at all. Any other value fails the process instead
 //! of guessing. `RUST_LOG` replaces the default filter when it is set.
 
+use crate::{Result, ServerError};
 use std::env;
-
-use thiserror::Error;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
@@ -26,18 +25,8 @@ struct TraceConfig {
     filter: String,
 }
 
-#[derive(Debug, Error)]
-pub enum TraceInitError {
-    #[error("unsupported LOONFS_TRACE value `{0}`; expected `json` or `off`")]
-    UnsupportedMode(String),
-    #[error("invalid RUST_LOG filter: {0}")]
-    Filter(String),
-    #[error("failed to initialize tracing subscriber: {0}")]
-    Subscriber(String),
-}
-
 /// Installs the JSON subscriber unless `LOONFS_TRACE=off` asks for silence.
-pub fn init_tracing_from_env() -> Result<(), TraceInitError> {
+pub fn init_tracing_from_env() -> Result<()> {
     let Some(config) =
         trace_config_from_env(env::var(TRACE_ENV).ok(), env::var(RUST_LOG_ENV).ok())?
     else {
@@ -46,13 +35,13 @@ pub fn init_tracing_from_env() -> Result<(), TraceInitError> {
     let filter = config
         .filter
         .parse::<EnvFilter>()
-        .map_err(|err| TraceInitError::Filter(err.to_string()))?;
+        .map_err(|err| ServerError::TraceFilter(err.to_string()))?;
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(filter)
         .with_span_events(FmtSpan::CLOSE)
         .try_init()
-        .map_err(|err| TraceInitError::Subscriber(err.to_string()))
+        .map_err(|err| ServerError::TraceSubscriber(err.to_string()))
 }
 
 /// Resolves the two environment variables into the subscriber to install, or
@@ -60,7 +49,7 @@ pub fn init_tracing_from_env() -> Result<(), TraceInitError> {
 fn trace_config_from_env(
     trace_env: Option<String>,
     rust_log_env: Option<String>,
-) -> Result<Option<TraceConfig>, TraceInitError> {
+) -> Result<Option<TraceConfig>> {
     // An operator who sets nothing gets logs. Only `off` takes them away.
     let trace_mode = trace_env.unwrap_or_default();
     let trace_mode = trace_mode.trim();
@@ -68,7 +57,7 @@ fn trace_config_from_env(
         return Ok(None);
     }
     if !trace_mode.is_empty() && trace_mode != TRACE_MODE_JSON {
-        return Err(TraceInitError::UnsupportedMode(trace_mode.to_owned()));
+        return Err(ServerError::TraceMode(trace_mode.to_owned()));
     }
     Ok(Some(TraceConfig {
         filter: rust_log_env
@@ -79,7 +68,8 @@ fn trace_config_from_env(
 
 #[cfg(test)]
 mod tests {
-    use super::{trace_config_from_env, TraceInitError, DEFAULT_TRACE_FILTER};
+    use super::{trace_config_from_env, DEFAULT_TRACE_FILTER};
+    use crate::ServerError;
     use std::assert_matches;
     use tracing::Level;
     use tracing_subscriber::layer::SubscriberExt as _;
@@ -154,7 +144,7 @@ mod tests {
         assert_matches!(
             trace_config_from_env(Some("text".to_owned()), None)
                 .expect_err("an unknown trace mode should be rejected"),
-            TraceInitError::UnsupportedMode(mode) if mode == "text"
+            ServerError::TraceMode(mode) if mode == "text"
         );
     }
 }

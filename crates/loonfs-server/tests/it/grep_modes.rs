@@ -30,7 +30,9 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "disabled").await;
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::Disabled),
+        test_config(temp_dir.path(), JobMode::Disabled)
+            .validate()
+            .expect("validate the test config"),
         AppConfig::default(),
     )
     .await
@@ -83,6 +85,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     )
     .await;
     server
+        .binding
         .runtime
         .shutdown()
         .await
@@ -94,9 +97,14 @@ async fn gc_reports_only_the_core_counts_where_the_deployment_maintains_no_index
     for mode in [JobMode::Disabled, JobMode::ServeOnly] {
         let temp_dir = tempdir().expect("store tempdir");
         let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "unmaintained").await;
-        let (router, server) = app(test_config(temp_dir.path(), mode), AppConfig::default())
-            .await
-            .expect("build app");
+        let (router, server) = app(
+            test_config(temp_dir.path(), mode)
+                .validate()
+                .expect("validate the test config"),
+            AppConfig::default(),
+        )
+        .await
+        .expect("build app");
         let response = send(
             &router,
             Method::POST,
@@ -110,6 +118,7 @@ async fn gc_reports_only_the_core_counts_where_the_deployment_maintains_no_index
         assert_eq!(body["namespace_id"], namespace_id.as_str());
         assert!(body.get("extensions").is_none(), "{mode:?}: {body}");
         server
+            .binding
             .runtime
             .shutdown()
             .await
@@ -122,7 +131,9 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "query-grammar").await;
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeOnly),
+        test_config(temp_dir.path(), JobMode::ServeOnly)
+            .validate()
+            .expect("validate the test config"),
         AppConfig::default(),
     )
     .await
@@ -186,6 +197,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     assert!(error.message.contains("maximum is 1024 bytes"));
 
     server
+        .binding
         .runtime
         .shutdown()
         .await
@@ -200,7 +212,9 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeAndMaintain),
+        test_config(temp_dir.path(), JobMode::ServeAndMaintain)
+            .validate()
+            .expect("validate the test config"),
         AppConfig::default(),
     )
     .await
@@ -233,21 +247,9 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
             ..
         }
     );
-    assert_eq!(
-        server.binding.namespaces.visit_held(&namespace_id, |held| (
-            held.handle.last_published_seq(),
-            held.index_dirty
-        )),
-        Some((None, true))
-    );
+    // The session published nothing, so only the enable's mark makes the
+    // next tick build the index.
     server.sweep.as_ref().expect("sweep").tick().await;
-    assert_eq!(
-        server
-            .binding
-            .namespaces
-            .visit_held(&namespace_id, |held| held.index_dirty),
-        Some(false)
-    );
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
     let active = index_status(&router, &namespace_id).await;
     assert_eq!(
@@ -313,13 +315,6 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
 
     // Disabling is one durable compare-and-swap; the sweep reads it.
     let disabled_response = disable_grep(&router, &namespace_id).await;
-    assert_eq!(
-        server
-            .binding
-            .namespaces
-            .visit_held(&namespace_id, |held| held.index_dirty),
-        Some(true)
-    );
     assert_eq!(disabled_response.status, v0::GrepIndexStatus::Disabled);
     assert!(!disabled_response.reorganize_pending);
     let disabled = load_current_grep_manifest(&*store, &namespace_id, observation())
@@ -370,6 +365,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     let reenabled = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(reenabled.matches.len(), 1);
     server
+        .binding
         .runtime
         .shutdown()
         .await
@@ -457,7 +453,9 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     // Nothing in this process has touched either namespace: one sweep pass
     // carries both indexes to their heads.
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeAndMaintain),
+        test_config(temp_dir.path(), JobMode::ServeAndMaintain)
+            .validate()
+            .expect("validate the test config"),
         AppConfig::default(),
     )
     .await
@@ -480,6 +478,7 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let resumed = grep(&router, &backfill, "mid-backfill needle").await;
     assert_eq!(resumed.matches.len(), 3);
     server
+        .binding
         .runtime
         .shutdown()
         .await
@@ -494,7 +493,9 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeOnly),
+        test_config(temp_dir.path(), JobMode::ServeOnly)
+            .validate()
+            .expect("validate the test config"),
         AppConfig::default(),
     )
     .await
@@ -572,6 +573,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.built_through_seq, ChangeSeq(1));
     server
+        .binding
         .runtime
         .shutdown()
         .await
@@ -586,7 +588,9 @@ async fn an_invalid_grep_pattern_reports_the_pattern_param() {
     worker.enable(&namespace_id).await.expect("enable grep");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeOnly),
+        test_config(temp_dir.path(), JobMode::ServeOnly)
+            .validate()
+            .expect("validate the test config"),
         AppConfig::default(),
     )
     .await
@@ -605,6 +609,7 @@ async fn an_invalid_grep_pattern_reports_the_pattern_param() {
     assert_eq!(error.code, "invalid_request");
     assert_eq!(error.param.as_deref(), Some("pattern"));
     server
+        .binding
         .runtime
         .shutdown()
         .await
@@ -619,7 +624,9 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::MaintainOnly),
+        test_config(temp_dir.path(), JobMode::MaintainOnly)
+            .validate()
+            .expect("validate the test config"),
         AppConfig::default(),
     )
     .await
@@ -687,6 +694,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         "the index this deployment maintains holds real segments"
     );
     server
+        .binding
         .runtime
         .shutdown()
         .await
@@ -704,7 +712,9 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         ServerConfig {
             maintenance: JobMode::ServeOnly,
             ..test_config(temp_dir.path(), JobMode::ServeAndMaintain)
-        },
+        }
+        .validate()
+        .expect("validate the test config"),
         AppConfig::default(),
     )
     .await
@@ -750,6 +760,7 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         1
     );
     server
+        .binding
         .runtime
         .shutdown()
         .await

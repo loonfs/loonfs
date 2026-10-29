@@ -8,6 +8,7 @@ use loonfs::{
     AdvanceRetentionFloorOptions, ChangeSeq, CreateNamespaceOptions, NamespaceDiagnostics,
     NamespaceId, RetentionTarget, SharedObjectStore,
 };
+use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -339,7 +340,7 @@ async fn ticks_never_advance_the_floor_and_the_next_full_pass_does() {
         .entry(&namespace_id)
         .expect("a held entry");
     assert_eq!(
-        lock(&entry).collected_seq,
+        lock(&entry).host_state.collected_seq,
         Some(seq),
         "a tick on the collection interval visited the namespace"
     );

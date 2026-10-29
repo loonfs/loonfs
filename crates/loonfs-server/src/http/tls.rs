@@ -2,6 +2,7 @@
 //! listener that wraps accepted TCP connections in a rustls session.
 
 use crate::config::TlsServerConfig;
+use crate::{Result, ServerError};
 use loonfs_types::{MonotonicTimer as _, StdMonotonicTimer};
 use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -13,33 +14,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 use std::time::Duration;
-use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::server::TlsStream as RustlsStream;
 use tokio_rustls::{Accept, TlsAcceptor};
-
-/// Why the configured TLS identity could not be used. Every variant names
-/// the file it came from; none of them carry key material.
-#[derive(Debug, Error)]
-pub enum TlsConfigError {
-    #[error("failed to read `{path}`: {source}")]
-    Read {
-        path: String,
-        #[source]
-        source: io::Error,
-    },
-    #[error("`{path}` is not valid PEM: {reason}")]
-    Pem { path: String, reason: String },
-    #[error(
-        "`{path}` and the certificate in `{cert_path}` do not form a usable identity: {reason}"
-    )]
-    Identity {
-        path: String,
-        cert_path: String,
-        reason: String,
-    },
-}
 
 /// Builds the rustls server configuration from the configured files.
 ///
@@ -49,22 +27,20 @@ pub enum TlsConfigError {
 /// `reqwest` use for their HTTP clients. With two providers linked, rustls
 /// has no single default and would panic when asked for one, so the listener
 /// names `ring`, and a bad configuration stays a returned error.
-pub(super) fn server_config(
-    config: &TlsServerConfig,
-) -> Result<rustls::ServerConfig, TlsConfigError> {
+pub(super) fn server_config(config: &TlsServerConfig) -> Result<rustls::ServerConfig> {
     let certs = load_cert_chain(&config.cert_path)?;
     let key = load_private_key(&config.key_path)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut server_config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(|error| TlsConfigError::Identity {
+        .map_err(|error| ServerError::TlsIdentity {
             path: config.key_path.clone(),
             cert_path: config.cert_path.clone(),
             reason: error.to_string(),
         })?
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .map_err(|error| TlsConfigError::Identity {
+        .map_err(|error| ServerError::TlsIdentity {
             path: config.key_path.clone(),
             cert_path: config.cert_path.clone(),
             reason: error.to_string(),
@@ -76,15 +52,15 @@ pub(super) fn server_config(
     Ok(server_config)
 }
 
-fn load_cert_chain(path: &str) -> Result<Vec<CertificateDer<'static>>, TlsConfigError> {
+fn load_cert_chain(path: &str) -> Result<Vec<CertificateDer<'static>>> {
     let certs = CertificateDer::pem_reader_iter(open(path)?)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| TlsConfigError::Pem {
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| ServerError::TlsPem {
             path: path.to_owned(),
             reason: error.to_string(),
         })?;
     if certs.is_empty() {
-        return Err(TlsConfigError::Pem {
+        return Err(ServerError::TlsPem {
             path: path.to_owned(),
             reason: "no CERTIFICATE section found; expected the PEM chain, leaf first".to_owned(),
         });
@@ -92,8 +68,8 @@ fn load_cert_chain(path: &str) -> Result<Vec<CertificateDer<'static>>, TlsConfig
     Ok(certs)
 }
 
-fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, TlsConfigError> {
-    PrivateKeyDer::from_pem_reader(open(path)?).map_err(|error| TlsConfigError::Pem {
+fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>> {
+    PrivateKeyDer::from_pem_reader(open(path)?).map_err(|error| ServerError::TlsPem {
         path: path.to_owned(),
         reason: match error {
             pem::Error::NoItemsFound => {
@@ -104,8 +80,8 @@ fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, TlsConfigError
     })
 }
 
-fn open(path: &str) -> Result<std::fs::File, TlsConfigError> {
-    std::fs::File::open(Path::new(path)).map_err(|source| TlsConfigError::Read {
+fn open(path: &str) -> Result<std::fs::File> {
+    std::fs::File::open(Path::new(path)).map_err(|source| ServerError::TlsRead {
         path: path.to_owned(),
         source,
     })

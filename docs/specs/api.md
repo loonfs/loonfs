@@ -676,6 +676,8 @@ The identity headers `Loonfs-Actor`, `Loonfs-Subject`, `Loonfs-Principal-Scope`,
 
 The server rejects a request body that contains an unknown field, at any level of nesting, with 400 `invalid_request`. Most request fields are optional, and several of them are preconditions, so the server can't ignore a field it doesn't recognize. If it did, a misspelled precondition would decode to its default, and the server would perform a different request than the one the caller asked for.
 
+A request that sends a JSON body MUST set `Content-Type` to `application/json`, or to another media type that ends in `+json`. The server rejects a body without a JSON media type with 400 `invalid_request`. On an operation whose body is optional, a request without a body doesn't need the header.
+
 Response bodies follow the opposite rule. A client MUST keep working against a server newer than itself, so it MUST tolerate response fields it doesn't recognize (see [Writer and client requirements](#72-writer-and-client-requirements)).
 
 The exceptions are `ContentRef`, `Checksum`, and `ContentToken`, which are closed shapes in both requests and responses. A response never adds a field to any of them. A new content strategy is added as a new `kind` value, and a new checksum algorithm as a new `algorithm` value, so the `ContentRef` and `Checksum` schemas are `additionalProperties: false` in responses too. `ContentToken` is closed because the server mints it and the client sends it back unchanged, so new information goes inside its opaque `token` string. An unknown content kind fails to decode, and so does an unknown checksum algorithm. [Strict decoding and evolution](format.md#123-strict-decoding-and-evolution) states the same rules and extends them to durable shapes.

@@ -31,7 +31,7 @@ async fn get_health() -> &'static str {
 }
 
 async fn get_readiness(State(state): State<AppState>) -> Response {
-    if state.runtime.is_shutting_down() {
+    if state.binding.runtime.is_shutting_down() {
         return error_response(
             ErrorCode::ShuttingDown,
             ErrorResponse::new(

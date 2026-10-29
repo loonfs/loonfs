@@ -1,18 +1,18 @@
-//! Shared query-parameter and path-id parsing for HTTP handlers.
+//! Shared query-parameter checks for HTTP handlers.
 
 use super::error::ApiResponseError;
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::{Consistency, ErrorCode, ListOptions, PinId, ReadAt, ReadConsistency};
-use loonfs_types::{
-    decode_cursor, GeneratedIdValidationError, LimitError, ListPageCursor, OpaqueTokenError,
-    PublicOrdinalRangeError, RevisionNo,
-};
-use std::str::FromStr;
+use loonfs_types::{decode_cursor, LimitError, ListPageCursor, OpaqueTokenError};
 
-pub(super) fn required_query_param(
-    value: Option<String>,
-    name: &str,
-) -> Result<String, ApiResponseError> {
+// The `limit` and `max_staleness_ms` query parameters declare these bounds
+// to OpenAPI as literals, because the `IntoParams` derive takes only a
+// literal bound.
+const _: () = assert!(loonfs_types::MAX_PAGE_LIMIT == 1000);
+const _: () = assert!(loonfs_types::DEFAULT_PAGE_LIMIT == 1000);
+const _: () = assert!(READ_REVALIDATION_BOUND_MS == 1_155_000);
+
+pub(super) fn required_query_param<T>(value: Option<T>, name: &str) -> Result<T, ApiResponseError> {
     value.ok_or_else(|| {
         ApiResponseError::new(
             ErrorCode::InvalidRequest,
@@ -22,56 +22,10 @@ pub(super) fn required_query_param(
     })
 }
 
-pub(super) fn parse_include_attributes(
-    value: &str,
-) -> Result<loonfs_types::AttributeInclusion, ApiResponseError> {
-    parse_boolean_query_param(value, "include_attributes").map(|include| match include {
-        true => loonfs_types::AttributeInclusion::Include,
-        false => loonfs_types::AttributeInclusion::Omit,
-    })
-}
-
-pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool, ApiResponseError> {
-    match value {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        other => Err(ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!("invalid {name} `{other}`: expected `true` or `false`"),
-        )
-        .with_param(name)),
-    }
-}
-
-/// Returns what a read reads at, from its parsed `snapshot_id` and its
-/// `consistency` and `max_staleness_ms` parameters. A read with a
-/// `snapshot_id` has no consistency setting, so a request can't set
-/// `consistency` with one.
-pub(super) fn parse_read_at(
-    snapshot_id: Option<PinId>,
-    consistency: Option<&str>,
-    max_staleness_ms: Option<&str>,
-) -> Result<ReadAt, ApiResponseError> {
-    let max_staleness_ms = max_staleness_ms.map(parse_max_staleness_ms).transpose()?;
-    let consistency = consistency.map(parse_read_consistency).transpose()?;
-    read_at(snapshot_id, consistency, max_staleness_ms)
-}
-
-/// Parses the `consistency` and `max_staleness_ms` parameters of a live
-/// read, or returns `None`, the runtime's default, when the request sets
-/// neither.
-pub(super) fn parse_consistency(
-    consistency: Option<&str>,
-    max_staleness_ms: Option<&str>,
-) -> Result<Option<Consistency>, ApiResponseError> {
-    let max_staleness_ms = max_staleness_ms.map(parse_max_staleness_ms).transpose()?;
-    let consistency = consistency.map(parse_read_consistency).transpose()?;
-    live_consistency(consistency, max_staleness_ms)
-}
-
 /// Returns what a read reads at, from its `snapshot_id` and its decoded
 /// `consistency` and `max_staleness_ms`, whether the request sets them as
-/// query parameters or as body fields.
+/// query parameters or as body fields. A read with a `snapshot_id` has no
+/// consistency setting, so a request can't set `consistency` with one.
 pub(super) fn read_at(
     snapshot_id: Option<PinId>,
     consistency: Option<ReadConsistency>,
@@ -123,57 +77,6 @@ pub(super) fn live_consistency(
     }
 }
 
-fn parse_read_consistency(value: &str) -> Result<ReadConsistency, ApiResponseError> {
-    match value {
-        "eventual" => Ok(ReadConsistency::Eventual),
-        "strong" => Ok(ReadConsistency::Strong),
-        other => Err(ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!("invalid consistency `{other}`: expected `strong` or `eventual`"),
-        )
-        .with_param("consistency")),
-    }
-}
-
-fn parse_max_staleness_ms(value: &str) -> Result<u64, ApiResponseError> {
-    value.parse::<u64>().map_err(|_| {
-        ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!(
-                "invalid max_staleness_ms `{value}`: expected an integer number of milliseconds"
-            ),
-        )
-        .with_param("max_staleness_ms")
-    })
-}
-
-pub(super) fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
-    parse_public_ordinal("revision_no", value, RevisionNo::parse)
-}
-
-pub(super) fn parse_public_ordinal<T>(
-    name: &str,
-    value: &str,
-    constructor: impl FnOnce(u64) -> Result<T, PublicOrdinalRangeError>,
-) -> Result<T, ApiResponseError> {
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|_| public_ordinal_response_error(name, value, PublicOrdinalRangeError))?;
-    constructor(parsed).map_err(|error| public_ordinal_response_error(name, value, error))
-}
-
-fn public_ordinal_response_error(
-    name: &str,
-    value: &str,
-    error: PublicOrdinalRangeError,
-) -> ApiResponseError {
-    ApiResponseError::new(
-        ErrorCode::InvalidRequest,
-        &format!("invalid {name} `{value}`: {error}"),
-    )
-    .with_param(name)
-}
-
 pub(super) fn invalid_path_id_error(name: &str, value: &str, reason: &str) -> ApiResponseError {
     ApiResponseError::new(
         ErrorCode::InvalidRequest,
@@ -182,35 +85,10 @@ pub(super) fn invalid_path_id_error(name: &str, value: &str, reason: &str) -> Ap
     .with_param(name)
 }
 
-pub(super) fn parse_path_id<T>(name: &'static str, value: &str) -> Result<T, ApiResponseError>
-where
-    T: FromStr<Err = GeneratedIdValidationError>,
-{
-    value.parse().map_err(|error: GeneratedIdValidationError| {
-        invalid_path_id_error(name, value, error.reason())
-    })
-}
-
-pub(super) fn parse_snapshot_id(value: &str) -> Result<loonfs_types::PinId, ApiResponseError> {
-    loonfs_types::PinId::parse(value)
-        .map_err(|error| invalid_path_id_error("snapshot_id", value, error.reason()))
-}
-
 pub(super) fn effective_page_limit(
-    limit: Option<String>,
+    limit: Option<u32>,
 ) -> Result<loonfs_types::EffectiveLimit, ApiResponseError> {
-    let requested = limit.as_deref().map(parse_page_limit).transpose()?;
-    loonfs_types::EffectiveLimit::from_requested(requested).map_err(limit_response_error)
-}
-
-fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
-    value.parse::<u32>().map_err(|error| {
-        ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!("invalid limit `{value}`: {error}"),
-        )
-        .with_param("limit")
-    })
+    loonfs_types::EffectiveLimit::from_requested(limit).map_err(limit_response_error)
 }
 
 /// Checks that a cursor was minted by this endpoint before any read, and
@@ -243,102 +121,3 @@ fn limit_response_error(error: LimitError) -> ApiResponseError {
 fn page_cursor_response_error(error: OpaqueTokenError) -> ApiResponseError {
     ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("cursor")
 }
-
-/// Schema-only override for the shared page-limit query contract.
-#[cfg(feature = "openapi")]
-pub(super) struct OpenApiPageLimit;
-
-#[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for OpenApiPageLimit {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::Integer)
-            .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
-                utoipa::openapi::KnownFormat::Int32,
-            )))
-            .minimum(Some(1u32))
-            .maximum(Some(loonfs_types::MAX_PAGE_LIMIT))
-            .default(Some(serde_json::json!(loonfs_types::DEFAULT_PAGE_LIMIT)))
-            .into()
-    }
-}
-
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for OpenApiPageLimit {}
-
-/// Schema-only override for the `consistency` query parameter.
-///
-/// The schema declares no default, because the default is the server's
-/// `consistency` setting, and a client generator that sends declared defaults
-/// would pair `consistency` with `snapshot_id`, which the server rejects.
-#[cfg(feature = "openapi")]
-pub(super) struct OpenApiConsistency;
-
-#[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for OpenApiConsistency {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::String)
-            .enum_values(Some(["strong", "eventual"]))
-            .into()
-    }
-}
-
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for OpenApiConsistency {}
-
-/// Schema-only override for the `max_staleness_ms` query parameter,
-/// which can't exceed the revalidation bound.
-#[cfg(feature = "openapi")]
-pub(super) struct OpenApiMaxStalenessMs;
-
-#[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for OpenApiMaxStalenessMs {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::Integer)
-            .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
-                utoipa::openapi::KnownFormat::Int64,
-            )))
-            .minimum(Some(0u64))
-            .maximum(Some(READ_REVALIDATION_BOUND_MS))
-            .into()
-    }
-}
-
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for OpenApiMaxStalenessMs {}
-
-/// Schema-only override for an optional boolean that defaults to true.
-#[cfg(feature = "openapi")]
-pub(super) struct OpenApiDefaultTrueBoolean;
-
-#[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for OpenApiDefaultTrueBoolean {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::Boolean)
-            .default(Some(serde_json::json!(true)))
-            .into()
-    }
-}
-
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for OpenApiDefaultTrueBoolean {}
-
-/// Schema-only override for an optional boolean that defaults to false.
-#[cfg(feature = "openapi")]
-pub(super) struct OpenApiDefaultFalseBoolean;
-
-#[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for OpenApiDefaultFalseBoolean {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::Boolean)
-            .default(Some(serde_json::json!(false)))
-            .into()
-    }
-}
-
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for OpenApiDefaultFalseBoolean {}
