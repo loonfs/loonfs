@@ -1,6 +1,6 @@
 //! The rule that makes a fold of a namespace's WAL tail due.
 
-use crate::InlineContentPolicy;
+use crate::RuntimeConfig;
 use std::num::NonZeroU64;
 
 /// When a writable runtime folds a namespace's WAL tail.
@@ -17,13 +17,11 @@ pub(crate) struct FoldTrigger {
 }
 
 impl FoldTrigger {
-    pub(crate) fn new(
-        inline_content: &InlineContentPolicy,
-        idle_fold_after_ms: Option<NonZeroU64>,
-    ) -> Self {
+    /// Returns the fold rule of a runtime with `config`.
+    pub(crate) fn new(config: &RuntimeConfig) -> Self {
         Self {
-            inline_content_fold_at_bytes: inline_content.inline_content_fold_at_bytes,
-            idle_fold_after_ms,
+            inline_content_fold_at_bytes: config.inline_content.inline_content_fold_at_bytes,
+            idle_fold_after_ms: config.idle_fold_after_ms,
         }
     }
 
@@ -46,14 +44,5 @@ impl FoldTrigger {
     pub(crate) fn idle_fold_due_at_ms(&self, newest_commit_at_ms: u64) -> Option<u64> {
         self.idle_fold_after_ms
             .map(|after_ms| newest_commit_at_ms.saturating_add(after_ms.get()))
-    }
-}
-
-impl Default for FoldTrigger {
-    fn default() -> Self {
-        Self::new(
-            &InlineContentPolicy::default(),
-            NonZeroU64::new(crate::config::DEFAULT_IDLE_FOLD_AFTER_MS),
-        )
     }
 }

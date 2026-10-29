@@ -35,7 +35,10 @@ async fn writer_with_cache(
     cache(
         LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id(writer_id))
-            .min_publish_interval_ms(0),
+            .config(loonfs::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                ..loonfs::RuntimeConfig::default()
+            }),
     )
     .build()
     .await
@@ -50,7 +53,10 @@ async fn writer_with_cache_and_metrics(
 ) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(writer_id))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .metadata_cache(metadata_cache)
         .metrics_recorder(recorder)
         .build()
@@ -304,7 +310,10 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     let reader = LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(timer.clone())
-        .manifest_revalidation_interval_ms(interval_ms)
+        .config(loonfs::RuntimeConfig {
+            manifest_revalidation_interval_ms: interval_ms,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("reader");
@@ -396,8 +405,11 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     let reader = LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(timer.clone())
-        .manifest_revalidation_interval_ms(interval_ms)
-        .max_staleness_ms(0)
+        .config(loonfs::RuntimeConfig {
+            manifest_revalidation_interval_ms: interval_ms,
+            max_staleness_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("reader");
@@ -480,7 +492,10 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
     let reader = LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(Arc::new(ManualClock::new(0)))
-        .max_staleness_ms(0)
+        .config(loonfs::RuntimeConfig {
+            max_staleness_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("reader");
@@ -558,7 +573,10 @@ async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
     let reader = LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(timer.clone())
-        .max_staleness_ms(0)
+        .config(loonfs::RuntimeConfig {
+            max_staleness_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("reader");
@@ -635,7 +653,11 @@ async fn other_wal_tail_bytes(other_id: &NamespaceId) -> usize {
         .stat("/")
         .await
         .expect("cold read");
-    reader.metadata_cache().stats().wal_tail_bytes
+    reader
+        .metadata_cache()
+        .stats()
+        .wal_tails
+        .cached_decoded_bytes
 }
 
 /// Checks that a read after a write in the writer's runtime sends no
@@ -652,7 +674,11 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
     let namespace_id = NamespaceId::parse("read-after-write").expect("valid namespace id");
 
     let writer = writer_with_cache(&store, "read-after-write-writer", |builder| {
-        builder.max_staleness_ms(READ_REVALIDATION_BOUND_MS)
+        builder.config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            max_staleness_ms: READ_REVALIDATION_BOUND_MS,
+            ..loonfs::RuntimeConfig::default()
+        })
     })
     .await;
     writer
@@ -706,9 +732,9 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
         .expect("read after write");
     assert_eq!(recording.take(), []);
     let after_read = reader.metadata_cache().stats();
-    assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
+    assert_eq!(after_read.wal_tails.misses, before_read.wal_tails.misses);
     assert_eq!(
-        after_read.wal_tail_hits, before_read.wal_tail_hits,
+        after_read.wal_tails.hits, before_read.wal_tails.hits,
         "the read takes the position's tail, not one from the read cache"
     );
 }
@@ -726,7 +752,11 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("maintained").expect("valid namespace id");
     let writer = writer_with_cache(&store, "maintained-writer", |builder| {
-        builder.max_staleness_ms(READ_REVALIDATION_BOUND_MS)
+        builder.config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            max_staleness_ms: READ_REVALIDATION_BOUND_MS,
+            ..loonfs::RuntimeConfig::default()
+        })
     })
     .await;
     writer
@@ -764,9 +794,9 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     namespace.stat("/file.txt").await.expect("next read");
     assert_eq!(recording.take(), []);
     let after_read = reader.metadata_cache().stats();
-    assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
+    assert_eq!(after_read.wal_tails.misses, before_read.wal_tails.misses);
     assert_eq!(
-        after_read.wal_tail_hits, before_read.wal_tail_hits,
+        after_read.wal_tails.hits, before_read.wal_tails.hits,
         "the read takes the position's tail, not one from the read cache"
     );
 }
@@ -816,7 +846,7 @@ async fn read_pressure_leaves_an_idle_writer_tail_and_its_next_publish_replays_n
         .stat("/")
         .await
         .expect("read the other namespace");
-    assert!(cache.stats().wal_tail_bytes > 0);
+    assert!(cache.stats().wal_tails.cached_decoded_bytes > 0);
 
     let landed = namespace
         .put_file(

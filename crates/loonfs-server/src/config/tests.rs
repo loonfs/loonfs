@@ -1,8 +1,6 @@
 //! Config tables and environment fallbacks that the loaders don't expose.
 
-use super::{
-    parse_server_config, AuthConfig, InlineContentConfig, PublicationLimitsConfig, ServerConfig,
-};
+use super::{parse_server_config, AuthConfig, ServerConfig};
 use crate::ServerError;
 use loonfs_test_support::EnvGuard;
 use loonfs_types::config::ConfigFieldError;
@@ -16,7 +14,6 @@ fn inline_content_defaults_and_overrides_preserve_explicit_disablement() {
     assert_eq!(defaults.inline_content_fold_at_bytes, 2 * 1024 * 1024);
     assert_eq!(defaults.inline_content_wal_object_budget_bytes, 1024 * 1024);
     assert_eq!(defaults.inline_content_tail_limit_bytes, 32 * 1024 * 1024);
-    assert_eq!(InlineContentConfig::default().effective_policy(), defaults);
     for (source, threshold) in [
         ("", Some(64 * 1024)),
         (
@@ -27,55 +24,37 @@ fn inline_content_defaults_and_overrides_preserve_explicit_disablement() {
         ("inline_content_threshold_bytes = 0", Some(0)),
         ("inline_content_threshold_bytes = false", None),
     ] {
-        let overrides: InlineContentConfig = toml::from_str(source).expect("overrides");
-        assert_eq!(
-            overrides.effective_policy().inline_content_threshold_bytes,
-            threshold
-        );
+        let overrides: loonfs::InlineContentPolicy = toml::from_str(source).expect("overrides");
+        assert_eq!(overrides.inline_content_threshold_bytes, threshold);
     }
-    toml::from_str::<InlineContentConfig>("inline_content_threshold_bytes = true")
+    toml::from_str::<loonfs::InlineContentPolicy>("inline_content_threshold_bytes = true")
         .expect_err("a boolean threshold should be rejected");
 }
 
 #[test]
 fn publication_overrides_are_strict_and_positive() {
-    let defaults: PublicationLimitsConfig = toml::from_str("").expect("empty overrides");
-    assert_eq!(
-        defaults.effective_policy(),
-        loonfs::PublicationPolicy::default()
-    );
+    let defaults: loonfs::PublicationPolicy = toml::from_str("").expect("empty overrides");
+    assert_eq!(defaults, loonfs::PublicationPolicy::default());
     for field in [
-        "max_requests",
         "max_requests_per_namespace",
-        "max_estimated_bytes",
         "max_estimated_bytes_per_namespace",
-        "max_concurrent_publications",
     ] {
-        toml::from_str::<PublicationLimitsConfig>(&format!("{field} = 0"))
+        toml::from_str::<loonfs::PublicationPolicy>(&format!("{field} = 0"))
             .expect_err(&format!("`{field} = 0` should be rejected"));
     }
-    toml::from_str::<PublicationLimitsConfig>("max_requsets = 10")
+    toml::from_str::<loonfs::PublicationPolicy>("max_requsets = 10")
         .expect_err("a misspelled field should be rejected");
-    let overrides: PublicationLimitsConfig =
-        toml::from_str("max_requests = 12\nmax_requests_per_namespace = 3").expect("overrides");
-    assert_eq!(overrides.max_requests, std::num::NonZeroUsize::new(12));
+    let overrides: loonfs::PublicationPolicy =
+        toml::from_str("max_requests_per_namespace = 3").expect("overrides");
+    assert_eq!(overrides.max_requests_per_namespace.get(), 3);
     assert_eq!(
-        overrides
-            .effective_policy()
-            .max_requests_per_namespace
-            .get(),
-        3
-    );
-    assert_eq!(
-        overrides
-            .effective_policy()
-            .max_estimated_bytes_per_namespace,
+        overrides.max_estimated_bytes_per_namespace,
         loonfs::PublicationPolicy::default().max_estimated_bytes_per_namespace
     );
 }
 
-/// Checks that the server's write-stop wait is half its request deadline,
-/// so a commit that waits for the whole write-stop wait returns
+/// Checks that the write-stop wait is half the request deadline, so a
+/// commit that waits for the whole write-stop wait returns
 /// `maintenance_required` before its request returns `deadline_exceeded`.
 #[test]
 fn the_write_stop_wait_is_half_the_request_deadline() {
@@ -95,10 +74,74 @@ root = "/tmp/loonfs-server"
     assert_eq!(
         config
             .config()
-            .publication_policy()
+            .runtime_config()
+            .publication
             .write_stop_wait_budget_ms,
         5_000
     );
+}
+
+/// Checks that the write-stop wait isn't a setting of the `[publication]`
+/// table.
+#[test]
+fn the_write_stop_wait_is_not_a_setting() {
+    let error = parse_server_config(
+        r#"
+bind = "127.0.0.1:9400"
+content_token_secret = "dev-content-token-secret"
+writer_id = "loonfs-server"
+
+[publication]
+write_stop_wait_budget_ms = 1000
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#,
+    )
+    .expect_err("an unknown publication key");
+    assert!(
+        error.to_string().contains("write_stop_wait_budget_ms"),
+        "{error}"
+    );
+}
+
+/// Checks that an absent idle fold age takes the runtime's default, and that
+/// zero turns the rule off.
+#[test]
+fn the_runtime_takes_the_idle_fold_age_or_its_default() {
+    let config = |setting: &str| {
+        parse_server_config(&format!(
+            r#"
+bind = "127.0.0.1:9400"
+content_token_secret = "dev-content-token-secret"
+writer_id = "loonfs-server"
+{setting}
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#
+        ))
+        .expect("valid config")
+    };
+    for (setting, expected) in [
+        (
+            "",
+            std::num::NonZeroU64::new(loonfs::DEFAULT_IDLE_FOLD_AFTER_MS),
+        ),
+        (
+            "idle_fold_after_ms = 60000",
+            std::num::NonZeroU64::new(60_000),
+        ),
+        ("idle_fold_after_ms = 0", None),
+    ] {
+        assert_eq!(
+            config(setting).config().runtime_config().idle_fold_after_ms,
+            expected,
+            "{setting:?}"
+        );
+    }
 }
 
 #[test]

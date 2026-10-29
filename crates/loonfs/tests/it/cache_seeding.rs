@@ -27,7 +27,10 @@ fn runtime_reads_reuse_the_writer_tail_for_repeated_reads() {
     ));
     let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with(object_store, "tail-projection-cache-test", |builder| {
-        builder.max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+        builder.config(loonfs::RuntimeConfig {
+            max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+            ..loonfs::RuntimeConfig::default()
+        })
     });
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -67,9 +70,9 @@ fn runtime_reads_reuse_the_writer_tail_for_repeated_reads() {
     let stats = fs.metadata_cache_stats();
     assert_eq!(
         (
-            stats.wal_tail_hits,
-            stats.wal_tail_misses,
-            stats.wal_tail_inserts
+            stats.wal_tails.hits,
+            stats.wal_tails.misses,
+            stats.wal_tails.inserts
         ),
         (0, 0, 0),
         "reads from the position never look a tail up in the read cache"
@@ -237,7 +240,10 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let reader = open_runtime_with(object_store.clone(), "tail-cache-reader", |builder| {
-        builder.max_staleness_ms(0)
+        builder.config(loonfs::RuntimeConfig {
+            max_staleness_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
     });
     let writer = open_runtime(object_store, "tail-cache-writer");
 
@@ -307,9 +313,9 @@ fn a_cache_with_zero_limits_keeps_nothing() {
         .expect("second read takes the position's tail again");
     assert_eq!(raw_store.wal_get_count(), 0);
     let stats = fs.metadata_cache_stats();
-    assert_eq!(stats.wal_tail_hits, 0);
-    assert_eq!(stats.wal_tail_misses, 0);
-    assert_eq!(stats.wal_tail_bytes, 0);
+    assert_eq!(stats.wal_tails.hits, 0);
+    assert_eq!(stats.wal_tails.misses, 0);
+    assert_eq!(stats.wal_tails.cached_decoded_bytes, 0);
 }
 
 /// Creates `first` and `other`, each holding one file of five bytes, so the
@@ -347,8 +353,8 @@ fn one_namespace_head_and_wal_tail_bytes() -> HeadAndWalTailBytes {
         .expect("cold read");
     let stats = fs.metadata_cache_stats();
     HeadAndWalTailBytes {
-        head: stats.head_bytes,
-        tail: stats.wal_tail_bytes,
+        head: stats.heads.cached_decoded_bytes,
+        tail: stats.wal_tails.cached_decoded_bytes,
     }
 }
 
@@ -384,8 +390,11 @@ fn heads_and_wal_tails_evict_by_bytes_anchors_included() {
     fs.read_file_blocking(&other, "/file.txt")
         .expect("cache the other namespace's head and WAL tail");
     let after_other = fs.metadata_cache_stats();
-    assert!(after_other.head_evictions > 0 && after_other.wal_tail_evictions > 0);
-    assert!(after_other.head_bytes <= head_budget && after_other.wal_tail_bytes <= budget);
+    assert!(after_other.heads.evictions > 0 && after_other.wal_tails.evictions > 0);
+    assert!(
+        after_other.heads.cached_decoded_bytes <= head_budget
+            && after_other.wal_tails.cached_decoded_bytes <= budget
+    );
 
     raw_store.reset_control_get_counts();
     let file = fs
@@ -401,15 +410,15 @@ fn heads_and_wal_tails_evict_by_bytes_anchors_included() {
     assert_eq!(raw_store.wal_get_count(), 3);
     let after_reload = fs.metadata_cache_stats();
     assert_eq!(
-        after_reload.wal_tail_inserts,
-        after_other.wal_tail_inserts + 1
+        after_reload.wal_tails.inserts,
+        after_other.wal_tails.inserts + 1
     );
     assert_eq!(
-        after_reload.wal_tail_hits,
-        after_other.wal_tail_hits + 1,
+        after_reload.wal_tails.hits,
+        after_other.wal_tails.hits + 1,
         "the read uses the projection its cold discovery inserted"
     );
-    assert_eq!(after_reload.wal_tail_misses, after_other.wal_tail_misses);
+    assert_eq!(after_reload.wal_tails.misses, after_other.wal_tails.misses);
 }
 
 #[tokio::test]
@@ -455,7 +464,7 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
         0,
         "no namespace's head was dropped and loaded again"
     );
-    assert_eq!(reader.metadata_cache().stats().head_evictions, 0);
+    assert_eq!(reader.metadata_cache().stats().heads.evictions, 0);
 }
 
 /// Checks that a WAL tail heavier than the WAL-tail budget isn't kept, so
@@ -485,7 +494,10 @@ fn runtime_wal_tail_cache_skips_oversized_projection() {
     let reader = block_on(
         loonfs::LoonFs::builder_with_store(object_store)
             .read_only()
-            .max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+            .config(loonfs::RuntimeConfig {
+                max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+                ..loonfs::RuntimeConfig::default()
+            })
             .metadata_cache(MetadataCache::builder().max_wal_tail_bytes(budget).build())
             .build(),
     )
@@ -522,11 +534,11 @@ fn runtime_wal_tail_cache_skips_oversized_projection() {
         );
     }
     let stats = reader.metadata_cache().stats();
-    assert_eq!(stats.wal_tail_misses, before.wal_tail_misses + 2);
-    assert_eq!(stats.wal_tail_hits, 0);
-    assert_eq!(stats.wal_tail_rejections, before.wal_tail_rejections + 2);
-    assert_eq!(stats.wal_tail_evictions, 0);
-    assert!(stats.wal_tail_bytes <= budget);
+    assert_eq!(stats.wal_tails.misses, before.wal_tails.misses + 2);
+    assert_eq!(stats.wal_tails.hits, 0);
+    assert_eq!(stats.wal_tails.rejections, before.wal_tails.rejections + 2);
+    assert_eq!(stats.wal_tails.evictions, 0);
+    assert!(stats.wal_tails.cached_decoded_bytes <= budget);
 }
 
 /// Checks that after a WAL publication conflict, the next write reloads
@@ -539,7 +551,10 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let recording = Arc::new(RecordingStore::new(raw_store.store(), KeyPredicate::any()));
     let fs = open_runtime_with(recording.clone(), "tail-cache-stale-test", |builder| {
-        builder.max_staleness_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+        builder.config(loonfs::RuntimeConfig {
+            max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+            ..loonfs::RuntimeConfig::default()
+        })
     });
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -570,9 +585,9 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
         .expect("read after the recovered write");
     assert_eq!(recording.take(), []);
     let after_read = fs.metadata_cache_stats();
-    assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
+    assert_eq!(after_read.wal_tails.misses, before_read.wal_tails.misses);
     assert_eq!(
-        after_read.wal_tail_hits, before_read.wal_tail_hits,
+        after_read.wal_tails.hits, before_read.wal_tails.hits,
         "the read takes the new position's tail"
     );
 }
@@ -698,8 +713,8 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
         .expect("second materialized stat");
     let after_second = fs.metadata_cache_stats();
 
-    assert!(after_first.segment_inserts > 0);
-    assert!(after_second.segment_hits > after_first.segment_hits);
+    assert!(after_first.segment_blocks.inserts > 0);
+    assert!(after_second.segment_blocks.hits > after_first.segment_blocks.hits);
     assert_eq!(read_heads(&recorder), heads + 2);
 }
 
@@ -734,9 +749,11 @@ fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let reader = open_runtime_with(raw_store.store(), "control-cache-reader", |builder| {
-        builder
-            .manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
-            .max_staleness_ms(0)
+        builder.config(loonfs::RuntimeConfig {
+            manifest_revalidation_interval_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+            max_staleness_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
     });
     // The writer's first commit publishes the claim of its writer epoch, and
     // the writer raises the hint after that publication in a background task

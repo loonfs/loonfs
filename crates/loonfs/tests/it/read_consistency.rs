@@ -59,7 +59,10 @@ async fn fixture(name: &str) -> Fixture {
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id(name))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -81,7 +84,10 @@ async fn fixture(name: &str) -> Fixture {
     let reader = LoonFs::builder_with_store(store)
         .read_only()
         .monotonic_timer(clock.clone())
-        .manifest_revalidation_interval_ms(INTERVAL_MS)
+        .config(loonfs::RuntimeConfig {
+            manifest_revalidation_interval_ms: INTERVAL_MS,
+            ..loonfs::RuntimeConfig::default()
+        })
         .metrics_recorder(recorder.clone())
         .build()
         .await
@@ -414,7 +420,10 @@ async fn a_strong_default_confirms_reads_that_set_no_consistency() {
     let reader = LoonFs::builder_with_store(store)
         .read_only()
         .monotonic_timer(fixture.clock.clone())
-        .consistency(ReadConsistency::Strong)
+        .config(loonfs::RuntimeConfig {
+            consistency: ReadConsistency::Strong,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("reader")
@@ -512,7 +521,10 @@ async fn budgeted_reader(
     LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(clock)
-        .manifest_revalidation_interval_ms(INTERVAL_MS)
+        .config(loonfs::RuntimeConfig {
+            manifest_revalidation_interval_ms: INTERVAL_MS,
+            ..loonfs::RuntimeConfig::default()
+        })
         .metadata_cache(
             MetadataCache::builder()
                 .max_head_bytes(max_head_bytes)
@@ -538,7 +550,7 @@ async fn keeps_the_head(
         .stat_with_options("/file.txt", &strong())
         .await
         .expect("strong read");
-    let misses = reader.metadata_cache().stats().head_misses;
+    let misses = reader.metadata_cache().stats().heads.misses;
     namespace
         .stat_with_options(
             "/file.txt",
@@ -549,7 +561,7 @@ async fn keeps_the_head(
         )
         .await
         .expect("eventual read");
-    reader.metadata_cache().stats().head_misses == misses
+    reader.metadata_cache().stats().heads.misses == misses
 }
 
 /// Checks that an eventual read after a strong read never reads an older
@@ -571,7 +583,10 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
     let actor = loonfs_test_support::test_actor();
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id("a"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -607,7 +622,10 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
 
     let peer = LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id(&format!("b{}", "x".repeat(127))))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("peer");
@@ -625,7 +643,7 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         .expect("strong read");
     assert_eq!(strong.head_seq, commit.committed_seq);
 
-    let misses = reader.metadata_cache().stats().head_misses;
+    let misses = reader.metadata_cache().stats().heads.misses;
     let after = namespace
         .stat_with_options(
             "/file.txt",
@@ -638,7 +656,7 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         .expect("eventual read");
     assert_eq!(after.head_seq, commit.committed_seq);
     assert_eq!(
-        reader.metadata_cache().stats().head_misses,
+        reader.metadata_cache().stats().heads.misses,
         misses + 1,
         "the eventual read loads the namespace"
     );

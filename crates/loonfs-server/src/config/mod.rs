@@ -14,8 +14,5 @@ pub use loonfs_http::JobMode;
 pub use loonfs_objectstore::StoreConfig;
 pub(crate) use memory::MemorySizing;
 pub use server::{AuthConfig, ServerConfig, TlsServerConfig, TransportConfig};
-pub(crate) use tables::InlineContentConfig;
-pub use tables::{
-    GrepConfig, MetadataCacheConfig, MetadataCacheSsdConfig, PublicationLimitsConfig,
-};
+pub use tables::{GrepConfig, MetadataCacheConfig, MetadataCacheSsdConfig};
 pub use validate::{load_server_config, parse_server_config, ValidatedServerConfig};

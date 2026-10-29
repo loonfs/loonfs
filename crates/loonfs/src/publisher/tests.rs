@@ -1,22 +1,23 @@
 //! Publisher batching, shutdown, retry, and observability tests.
 
-#[path = "publication_clock.rs"]
-mod publication_clock;
-
+use super::admission::AdmittedWaiter;
+use super::queue::{queued_candidates, PreparedCandidate, SubmissionAdmission};
+use super::worker::result_label;
 use super::*;
-use crate::config::ReadConfig;
 use crate::content_tokens::ContentTokenError;
 use crate::execution_budget::BudgetPermit;
-use crate::fs::WriterIdentity;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
-use crate::publish::{CommitIntent, ContentPreparationError, FilesystemOperation};
+use crate::publish::{CommitCandidate, CommitIntent, ContentPreparationError, FilesystemOperation};
 use crate::{
     ConfiguredObjectStoreKind, ErrorCode, ExecutionBudget, MetadataCache,
     SharedObjectStore as SharedStore, TraceMode,
 };
+use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, FoldWalOutcome};
 use async_trait::async_trait;
 use bytes::Bytes;
+use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS, MAX_UNFOLDED_WAL_OBJECTS};
 use loonfs_core::test_support::WriterAt;
+use loonfs_core::time::OperationClock;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
@@ -25,14 +26,19 @@ use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate,
     NamespaceOverlapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
 };
+use loonfs_types::api::v0::Commit;
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
+use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
 use std::assert_matches;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Condvar;
+use std::time::Duration;
 use tempfile::tempdir;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 fn is_publication(bytes: &[u8]) -> bool {
     decode_wal_object_envelope_zstd(bytes).is_ok_and(|wal| !wal.payload().records.is_empty())
@@ -196,60 +202,84 @@ fn lost_wal_put_ack_store(
     }, InjectedError::Transport("lost WAL put acknowledgement".to_owned())).apply_then_fail()
 }
 
-fn test_runtime_core(
-    store: SharedStore,
+/// The settings and the clocks of a test runtime core.
+struct TestCore {
+    config: crate::RuntimeConfig,
+    execution_budget: ExecutionBudget,
     run_policy: loonfs_core::MetadataRunPolicy,
-) -> RuntimeCore {
-    let execution_budget = ExecutionBudget::default();
-    let metadata_cache =
-        MetadataCache::default().bind(&store, execution_budget.read_working_memory());
-    RuntimeCore::open(
-        store,
-        ReadConfig {
-            execution_budget,
-            max_read_content_bytes: crate::DEFAULT_MAX_READ_CONTENT_BYTES,
-            manifest_revalidation_interval_ms: 1000,
-            max_staleness_ms: 1000,
-            consistency: crate::ReadConsistency::Eventual,
-            run_policy,
-            trace_mode: TraceMode::Remote,
-            store_kind: Some(ConfiguredObjectStoreKind::LocalFs),
-        },
-        metadata_cache,
-        RuntimeInstruments::new(None),
-        Arc::new(loonfs_types::StdMonotonicTimer::default()),
-        Arc::new(loonfs_core::time::SystemWallClock),
-    )
+    timer: Arc<dyn loonfs_types::MonotonicTimer>,
+    wall_clock: Arc<dyn crate::WallClock>,
 }
 
-fn test_writer_bits() -> Arc<WriterBits> {
-    Arc::new(WriterBits {
-        inline_content: crate::InlineContentPolicy::default(),
-        fold_trigger: super::FoldTrigger::default(),
-        identity: WriterIdentity {
-            writer_id: loonfs_test_support::ids::writer_id("writer-a"),
-        },
-        execution_budget: ExecutionBudget::default(),
+impl Default for TestCore {
+    fn default() -> Self {
+        Self {
+            config: crate::RuntimeConfig {
+                min_publish_interval_ms: TEST_STANDALONE_PACING_MS,
+                trace_mode: TraceMode::Remote,
+                ..crate::RuntimeConfig::default()
+            },
+            execution_budget: ExecutionBudget::default(),
+            run_policy: loonfs_core::MetadataRunPolicy::default(),
+            timer: Arc::new(loonfs_types::StdMonotonicTimer::default()),
+            wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
+        }
+    }
+}
+
+impl TestCore {
+    /// Returns the settings of a core whose publishers aren't paced.
+    fn unpaced() -> Self {
+        let mut core = Self::default();
+        core.config.min_publish_interval_ms = 0;
+        core
+    }
+
+    fn open(self, store: SharedStore) -> RuntimeCore {
+        let metadata_cache =
+            MetadataCache::default().bind(&store, self.execution_budget.read_working_memory());
+        RuntimeCore::open(
+            store,
+            self.config,
+            self.execution_budget,
+            self.run_policy,
+            Some(ConfiguredObjectStoreKind::LocalFs),
+            metadata_cache,
+            RuntimeInstruments::new(None),
+            self.timer,
+            self.wall_clock,
+        )
+    }
+}
+
+fn test_writer_state() -> Arc<WriterState> {
+    Arc::new(WriterState {
+        writer_id: loonfs_test_support::ids::writer_id("writer-a"),
         compactor_epochs: tokio::sync::Mutex::default(),
     })
 }
 
-/// A runtime core plus the writer bits a standalone publisher publishes
-/// under. The caller keeps both alive; the publisher holds the bits weakly.
+/// A runtime core plus the writer state a standalone publisher publishes
+/// under. The caller keeps both alive, and the publisher keeps only a weak
+/// reference to the writer state.
 struct TestRuntime {
     core: RuntimeCore,
-    bits: Arc<WriterBits>,
+    writer: Arc<WriterState>,
 }
 
 fn test_runtime(store: SharedStore) -> TestRuntime {
     TestRuntime {
-        core: test_runtime_core(store, loonfs_core::MetadataRunPolicy::default()),
-        bits: test_writer_bits(),
+        core: TestCore::default().open(store),
+        writer: test_writer_state(),
     }
 }
 
 async fn test_writer(store: SharedStore) -> crate::LoonFs<crate::Writable> {
-    test_writer_with_interval(store, crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS).await
+    test_writer_with_interval(
+        store,
+        crate::RuntimeConfig::default().min_publish_interval_ms,
+    )
+    .await
 }
 
 async fn test_writer_with_interval(
@@ -258,8 +288,11 @@ async fn test_writer_with_interval(
 ) -> crate::LoonFs<crate::Writable> {
     crate::LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .min_publish_interval_ms(min_publish_interval_ms)
-        .trace_mode(TraceMode::Remote)
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms,
+            trace_mode: TraceMode::Remote,
+            ..crate::RuntimeConfig::default()
+        })
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
@@ -273,10 +306,13 @@ async fn test_writer_with_cache(
 ) -> crate::LoonFs<crate::Writable> {
     crate::LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .min_publish_interval_ms(0)
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            trace_mode: TraceMode::Remote,
+            ..crate::RuntimeConfig::default()
+        })
         .metadata_cache(metadata_cache)
         .metrics_recorder(recorder)
-        .trace_mode(TraceMode::Remote)
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
@@ -332,7 +368,7 @@ fn test_namespaces(count: usize) -> Vec<NamespaceId> {
 async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
     runtime
         .core
-        .writer_engine(&runtime.bits.identity, namespace_id)
+        .writer_engine(&runtime.writer.writer_id, namespace_id)
         .bootstrap_namespace(
             &loonfs_test_support::test_actor(),
             &loonfs_core::CreateNamespaceOptions::default(),
@@ -343,7 +379,7 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
 
 /// Pacing for standalone test publishers, long enough that
 /// `wait_past_publish_pacing` outlasting it is meaningful.
-const TEST_STANDALONE_PACING: Duration = Duration::from_secs(1);
+const TEST_STANDALONE_PACING_MS: u64 = 1_000;
 
 fn publisher_state(
     publisher: &NamespacePublisher,
@@ -461,14 +497,17 @@ async fn wait_for_queued_delete_waiters(publisher: &NamespacePublisher, expected
 fn spawn_delete(
     publisher: &NamespacePublisher,
     options: DeleteNamespaceOptions,
-) -> tokio::task::JoinHandle<DeleteResult> {
+) -> tokio::task::JoinHandle<crate::Result<DeleteNamespaceResponse>> {
     let publisher = publisher.clone();
     tokio::spawn(async move { publisher.submit_delete(options).await })
 }
 
 /// Bounded: a stranded delete waiter is a hang, and a hang must fail
 /// the test.
-async fn settle_delete(handle: tokio::task::JoinHandle<DeleteResult>, label: &str) -> DeleteResult {
+async fn settle_delete(
+    handle: tokio::task::JoinHandle<crate::Result<DeleteNamespaceResponse>>,
+    label: &str,
+) -> crate::Result<DeleteNamespaceResponse> {
     bounded(Duration::from_secs(10), handle)
         .await
         .unwrap_or_else(|_| panic!("{label} must settle, not hang"))
@@ -477,17 +516,29 @@ async fn settle_delete(handle: tokio::task::JoinHandle<DeleteResult>, label: &st
 
 /// A publisher with no owning registry, exercising the unowned-task
 /// fallback the production paths reserve for a dropped registry. The
-/// caller keeps `runtime` alive; the publisher holds its bits weakly.
+/// caller keeps `runtime` alive, and the publisher keeps only a weak
+/// reference to the writer state.
 fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> NamespacePublisher {
     let registry = PublisherRegistry::new(
         runtime.core.clone(),
-        Arc::downgrade(&runtime.bits),
+        Arc::downgrade(&runtime.writer),
         tokio::runtime::Handle::current(),
-        TEST_STANDALONE_PACING,
-        crate::PublicationPolicy::default(),
-        runtime.bits.execution_budget.clone(),
     );
-    NamespacePublisher::new(namespace_id.clone(), &registry)
+    NamespacePublisher::new(namespace_id.clone(), &registry.shared)
+}
+
+/// Returns a standalone publisher of `runtime`'s writer whose runtime core,
+/// over the same store, has the settings and the clocks of `core`.
+fn standalone_publisher_with(
+    namespace_id: &NamespaceId,
+    runtime: &TestRuntime,
+    core: TestCore,
+) -> NamespacePublisher {
+    let runtime = TestRuntime {
+        core: core.open(runtime.core.shared_store()),
+        writer: Arc::clone(&runtime.writer),
+    };
+    standalone_publisher(namespace_id, &runtime)
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -497,7 +548,7 @@ async fn wait_past_publish_pacing() {
     // racing second task release a queued delete after exactly that
     // interval, so outlasting it proves the delete is ordered behind
     // the sealed batch, not merely paced behind it.
-    tokio::time::sleep(TEST_STANDALONE_PACING + Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(TEST_STANDALONE_PACING_MS + 300)).await;
 }
 
 /// One directory creation directly under the root, named by the directory
@@ -522,7 +573,7 @@ fn admit_commit(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
     request: CommitIntent,
-) -> oneshot::Receiver<CommitResult> {
+) -> oneshot::Receiver<crate::Result<Commit>> {
     try_admit_commit(publisher, namespace_id, request).expect("admit mutation")
 }
 
@@ -530,7 +581,7 @@ fn try_admit_commit(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
     request: CommitIntent,
-) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
+) -> Result<oneshot::Receiver<crate::Result<Commit>>, CoreError> {
     let candidate = CommitCandidate::new(request);
     try_admit_candidate(publisher, namespace_id, candidate)
 }
@@ -539,7 +590,7 @@ fn try_admit_candidate(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
     candidate: CommitCandidate,
-) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
+) -> Result<oneshot::Receiver<crate::Result<Commit>>, CoreError> {
     try_admit_prepared_candidate(publisher, namespace_id, PreparedCandidate::new(candidate)?)
 }
 
@@ -547,26 +598,30 @@ fn try_admit_prepared_candidate(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
     candidate: PreparedCandidate,
-) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
+) -> Result<oneshot::Receiver<crate::Result<Commit>>, CoreError> {
     let commit_id = candidate.candidate.commit_id().clone();
     drop(publisher.admitted_session(&publisher.lock_state())?);
     let permit = publisher
+        .context
         .admission
         .acquire_candidate(namespace_id, &candidate)?;
     let semantic_identity = candidate.candidate.semantic_identity(namespace_id);
     let (sender, receiver) = oneshot::channel();
-    let admission = publisher.admit(
+    let admitted = publisher.admit(
         commit_id,
         candidate,
         semantic_identity,
         AdmittedWaiter::new(sender, &permit),
-        publisher.timer.monotonic_now_ms(),
+        publisher.context.runtime_core.timer().monotonic_now_ms(),
     )?;
-    assert!(matches!(admission, SubmissionAdmission::OwnOutcome));
+    assert!(matches!(
+        admitted.admission,
+        SubmissionAdmission::OwnOutcome
+    ));
     Ok(receiver)
 }
 
-async fn recv_commit(receiver: oneshot::Receiver<CommitResult>, label: &str) -> Commit {
+async fn recv_commit(receiver: oneshot::Receiver<crate::Result<Commit>>, label: &str) -> Commit {
     receiver
         .await
         .unwrap_or_else(|err| panic!("{label} receiver dropped: {err}"))
@@ -584,8 +639,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
         ));
         let runtime = test_runtime(store.clone());
         create_namespace(&runtime, &namespace_id).await;
-        let mut publisher = standalone_publisher(&namespace_id, &runtime);
-        publisher.min_publish_interval = Duration::ZERO;
+        let publisher = standalone_publisher_with(&namespace_id, &runtime, TestCore::unpaced());
         recv_commit(
             admit_commit(
                 &publisher,
@@ -656,11 +710,11 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
         ));
         let runtime = test_runtime(store.clone());
         create_namespace(&runtime, &namespace_id).await;
-        let mut publisher = standalone_publisher(&namespace_id, &runtime);
-        publisher.min_publish_interval = Duration::ZERO;
-        publisher
+        let mut core = TestCore::unpaced();
+        core.config
             .inline_content
             .inline_content_wal_object_budget_bytes = MAX_WAL_OBJECT_INLINE_CONTENT_BYTES;
+        let publisher = standalone_publisher_with(&namespace_id, &runtime, core);
         recv_commit(
             admit_commit(
                 &publisher,
@@ -927,13 +981,16 @@ async fn publisher_contender_retries_after_active_request_fails() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let runtime = test_runtime(store);
     create_namespace(&runtime, &namespace_id).await;
-    let mut publisher = standalone_publisher(&namespace_id, &runtime);
-    publisher.admission = Arc::new(PublicationAdmission::new(
-        crate::PublicationPolicy::default(),
-        ExecutionBudget::builder()
-            .max_admitted_requests(NonZeroUsize::MIN)
-            .build(),
-    ));
+    let publisher = standalone_publisher_with(
+        &namespace_id,
+        &runtime,
+        TestCore {
+            execution_budget: ExecutionBudget::builder()
+                .max_admitted_requests(NonZeroUsize::MIN)
+                .build(),
+            ..TestCore::default()
+        },
+    );
     let commit_id = CommitId::parse("handoff").expect("valid commit id");
     let primary_identity = CommitCandidate::new(create_directory_request("handoff", "first"))
         .semantic_identity(&namespace_id);
@@ -971,7 +1028,7 @@ async fn publisher_contender_retries_after_active_request_fails() {
         .expect("contender publishes after the failed primary");
     assert_eq!(response.commit_id, commit_id);
     assert_eq!(response.committed_seq, ChangeSeq(1));
-    assert_eq!(publisher.admission.used_requests(), 0);
+    assert_eq!(publisher.context.admission.used_requests(), 0);
 }
 
 #[tokio::test]
@@ -1192,10 +1249,13 @@ async fn a_request_queued_behind_a_publish_waits_out_the_pacing_interval() {
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let runtime = test_runtime(store.clone() as SharedStore);
     create_namespace(&runtime, &namespace_id).await;
-    let mut publisher = standalone_publisher(&namespace_id, &runtime);
     let timer = Arc::new(ManualClock::new(0));
-    publisher.timer = timer.clone();
-    publisher.min_publish_interval = Duration::from_millis(400);
+    let mut core = TestCore {
+        timer: timer.clone(),
+        ..TestCore::default()
+    };
+    core.config.min_publish_interval_ms = 400;
+    let publisher = standalone_publisher_with(&namespace_id, &runtime, core);
 
     store.block_next();
     let active = admit_commit(
@@ -1230,8 +1290,16 @@ async fn a_sequential_follow_up_publishes_at_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let mut writer = test_writer_with_interval(store, 400).await;
-    writer.mode.publisher.timer = Arc::new(ManualClock::new(0));
+    let writer = crate::LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 400,
+            ..crate::RuntimeConfig::default()
+        })
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("build writer");
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -1436,8 +1504,12 @@ async fn deletion_folds_the_tail_with_the_configured_run_policy() {
         ..loonfs_core::MetadataRunPolicy::default()
     };
     let runtime = TestRuntime {
-        core: test_runtime_core(store.clone(), one_row_segments),
-        bits: test_writer_bits(),
+        core: TestCore {
+            run_policy: one_row_segments,
+            ..TestCore::default()
+        }
+        .open(store.clone()),
+        writer: test_writer_state(),
     };
     create_namespace(&runtime, &namespace_id).await;
     let publisher = standalone_publisher(&namespace_id, &runtime);
@@ -2088,7 +2160,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         "drain reports the count of panicked publisher tasks: {drain_error}"
     );
     assert_eq!(
-        registry.shared.admission.used_requests(),
+        registry.shared.context.admission.used_requests(),
         0,
         "panic and drain refund admission"
     );
@@ -2948,6 +3020,7 @@ async fn maintenance_invalidation_leaves_the_writer_tail() {
 
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     maintenance
+        .compactor
         .publisher
         .invalidate_namespace(&namespace_id, NamespaceChange::Unchanged)
         .await;
@@ -3038,9 +3111,12 @@ async fn wal_recording_writer(
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone() as SharedStore)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .min_publish_interval_ms(0)
-        .max_staleness_ms(loonfs_core::limits::READ_REVALIDATION_BOUND_MS)
-        .trace_mode(TraceMode::Remote)
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            max_staleness_ms: loonfs_core::limits::READ_REVALIDATION_BOUND_MS,
+            trace_mode: TraceMode::Remote,
+            ..crate::RuntimeConfig::default()
+        })
         .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
@@ -3062,7 +3138,7 @@ async fn a_writer_keeps_its_tail_out_of_the_read_cache() {
         namespaces[0].commit_candidate(CommitCandidate::new(create_directory_request(name, name)))
     };
     let heads = writer.metadata_cache().stats();
-    assert_eq!(heads.wal_tail_inserts, 0, "{heads:?}");
+    assert_eq!(heads.wal_tails.inserts, 0, "{heads:?}");
 
     commit("before-fold").await.expect("commit before the fold");
     writer
@@ -3086,11 +3162,11 @@ async fn a_writer_keeps_its_tail_out_of_the_read_cache() {
     commit("after-fold").await.expect("commit after the fold");
 
     let stats = writer.metadata_cache().stats();
-    assert_eq!(stats.wal_tail_misses, heads.wal_tail_misses, "{stats:?}");
-    assert_eq!(stats.wal_tail_inserts, 0, "{stats:?}");
-    assert_eq!(stats.wal_tail_evictions, 0, "{stats:?}");
+    assert_eq!(stats.wal_tails.misses, heads.wal_tails.misses, "{stats:?}");
+    assert_eq!(stats.wal_tails.inserts, 0, "{stats:?}");
+    assert_eq!(stats.wal_tails.evictions, 0, "{stats:?}");
     assert_eq!(
-        stats.wal_tail_bytes, heads.wal_tail_bytes,
+        stats.wal_tails.cached_decoded_bytes, heads.wal_tails.cached_decoded_bytes,
         "the publishes and the fold add nothing to the read cache: {stats:?}"
     );
     writer.shutdown().await.expect("shutdown");
@@ -3126,8 +3202,8 @@ async fn a_closed_session_hands_its_head_and_tail_to_the_read_cache() {
         .await
         .expect("read after the session ends");
     let after = writer.metadata_cache().stats();
-    assert_eq!(after.wal_tail_hits, before.wal_tail_hits + 1, "{after:?}");
-    assert_eq!(after.wal_tail_misses, before.wal_tail_misses, "{after:?}");
+    assert_eq!(after.wal_tails.hits, before.wal_tails.hits + 1, "{after:?}");
+    assert_eq!(after.wal_tails.misses, before.wal_tails.misses, "{after:?}");
     assert_eq!(
         store.count(OperationSelector::Read),
         0,
@@ -3142,10 +3218,18 @@ async fn a_quiet_writer_confirms_its_tip_but_the_revalidation_bound_replays_it()
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let mut writer =
-        test_writer_with_cache(store, MetadataCache::default(), recorder.clone()).await;
     let timer = Arc::new(ManualClock::new(0));
-    writer.mode.publisher.timer = timer.clone();
+    let writer = crate::LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..crate::RuntimeConfig::default()
+        })
+        .metrics_recorder(recorder.clone())
+        .monotonic_timer(timer.clone())
+        .build()
+        .await
+        .expect("build writer");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -3216,7 +3300,13 @@ async fn zero_head_and_wal_tail_limits_cache_nothing_and_sessions_keep_their_tai
         .expect("commit");
 
     let stats = writer.metadata_cache().stats();
-    assert_eq!((stats.head_bytes, stats.wal_tail_bytes), (0, 0));
+    assert_eq!(
+        (
+            stats.heads.cached_decoded_bytes,
+            stats.wal_tails.cached_decoded_bytes
+        ),
+        (0, 0)
+    );
     assert_eq!(
         counter(&recorder, "loonfs.publisher.tail_replays"),
         u64::try_from(namespaces.len()).expect("small count"),
@@ -3248,9 +3338,13 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
                 .max_concurrent_publications(NonZeroUsize::MIN)
                 .build(),
         )
-        .publication_policy(crate::PublicationPolicy {
-            max_requests_per_namespace: NonZeroUsize::new(1).expect("one request per namespace"),
-            ..crate::PublicationPolicy::default()
+        .config(crate::RuntimeConfig {
+            publication: crate::PublicationPolicy {
+                max_requests_per_namespace: NonZeroUsize::new(1)
+                    .expect("one request per namespace"),
+                ..crate::PublicationPolicy::default()
+            },
+            ..crate::RuntimeConfig::default()
         })
         .build()
         .await
@@ -3297,7 +3391,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     first.abort();
     let _ = first.await;
     assert_eq!(
-        registry.shared.admission.used_requests(),
+        registry.shared.context.admission.used_requests(),
         2,
         "disconnected work remains charged"
     );
@@ -3314,7 +3408,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
         .expect("second task")
         .expect("second publication");
     writer.shutdown().await.expect("drain");
-    assert_eq!(registry.shared.admission.used_requests(), 0);
+    assert_eq!(registry.shared.context.admission.used_requests(), 0);
     assert_eq!(budget.stats(), crate::ExecutionBudgetStats::default());
 }
 
@@ -3441,6 +3535,7 @@ mod head_positions;
 mod hint_raises;
 mod inline_writer;
 mod pin_folds;
+mod publication_clock;
 mod retention_expiry;
 mod session_compaction;
 mod write_stop_wait;

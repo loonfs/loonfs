@@ -93,9 +93,11 @@ impl ServerConfig {
             ("max_upload_bytes", self.max_upload_bytes),
             ("request_deadline_ms", self.request_deadline_ms),
             ("shutdown_deadline_ms", self.shutdown_deadline_ms),
-            ("max_download_bytes", self.max_download_bytes),
         ] {
             validate_positive(field, value, None)?;
+        }
+        if let Some(max_download_bytes) = self.max_download_bytes {
+            validate_positive("max_download_bytes", max_download_bytes, None)?;
         }
         for (field, value) in [
             ("max_in_flight_requests", self.max_in_flight_requests),

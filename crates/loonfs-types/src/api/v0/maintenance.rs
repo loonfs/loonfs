@@ -1,7 +1,7 @@
 //! Maintenance job requests and responses for the v0 HTTP API.
 
 use super::{GcRequest, GcResponse};
-use crate::{AccessRevisionNo, ChangeSeq, CommitId, ManifestNo, NamespaceId, PrincipalId};
+use crate::{AccessRevisionNo, ChangeSeq, CommitId, NamespaceId, PrincipalId};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -132,37 +132,6 @@ pub struct MetadataMaintenanceRequest {
     pub max_wal_tail_objects: Option<NonZeroU64>,
 }
 
-/// What the WAL fold step of a maintenance pass did.
-///
-/// The embedded runtime reports it. It isn't part of the HTTP API.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum WalFoldStepOutcome {
-    /// The tail was below the threshold, so there was nothing to fold.
-    NotNeeded,
-    /// The step folded the WAL tail and published the next current manifest.
-    Folded {
-        /// The last sequence that the published manifest includes.
-        manifest_head_seq: ChangeSeq,
-    },
-    /// The current manifest already included the captured WAL tail, so this step didn't publish a
-    /// manifest.
-    AlreadyPublished {
-        /// The sequence that this step tried to fold through.
-        attempted_seq: ChangeSeq,
-        /// The number of the namespace's current manifest.
-        current_manifest_no: ManifestNo,
-    },
-    /// Concurrent updates prevented every publication attempt.
-    RetriesExhausted {
-        /// The head sequence observed before the step ran.
-        observed_head_seq: ChangeSeq,
-    },
-    /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
-    #[serde(other)]
-    Unknown,
-}
-
 /// The result of one maintenance job.
 ///
 /// The `kind` matches the request.
@@ -211,68 +180,6 @@ pub enum MetadataMaintenanceOutcome {
     /// Work is still due, or the run couldn't tell. Another run continues the work.
     Due,
     /// An outcome from a newer server.
-    #[serde(other)]
-    Unknown,
-}
-
-/// What the WAL fold and the compaction unit of one metadata maintenance pass did.
-///
-/// The embedded runtime reports it. It isn't part of the HTTP API.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataPassReport {
-    /// The namespace that this pass maintained.
-    pub namespace_id: NamespaceId,
-    /// What the WAL fold did.
-    pub wal_fold: WalFoldStepOutcome,
-    /// What the compaction unit did.
-    pub compaction: MetadataCompactionOutcome,
-}
-
-/// What one metadata compaction unit did.
-///
-/// The embedded runtime reports it. It isn't part of the HTTP API.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataCompactionResponse {
-    /// The namespace that this run compacted.
-    pub namespace_id: NamespaceId,
-    /// The outcome of the compaction.
-    pub compaction: MetadataCompactionOutcome,
-}
-
-/// The outcome of one metadata compaction unit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum MetadataCompactionOutcome {
-    /// No eligible family group was available, so nothing was published.
-    NotNeeded,
-    /// The unit merged the selected window and published the next manifest.
-    Published {
-        /// The manifest that the compaction published.
-        manifest_no: ManifestNo,
-        /// The rows that the compaction read.
-        rows_read: u64,
-        /// The rows that the compaction wrote.
-        rows_written: u64,
-        /// The input bytes that the compaction read.
-        input_bytes: u64,
-        /// The output bytes that the compaction wrote.
-        output_bytes: u64,
-        /// The output segments that the compaction wrote.
-        output_segments: u64,
-    },
-    /// The selected window lists more rows than a metadata pass merges, so nothing was published.
-    ///
-    /// `Maintenance::compact_metadata` merges a window of any size, and
-    /// `Maintenance::maintain_metadata_while_due` runs it whenever a pass reports this outcome.
-    MetadataCompactionRequired,
-    /// The run was cancelled, so the current manifest didn't change.
-    Cancelled,
-    /// The unit stopped because its inputs changed, time ran out, or every publication attempt
-    /// lost.
-    Abandoned,
-    /// Another process claimed the namespace's compactor epoch, so nothing was published.
-    Fenced,
-    /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
     #[serde(other)]
     Unknown,
 }

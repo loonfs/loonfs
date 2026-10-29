@@ -1,6 +1,9 @@
 //! Metadata retry, collection, and close costs for held sessions.
 
-use super::{held_ids, seed_unfolded_tail, seed_writer, sweep_config, SweepServer, DAY_MS};
+use super::{
+    held_ids, idle_fold_after_ms, seed_unfolded_tail, seed_writer, sweep_config, SweepServer,
+    DAY_MS,
+};
 use crate::sweep::GarbageCollection;
 use loonfs::SharedObjectStore;
 use loonfs_grep::GrepWorkerConfig;
@@ -71,7 +74,7 @@ async fn ticks_leave_active_sessions_alone_and_fold_idle_tails_then_cost_nothing
         server.tick_after(1).await;
         assert!(!store.take().is_empty(), "unfinished metadata is retried");
         assert!(server.wal_tail_objects(&namespace_id).await > 0);
-        server.tick_after(config.idle_fold_after_ms).await;
+        server.tick_after(idle_fold_after_ms(&config)).await;
         assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
         assert!(held.metadata_caught_up());
         store.reset();
@@ -100,7 +103,7 @@ async fn a_tick_leaves_a_tail_below_the_configured_inline_fold_size_until_it_is_
     ));
     let mut config = sweep_config(None);
     config.inline_content.inline_content_threshold_bytes = Some(VALUE_BYTES);
-    config.inline_content.inline_content_fold_at_bytes = Some(8 * MIB);
+    config.inline_content.inline_content_fold_at_bytes = 8 * MIB;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("large-fold-trigger");
     server
@@ -144,7 +147,7 @@ async fn a_tick_leaves_a_tail_below_the_configured_inline_fold_size_until_it_is_
         tail_objects,
         "a tail below the configured fold size stays unfolded"
     );
-    server.tick_after(config.idle_fold_after_ms).await;
+    server.tick_after(idle_fold_after_ms(&config)).await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     server.runtime.shutdown().await.expect("shutdown");
 }
@@ -256,7 +259,7 @@ async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval(
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = 0;
+    config.idle_fold_after_ms = Some(0);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("fenced-compactor");
     server
@@ -330,7 +333,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(Some(GrepWorkerConfig::default()));
-    config.idle_fold_after_ms = 0;
+    config.idle_fold_after_ms = Some(0);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let moved = namespace_id("moved");
     let quiet = namespace_id("quiet");
@@ -409,7 +412,7 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(Some(GrepWorkerConfig::default()));
-    config.idle_fold_after_ms = 0;
+    config.idle_fold_after_ms = Some(0);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.sweep.inner.namespaces;
     let namespace_id = namespace_id("idle-close");
@@ -505,7 +508,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     ));
     let mut config = sweep_config(None);
     config.idle_session_close_after_ms = 1;
-    config.idle_fold_after_ms = 60_000;
+    config.idle_fold_after_ms = Some(60_000);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.sweep.inner.namespaces;
     let aborted = namespace_id("aborted-upload");
@@ -548,7 +551,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     assert!(server.wal_tail_objects(&unfolded).await > 0);
     store.reset();
     server
-        .tick_after(config.idle_fold_after_ms - config.tick_interval_ms - 1)
+        .tick_after(idle_fold_after_ms(&config) - config.tick_interval_ms - 1)
         .await;
     assert!(
         store.take().is_empty(),
@@ -576,9 +579,12 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
         .writer_id(loonfs_test_support::ids::writer_id("self-maintenance"))
         .wall_clock(clock.clone())
         .monotonic_timer(clock.clone())
-        .inline_content(loonfs::InlineContentPolicy {
-            inline_content_fold_at_bytes: 1,
-            ..loonfs::InlineContentPolicy::default()
+        .config(loonfs::RuntimeConfig {
+            inline_content: loonfs::InlineContentPolicy {
+                inline_content_fold_at_bytes: 1,
+                ..loonfs::InlineContentPolicy::default()
+            },
+            ..loonfs::RuntimeConfig::default()
         })
         .build()
         .await
@@ -629,7 +635,7 @@ async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = 60_000;
+    config.idle_fold_after_ms = Some(60_000);
     // The runtime's timer starts a day ahead of the system timer, so a host
     // that read a second timer would disagree with it.
     let server = SweepServer::start(store.clone(), &config, DAY_MS).await;
@@ -652,7 +658,7 @@ async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
     store.reset();
     server
-        .tick_after(config.idle_fold_after_ms - config.tick_interval_ms - 1)
+        .tick_after(idle_fold_after_ms(&config) - config.tick_interval_ms - 1)
         .await;
     assert!(
         store.take().is_empty(),
@@ -666,7 +672,7 @@ async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
     );
 
     server
-        .tick_after(config.idle_session_close_after_ms - config.idle_fold_after_ms)
+        .tick_after(config.idle_session_close_after_ms - idle_fold_after_ms(&config))
         .await;
     assert_eq!(
         held_ids(namespaces).len(),

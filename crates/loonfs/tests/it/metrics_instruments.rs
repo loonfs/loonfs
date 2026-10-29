@@ -174,13 +174,13 @@ fn reads_record_head_cache_lookups_and_retained_bytes_in_the_cache_stats() {
         reader.metadata_cache().stats()
     });
 
-    assert_eq!((stats.head_misses, stats.head_hits), (2, 1));
+    assert_eq!((stats.heads.misses, stats.heads.hits), (2, 1));
     assert!(
-        stats.wal_tail_bytes > 0,
+        stats.wal_tails.cached_decoded_bytes > 0,
         "the head loads cached both namespaces' WAL tails"
     );
     assert!(
-        stats.manifest_bytes > 0,
+        stats.manifests.cached_decoded_bytes > 0,
         "the head loads cached the manifests they decoded"
     );
 }

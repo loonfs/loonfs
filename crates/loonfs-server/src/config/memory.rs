@@ -1,13 +1,13 @@
 //! Memory sizing: the fixed costs, the headroom, and the pools that the
 //! server sizes under its memory limit.
 
-use super::server::default_max_merge_input_bytes;
 use super::validate::validate_positive;
 use super::ServerConfig;
 use crate::{Result, ServerError};
 use loonfs::{MetadataCache, SsdSegmentBlocks};
 use loonfs_types::config::ConfigFieldError;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 const MIB: usize = 1024 * 1024;
@@ -95,7 +95,7 @@ pub(crate) struct MemorySizing {
     content_object: MemoryTerm,
     pub(crate) grep: MemoryTerm,
     pub(super) read_working: MemoryTerm,
-    pub(super) publication: MemoryTerm,
+    pub(super) admitted: MemoryTerm,
     pub(super) merge_input: MemoryTerm,
     compactions: usize,
     serves_grep: bool,
@@ -111,7 +111,7 @@ impl MemorySizing {
             (&self.content_object, 1),
             (&self.grep, usize::from(self.serves_grep)),
             (&self.read_working, 1),
-            (&self.publication, 1),
+            (&self.admitted, 1),
             (&self.merge_input, self.compactions),
         ]
     }
@@ -199,6 +199,17 @@ impl ServerConfig {
     /// the pools fit.
     pub(super) fn memory_sizing(&self, cgroup_limit: Option<usize>) -> Result<MemorySizing> {
         let limit = self.memory_limit_bytes.or(cgroup_limit);
+        let folds = self
+            .max_concurrent_folds
+            .map_or(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS, NonZeroUsize::get);
+        let compactions = self.max_concurrent_compactions.map_or(
+            loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+            NonZeroUsize::get,
+        );
+        let content_writes = self.max_concurrent_content_writes.map_or(
+            loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES,
+            NonZeroUsize::get,
+        );
         let fixed = [
             ("process", (128 * MIB) as u128),
             (
@@ -213,13 +224,12 @@ impl ServerConfig {
             ),
             (
                 "segment output ((`max_concurrent_folds` + `max_concurrent_compactions`) x 32 MiB)",
-                (self.max_concurrent_folds.get() as u128
-                    + self.max_concurrent_compactions.get() as u128)
+                (folds as u128 + compactions as u128)
                     * loonfs::MAX_PENDING_SEGMENT_BYTES as u128,
             ),
             (
                 "content writes (`max_concurrent_content_writes` x 16 MiB, or 72 MiB on R2)",
-                self.max_concurrent_content_writes.get() as u128
+                content_writes as u128
                     * u128::from(self.store.kind().max_assembly_buffer_bytes()),
             ),
             (
@@ -307,21 +317,19 @@ impl ServerConfig {
                 share(20),
                 loonfs::DEFAULT_MAX_READ_WORKING_BYTES,
             ),
-            publication: MemoryTerm::new(
-                "publication.max_estimated_bytes",
-                self.publication
-                    .max_estimated_bytes
-                    .map(std::num::NonZeroUsize::get),
+            admitted: MemoryTerm::new(
+                "max_admitted_bytes",
+                self.max_admitted_bytes.map(NonZeroUsize::get),
                 share(10),
                 64 * MIB,
             ),
             merge_input: MemoryTerm::new(
                 "max_merge_input_bytes",
                 self.max_merge_input_bytes,
-                share(10).map(|bytes| bytes / self.max_concurrent_compactions.get()),
-                default_max_merge_input_bytes(),
+                share(10).map(|bytes| bytes / compactions),
+                loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
             ),
-            compactions: self.max_concurrent_compactions.get(),
+            compactions,
             serves_grep,
         };
         memory.validate()?;

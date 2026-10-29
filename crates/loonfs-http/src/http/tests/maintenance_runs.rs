@@ -2,12 +2,12 @@
 //! runs against namespaces that do not exist or are deleted.
 
 use super::*;
+use loonfs::MetadataCompactionOutcome;
 use loonfs::{MaintainMetadataOptions, MaintenanceCancellation};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::ids::writer_id;
 use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
-use loonfs_types::MetadataCompactionOutcome;
 use tower::ServiceExt;
 
 async fn run(
@@ -56,7 +56,10 @@ async fn write_delta_runs(store: SharedObjectStore, namespaces: &[&NamespaceId])
     let actor = loonfs_test_support::test_actor();
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id("history-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");

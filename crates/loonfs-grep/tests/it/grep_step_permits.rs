@@ -51,10 +51,13 @@ async fn content_object_writer(store: &SharedObjectStore) -> LoonFs<Writable> {
         .writer_id(loonfs_test_support::ids::writer_id(
             "grep-step-permits-writer",
         ))
-        .min_publish_interval_ms(0)
-        .inline_content(InlineContentPolicy {
-            inline_content_threshold_bytes: None,
-            ..InlineContentPolicy::default()
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            inline_content: InlineContentPolicy {
+                inline_content_threshold_bytes: None,
+                ..InlineContentPolicy::default()
+            },
+            ..loonfs::RuntimeConfig::default()
         })
         .build()
         .await

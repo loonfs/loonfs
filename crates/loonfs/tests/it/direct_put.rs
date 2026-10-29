@@ -309,9 +309,12 @@ fn put_file_gates_publish_on_its_own_content_write_without_probing() {
         object_store,
         "put-file-content-validation-test",
         |builder| {
-            builder.inline_content(loonfs::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
-                ..Default::default()
+            builder.config(loonfs::RuntimeConfig {
+                inline_content: loonfs::InlineContentPolicy {
+                    inline_content_threshold_bytes: None,
+                    ..Default::default()
+                },
+                ..loonfs::RuntimeConfig::default()
             })
         },
     );
@@ -522,7 +525,10 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
     let object_store = store(temp_dir.path());
     block_on(async {
         let fs = open_runtime_with_async(object_store.clone(), "zero-interval-test", |builder| {
-            builder.min_publish_interval_ms(0)
+            builder.config(loonfs::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                ..loonfs::RuntimeConfig::default()
+            })
         })
         .await;
         fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -562,9 +568,12 @@ fn a_transient_content_failure_fails_only_its_own_concurrent_put() {
     let object_store: SharedObjectStore = raw_store.clone();
     block_on(async {
         let fs = open_runtime_with_async(object_store, "window-abort-test", |builder| {
-            builder.inline_content(loonfs::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
-                ..Default::default()
+            builder.config(loonfs::RuntimeConfig {
+                inline_content: loonfs::InlineContentPolicy {
+                    inline_content_threshold_bytes: None,
+                    ..Default::default()
+                },
+                ..loonfs::RuntimeConfig::default()
             })
         })
         .await;

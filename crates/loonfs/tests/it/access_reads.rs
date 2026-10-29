@@ -45,7 +45,10 @@ async fn check_buffered_read_access(content_size: usize) {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("access-reads"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -72,7 +75,10 @@ async fn check_buffered_read_access(content_size: usize) {
     // `strong` read does, so the next read after a change sees it.
     let reader = LoonFs::builder_with_store(store)
         .read_only()
-        .max_staleness_ms(0)
+        .config(loonfs::RuntimeConfig {
+            max_staleness_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("reader")
@@ -212,7 +218,10 @@ async fn check_eventual_read_access(content_size: usize) {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("eventual-access"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -342,7 +351,10 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000_000));
     let old_writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("old-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .monotonic_timer(clock.clone())
         .build()
         .await
@@ -409,7 +421,10 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
     }
     let peer = LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id("peer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("peer");

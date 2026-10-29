@@ -32,7 +32,10 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     creator.shutdown().await.expect("shutdown creator");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("fresh writer");
@@ -148,7 +151,10 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
     ));
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");

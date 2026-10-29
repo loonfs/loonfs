@@ -47,7 +47,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
 
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("coldstat-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("build writer");

@@ -23,7 +23,10 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
     let namespace_id = namespace_id("publication-recovery");
     let writer = LoonFs::builder_with_store(base.clone())
         .writer_id(loonfs_test_support::ids::writer_id("publication-recovery"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");

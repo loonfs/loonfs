@@ -1,10 +1,7 @@
 //! The server config file's top-level settings, its `[auth]` and
 //! `[transport]` tables, and their defaults.
 
-use super::{
-    GrepConfig, InlineContentConfig, JobMode, MemorySizing, MetadataCacheConfig,
-    PublicationLimitsConfig, ReadConsistency, StoreConfig,
-};
+use super::{GrepConfig, JobMode, MemorySizing, MetadataCacheConfig, ReadConsistency, StoreConfig};
 use crate::{Result, ServerError};
 use loonfs::metrics::MetricsRecorder;
 use loonfs::ExecutionBudget;
@@ -42,34 +39,54 @@ pub struct ServerConfig {
     pub content_token_secret: SecretString,
     pub writer_id: WriterId,
     /// Maximum public reads running at once. Reads past this limit wait.
-    #[serde(default = "default_max_concurrent_reads")]
-    pub max_concurrent_reads: NonZeroUsize,
+    /// Defaults to the runtime's
+    /// [`DEFAULT_MAX_CONCURRENT_READS`](loonfs::DEFAULT_MAX_CONCURRENT_READS),
+    /// 64.
+    pub max_concurrent_reads: Option<NonZeroUsize>,
     #[serde(default = "default_max_in_flight_requests")]
     pub max_in_flight_requests: NonZeroUsize,
     #[serde(default = "default_max_connections")]
     pub max_connections: NonZeroUsize,
     /// Maximum WAL folds this server runs concurrently. A sustained
     /// `loonfs.execution_budget.folds_waiting` gauge means this cap is too
-    /// low.
-    #[serde(default = "default_max_concurrent_folds")]
-    pub max_concurrent_folds: NonZeroUsize,
+    /// low. Defaults to the runtime's
+    /// [`DEFAULT_MAX_CONCURRENT_FOLDS`](loonfs::DEFAULT_MAX_CONCURRENT_FOLDS),
+    /// 2.
+    pub max_concurrent_folds: Option<NonZeroUsize>,
     /// Maximum metadata compaction units this server runs at once, whether
     /// writer sessions, the maintenance sweep, or maintenance requests start
-    /// them. A merge never takes a fold permit.
-    #[serde(default = "default_max_concurrent_compactions")]
-    pub max_concurrent_compactions: NonZeroUsize,
+    /// them. A merge never takes a fold permit. Defaults to the runtime's
+    /// [`DEFAULT_MAX_CONCURRENT_COMPACTIONS`](loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS),
+    /// 2.
+    pub max_concurrent_compactions: Option<NonZeroUsize>,
     /// Maximum content object writes this server runs at once, including the
     /// content that folds write. A sustained
     /// `loonfs.execution_budget.content_writes_waiting` gauge means this cap
-    /// is too low.
-    #[serde(default = "default_max_concurrent_content_writes")]
-    pub max_concurrent_content_writes: NonZeroUsize,
-    /// Shared request and concurrency limits for namespace publications.
+    /// is too low. Defaults to the runtime's
+    /// [`DEFAULT_MAX_CONCURRENT_CONTENT_WRITES`](loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES),
+    /// 32.
+    pub max_concurrent_content_writes: Option<NonZeroUsize>,
+    /// Maximum publication requests admitted and not yet settled, across
+    /// every namespace. Defaults to 8,192.
+    pub max_admitted_requests: Option<NonZeroUsize>,
+    /// Approximate retained bytes of the publication requests admitted and
+    /// not yet settled, across every namespace. Derived when sized, and
+    /// otherwise 64 MiB.
+    pub max_admitted_bytes: Option<NonZeroUsize>,
+    /// Maximum publication batches running at once. Defaults to 8.
+    pub max_concurrent_publications: Option<NonZeroUsize>,
+    /// The per-namespace admission limits of the server's runtime. The
+    /// write-stop wait isn't a key of this table: the server sets it to half
+    /// of `request_deadline_ms`, so a commit that waits for the whole wait
+    /// returns `maintenance_required` before its request returns
+    /// `deadline_exceeded`.
     #[serde(default)]
-    pub publication: PublicationLimitsConfig,
-    /// Defaults to a 64 KiB threshold; `false` disables inline writes in TOML.
+    pub publication: loonfs::PublicationPolicy,
+    /// The inline content policy of the server's runtime. Inline writes are
+    /// on with a 64 KiB threshold by default, and
+    /// `inline_content_threshold_bytes = false` turns them off.
     #[serde(default)]
-    pub inline_content: InlineContentConfig,
+    pub inline_content: loonfs::InlineContentPolicy,
     /// Limits of the one metadata cache the server's runtime reads through.
     #[serde(default)]
     pub metadata_cache: MetadataCacheConfig,
@@ -128,8 +145,10 @@ pub struct ServerConfig {
     /// against resolved metadata before fetching content bytes; over-limit reads
     /// answer `content_too_large`. Advertised to clients as the
     /// `download.service_proxied.max_content_bytes` capability limit.
-    #[serde(default = "default_max_download_bytes")]
-    pub max_download_bytes: u64,
+    /// Defaults to the runtime's
+    /// [`DEFAULT_MAX_READ_CONTENT_BYTES`](loonfs::DEFAULT_MAX_READ_CONTENT_BYTES),
+    /// 256 MiB.
+    pub max_download_bytes: Option<u64>,
     /// How many proxied upload bodies the server will stream at once;
     /// requests past the cap answer `server_busy` before any transfer.
     /// Worst-case upload memory is this times one streamed part, since
@@ -196,9 +215,10 @@ pub struct ServerConfig {
     /// How old a WAL tail's newest commit must be before maintenance folds
     /// a tail that is below the fold thresholds, in milliseconds. The
     /// maintenance sweep and explicit `metadata` requests use the same
-    /// period. Zero turns the rule off. Defaults to 15 minutes.
-    #[serde(default = "default_idle_fold_after_ms")]
-    pub idle_fold_after_ms: u64,
+    /// period. Zero turns the rule off. Defaults to the runtime's
+    /// [`DEFAULT_IDLE_FOLD_AFTER_MS`](loonfs::DEFAULT_IDLE_FOLD_AFTER_MS), 15
+    /// minutes.
+    pub idle_fold_after_ms: Option<u64>,
     /// How the server's listener carries requests. Without a `[transport]`
     /// table, the server serves plaintext HTTP, which validation accepts
     /// only on a loopback bind, because the wire carries the bearer token
@@ -279,13 +299,9 @@ fn default_shutdown_deadline_ms() -> u64 {
 }
 
 fn default_max_upload_bytes() -> u64 {
-    // Mirrors the download default so anything the proxy accepted, the proxy
-    // will serve back. Content ingested past this through `direct_put`
-    // needs a raised limit to be read through the server.
-    default_max_download_bytes()
-}
-
-fn default_max_download_bytes() -> u64 {
+    // The download default, so anything the proxy accepted, the proxy will
+    // serve back. Content ingested past this through `direct_put` needs a
+    // raised limit to be read through the server.
     loonfs::DEFAULT_MAX_READ_CONTENT_BYTES
 }
 
@@ -299,22 +315,6 @@ fn default_max_connections() -> NonZeroUsize {
 
 fn default_max_concurrent_uploads() -> NonZeroUsize {
     const { NonZeroUsize::new(loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS).unwrap() }
-}
-
-fn default_max_concurrent_reads() -> NonZeroUsize {
-    const { NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_READS).unwrap() }
-}
-
-fn default_max_concurrent_folds() -> NonZeroUsize {
-    const { NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_FOLDS).unwrap() }
-}
-
-fn default_max_concurrent_compactions() -> NonZeroUsize {
-    const { NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS).unwrap() }
-}
-
-fn default_max_concurrent_content_writes() -> NonZeroUsize {
-    const { NonZeroUsize::new(loonfs::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES).unwrap() }
 }
 
 fn default_max_concurrent_downloads() -> NonZeroUsize {
@@ -345,14 +345,6 @@ fn default_idle_session_close_after_ms() -> u64 {
     1_800_000
 }
 
-pub(super) fn default_max_merge_input_bytes() -> usize {
-    loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
-}
-
-fn default_idle_fold_after_ms() -> u64 {
-    loonfs::DEFAULT_IDLE_FOLD_AFTER_MS
-}
-
 impl ServerConfig {
     /// Builds the object store selected by this server configuration.
     pub fn object_store(&self) -> Result<ConfiguredObjectStore> {
@@ -364,16 +356,31 @@ impl ServerConfig {
         })
     }
 
-    /// Builds the publication policy of the server's one runtime from its
-    /// `[publication]` table and `request_deadline_ms`.
-    ///
-    /// The write-stop wait is half the request deadline, so a commit that
-    /// waits for the whole write-stop wait returns `maintenance_required`
-    /// before its request returns `deadline_exceeded`.
-    pub(crate) fn publication_policy(&self) -> loonfs::PublicationPolicy {
-        loonfs::PublicationPolicy {
-            write_stop_wait_budget_ms: self.request_deadline_ms / 2,
-            ..self.publication.effective_policy()
+    /// Returns the settings of the server's one runtime.
+    pub(crate) fn runtime_config(&self) -> loonfs::RuntimeConfig {
+        let defaults = loonfs::RuntimeConfig::default();
+        loonfs::RuntimeConfig {
+            // Every read the server serves goes through this runtime, so the
+            // read cap covers every proxied content read.
+            max_read_content_bytes: self
+                .max_download_bytes
+                .unwrap_or(defaults.max_read_content_bytes),
+            manifest_revalidation_interval_ms: self
+                .manifest_revalidation_interval_ms
+                .unwrap_or(defaults.manifest_revalidation_interval_ms),
+            max_staleness_ms: self.max_staleness_ms.unwrap_or(defaults.max_staleness_ms),
+            consistency: self.consistency,
+            trace_mode: loonfs::TraceMode::Remote,
+            min_publish_interval_ms: self.min_publish_interval_ms,
+            publication: loonfs::PublicationPolicy {
+                write_stop_wait_budget_ms: self.request_deadline_ms / 2,
+                ..self.publication.clone()
+            },
+            inline_content: self.inline_content.clone(),
+            idle_fold_after_ms: match self.idle_fold_after_ms {
+                Some(idle_fold_after_ms) => NonZeroU64::new(idle_fold_after_ms),
+                None => defaults.idle_fold_after_ms,
+            },
         }
     }
 
@@ -390,9 +397,9 @@ impl ServerConfig {
         }
     }
 
-    /// Builds the execution budget of the server's one runtime from its fold,
-    /// compaction, content write, and merge input limits and the totals of
-    /// its `[publication]` table, reporting to `recorder`.
+    /// Builds the execution budget of the server's one runtime from its read,
+    /// fold, compaction, content write, and merge input limits and its
+    /// admission totals, reporting to `recorder`.
     pub(crate) fn execution_budget(
         &self,
         memory: &MemorySizing,
@@ -402,18 +409,26 @@ impl ServerConfig {
             NonZeroUsize::new(value).expect("validated budget limits should be nonzero")
         };
         let mut builder = ExecutionBudget::builder()
-            .max_concurrent_reads(self.max_concurrent_reads)
-            .max_concurrent_folds(self.max_concurrent_folds)
-            .max_concurrent_compactions(self.max_concurrent_compactions)
-            .max_concurrent_content_writes(self.max_concurrent_content_writes)
             .max_merge_input_bytes(positive(memory.merge_input.bytes))
             .max_read_working_bytes(memory.read_working.bytes)
-            .max_admitted_bytes(positive(memory.publication.bytes))
+            .max_admitted_bytes(positive(memory.admitted.bytes))
             .metrics_recorder(recorder);
-        if let Some(limit) = self.publication.max_requests {
+        if let Some(limit) = self.max_concurrent_reads {
+            builder = builder.max_concurrent_reads(limit);
+        }
+        if let Some(limit) = self.max_concurrent_folds {
+            builder = builder.max_concurrent_folds(limit);
+        }
+        if let Some(limit) = self.max_concurrent_compactions {
+            builder = builder.max_concurrent_compactions(limit);
+        }
+        if let Some(limit) = self.max_concurrent_content_writes {
+            builder = builder.max_concurrent_content_writes(limit);
+        }
+        if let Some(limit) = self.max_admitted_requests {
             builder = builder.max_admitted_requests(limit);
         }
-        if let Some(limit) = self.publication.max_concurrent_publications {
+        if let Some(limit) = self.max_concurrent_publications {
             builder = builder.max_concurrent_publications(limit);
         }
         builder.build()

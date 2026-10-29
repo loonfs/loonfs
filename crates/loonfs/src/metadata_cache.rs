@@ -2,8 +2,8 @@
 
 use crate::{ObjectStore, SharedObjectStore, READAHEAD_WINDOW_BYTES};
 use loonfs_core::cache::{
-    CacheScope, CompletedUploadSessionCache, HeadAndWalTailCache, MemorySegmentBlocks,
-    MetadataSegmentCache, ObjectCache, ObjectStoreScope, ReadWorkingMemory,
+    CacheScope, CompletedUploadSessionCache, DecodedBlockCacheStats, HeadAndWalTailCache,
+    MemorySegmentBlocks, MetadataSegmentCache, ObjectCache, ObjectStoreScope, ReadWorkingMemory,
     SharedCompletedUploadSessions, SharedHeadsAndWalTails, SharedObjects, SharedSegmentBlocks,
 };
 use std::fmt;
@@ -123,55 +123,35 @@ impl MetadataCache {
     /// runtime that reads through it.
     pub fn stats(&self) -> MetadataCacheStats {
         let segments = self.inner.segment_blocks.stats();
-        let manifests = self.inner.segment_blocks.manifest_stats();
-        let heads = self.inner.heads_and_wal_tails.head_stats();
-        let tails = self.inner.heads_and_wal_tails.tail_stats();
-        let content_objects = self.inner.objects.content_object_stats();
-        let completed_sessions = self.inner.completed_upload_sessions.stats();
         MetadataCacheStats {
-            segment_hits: segments.hits,
-            segment_misses: segments.misses,
-            segment_inserts: segments.inserts,
-            segment_evictions: segments.evictions,
-            segment_filter_skips: segments.filter_skips,
-            segment_filter_false_positives: segments.filter_false_positives,
-            segment_rejections: segments.rejections,
-            segment_bytes: segments.cached_decoded_bytes,
+            segment_blocks: DecodedBlockCacheStats {
+                hits: segments.hits,
+                misses: segments.misses,
+                inserts: segments.inserts,
+                evictions: segments.evictions,
+                evicted_decoded_bytes: segments.evicted_decoded_bytes,
+                rejections: segments.rejections,
+                rejected_decoded_bytes: segments.rejected_decoded_bytes,
+                cached_decoded_bytes: segments.cached_decoded_bytes,
+            },
+            segment_filter: SegmentFilterStats {
+                skips: segments.filter_skips,
+                false_positives: segments.filter_false_positives,
+            },
             segment_ssd: self
                 .inner
                 .ssd_segment_blocks
                 .as_ref()
                 .map(|ssd| ssd.stats()),
-            manifest_hits: manifests.hits,
-            manifest_misses: manifests.misses,
-            manifest_inserts: manifests.inserts,
-            manifest_evictions: manifests.evictions,
-            manifest_rejections: manifests.rejections,
-            manifest_bytes: manifests.cached_decoded_bytes,
-            head_hits: self.inner.head_hits.load(Ordering::Relaxed),
-            head_misses: self.inner.head_misses.load(Ordering::Relaxed),
-            head_evictions: heads.evictions,
-            head_evicted_bytes: heads.evicted_decoded_bytes,
-            head_rejections: heads.rejections,
-            head_rejected_bytes: heads.rejected_decoded_bytes,
-            head_bytes: heads.cached_decoded_bytes,
-            wal_tail_hits: tails.hits,
-            wal_tail_misses: tails.misses,
-            wal_tail_inserts: tails.inserts,
-            wal_tail_evictions: tails.evictions,
-            wal_tail_evicted_bytes: tails.evicted_decoded_bytes,
-            wal_tail_rejections: tails.rejections,
-            wal_tail_rejected_bytes: tails.rejected_decoded_bytes,
-            wal_tail_bytes: tails.cached_decoded_bytes,
-            content_object_hits: content_objects.hits,
-            content_object_misses: content_objects.misses,
-            content_object_inserts: content_objects.inserts,
-            content_object_evictions: content_objects.evictions,
-            content_object_bytes: content_objects.cached_decoded_bytes,
-            completed_upload_session_hits: completed_sessions.hits,
-            completed_upload_session_misses: completed_sessions.misses,
-            completed_upload_session_evictions: completed_sessions.evictions,
-            completed_upload_session_bytes: completed_sessions.cached_decoded_bytes,
+            manifests: self.inner.segment_blocks.manifest_stats(),
+            heads: DecodedBlockCacheStats {
+                hits: self.inner.head_hits.load(Ordering::Relaxed),
+                misses: self.inner.head_misses.load(Ordering::Relaxed),
+                ..self.inner.heads_and_wal_tails.head_stats()
+            },
+            wal_tails: self.inner.heads_and_wal_tails.tail_stats(),
+            content_objects: self.inner.objects.content_object_stats(),
+            completed_upload_sessions: self.inner.completed_upload_sessions.stats(),
         }
     }
 
@@ -455,102 +435,46 @@ impl MetadataCacheBuilder {
 }
 
 /// Counters and occupancy of a [`MetadataCache`], summed over every runtime
-/// that reads through it.
+/// that reads through it, with one set of cache counters for each kind of
+/// entry.
+///
+/// The byte fields of each set report what the cache charges its entries,
+/// including their keys and the cache's own allocation for each entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataCacheStats {
-    /// Segment block lookups that found their block in memory.
-    pub segment_hits: usize,
-    /// Segment block lookups that didn't find their block in memory.
-    pub segment_misses: usize,
-    /// Segment blocks inserted into memory.
-    pub segment_inserts: usize,
-    /// Segment blocks evicted from memory to stay within the segment limit.
-    pub segment_evictions: usize,
-    /// Segment blocks heavier than the whole segment limit, which are never
-    /// kept in memory.
-    pub segment_rejections: usize,
-    /// Segments skipped because their bloom filter ruled out a lookup before
-    /// any index or data read.
-    pub segment_filter_skips: usize,
-    /// Segments whose filter admitted a lookup that matched no rows.
-    pub segment_filter_false_positives: usize,
-    /// Bytes charged to segment blocks in memory now, including their keys
-    /// and the cache's own allocation for each entry.
-    pub segment_bytes: usize,
+    /// The decoded data, index, and filter blocks of segments in memory.
+    pub segment_blocks: DecodedBlockCacheStats,
+    /// The lookups that the segments' bloom filters decided.
+    pub segment_filter: SegmentFilterStats,
     /// The counters and occupancy of the SSD tier of the segment blocks, or
     /// `None` if the cache has no SSD tier.
     pub segment_ssd: Option<SsdSegmentBlocksStats>,
-    /// Manifest lookups that found their manifest in the cache.
-    pub manifest_hits: usize,
-    /// Manifest lookups that went to the store.
-    pub manifest_misses: usize,
-    /// Manifests inserted into the cache.
-    pub manifest_inserts: usize,
-    /// Manifests evicted to stay within the manifest limit.
-    pub manifest_evictions: usize,
-    /// Manifests heavier than the whole manifest limit, which are never
-    /// kept.
-    pub manifest_rejections: usize,
-    /// Bytes charged to manifests now, including their keys and the cache's
-    /// own allocation for each entry.
-    pub manifest_bytes: usize,
-    /// Namespace head lookups a read could start from.
-    pub head_hits: usize,
-    /// Namespace head lookups that sent a read to the store.
-    pub head_misses: usize,
-    /// Namespace heads evicted to stay within the head limit.
-    pub head_evictions: usize,
-    /// Bytes charged to the evicted namespace heads, including their keys.
-    pub head_evicted_bytes: usize,
-    /// Namespace heads heavier than the whole head limit, which are never
-    /// kept.
-    pub head_rejections: usize,
-    /// Bytes that the rejected namespace heads would have been charged,
-    /// including their keys and the cache's own allocation for each entry.
-    pub head_rejected_bytes: usize,
-    /// Bytes charged to namespace heads now, including their keys and the
-    /// cache's own allocation for each entry.
-    pub head_bytes: usize,
-    /// WAL-tail projection lookups the cache answered.
-    pub wal_tail_hits: usize,
-    /// WAL-tail projection lookups the cache could not answer.
-    pub wal_tail_misses: usize,
-    /// WAL-tail projections inserted.
-    pub wal_tail_inserts: usize,
-    /// WAL-tail projections evicted to stay within the WAL-tail limit.
-    pub wal_tail_evictions: usize,
-    /// Bytes charged to the evicted WAL-tail projections, including their
-    /// keys.
-    pub wal_tail_evicted_bytes: usize,
-    /// WAL-tail projections heavier than the whole WAL-tail limit, which are
-    /// never kept.
-    pub wal_tail_rejections: usize,
-    /// Bytes that the rejected WAL-tail projections would have been charged,
-    /// including their keys and the cache's own allocation for each entry.
-    pub wal_tail_rejected_bytes: usize,
-    /// Bytes charged to WAL-tail projections now, including their keys and
-    /// the cache's own allocation for each entry.
-    pub wal_tail_bytes: usize,
-    /// Content object lookups that found the requested bytes in the cache.
-    pub content_object_hits: usize,
-    /// Content object lookups that went to the store.
-    pub content_object_misses: usize,
-    /// Content objects inserted.
-    pub content_object_inserts: usize,
-    /// Content objects evicted to stay within the content object limit.
-    pub content_object_evictions: usize,
-    /// Bytes charged to content objects now, including their keys and the
-    /// cache's own allocation for each entry.
-    pub content_object_bytes: usize,
-    /// Upload session lookups that found a completed session in the cache.
-    pub completed_upload_session_hits: usize,
-    /// Upload session lookups that found no session in the cache, so the
-    /// pass read the session's record.
-    pub completed_upload_session_misses: usize,
-    /// Completed upload sessions evicted to stay within the completed
-    /// upload session limit.
-    pub completed_upload_session_evictions: usize,
-    /// Bytes charged to completed upload sessions now, including their keys
-    /// and the cache's own allocation for each entry.
-    pub completed_upload_session_bytes: usize,
+    /// The decoded manifests.
+    pub manifests: DecodedBlockCacheStats,
+    /// The namespace heads.
+    ///
+    /// `hits` counts the reads that started from a cached head, whether
+    /// they took the head as it was or refreshed it, and `misses` the reads
+    /// that loaded the head from the store because the cache had none. A
+    /// read can look its head up in the cache more than once while it
+    /// confirms the head, so these count each read once, where the cache's
+    /// own lookup counts would count each lookup.
+    pub heads: DecodedBlockCacheStats,
+    /// The WAL-tail projections.
+    pub wal_tails: DecodedBlockCacheStats,
+    /// The small content objects.
+    pub content_objects: DecodedBlockCacheStats,
+    /// The completed upload sessions that garbage collection keeps between
+    /// passes. A lookup misses when the pass reads the session's record.
+    pub completed_upload_sessions: DecodedBlockCacheStats,
+}
+
+/// The lookups that the bloom filters of segments decided.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SegmentFilterStats {
+    /// Segments skipped because their bloom filter ruled out a lookup before
+    /// any index or data read.
+    pub skips: usize,
+    /// Segments whose filter admitted a lookup that matched no rows.
+    pub false_positives: usize,
 }

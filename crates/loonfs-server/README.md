@@ -49,7 +49,7 @@ When a limit is available, each memory setting is derived from it by default. A 
 | `metadata_cache.max_content_object_bytes` | Derived: 10% | 96 MiB |
 | `grep.max_cache_bytes` | Derived: 10% when grep is served | 256 MiB when grep is served |
 | `max_read_working_bytes` | Derived: 20% | 256 MiB |
-| `publication.max_estimated_bytes` | Derived: 10% | 64 MiB |
+| `max_admitted_bytes` | Derived: 10% | 64 MiB |
 | `max_merge_input_bytes` | Derived: 10% divided by `max_concurrent_compactions` | 64 MiB per compaction |
 
 You can set a cache size or `max_read_working_bytes` to zero to disable retention. The publication byte limit and the merge input limit must be positive. `grep.max_cache_bytes` applies only when the configured grep mode serves queries.

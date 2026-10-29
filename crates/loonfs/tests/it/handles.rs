@@ -556,13 +556,16 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         let store: SharedObjectStore = failing.clone();
         let writer = LoonFs::builder_with_store(store)
             .writer_id(loonfs_test_support::ids::writer_id("fold-failure-writer"))
-            .inline_content(loonfs::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
-                ..Default::default()
-            })
-            .publication_policy(loonfs::PublicationPolicy {
-                write_stop_wait_budget_ms: 2_000,
-                ..Default::default()
+            .config(loonfs::RuntimeConfig {
+                inline_content: loonfs::InlineContentPolicy {
+                    inline_content_threshold_bytes: None,
+                    ..Default::default()
+                },
+                publication: loonfs::PublicationPolicy {
+                    write_stop_wait_budget_ms: 2_000,
+                    ..Default::default()
+                },
+                ..loonfs::RuntimeConfig::default()
             })
             .build()
             .await
@@ -843,7 +846,10 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
     block_on(async {
         assert_rejected(
             builder()
-                .manifest_revalidation_interval_ms(bound + 1)
+                .config(loonfs::RuntimeConfig {
+                    manifest_revalidation_interval_ms: bound + 1,
+                    ..loonfs::RuntimeConfig::default()
+                })
                 .build()
                 .await
                 .map(drop),
@@ -851,7 +857,10 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
         );
         assert_rejected(
             builder()
-                .max_staleness_ms(bound + 1)
+                .config(loonfs::RuntimeConfig {
+                    max_staleness_ms: bound + 1,
+                    ..loonfs::RuntimeConfig::default()
+                })
                 .build()
                 .await
                 .map(drop),
@@ -860,7 +869,10 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
         assert_rejected(
             builder()
                 .read_only()
-                .manifest_revalidation_interval_ms(bound + 1)
+                .config(loonfs::RuntimeConfig {
+                    manifest_revalidation_interval_ms: bound + 1,
+                    ..loonfs::RuntimeConfig::default()
+                })
                 .build()
                 .await
                 .map(drop),
@@ -869,23 +881,32 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
         assert_rejected(
             builder()
                 .read_only()
-                .max_staleness_ms(bound + 1)
+                .config(loonfs::RuntimeConfig {
+                    max_staleness_ms: bound + 1,
+                    ..loonfs::RuntimeConfig::default()
+                })
                 .build()
                 .await
                 .map(drop),
             "max_staleness_ms",
         );
         let writer = builder()
-            .manifest_revalidation_interval_ms(bound)
-            .max_staleness_ms(bound)
+            .config(loonfs::RuntimeConfig {
+                manifest_revalidation_interval_ms: bound,
+                max_staleness_ms: bound,
+                ..loonfs::RuntimeConfig::default()
+            })
             .build()
             .await
             .expect("the bound itself is accepted");
         writer.shutdown().await.expect("shutdown");
         builder()
             .read_only()
-            .manifest_revalidation_interval_ms(bound)
-            .max_staleness_ms(bound)
+            .config(loonfs::RuntimeConfig {
+                manifest_revalidation_interval_ms: bound,
+                max_staleness_ms: bound,
+                ..loonfs::RuntimeConfig::default()
+            })
             .build()
             .await
             .expect("the bound itself is accepted");
@@ -960,7 +981,10 @@ async fn namespace_deletion_drops_cached_reads_even_when_its_answer_is_lost() {
         );
         let writer = LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id("delete-lost-answer"))
-            .manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+            .config(loonfs::RuntimeConfig {
+                manifest_revalidation_interval_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+                ..loonfs::RuntimeConfig::default()
+            })
             .build()
             .await
             .expect("writer");

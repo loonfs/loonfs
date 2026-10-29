@@ -291,7 +291,10 @@ fn full_attributes() -> BTreeMap<AttributeKey, AttributeValue> {
 async fn seed(store: &SharedObjectStore, shape: &Shape) {
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("seed-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("writer");
@@ -686,10 +689,10 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
     let retained = with_budget.saturating_sub(without_budget);
     println!(
         "oversized head | {BUDGET} | {} accounted | {retained} retained",
-        first.head_bytes
+        first.heads.cached_decoded_bytes
     );
-    assert!(first.head_rejections >= 1, "{first:?}");
-    assert!(first.head_bytes <= BUDGET, "{first:?}");
+    assert!(first.heads.rejections >= 1, "{first:?}");
+    assert!(first.heads.cached_decoded_bytes <= BUDGET, "{first:?}");
     assert!(
         retained <= BUDGET,
         "the head cache retains {retained} bytes under a {BUDGET} byte budget"
@@ -697,9 +700,9 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
 
     stat_one_path_per_namespace(&shape, reader.clone()).await;
     let second = reader.metadata_cache().stats();
-    assert_eq!(second.head_misses, first.head_misses + 1);
-    assert_eq!(second.head_hits, first.head_hits);
-    assert!(second.head_rejections > first.head_rejections);
+    assert_eq!(second.heads.misses, first.heads.misses + 1);
+    assert_eq!(second.heads.hits, first.heads.hits);
+    assert!(second.heads.rejections > first.heads.rejections);
 }
 
 #[tokio::test]
@@ -760,7 +763,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         )
         .await;
         assert!(
-            reader.metadata_cache().stats().segment_evictions > 0,
+            reader.metadata_cache().stats().segment_blocks.evictions > 0,
             "the {} dataset should outgrow the segment budget",
             shape.label
         );
@@ -786,7 +789,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         )
         .await;
         let stats = reader.metadata_cache().stats();
-        let accounted = stats.head_bytes + stats.wal_tail_bytes;
+        let accounted = stats.heads.cached_decoded_bytes + stats.wal_tails.cached_decoded_bytes;
         drop(reader);
         let (with_manifests, reader) = retained_heap(
             root.path(),
@@ -794,7 +797,11 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
             |reader| stat_one_path_per_namespace(shape, reader),
         )
         .await;
-        let manifests_accounted = reader.metadata_cache().stats().manifest_bytes;
+        let manifests_accounted = reader
+            .metadata_cache()
+            .stats()
+            .manifests
+            .cached_decoded_bytes;
         drop(reader);
         let (without_entries, reader) = retained_heap(root.path(), kept(0, 0, 0), |reader| {
             stat_one_path_per_namespace(shape, reader)

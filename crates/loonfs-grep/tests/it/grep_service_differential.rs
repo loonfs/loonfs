@@ -207,7 +207,10 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
         .writer_id(loonfs_test_support::ids::writer_id(
             "planless-boundary-writer",
         ))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("build writer");
@@ -394,7 +397,10 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     let namespace_id = NamespaceId::parse("grep-service-differential").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("grep-service-writer"))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("build writer");

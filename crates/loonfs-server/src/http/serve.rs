@@ -12,7 +12,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
-use loonfs::{LoonFs, Maintenance, SharedObjectStore, TraceMode, Writable, WriterId};
+use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable, WriterId};
 use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
 use loonfs_http::{
     BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, Namespaces,
@@ -239,7 +239,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     let binding = BindingState::new(
         BindingConfig {
             serves_maintenance: config.maintenance.serves(),
-            max_download_bytes: Some(config.max_download_bytes),
+            max_download_bytes: Some(config.runtime_config().max_read_content_bytes),
             max_upload_bytes: Some(config.max_upload_bytes),
             max_concurrent_uploads: config.max_concurrent_uploads.get(),
             max_concurrent_downloads: config.max_concurrent_downloads.get(),
@@ -306,25 +306,11 @@ pub(super) async fn build_handles(
 
     let mut builder = LoonFs::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
-        .min_publish_interval_ms(config.min_publish_interval_ms)
-        .publication_policy(config.publication_policy())
-        .inline_content(config.inline_content.effective_policy())
-        .idle_fold_after_ms(std::num::NonZeroU64::new(config.idle_fold_after_ms))
+        .config(config.runtime_config())
         .execution_budget(config.execution_budget(memory, metrics.recorder()))
-        // Every read the server serves goes through this runtime, so the
-        // read cap covers every proxied content read.
-        .max_read_content_bytes(config.max_download_bytes)
         .metadata_cache(memory.metadata_cache(ssd))
-        .trace_mode(TraceMode::Remote)
         .store_kind(store_kind)
         .metrics_recorder(metrics.recorder());
-    if let Some(interval_ms) = config.manifest_revalidation_interval_ms {
-        builder = builder.manifest_revalidation_interval_ms(interval_ms);
-    }
-    if let Some(interval_ms) = config.max_staleness_ms {
-        builder = builder.max_staleness_ms(interval_ms);
-    }
-    builder = builder.consistency(config.consistency);
     if let Some(samples) = &samples {
         builder = builder.object_store_metrics_recorder(Arc::clone(samples));
     }

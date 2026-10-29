@@ -2287,8 +2287,8 @@ These are defaults for the reference producer and runtime. A target size can be 
 | Idle WAL-fold period | 15 minutes |
 | Unfolded-tail write stop (new commits wait for a fold) | 128 WAL objects |
 | `PublicationPolicy::write_stop_wait_budget_ms` | 30,000 ms |
-| `LoonFsBuilder::manifest_revalidation_interval_ms` | 1,000 ms |
-| `LoonFsBuilder::max_staleness_ms` | 1,000 ms |
+| `RuntimeConfig::manifest_revalidation_interval_ms` | 1,000 ms |
+| `RuntimeConfig::max_staleness_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
 | `HINT_RAISE_INTERVAL_MS` (the shortest time between two raises of one namespace's hint by one runtime) | 1,000 ms |
 | `MANIFEST_PROBE_WINDOW` (manifest numbers probed at once above a manifest whose successor exists) | 8 |

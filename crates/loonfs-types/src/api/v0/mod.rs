@@ -32,11 +32,10 @@ pub use gc::{
     GrepGcReport, RetainedCandidates, RetainedReason,
 };
 pub use maintenance::{
-    AdvanceRetentionRequest, AdvanceRetentionResponse, MetadataCompactionOutcome,
-    MetadataCompactionResponse, MetadataMaintenanceOutcome, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, MetadataPassReport, RecoverAdministratorRequest,
+    AdvanceRetentionRequest, AdvanceRetentionResponse, MetadataMaintenanceOutcome,
+    MetadataMaintenanceRequest, MetadataMaintenanceResponse, RecoverAdministratorRequest,
     RecoverAdministratorResponse, RunMaintenanceRequest, RunMaintenanceResponse,
-    SetRetentionWindowRequest, SetRetentionWindowResponse, WalFoldStepOutcome,
+    SetRetentionWindowRequest, SetRetentionWindowResponse,
 };
 pub use namespaces::{
     CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceAccessMode,

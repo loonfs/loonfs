@@ -554,7 +554,7 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
             .await;
 
         let harness = start_server(loonfs_server::ServerConfig {
-            idle_fold_after_ms,
+            idle_fold_after_ms: Some(idle_fold_after_ms),
             maintenance: loonfs_server::JobMode::ServeOnly,
             ..test_config(store_root, "loonfs-server-idle", key_prefix)
         })

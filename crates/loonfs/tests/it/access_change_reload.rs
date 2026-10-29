@@ -105,7 +105,10 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id(name))
-        .min_publish_interval_ms(0)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
         .monotonic_timer(clock.clone())
         .wall_clock(wall_clock.clone())
         .metrics_recorder(recorder.clone())

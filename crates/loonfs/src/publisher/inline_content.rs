@@ -1,6 +1,8 @@
 //! Inline placement and permit-held fallback staging.
 
-use super::{AdmissionPermit, NamespacePublisher, PreparedCandidate};
+use super::admission::AdmissionPermit;
+use super::queue::PreparedCandidate;
+use super::NamespacePublisher;
 use crate::publish::CommitCandidate;
 use crate::{CoreError, Result};
 use loonfs_core::publish::InlineContent;
@@ -20,6 +22,9 @@ impl NamespacePublisher {
         let namespace_id = &self.namespace_id;
         let values = candidate.ordered_inline_content(namespace_id)?;
         let mut remaining = self
+            .context
+            .runtime_core
+            .config()
             .inline_content
             .inline_content_wal_object_budget_bytes
             .saturating_sub(candidate.appended_bytes());
@@ -60,16 +65,29 @@ impl NamespacePublisher {
             // Without a position the tail is unknown, so admit at most one WAL
             // object budget until the next publish reads the tail.
             let unfolded_bytes = slot.wal_tail_inline_bytes().unwrap_or(
-                self.inline_content
+                self.context
+                    .runtime_core
+                    .config()
+                    .inline_content
                     .inline_content_tail_limit_bytes
-                    .saturating_sub(self.inline_content.inline_content_wal_object_budget_bytes),
+                    .saturating_sub(
+                        self.context
+                            .runtime_core
+                            .config()
+                            .inline_content
+                            .inline_content_wal_object_budget_bytes,
+                    ),
             );
             permit.reserve_inline(
                 plan.ordered_inline_content[..plan.wal_object_inline_values]
                     .iter()
                     .map(|value| value.bytes().len()),
                 unfolded_bytes,
-                self.inline_content.inline_content_tail_limit_bytes,
+                self.context
+                    .runtime_core
+                    .config()
+                    .inline_content
+                    .inline_content_tail_limit_bytes,
             )
         };
         self.stage_inline_values(
@@ -99,12 +117,13 @@ impl NamespacePublisher {
                 return Ok(());
             }
         }
-        let crate::cache::PinnedRead {
+        let crate::pinned_read::PinnedRead {
             engine: reader,
             context,
         } = self
+            .context
             .runtime_core
-            .pinned_read(namespace_id, crate::cache::HeadConfirmation::View)
+            .pinned_read(namespace_id, crate::runtime_core::HeadConfirmation::View)
             .await?;
         if reader
             .find_commit_receipt(&context, candidate.commit_id())
@@ -113,14 +132,20 @@ impl NamespacePublisher {
         {
             return Ok(());
         }
-        let writer = self.writer.upgrade().ok_or(CoreError::ShuttingDown)?;
+        let writer = self
+            .context
+            .writer
+            .upgrade()
+            .ok_or(CoreError::ShuttingDown)?;
         let catalog = self
+            .context
             .runtime_core
             .load_namespace_catalog_cached(namespace_id)
             .await?;
         let engine = self
+            .context
             .runtime_core
-            .writer_engine(&writer.identity, namespace_id);
+            .writer_engine(&writer.writer_id, namespace_id);
         for value in values {
             let proof = engine
                 .stage_owned_bytes(
