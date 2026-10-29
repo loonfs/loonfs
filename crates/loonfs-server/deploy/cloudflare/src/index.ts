@@ -31,7 +31,6 @@ function serverConfig(env: Env): string {
 
   return `bind = "0.0.0.0:9400"
 writer_id = "cloudflare-primary"
-allow_remote_without_tls = true
 max_upload_bytes = 67108864
 max_download_bytes = 67108864
 max_concurrent_uploads = 2
@@ -41,6 +40,9 @@ max_concurrent_maintenance = 1
 [metadata_cache]
 max_segment_bytes = 67108864
 max_wal_tail_bytes = 67108864
+
+[transport]
+kind = "plaintext_behind_proxy"
 
 [store]
 kind = "cloudflare_r2"

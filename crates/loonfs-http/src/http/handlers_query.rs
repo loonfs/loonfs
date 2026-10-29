@@ -2,9 +2,7 @@
 
 use super::extractors::SubjectHeaders;
 use super::handlers_inodes::parse_inode_id;
-use super::query_params::{effective_page_limit, parse_boolean_query_param, required_query_param};
-#[cfg(feature = "openapi")]
-use super::query_params::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
+use super::query_params::{effective_page_limit, required_query_param};
 use super::{AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
@@ -22,16 +20,43 @@ use loonfs_types::{
 };
 use std::sync::Arc;
 
+/// The query of a content search.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct GrepQuery {
+    /// The search pattern, in the Rust `regex` crate's syntax. Its UTF-8 encoding must be at most
+    /// 1024 bytes.
+    #[cfg_attr(feature = "openapi", param(required = true))]
     pattern: Option<String>,
-    case_insensitive: Option<String>,
+    /// Whether matching ignores case. The default is `false`.
+    #[cfg_attr(feature = "openapi", param(default = false))]
+    case_insensitive: Option<bool>,
+    /// A complete absolute path that limits matches to its descendants. It can't be combined with
+    /// `inode_id`.
     path_prefix: Option<String>,
+    /// An inode that limits matches to its descendants. It can't be combined with `path_prefix`.
+    #[cfg_attr(
+        feature = "openapi",
+        param(pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
+    )]
     inode_id: Option<String>,
-    allow_scan: Option<String>,
-    allow_stale: Option<String>,
-    limit: Option<String>,
+    /// Whether a pattern with no required literal bytes can use a capped exhaustive scan. The
+    /// default is `false`.
+    #[cfg_attr(feature = "openapi", param(default = false))]
+    allow_scan: Option<bool>,
+    /// Whether the server returns results from the index alone when the unindexed tail exceeds the
+    /// scan budget. The default is `false`.
+    #[cfg_attr(feature = "openapi", param(default = false))]
+    allow_stale: Option<bool>,
+    /// The maximum number of matches per page.
+    #[cfg_attr(
+        feature = "openapi",
+        param(minimum = 1, maximum = 1000, default = 1000)
+    )]
+    limit: Option<u32>,
+    /// The opaque cursor that the previous page returned.
     cursor: Option<String>,
 }
 
@@ -47,14 +72,7 @@ pub(super) struct GrepQuery {
         description = "Searches file content with a regular expression, using the namespace's grep index to narrow the candidates. The server checks each candidate against the full pattern and returns matches in ascending `(inode_id, byte_offset)` order. It scans every revision committed after the index watermark, unless `allow_stale` skips them. The deployment must serve grep, and the namespace must have a materialized, active grep index.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("pattern" = String, Query, description = "The search pattern, in the Rust `regex` crate's syntax. Its UTF-8 encoding must be at most 1024 bytes."),
-            ("case_insensitive" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether matching ignores case. The default is `false`."),
-            ("path_prefix" = Option<String>, Query, description = "A complete absolute path that limits matches to its descendants. It can't be combined with `inode_id`."),
-            ("inode_id" = Option<String>, Query, description = "An inode that limits matches to its descendants. It can't be combined with `path_prefix`.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("allow_scan" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether a pattern with no required literal bytes can use a capped exhaustive scan. The default is `false`."),
-            ("allow_stale" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Whether the server returns results from the index alone when the unindexed tail exceeds the scan budget. The default is `false`."),
-            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "The maximum number of matches per page."),
-            ("cursor" = Option<String>, Query, description = "The opaque cursor that the previous page returned.")
+            GrepQuery
         ),
         responses(
             (status = 200, description = "One page of matches", body = GrepResponse),
@@ -69,7 +87,7 @@ pub(super) struct GrepQuery {
     )
 )]
 pub(super) async fn grep(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     Extension(service): Extension<Arc<GrepService>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -122,18 +140,11 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
     };
     Ok(GrepRequest {
         pattern,
-        case_insensitive: parse_optional_boolean(query.case_insensitive, "case_insensitive")?,
+        case_insensitive: query.case_insensitive.unwrap_or(false),
         scope,
-        allow_stale: parse_optional_boolean(query.allow_stale, "allow_stale")?,
-        allow_scan: parse_optional_boolean(query.allow_scan, "allow_scan")?,
+        allow_stale: query.allow_stale.unwrap_or(false),
+        allow_scan: query.allow_scan.unwrap_or(false),
     })
-}
-
-fn parse_optional_boolean(value: Option<String>, name: &str) -> Result<bool, ApiResponseError> {
-    value
-        .as_deref()
-        .map(|value| parse_boolean_query_param(value, name))
-        .unwrap_or(Ok(false))
 }
 
 /// Absent-capability response where this deployment answers no searches.
@@ -179,7 +190,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
     )
 )]
 pub(super) async fn enable_grep_index(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     Extension(worker): Extension<GrepWorker<SharedObjectStore>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -266,7 +277,7 @@ async fn read_grep_index_status(
     )
 )]
 pub(super) async fn disable_grep_index(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     Extension(worker): Extension<GrepWorker<SharedObjectStore>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,

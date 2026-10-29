@@ -581,11 +581,6 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
             None,
         ),
         (
-            "download",
-            download_url(&harness.server_url, namespace.as_str()),
-            Some(serde_json::json!({"path": "/keep.txt", "snapshot_id": deleted_id})),
-        ),
-        (
             "changes",
             changes_url(
                 &harness.server_url,
@@ -606,43 +601,55 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         assert_eq!(error.0, 404, "route {name}");
         assert_eq!(error.1.code, "snapshot_not_found", "route {name}");
     }
+    // This deployment can't presign, and a download grant checks that
+    // capability before it reads anything.
+    let error = post_json::<serde_json::Value>(
+        &download_url(&harness.server_url, namespace.as_str()),
+        serde_json::json!({"path": "/keep.txt", "snapshot_id": deleted_id}),
+    )
+    .expect_err("a download grant needs a presigning deployment");
+    assert_eq!(error.0, 501);
+    assert_eq!(error.1.code, "not_supported");
     let inode_id = harness
         .client
         .stat(&keep)
         .await
         .expect("stat file")
         .inode_id;
-    for error in [
-        harness
-            .client
-            .read_file_by_inode_with_options(
-                &namespace,
-                inode_id,
-                &ReadFileOptions {
-                    at: ReadAt::Snapshot(deleted.snapshot_id.clone()),
-                },
-            )
-            .await
-            .map(|_| ())
-            .expect_err("deleted snapshot read by inode must fail"),
-        harness
-            .client
-            .create_download_by_inode_with_options(
-                &namespace,
-                inode_id,
-                &DownloadOptions {
-                    at: ReadAt::Snapshot(deleted.snapshot_id.clone()),
-                    ..DownloadOptions::default()
-                },
-            )
-            .await
-            .map(|_| ())
-            .expect_err("deleted snapshot download by inode must fail"),
+    for (error, code) in [
+        (
+            harness
+                .client
+                .read_file_by_inode_with_options(
+                    &namespace,
+                    inode_id,
+                    &ReadFileOptions {
+                        at: ReadAt::Snapshot(deleted.snapshot_id.clone()),
+                    },
+                )
+                .await
+                .map(|_| ())
+                .expect_err("deleted snapshot read by inode must fail"),
+            loonfs_types::ErrorCode::SnapshotNotFound,
+        ),
+        (
+            harness
+                .client
+                .create_download_by_inode_with_options(
+                    &namespace,
+                    inode_id,
+                    &DownloadOptions {
+                        at: ReadAt::Snapshot(deleted.snapshot_id.clone()),
+                        ..DownloadOptions::default()
+                    },
+                )
+                .await
+                .map(|_| ())
+                .expect_err("a download grant needs a presigning deployment"),
+            loonfs_types::ErrorCode::NotSupported,
+        ),
     ] {
-        assert_eq!(
-            error.code(),
-            Some(loonfs_types::ErrorCode::SnapshotNotFound)
-        );
+        assert_eq!(error.code(), Some(code));
     }
 
     let unexpiring = harness

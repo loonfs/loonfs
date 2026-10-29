@@ -60,7 +60,7 @@ kubectl --namespace loonfs rollout restart deployment/loonfs-server
 
 ## The two secret values
 
-You can set `auth_token` and `content_token_secret` in the config file, or pass them through the environment as `LOONFS_AUTH_TOKEN` and `LOONFS_CONTENT_TOKEN_SECRET`. If the file has a non-blank value, the server uses it instead of the environment variable.
+You can set the `[auth]` table's `token` and `content_token_secret` in the config file, or pass them through the environment as `LOONFS_AUTH_TOKEN` and `LOONFS_CONTENT_TOKEN_SECRET`. If the file has a non-blank value, the server uses it instead of the environment variable.
 
 The chart has no values for providers or credentials. It passes `extraEnv` and `extraEnvFrom` through unchanged, so you can use them to pass those values to the process from a Secret you already have:
 

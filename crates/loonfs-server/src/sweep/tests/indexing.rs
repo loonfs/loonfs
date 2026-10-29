@@ -1,9 +1,10 @@
 //! Index lifecycle changes and unfinished index work on held entries.
 
-use super::{seed_writer, sweep_config, SweepServer};
+use super::{held_ids, seed_writer, sweep_config, visit_held, SweepServer};
 use loonfs::{ChangeSeq, SharedObjectStore};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::GrepWorkerConfig;
+use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
@@ -176,7 +177,7 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Backfilling { .. }
     );
-    assert_eq!(server.sweep.inner.namespaces.held_ids().len(), 1);
+    assert_eq!(held_ids(&server.sweep.inner.namespaces).len(), 1);
     store.reset();
     server.sweep.tick().await;
     assert!(
@@ -199,16 +200,14 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
         "reorganization needs a step that finds nothing left"
     );
     assert_eq!(
-        server
-            .sweep
-            .inner
-            .namespaces
-            .visit_held(&namespace_id, |held| held.handle.last_published_seq()),
+        visit_held(&server.sweep.inner.namespaces, &namespace_id, |held| held
+            .handle
+            .last_published_seq()),
         Some(None)
     );
     server.sweep.tick().await;
     assert!(store.take().is_empty(), "closing costs no store requests");
-    assert!(server.sweep.inner.namespaces.held_ids().is_empty());
+    assert!(held_ids(&server.sweep.inner.namespaces).is_empty());
     server.runtime.shutdown().await.expect("shutdown");
 }
 
@@ -273,7 +272,7 @@ async fn pending_reorganization_keeps_an_idle_entry_settling() {
             !store.take().is_empty(),
             "unfinished reorganization stays selected"
         );
-        assert_eq!(server.sweep.inner.namespaces.held_ids().len(), 1);
+        assert_eq!(held_ids(&server.sweep.inner.namespaces).len(), 1);
         pending = worker
             .get_grep_index(&namespace_id)
             .await
@@ -295,6 +294,6 @@ async fn pending_reorganization_keeps_an_idle_entry_settling() {
         store.take().is_empty(),
         "a finished session closes without requests"
     );
-    assert!(server.sweep.inner.namespaces.held_ids().is_empty());
+    assert!(held_ids(&server.sweep.inner.namespaces).is_empty());
     server.runtime.shutdown().await.expect("shutdown");
 }

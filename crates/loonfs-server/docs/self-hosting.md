@@ -33,17 +33,20 @@ Here's a minimal config for a local filesystem store. It assumes that a proxy or
 ```toml
 bind = "0.0.0.0:9400"
 writer_id = "loonfs-server-1"
-allow_remote_without_tls = true
+
+[transport]
+kind = "plaintext_behind_proxy"
 
 [store]
 kind = "local_fs"
 root = "/var/lib/loonfs/store"
 ```
 
-Set `allow_remote_without_tls = true` only when a trusted proxy provides TLS. If LoonFS provides TLS directly, remove that setting and add:
+Use `kind = "plaintext_behind_proxy"` only when a trusted proxy provides TLS. If LoonFS provides TLS directly, use this `[transport]` table instead:
 
 ```toml
-[tls]
+[transport]
+kind = "tls"
 cert_path = "/etc/loonfs/tls/server.crt"
 key_path = "/etc/loonfs/tls/server.key"
 ```
@@ -55,9 +58,9 @@ export LOONFS_AUTH_TOKEN="$(openssl rand -hex 32)"
 export LOONFS_CONTENT_TOKEN_SECRET="$(openssl rand -hex 32)"
 ```
 
-`LOONFS_AUTH_TOKEN` protects the HTTP API, and `LOONFS_CONTENT_TOKEN_SECRET` signs content transfer tokens. The config can contain these values, but environment variables make it easier to keep them out of the config file.
+`LOONFS_AUTH_TOKEN` protects the HTTP API, and `LOONFS_CONTENT_TOKEN_SECRET` signs content transfer tokens. The config can contain these values, as the `token` of an `[auth]` table with `kind = "bearer_token"` and as `content_token_secret`, but environment variables make it easier to keep them out of the config file.
 
-Don't expose a server without authentication. LoonFS rejects a config without authentication on a non-loopback address, unless `allow_unauthenticated_remote = true` is set. That setting is intended only for controlled testing.
+Don't expose a server without authentication. LoonFS rejects a config without authentication on a non-loopback address, unless the config has an `[auth]` table with `kind = "open"`. That setting is intended only for controlled testing.
 
 For S3 or Google Cloud Storage, configure the bucket to remove incomplete multipart uploads. Both providers call this action `AbortIncompleteMultipartUpload`.
 

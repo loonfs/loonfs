@@ -16,10 +16,13 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     ));
     let mut config = test_config(directory.path(), "admission-writer");
     config.max_in_flight_requests = std::num::NonZeroUsize::MIN;
-    let (router, state) = app(config, options_with_store(store.clone()))
-        .await
-        .expect("app");
-    let limit = state.binding.request_limit.as_ref().expect("request limit");
+    let (router, state) = app(
+        config.validate().expect("validate the test config"),
+        options_with_store(store.clone()),
+    )
+    .await
+    .expect("app");
+    let limit = state.binding.request_limit().expect("request limit");
     let before = store.counts();
     let first_polls = Arc::new(AtomicUsize::new(0));
     let mut first = Box::pin(
@@ -81,8 +84,22 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     assert_eq!(limit.in_flight(), 0);
 
     store.take();
-    let mut uncapped = state.binding.clone();
-    uncapped.request_limit = None;
+    let binding = &state.binding;
+    let uncapped = loonfs_http::BindingState::new(
+        loonfs_http::BindingConfig {
+            max_in_flight_requests: None,
+            ..(*binding.options).clone()
+        },
+        loonfs_http::BindingHandles {
+            runtime: binding.runtime.clone(),
+            namespaces: Arc::clone(&binding.namespaces),
+            maintenance: binding.maintenance.clone(),
+            direct_transfers: binding.direct_transfers.clone(),
+            grep: binding.grep.clone(),
+            metrics: Arc::clone(&binding.metrics),
+            usage_recorder: binding.usage_recorder.clone(),
+        },
+    );
     let response = loonfs_http::router(uncapped)
         .oneshot(request("/v0/namespaces/missing"))
         .await
@@ -97,7 +114,7 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     assert_eq!(limit.in_flight(), 1);
     drop(response);
     assert_eq!(limit.in_flight(), 0);
-    state.runtime.shutdown().await.expect("shutdown");
+    state.binding.runtime.shutdown().await.expect("shutdown");
 }
 
 fn request(path: &str) -> Request<Body> {
@@ -139,9 +156,12 @@ async fn a_full_server_answers_busy_before_the_client_sends_any_body_byte() {
     ));
     let mut config = test_config(directory.path(), "unsent-body-writer");
     config.max_in_flight_requests = std::num::NonZeroUsize::MIN;
-    let (router, state) = app(config, options_with_store(store.clone()))
-        .await
-        .expect("app");
+    let (router, state) = app(
+        config.validate().expect("validate the test config"),
+        options_with_store(store.clone()),
+    )
+    .await
+    .expect("app");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -196,5 +216,5 @@ async fn a_full_server_answers_busy_before_the_client_sends_any_body_byte() {
         .await
         .expect("first response");
     server.abort();
-    state.runtime.shutdown().await.expect("shutdown");
+    state.binding.runtime.shutdown().await.expect("shutdown");
 }

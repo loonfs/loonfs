@@ -2,10 +2,10 @@
 
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
-use super::handlers_filesystem::{read_target, reject_snapshot_with_revision};
+use super::handlers_filesystem::reject_snapshot_with_revision;
 use super::handlers_inodes::{parse_inode_id, InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
-use super::query_params::{live_consistency, parse_revision_no, read_at};
+use super::query_params::{live_consistency, read_at};
 use super::usage::GrantedBytes;
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
@@ -22,6 +22,7 @@ use loonfs_types::{
     },
     FEATURE_DOWNLOADS_DIRECT_GET,
 };
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Issues a short-lived download URL for a file.
@@ -55,7 +56,7 @@ use std::time::Duration;
     )
 )]
 pub(super) async fn create_download(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -73,20 +74,26 @@ pub(super) async fn create_download(
         request.max_staleness_ms,
     )
     .map_err(with_consistency_field_params)?;
-    let target = read_target(runtime.namespace(&namespace_id), at, "/snapshot_id").await?;
     let issuer = direct_get_issuer(&state)?;
 
     let options = DownloadOptions {
+        at,
         start_offset: request.start_offset,
-        ..DownloadOptions::default()
     };
-    let download = target
-        .create_download(request.path.as_str(), request.revision_no, &options)
-        .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_body_field_param("start_offset")
-        })?;
+    let namespace = runtime.namespace(&namespace_id);
+    let path = request.path.as_str();
+    let download = match request.revision_no {
+        Some(revision_no) => {
+            namespace
+                .create_revision_download_with_options(path, revision_no, &options)
+                .await
+        }
+        None => namespace.create_download_with_options(path, &options).await,
+    }
+    .map_err(|error| {
+        ApiResponseError::runtime_for_namespace(&namespace_id, error)
+            .with_body_field_param("start_offset")
+    })?;
     let ranges = presigned_ranges(issuer, &download.ranges, download.start_offset).await?;
 
     Ok((
@@ -131,7 +138,7 @@ pub(super) async fn create_download(
     )
 )]
 pub(super) async fn create_download_by_inode(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -147,14 +154,14 @@ pub(super) async fn create_download_by_inode(
         request.max_staleness_ms,
     )
     .map_err(with_consistency_field_params)?;
-    let target = read_target(runtime.namespace(&namespace_id), at, "/snapshot_id").await?;
     let issuer = direct_get_issuer(&state)?;
     let options = DownloadOptions {
+        at,
         start_offset: request.start_offset,
-        ..DownloadOptions::default()
     };
-    let download = target
-        .create_download_by_inode(inode_id, &options)
+    let download = runtime
+        .namespace(&namespace_id)
+        .create_download_by_inode_with_options(inode_id, &options)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -194,7 +201,7 @@ pub(super) async fn create_download_by_inode(
     )
 )]
 pub(super) async fn create_revision_download_by_inode(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
@@ -204,7 +211,7 @@ pub(super) async fn create_revision_download_by_inode(
     let request = request.unwrap_or_default();
     let runtime = state.runtime_for(subject);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let revision_no = parse_revision_no(&path.revision_no)?;
+    let revision_no = path.revision_no;
     let consistency = live_consistency(request.consistency, request.max_staleness_ms)
         .map_err(with_consistency_field_params)?;
     let issuer = direct_get_issuer(&state)?;

@@ -2,7 +2,7 @@
 
 ## Deploying securely
 
-If you serve a LoonFS server beyond localhost, serve it over TLS. Without TLS, anyone who can read the connection can read the bearer token, and the presigned object-store URLs that upload responses include. [Self-hosting](crates/loonfs-server/docs/self-hosting.md) describes the `[tls]` configuration, and the one exception, for deployments where a proxy terminates TLS instead.
+If you serve a LoonFS server beyond localhost, serve it over TLS. Without TLS, anyone who can read the connection can read the bearer token, and the presigned object-store URLs that upload responses include. [Self-hosting](crates/loonfs-server/docs/self-hosting.md) describes the `[transport]` configuration, and the one exception, for deployments where a proxy terminates TLS instead.
 
 ## Supported Versions
 

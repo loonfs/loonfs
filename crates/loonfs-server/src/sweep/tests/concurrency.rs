@@ -1,7 +1,8 @@
 //! Concurrent visits preserve session progress and share the host's slots.
 
-use super::{sweep_config, SweepServer};
+use super::{sweep_config, visit_held, SweepServer};
 use crate::sweep::GarbageCollection;
+use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
@@ -253,11 +254,8 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
             tick.await;
         }
         assert_eq!(
-            server
-                .sweep
-                .inner
-                .namespaces
-                .visit_held(&namespace_id, |held| held.index_dirty),
+            visit_held(&server.sweep.inner.namespaces, &namespace_id, |held| held
+                .index_dirty),
             Some(true)
         );
         store.inner().reset();
@@ -300,6 +298,8 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
     held.put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
+    let seq = held.last_published_seq();
+    drop(held);
     server.tick_after(config.tick_interval_ms).await;
     server.clock.advance_ms(config.gc_interval_ms);
     store.block_next();
@@ -309,9 +309,10 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
     });
     store.wait_until_blocked().await;
     namespaces
-        .close(&namespace_id)
+        .close_if_idle(&namespace_id, seq, 0, |_| true)
         .await
-        .expect("close during collection");
+        .expect("close during collection")
+        .expect("the idle session closes");
     let fresh = namespaces
         .open(&namespace_id)
         .await
@@ -320,7 +321,9 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
     store.release();
     visit.await.expect("finish collection");
     assert_eq!(
-        namespaces.visit_held(&namespace_id, |held| held.collected_seq),
+        visit_held(namespaces, &namespace_id, |held| held
+            .host_state
+            .collected_seq),
         Some(None)
     );
     store.inner().reset();

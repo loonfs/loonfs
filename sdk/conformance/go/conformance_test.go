@@ -878,7 +878,7 @@ func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
 		label := setting.consistency
 		trash, err := h.client.Trash.List(ctx, &loonfs.ListTrashRequest{
 			NamespaceID:    request.NamespaceID,
-			Consistency:    loonfs.ListTrashRequestConsistency(setting.consistency).Ptr(),
+			Consistency:    loonfs.ReadConsistency(setting.consistency).Ptr(),
 			MaxStalenessMs: setting.maxStalenessMs,
 		})
 		if err != nil {
@@ -890,7 +890,7 @@ func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
 		byPath, err := h.client.Files.ListRevisions(ctx, &loonfs.ListFileRevisionsRequest{
 			NamespaceID:    request.NamespaceID,
 			Path:           request.Path,
-			Consistency:    loonfs.ListRevisionsFilesRequestConsistency(setting.consistency).Ptr(),
+			Consistency:    loonfs.ReadConsistency(setting.consistency).Ptr(),
 			MaxStalenessMs: setting.maxStalenessMs,
 		})
 		if err != nil {
@@ -899,7 +899,7 @@ func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
 		byInode, err := h.client.Inodes.ListRevisions(ctx, &loonfs.ListFileRevisionsByInodeRequest{
 			NamespaceID:    request.NamespaceID,
 			InodeID:        inodeID,
-			Consistency:    loonfs.ListRevisionsInodesRequestConsistency(setting.consistency).Ptr(),
+			Consistency:    loonfs.ReadConsistency(setting.consistency).Ptr(),
 			MaxStalenessMs: setting.maxStalenessMs,
 		})
 		if err != nil {

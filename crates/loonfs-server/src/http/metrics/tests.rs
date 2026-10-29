@@ -3,7 +3,9 @@
 //! scrapes of the same readings.
 
 use super::*;
+use loonfs::engine::DecodedBlockCacheStats;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricsRecorder, LATENCY_SECONDS_BOUNDARIES};
+use loonfs::{MetadataCacheStats, SsdSegmentBlocksStats};
 
 #[test]
 fn a_counter_renders_with_the_total_suffix_and_its_labels() {

@@ -1,6 +1,6 @@
 //! The first due step for each held session and the two host intervals.
 
-use super::{lock, GarbageCollection, Overlap, RunningSweep, Sweep, SweepCall};
+use super::{index_pending, lock, GarbageCollection, Overlap, RunningSweep, Sweep, SweepCall};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, NamespaceId};
 use loonfs_http::panic_message;
@@ -49,7 +49,7 @@ impl Sweep {
 
     async fn run_due_step(&self, namespace_id: &NamespaceId) {
         let inner = &self.inner;
-        let now_ms = inner.namespaces.now_ms();
+        let now_ms = inner.timer.monotonic_now_ms();
         let Some(entry) = inner.namespaces.entry(namespace_id) else {
             return;
         };
@@ -66,7 +66,7 @@ impl Sweep {
                 return;
             }
             let metadata_caught_up = held.handle.metadata_caught_up();
-            let metadata_retry = held.metadata_retry;
+            let metadata_retry = held.host_state.metadata_retry;
             // The idle fold allows one metadata call before the retry time,
             // when no call has run since the tail reached the idle fold age.
             // While the call keeps failing, its retry time also includes its
@@ -87,13 +87,15 @@ impl Sweep {
             let due = if metadata_due {
                 Due::Metadata
             } else if inner.grep.is_some()
-                && held.index_pending(seq)
-                && now_ms >= held.index_retry.retry_at_ms
+                && index_pending(&held, seq)
+                && now_ms >= held.host_state.index_retry.retry_at_ms
             {
                 Due::Index
             } else if seq.is_some()
-                && held.collection_pending(seq, now_ms, inner.config.gc_interval_ms)
-                && now_ms >= held.gc_retry.retry_at_ms
+                && held
+                    .host_state
+                    .collection_pending(seq, now_ms, inner.config.gc_interval_ms)
+                && now_ms >= held.host_state.gc_retry.retry_at_ms
             {
                 Due::Collection
             } else if metadata_caught_up || self.backoff_at_cap(metadata_retry) {
@@ -147,16 +149,16 @@ impl Sweep {
                     // cap. Then the session closes and the next full pass
                     // retries the call.
                     let at_cap = |call: SweepCall| {
-                        call.retry(held)
+                        call.retry(&held.host_state)
                             .is_some_and(|retry| self.backoff_at_cap(retry))
                     };
                     (held.handle.metadata_caught_up() || at_cap(SweepCall::Metadata))
                         && (inner.grep.is_none()
-                            || !held.index_pending(seq)
+                            || !index_pending(held, seq)
                             || at_cap(SweepCall::GrepIndex))
-                        && (!held.collection_pending(
+                        && (!held.host_state.collection_pending(
                             seq,
-                            inner.namespaces.now_ms(),
+                            inner.timer.monotonic_now_ms(),
                             inner.config.gc_interval_ms,
                         ) || at_cap(SweepCall::Gc))
                 },

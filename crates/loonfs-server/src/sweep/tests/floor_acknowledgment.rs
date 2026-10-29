@@ -5,6 +5,7 @@ use super::retention::{retention_config, START_MS, WINDOW_MS};
 use super::{local_store, SweepServer};
 use crate::sweep::SweepCall;
 use loonfs::{ChangeSeq, ErrorCode, NamespaceId};
+use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};

@@ -2,13 +2,12 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::extractors::{decode_json, SubjectHeaders};
-use super::query_params::parse_path_id;
+use super::extractors::SubjectHeaders;
 use super::{
-    AppPath, AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery, UploadBodyBytes,
-    UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
+    AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery, UploadBodyStream,
+    MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
-use crate::Namespaces;
+use crate::WriterSessions;
 use axum::extract::State;
 use axum::Json;
 use loonfs::content_tokens::{
@@ -32,6 +31,7 @@ use loonfs_types::{
     ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
 };
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Lifetime of one part-upload capability. Longer than a whole-object PUT's
@@ -76,7 +76,7 @@ impl<'a> ContentTokenVerifier<'a> {
 
     async fn prepare(
         self,
-        namespaces: &Namespaces,
+        namespaces: &dyn WriterSessions,
         namespace: &Namespace<Writable>,
         token: &ContentToken,
     ) -> Result<Result<PreparedContent, ContentTokenError>, ApiResponseError> {
@@ -107,7 +107,7 @@ impl<'a> ContentTokenVerifier<'a> {
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct UploadPathParams {
-    upload_id: String,
+    upload_id: UploadId,
 }
 
 #[cfg_attr(
@@ -135,11 +135,11 @@ pub(super) struct UploadPathParams {
     )
 )]
 pub(super) async fn create_upload(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-    UploadControlJson(request): UploadControlJson<CreateUploadBody, MAX_UPLOAD_CONTROL_BODY_BYTES>,
+    AppJson(request): AppJson<CreateUploadBody, MAX_UPLOAD_CONTROL_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let namespace = state.open_writer(&namespace_id, subject).await?;
     // Decoding the body settled which transport this is and that it carries
@@ -158,7 +158,7 @@ pub(super) async fn create_upload(
                     .create_upload()
                     .await
                     .map_err(ApiResponseError::for_namespace_writer(
-                        &state.namespaces,
+                        state.namespaces.as_ref(),
                         &namespace_id,
                     ))?;
             Ok(Json(response))
@@ -200,7 +200,7 @@ async fn begin_direct_put_upload(
     }
 
     let mut prepared = namespace.create_direct_put_upload_target().await.map_err(
-        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
     )?;
     fill_direct_put_access(issuer.as_ref(), &prepared.object_key, &mut prepared.session).await?;
     Ok(Json(prepared.session))
@@ -251,8 +251,12 @@ async fn begin_direct_multipart_upload(
         })
         .await
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
-                .with_invalid_request_param("/part_size_bytes")
+            ApiResponseError::runtime_for_namespace_writer(
+                state.namespaces.as_ref(),
+                &namespace_id,
+                error,
+            )
+            .with_invalid_request_param("/part_size_bytes")
         })?;
 
     Ok(Json(prepared.session))
@@ -287,17 +291,13 @@ async fn begin_direct_multipart_upload(
     )
 )]
 pub(super) async fn sign_upload_parts(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
-    UploadControlJson(request): UploadControlJson<
-        SignUploadPartsRequest,
-        MAX_UPLOAD_CONTROL_BODY_BYTES,
-    >,
+    AppJson(request): AppJson<SignUploadPartsRequest, MAX_UPLOAD_CONTROL_BODY_BYTES>,
 ) -> Result<Json<SignUploadPartsResponse>, ApiResponseError> {
-    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let Some(issuer) = state
         .direct_transfers
         .as_ref()
@@ -314,7 +314,7 @@ pub(super) async fn sign_upload_parts(
         .sign_upload_parts(&upload_id, &request.parts)
         .await
         .map_err(ApiResponseError::for_namespace_writer(
-            &state.namespaces,
+            state.namespaces.as_ref(),
             &namespace_id,
         ))?;
     let parts = sign_parts(issuer.as_ref(), &targets).await?;
@@ -383,7 +383,7 @@ pub(super) fn presign_time() -> SystemTime {
 /// or minted for another namespace, is worth saying out
 /// loud even when the request it arrived in went on to publish.
 pub(super) async fn content_preparation_for_puts(
-    namespaces: &Namespaces,
+    namespaces: &dyn WriterSessions,
     namespace: &Namespace<Writable>,
     verifier: ContentTokenVerifier<'_>,
     content_refs: &[&ContentRef],
@@ -490,14 +490,13 @@ fn with_content_token(
     )
 )]
 pub(super) async fn put_upload_content(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyStream,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let namespace = state.open_writer(&namespace_id, subject).await?;
     let (stream, outcome) = body.into_stream();
     match namespace
@@ -506,7 +505,11 @@ pub(super) async fn put_upload_content(
     {
         Ok(response) => Ok(Json(response)),
         Err(error) => Err(outcome.into_rejection().unwrap_or_else(|| {
-            ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
+            ApiResponseError::runtime_for_namespace_writer(
+                state.namespaces.as_ref(),
+                &namespace_id,
+                error,
+            )
         })),
     }
 }
@@ -542,21 +545,19 @@ pub(super) async fn put_upload_content(
     )
 )]
 pub(super) async fn complete_upload(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
-    body: UploadBodyBytes<MAX_COMPLETION_BODY_BYTES>,
+    AppJson(completion): AppJson<CompleteUploadBody, MAX_COMPLETION_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let completion = decode_json::<CompleteUploadBody>(&body.into_bytes())?;
     let namespace = state.open_writer(&namespace_id, subject).await?;
     let completed = namespace
         .complete_upload(&upload_id, completion)
         .await
         .map_err(ApiResponseError::for_namespace_writer(
-            &state.namespaces,
+            state.namespaces.as_ref(),
             &namespace_id,
         ))?;
     Ok(Json(with_content_token(
@@ -592,20 +593,19 @@ pub(super) async fn complete_upload(
     )
 )]
 pub(super) async fn get_upload(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let namespace = state.open_writer(&namespace_id, subject).await?;
     let mut view =
         namespace
             .get_upload(&upload_id)
             .await
             .map_err(ApiResponseError::for_namespace_writer(
-                &state.namespaces,
+                state.namespaces.as_ref(),
                 &namespace_id,
             ))?;
     if let Some(object_key) = &view.direct_put_object_key {
@@ -655,23 +655,23 @@ pub(super) async fn get_upload(
     )
 )]
 pub(super) async fn abort_upload(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let namespace = state.open_writer(&namespace_id, subject).await?;
     let response = namespace.abort_upload(&upload_id).await.map_err(
-        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
     )?;
     Ok(Json(response))
 }
 
 #[cfg(test)]
 mod completion_body_tests {
+    use super::super::extractors::decode_json;
     use super::*;
     use loonfs::LoonFs;
     use loonfs_types::{

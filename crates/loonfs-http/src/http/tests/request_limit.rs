@@ -1,7 +1,7 @@
 //! Request admission while a slow client drains a buffered response.
 
 use super::{test_app, test_options, TestAppOptions};
-use crate::{observe_routes, RequestLimit};
+use crate::observe_routes;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
@@ -18,14 +18,12 @@ async fn a_slow_client_keeps_the_request_slot_until_only_transport_buffering_rem
     const RETAINED_BYTES: usize = 8192 + 4096 * 100 + 64 * 1024;
 
     let directory = tempfile::tempdir().expect("temporary store");
-    let (_, mut state) = test_app(
-        test_options(directory.path(), "slow-response-writer"),
-        TestAppOptions::default(),
-    )
-    .await
-    .expect("app");
-    let limit = RequestLimit::new(NonZeroUsize::new(1).expect("positive cap"));
-    state.request_limit = Some(limit.clone());
+    let mut options = test_options(directory.path(), "slow-response-writer");
+    options.binding.max_in_flight_requests = Some(NonZeroUsize::new(1).expect("positive cap"));
+    let (_, state) = test_app(options, TestAppOptions::default())
+        .await
+        .expect("app");
+    let limit = state.request_limit().expect("request limit").clone();
     let router = observe_routes(
         Router::new().route(
             "/",

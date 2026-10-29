@@ -13,8 +13,8 @@ use loonfs::SharedObjectStore;
 use loonfs_client::{Client, ClientConfig, ClientError, ListOptions, NamespacePath};
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_server::{
-    app, serve_with_shutdown, AppConfig, JobMode, ServeError, ServerConfig, StoreConfig,
-    TlsServerConfig,
+    app, serve_with_shutdown, AppConfig, AuthConfig, JobMode, ServerConfig, ServerError,
+    StoreConfig, TlsServerConfig, TransportConfig,
 };
 use loonfs_test_support::http::{raw_agent, reserve_loopback_address};
 use loonfs_types::{ErrorCode, ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
@@ -119,7 +119,6 @@ pub(crate) fn assert_api_code<T: std::fmt::Debug>(
 }
 
 pub(crate) struct TestServer {
-    pub(crate) namespaces: std::sync::Arc<loonfs_http::Namespaces>,
     pub(crate) client: Client,
     pub(crate) server_url: String,
     /// The object store the server reads and writes, for a test that opens
@@ -141,10 +140,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         }
         _ => (None, None),
     };
-    let auth_token = config
-        .auth_token
-        .as_ref()
-        .map(|token| token.expose().to_owned());
+    let auth_token = bearer_token(&config);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -152,8 +148,8 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
     let configured = config.object_store().expect("build the configured store");
     let direct_transfers = configured.direct_transfers();
     let store = configured.into_shared();
-    let (router, state) = app(
-        config,
+    let (router, _) = app(
+        config.validate().expect("validate the test config"),
         AppConfig {
             store: Some(store.clone()),
             direct_transfers,
@@ -167,7 +163,6 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
     let server_url = format!("http://{addr}");
 
     TestServer {
-        namespaces: state.binding.namespaces.clone(),
         client: client(&server_url, auth_token, None),
         server_url,
         store,
@@ -190,7 +185,7 @@ pub(crate) struct TlsTestServer {
     pub(crate) ca_cert_path: String,
     pub(crate) auth_token: Option<String>,
     pub(crate) shutdown: tokio::sync::oneshot::Sender<()>,
-    pub(crate) server: tokio::task::JoinHandle<Result<(), ServeError>>,
+    pub(crate) server: tokio::task::JoinHandle<Result<(), ServerError>>,
     /// Holds the generated certificate and key on disk for the server's
     /// lifetime.
     _identity_dir: tempfile::TempDir,
@@ -225,19 +220,19 @@ pub(crate) async fn start_tls_server_with_certificate(
 
     let addr = reserve_loopback_address();
     config.bind = addr.to_string();
-    config.tls = Some(TlsServerConfig {
+    config.transport = Some(TransportConfig::Tls(TlsServerConfig {
         cert_path: cert_path.display().to_string(),
         key_path: key_path.display().to_string(),
-    });
-    let auth_token = config
-        .auth_token
-        .as_ref()
-        .map(|token| token.expose().to_owned());
+    }));
+    let auth_token = bearer_token(&config);
 
     let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
-    let mut server = tokio::spawn(serve_with_shutdown(config, async move {
-        let _ = shutdown_signal.await;
-    }));
+    let mut server = tokio::spawn(serve_with_shutdown(
+        config.validate().expect("validate the test config"),
+        async move {
+            let _ = shutdown_signal.await;
+        },
+    ));
     wait_until_listening(addr, &mut server).await;
 
     let server_url = format!("https://{addr}");
@@ -265,21 +260,21 @@ pub(crate) struct GracefulTestServer {
     pub(crate) client: Client,
     pub(crate) server_url: String,
     shutdown: tokio::sync::oneshot::Sender<()>,
-    server: tokio::task::JoinHandle<Result<(), ServeError>>,
+    server: tokio::task::JoinHandle<Result<(), ServerError>>,
 }
 
 pub(crate) async fn start_graceful_server(mut config: ServerConfig) -> GracefulTestServer {
     let addr = reserve_loopback_address();
     config.bind = addr.to_string();
-    let auth_token = config
-        .auth_token
-        .as_ref()
-        .map(|token| token.expose().to_owned());
+    let auth_token = bearer_token(&config);
 
     let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
-    let mut server = tokio::spawn(serve_with_shutdown(config, async move {
-        let _ = shutdown_signal.await;
-    }));
+    let mut server = tokio::spawn(serve_with_shutdown(
+        config.validate().expect("validate the test config"),
+        async move {
+            let _ = shutdown_signal.await;
+        },
+    ));
     wait_until_listening(addr, &mut server).await;
 
     let server_url = format!("http://{addr}");
@@ -328,7 +323,7 @@ fn client(server_url: &str, auth_token: Option<String>, ca_cert_path: Option<Str
 )]
 async fn wait_until_listening(
     addr: SocketAddr,
-    server: &mut tokio::task::JoinHandle<Result<(), ServeError>>,
+    server: &mut tokio::task::JoinHandle<Result<(), ServerError>>,
 ) {
     for _ in 0..500 {
         if server.is_finished() {
@@ -341,6 +336,15 @@ async fn wait_until_listening(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("server never started listening on {addr}");
+}
+
+/// Returns the bearer token that a client of a server with `config` sends,
+/// or `None` for a server without one.
+fn bearer_token(config: &ServerConfig) -> Option<String> {
+    match &config.auth {
+        Some(AuthConfig::BearerToken { token }) => Some(token.expose().to_owned()),
+        Some(AuthConfig::Open) | None => None,
+    }
 }
 
 pub(crate) fn test_config(
@@ -360,7 +364,9 @@ root = "unused"
 "#,
     )
     .expect("parse the test config");
-    config.auth_token = Some(auth_token.into());
+    config.auth = Some(AuthConfig::BearerToken {
+        token: auth_token.into(),
+    });
     config.content_token_secret = content_token_secret.into();
     config.writer_id = loonfs_test_support::ids::writer_id(writer_id);
     config.grep.mode = JobMode::ServeAndMaintain;

@@ -7,10 +7,9 @@ use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable};
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_http::{
-    AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, Namespaces,
+    AuthPolicy, BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, Namespaces,
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
-use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::SecretString;
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt as _;
@@ -28,39 +27,35 @@ pub(crate) struct MaintenanceHost {
 pub(crate) fn client(
     host: &MaintenanceHost,
     grep_service: GrepService,
-    store_kind: ConfiguredObjectStoreKind,
     no_retry: bool,
 ) -> Result<Client, CliError> {
-    let options = Arc::new(BindingConfig {
-        serves_maintenance: true,
-        max_download_bytes: None,
-        max_upload_bytes: None,
-        max_concurrent_uploads: DEFAULT_MAX_CONCURRENT_UPLOADS,
-        max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS,
-        content_token_secret: CONTENT_TOKEN_SECRET
-            .get_or_init(|| loonfs_types::generated_id("content-token").into())
-            .clone(),
-        request_deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
-        store_kind,
-        auth_policy: AuthPolicy::Unauthenticated,
-    });
-    let state = BindingState {
-        request_limit: None,
-        upload_permits: loonfs_http::transfer_permits(options.max_concurrent_uploads),
-        download_permits: loonfs_http::transfer_permits(options.max_concurrent_downloads),
-        options,
-        runtime: host.runtime.clone(),
-        namespaces: Arc::new(Namespaces::new(host.runtime.clone())),
-        maintenance: host.maintenance.clone(),
-        probe_store: host.runtime.object_store(),
-        direct_transfers: None,
-        grep: GrepBinding::ServeAndMaintain {
-            service: Arc::new(grep_service),
-            worker: host.grep_worker.clone(),
+    let state = BindingState::new(
+        BindingConfig {
+            serves_maintenance: true,
+            max_download_bytes: None,
+            max_upload_bytes: None,
+            max_concurrent_uploads: DEFAULT_MAX_CONCURRENT_UPLOADS,
+            max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+            max_in_flight_requests: None,
+            content_token_secret: CONTENT_TOKEN_SECRET
+                .get_or_init(|| loonfs_types::generated_id("content-token").into())
+                .clone(),
+            request_deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
+            auth_policy: AuthPolicy::Unauthenticated,
         },
-        metrics: HttpMetrics::new(),
-        usage_recorder: None,
-    };
+        BindingHandles {
+            runtime: host.runtime.clone(),
+            namespaces: Arc::new(Namespaces::<()>::new(host.runtime.clone())),
+            maintenance: host.maintenance.clone(),
+            direct_transfers: None,
+            grep: GrepBinding::ServeAndMaintain {
+                service: Arc::new(grep_service),
+                worker: host.grep_worker.clone(),
+            },
+            metrics: HttpMetrics::new(),
+            usage_recorder: None,
+        },
+    );
     let router = loonfs_http::router(state);
     let runtime = host.runtime.clone();
     let service = tower::service_fn(move |request: http::Request<Body>| {

@@ -107,6 +107,7 @@ async fn post(router: &axum::Router, uri: &str, body: Body) -> (StatusCode, serd
                 .method("POST")
                 .uri(uri)
                 .header("authorization", "Bearer test-token")
+                .header("content-type", "application/json")
                 .body(body)
                 .expect("request"),
         )
@@ -163,4 +164,44 @@ async fn a_store_probe_body_up_to_two_mib_is_accepted() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(error["code"], "content_too_large");
     state.runtime.shutdown().await.expect("shutdown writer");
+}
+
+#[cfg(feature = "openapi")]
+#[test]
+fn the_route_table_matches_the_openapi_document() {
+    use super::super::router::{MAINTENANCE_ROUTES, ROUTES};
+    use std::collections::BTreeSet;
+
+    let document =
+        serde_json::to_value(crate::openapi_document()).expect("serialize the OpenAPI document");
+    // The document also describes the host's health, readiness, and metrics
+    // routes, which the table leaves to the host.
+    let documented: BTreeSet<(String, String, String)> = document["paths"]
+        .as_object()
+        .expect("OpenAPI paths object")
+        .iter()
+        .filter(|(path, _)| path.starts_with("/v0/"))
+        .flat_map(|(path, item)| {
+            item.as_object()
+                .expect("OpenAPI path item")
+                .iter()
+                .filter_map(move |(method, operation)| {
+                    let operation = operation.get("operationId")?.as_str()?;
+                    Some((method.to_uppercase(), path.clone(), operation.to_owned()))
+                })
+        })
+        .collect();
+    let table: BTreeSet<(String, String, String)> = ROUTES
+        .iter()
+        .chain(MAINTENANCE_ROUTES)
+        .map(|route| {
+            (
+                route.method.as_str().to_owned(),
+                route.path.to_owned(),
+                route.operation.to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(table.len(), ROUTES.len() + MAINTENANCE_ROUTES.len());
+    assert_eq!(table, documented);
 }

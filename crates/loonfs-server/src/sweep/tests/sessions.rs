@@ -1,9 +1,10 @@
 //! Metadata retry, collection, and close costs for held sessions.
 
-use super::{seed_unfolded_tail, seed_writer, sweep_config, SweepServer, DAY_MS};
+use super::{held_ids, seed_unfolded_tail, seed_writer, sweep_config, SweepServer, DAY_MS};
 use crate::sweep::GarbageCollection;
 use loonfs::SharedObjectStore;
 use loonfs_grep::GrepWorkerConfig;
+use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
@@ -51,7 +52,7 @@ async fn ticks_leave_active_sessions_alone_and_fold_idle_tails_then_cost_nothing
         assert_eq!(held.last_published_seq(), Some(commit.committed_seq));
         assert_eq!(
             held.last_published_at_ms(),
-            Some(server.sweep.inner.namespaces.now_ms())
+            Some(server.sweep.inner.timer.monotonic_now_ms())
         );
         assert!(!held.metadata_caught_up());
         store.reset();
@@ -439,7 +440,7 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
         .tick_after(config.idle_session_close_after_ms - config.tick_interval_ms)
         .await;
     assert_eq!(
-        namespaces.held_ids().len(),
+        held_ids(namespaces).len(),
         1,
         "the threshold must be passed"
     );
@@ -454,7 +455,7 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
     let clone = request.clone();
     drop(request);
     server.tick_after(1).await;
-    assert_eq!(namespaces.held_ids().len(), 1);
+    assert_eq!(held_ids(namespaces).len(), 1);
     assert!(store.take().is_empty());
     server
         .tick_after(config.idle_session_close_after_ms + 1)
@@ -463,7 +464,7 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
     store.reset();
     server.sweep.tick().await;
     assert_eq!(
-        namespaces.held_ids().len(),
+        held_ids(namespaces).len(),
         1,
         "a request clone prevents closing"
     );
@@ -473,7 +474,7 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
     );
     drop(clone);
     server.sweep.tick().await;
-    assert!(namespaces.held_ids().is_empty());
+    assert!(held_ids(namespaces).is_empty());
     assert!(store.take().is_empty(), "closing costs zero requests");
     let reopened = namespaces.open(&namespace_id).await.expect("reopen");
     assert_eq!(reopened.last_published_seq(), None);
@@ -527,10 +528,10 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     drop(handle);
     store.reset();
     server.tick_after(1).await;
-    assert_eq!(namespaces.held_ids().len(), 1);
+    assert_eq!(held_ids(namespaces).len(), 1);
     assert!(store.take().is_empty());
     server.tick_after(1).await;
-    assert!(namespaces.held_ids().is_empty());
+    assert!(held_ids(namespaces).is_empty());
     assert!(
         store.take().is_empty(),
         "an aborted upload closes without requests"
@@ -543,7 +544,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     drop(handle);
     server.tick_after(config.tick_interval_ms).await;
     assert_eq!(
-        namespaces.held_ids().len(),
+        held_ids(namespaces).len(),
         1,
         "unfinished metadata prevents close"
     );
@@ -559,10 +560,10 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     );
     server.tick_after(1).await;
     assert_eq!(server.wal_tail_objects(&unfolded).await, 0);
-    assert_eq!(namespaces.held_ids().len(), 1, "one tick does one due step");
+    assert_eq!(held_ids(namespaces).len(), 1, "one tick does one due step");
     store.reset();
     server.sweep.tick().await;
-    assert!(namespaces.held_ids().is_empty());
+    assert!(held_ids(namespaces).is_empty());
     assert!(store.take().is_empty(), "closing costs zero requests");
     server.runtime.shutdown().await.expect("shutdown");
 }
@@ -606,6 +607,7 @@ async fn a_session_records_when_its_own_maintenance_catches_up() {
         runtime.object_store(),
         runtime.maintenance(writer_id("maintenance")),
         namespaces,
+        runtime.monotonic_timer(),
         None,
         &recorder,
     );
@@ -671,13 +673,13 @@ async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
         .tick_after(config.idle_session_close_after_ms - config.idle_fold_after_ms)
         .await;
     assert_eq!(
-        namespaces.held_ids().len(),
+        held_ids(namespaces).len(),
         1,
         "the session is not idle yet on the runtime's timer"
     );
     server.tick_after(1).await;
     assert!(
-        namespaces.held_ids().is_empty(),
+        held_ids(namespaces).is_empty(),
         "the session closes once it is idle"
     );
     server.runtime.shutdown().await.expect("shutdown");

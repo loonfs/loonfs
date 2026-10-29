@@ -1,7 +1,9 @@
 //! The writable namespace handles the host holds across requests.
 
+use super::fixtures::test_app_with_sessions;
 use super::*;
 use crate::http::error::ApiResponseError;
+use crate::{Namespaces, WriterSessions};
 use axum::http::Method;
 use axum::response::IntoResponse;
 use loonfs::NamespaceSessionStatus;
@@ -59,15 +61,22 @@ async fn create_direct_put_upload(
     (status, error.code)
 }
 
-async fn host(writer_id: &str) -> (tempfile::TempDir, axum::Router, BindingState) {
+async fn host(
+    writer_id: &str,
+) -> (
+    tempfile::TempDir,
+    axum::Router,
+    BindingState,
+    Arc<Namespaces<()>>,
+) {
     let directory = tempdir().expect("tempdir");
-    let (router, state) = test_app(
+    let (router, state, namespaces) = test_app_with_sessions(
         test_options(directory.path(), writer_id),
         TestAppOptions::default(),
     )
     .await
     .expect("app");
-    (directory, router, state)
+    (directory, router, state, namespaces)
 }
 
 async fn create_namespace(state: &BindingState, namespace_id: &NamespaceId) {
@@ -80,7 +89,7 @@ async fn create_namespace(state: &BindingState, namespace_id: &NamespaceId) {
 
 async fn writer_epoch(state: &BindingState, namespace_id: &NamespaceId) -> u64 {
     loonfs::control::load_namespace_read_state(
-        state.probe_store.as_ref(),
+        state.runtime.object_store().as_ref(),
         namespace_id,
         std::sync::Arc::new(loonfs_types::StdMonotonicTimer::default()),
     )
@@ -92,7 +101,7 @@ async fn writer_epoch(state: &BindingState, namespace_id: &NamespaceId) -> u64 {
 
 #[tokio::test]
 async fn two_commits_to_one_namespace_use_one_writer_epoch() {
-    let (_directory, router, state) = host("one-epoch-host").await;
+    let (_directory, router, state, _) = host("one-epoch-host").await;
     let namespace_id = namespace_id("one-epoch");
     create_namespace(&state, &namespace_id).await;
     let created = writer_epoch(&state, &namespace_id).await;
@@ -105,7 +114,7 @@ async fn two_commits_to_one_namespace_use_one_writer_epoch() {
 
 #[tokio::test]
 async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
-    let (_directory, router, state) = host("delete-host").await;
+    let (_directory, router, state, namespaces) = host("delete-host").await;
     let deleted = namespace_id("deleted");
     let kept = namespace_id("kept");
     for namespace_id in [&deleted, &kept] {
@@ -119,15 +128,15 @@ async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
         StatusCode::OK
     );
 
-    let closed = state.namespaces.close(&deleted).await.expect("close");
+    let closed = namespaces.close(&deleted).await.expect("close");
     assert!(closed.is_none(), "the host kept a handle: {closed:?}");
-    let closed = state.namespaces.close(&kept).await.expect("close");
+    let closed = namespaces.close(&kept).await.expect("close");
     assert!(closed.is_some(), "the host holds the written namespace");
 }
 
 #[tokio::test]
 async fn a_create_request_with_a_naming_field_is_rejected_and_leaves_no_writer_handle() {
-    let (_directory, router, state) = host("naming-field-host").await;
+    let (_directory, router, _, namespaces) = host("naming-field-host").await;
     let named = namespace_id("named");
     // Every namespace compares sibling names by the same rule, so the create
     // request has no `naming` field.
@@ -147,13 +156,13 @@ async fn a_create_request_with_a_naming_field_is_rejected_and_leaves_no_writer_h
         send(&router, Method::GET, &uri, String::new()).await.0,
         StatusCode::NOT_FOUND
     );
-    let closed = state.namespaces.close(&named).await.expect("close");
+    let closed = namespaces.close(&named).await.expect("close");
     assert!(closed.is_none(), "the host kept a handle: {closed:?}");
 }
 
 #[tokio::test]
 async fn a_request_for_a_missing_namespace_leaves_no_writer_handle_in_the_host() {
-    let (_directory, router, state) = host("missing-host").await;
+    let (_directory, router, _, namespaces) = host("missing-host").await;
     let missing = namespace_id("missing");
     let body = serde_json::json!({
         "commit_id": "create-missing",
@@ -165,13 +174,13 @@ async fn a_request_for_a_missing_namespace_leaves_no_writer_handle_in_the_host()
         StatusCode::NOT_FOUND
     );
 
-    let closed = state.namespaces.close(&missing).await.expect("close");
+    let closed = namespaces.close(&missing).await.expect("close");
     assert!(closed.is_none(), "the host kept a handle: {closed:?}");
 }
 
 #[tokio::test]
 async fn a_rejected_upload_for_a_missing_namespace_answers_not_found_and_leaves_no_writer_handle() {
-    let (_directory, router, state) = host("missing-upload-host").await;
+    let (_directory, router, _, namespaces) = host("missing-upload-host").await;
     let missing = namespace_id("missing");
 
     assert_eq!(
@@ -182,13 +191,13 @@ async fn a_rejected_upload_for_a_missing_namespace_answers_not_found_and_leaves_
         )
     );
 
-    let closed = state.namespaces.close(&missing).await.expect("close");
+    let closed = namespaces.close(&missing).await.expect("close");
     assert!(closed.is_none(), "the host kept a handle: {closed:?}");
 }
 
 #[tokio::test]
 async fn a_rejected_upload_for_an_existing_namespace_keeps_its_writer_handle() {
-    let (_directory, router, state) = host("existing-upload-host").await;
+    let (_directory, router, state, namespaces) = host("existing-upload-host").await;
     let existing = namespace_id("existing");
     create_namespace(&state, &existing).await;
 
@@ -201,7 +210,7 @@ async fn a_rejected_upload_for_an_existing_namespace_keeps_its_writer_handle() {
         )
     );
 
-    let closed = state.namespaces.close(&existing).await.expect("close");
+    let closed = namespaces.close(&existing).await.expect("close");
     assert!(closed.is_some(), "the host holds the existing namespace");
 }
 
@@ -214,7 +223,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
         KeyPredicate::hint(&namespace_id),
         OperationSelector::Read,
     ));
-    let (router, state) = test_app(
+    let (router, state, namespaces) = test_app_with_sessions(
         test_options(directory.path(), "close-during-open-host"),
         options_with_store(blocking.clone()),
     )
@@ -224,7 +233,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
 
     blocking.block_next();
     let paused = tokio::spawn({
-        let namespaces = Arc::clone(&state.namespaces);
+        let namespaces = Arc::clone(&namespaces);
         let namespace_id = namespace_id.clone();
         async move { namespaces.open(&namespace_id).await }
     });
@@ -234,7 +243,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
         .open(&namespace_id)
         .await
         .expect("open while the first open waits");
-    let closed = state.namespaces.close(&namespace_id).await.expect("close");
+    let closed = namespaces.close(&namespace_id).await.expect("close");
     assert!(closed.is_some(), "the host holds the opened namespace");
     blocking.release();
     paused
@@ -249,7 +258,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
 
 #[tokio::test]
 async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replacements_held() {
-    let (directory, router, state) = host("fenced-host").await;
+    let (directory, router, state, namespaces) = host("fenced-host").await;
     let (_, other) = test_app(
         test_options(directory.path(), "winning-host"),
         TestAppOptions::default(),
@@ -286,7 +295,7 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
                 .expect_err("old session is fenced");
             barrier.wait().await;
             let response = ApiResponseError::runtime_for_namespace_writer(
-                &state.namespaces,
+                state.namespaces.as_ref(),
                 fenced,
                 error.clone(),
             );
@@ -297,9 +306,8 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
         }
     }))
     .await;
-    assert_eq!(state.namespaces.fenced_sessions_dropped(), 1);
     assert_eq!(writer_epoch(&state, &fenced).await, winning_epoch);
-    assert_eq!(state.namespaces.held_ids().len(), 1);
+    assert_eq!(namespaces.held_ids(), std::slice::from_ref(&kept));
     assert!(!state.namespaces.forget_if_fenced(&kept, &errors[0]));
     assert!(!state.namespaces.forget_if_fenced(&fenced, &errors[0]));
 
@@ -308,12 +316,12 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
     assert_eq!(replacement.session_status(), NamespaceSessionStatus::Open);
     assert_eq!(old.session_status(), NamespaceSessionStatus::Fenced);
     let response = ApiResponseError::runtime_for_namespace_writer(
-        &state.namespaces,
+        state.namespaces.as_ref(),
         &fenced,
         errors[0].clone(),
     );
     assert_eq!(response.into_response().status(), StatusCode::CONFLICT);
-    assert_eq!(state.namespaces.fenced_sessions_dropped(), 1);
+    assert_eq!(namespaces.held_ids().len(), 2, "the replacement stays held");
     assert!(!state.namespaces.forget_if_fenced(&fenced, &errors[0]));
     drop(old);
     create_directory(&router, &fenced, "/still-replacement").await;
@@ -344,7 +352,6 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
     assert_eq!(error.code(), ErrorCode::WriterFenced);
     assert!(other.namespaces.forget_if_fenced(&fenced, &error));
     assert!(!other.namespaces.forget_if_fenced(&fenced, &error));
-    assert_eq!(other.namespaces.fenced_sessions_dropped(), 1);
 }
 
 #[tokio::test]
@@ -358,9 +365,10 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
     ));
     let mut options = test_options(directory.path(), "ending-host");
     options.inline_content.inline_content_fold_at_bytes = 1;
-    let (router, state) = test_app(options, options_with_store(blocking.clone()))
-        .await
-        .expect("host");
+    let (router, state, namespaces) =
+        test_app_with_sessions(options, options_with_store(blocking.clone()))
+            .await
+            .expect("host");
     let (_, other) = test_app(
         test_options(directory.path(), "winning-host"),
         options_with_store(Arc::new(
@@ -397,13 +405,12 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
     assert_eq!(status, StatusCode::CONFLICT);
     let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("fenced error");
     assert_eq!(error.code, ErrorCode::WriterFenced.as_str());
-    assert_eq!(state.namespaces.fenced_sessions_dropped(), 1);
-    assert!(state.namespaces.held_ids().is_empty());
+    assert!(namespaces.held_ids().is_empty());
     let (status, bytes) = send(&router, Method::POST, &uri, body.clone()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("closing error");
     assert_eq!(error.code, ErrorCode::WriterSessionClosed.as_str());
-    assert!(state.namespaces.held_ids().is_empty());
+    assert!(namespaces.held_ids().is_empty());
 
     blocking.release();
     state.runtime.drain().await.expect("old work ends");
@@ -446,7 +453,7 @@ async fn an_idle_close_rechecks_the_seq_and_counts_subject_scoped_handles() {
     .expect("app");
     let namespace_id = namespace_id("idle-close-checks");
     create_namespace(&state, &namespace_id).await;
-    let namespaces = crate::Namespaces::new(state.runtime.clone());
+    let namespaces = Namespaces::<()>::new(state.runtime.clone());
     let handle = namespaces.open(&namespace_id).await.expect("open");
     let initial = handle
         .put_file("/first", b"first", &loonfs_test_support::test_actor())
@@ -512,7 +519,7 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
         let mut options = test_options(directory.path(), "closing-host");
         options.inline_content.inline_content_fold_at_bytes = 1;
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let (_, state) = test_app(
+        let (_, state, namespaces) = test_app_with_sessions(
             options,
             TestAppOptions {
                 monotonic_timer: Some(timer.clone()),
@@ -534,17 +541,16 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
             .expect("publish");
         store.wait_until_blocked().await;
         let seq = old.last_published_seq();
-        let old_entry = state.namespaces.entry(&namespace_id).expect("held entry");
+        let old_entry = namespaces.entry(&namespace_id).expect("held entry");
         drop(old);
         timer.advance_ms(2);
         let mut closing = Box::pin(async {
             if idle {
-                state
-                    .namespaces
+                namespaces
                     .close_if_idle(&namespace_id, seq, 1, |_| true)
                     .await
             } else {
-                state.namespaces.close(&namespace_id).await
+                namespaces.close(&namespace_id).await
             }
         });
         assert!(futures::poll!(closing.as_mut()).is_pending());

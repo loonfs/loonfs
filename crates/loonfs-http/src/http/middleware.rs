@@ -3,7 +3,8 @@
 
 use super::error::{ApiResponseError, ServedErrorCode};
 use super::extractors::authorize;
-use super::router::method_not_allowed;
+use super::metrics::{route_label, UNMATCHED_ROUTE};
+use super::router::{find_route, method_not_allowed, Deadline};
 use crate::BindingState;
 use axum::extract::{MatchedPath, RawPathParams, Request, State};
 use axum::http::{HeaderValue, StatusCode};
@@ -14,6 +15,7 @@ use futures::FutureExt as _;
 use loonfs::ErrorCode;
 use loonfs_types::ErrorKind;
 use std::any::Any;
+use std::sync::Arc;
 
 /// Response header carrying the request's correlation id.
 pub(super) const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -46,16 +48,6 @@ pub(super) enum RequestLogSeverity {
     Debug,
 }
 
-// Membership is limited to streamed content and operator work that is long by design.
-pub(super) const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
-    "/v0/namespaces/{namespace_id}/filesystem/content",
-    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
-    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
-    "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
-    "/v0/maintenance/namespaces/{namespace_id}/runs",
-    "/v0/maintenance/store/probe",
-];
-
 /// Assigns each request a correlation id: every response carries it as the
 /// `x-request-id` header, and error bodies repeat it as
 /// `ErrorResponse.request_id` so a caller's log line and the server's trace can
@@ -84,7 +76,8 @@ pub(super) async fn with_request_deadline(
     if request
         .extensions()
         .get::<MatchedPath>()
-        .is_some_and(|matched| DEADLINE_EXEMPT_ROUTES.contains(&matched.as_str()))
+        .and_then(|matched| find_route(request.method(), matched.as_str()))
+        .is_some_and(|route| route.deadline == Deadline::Exempt)
     {
         return next.run(request).await;
     }
@@ -166,7 +159,7 @@ pub fn panic_message(payload: &(dyn Any + Send)) -> &str {
 
 /// Counts, times, and logs every request once it reaches its HTTP outcome.
 async fn with_request_observability(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -179,12 +172,14 @@ async fn with_request_observability(
         status,
         response.extensions().get::<ServedErrorCode>().copied(),
     );
-    let route = state.metrics.request_served(
-        matched_route.as_ref().map(MatchedPath::as_str),
+    let route = matched_route.as_ref().map(MatchedPath::as_str);
+    state.metrics.request_served(
+        route_label(route),
         &method,
         status,
         started.elapsed().as_secs_f64(),
     );
+    let route = route.unwrap_or(UNMATCHED_ROUTE);
 
     REQUEST_ID.with(|request_id| match severity {
         RequestLogSeverity::Error => {
@@ -245,7 +240,7 @@ fn request_clock() -> std::time::Instant {
 }
 
 async fn require_bearer_token(
-    State(state): State<BindingState>,
+    State(state): State<Arc<BindingState>>,
     request: Request,
     next: Next,
 ) -> Result<Response, ApiResponseError> {
@@ -255,20 +250,28 @@ async fn require_bearer_token(
 
 /// Applies the binding's authentication and request deadline to host routes.
 pub fn authenticate_routes(router: Router, state: &BindingState) -> Router {
+    authenticate(router, Arc::new(state.clone()))
+}
+
+/// Applies the binding's authentication and request deadline to `router`.
+pub(super) fn authenticate(router: Router, state: Arc<BindingState>) -> Router {
     let request_deadline_ms = state.options.request_deadline_ms;
     router
         .route_layer(middleware::from_fn(move |request: Request, next: Next| {
             with_request_deadline(request_deadline_ms, request, next)
         }))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer_token,
-        ))
+        .route_layer(middleware::from_fn_with_state(state, require_bearer_token))
 }
 
 /// Applies request admission, usage reports, error envelopes, correlation IDs, and metrics
 /// to host routes.
 pub fn observe_routes(router: Router, state: &BindingState) -> Router {
+    observe(router, Arc::new(state.clone()))
+}
+
+/// Applies request admission, usage reports, error envelopes, correlation IDs, and metrics
+/// to `router`.
+pub(super) fn observe(router: Router, state: Arc<BindingState>) -> Router {
     router
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn(catch_handler_panic))
@@ -284,7 +287,7 @@ pub fn observe_routes(router: Router, state: &BindingState) -> Router {
             super::request_limit::admit_request,
         ))
         .layer(middleware::from_fn_with_state(
-            state.clone(),
+            state,
             with_request_observability,
         ))
         .layer(middleware::from_fn(with_request_id))

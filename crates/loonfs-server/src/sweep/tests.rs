@@ -1,13 +1,13 @@
 //! Daily listing, session ticks, and their store request costs.
 
-use super::{GarbageCollection, GrepIndexing, Sweep, SweepCall};
+use super::{GarbageCollection, GrepIndexing, Sweep, SweepCall, SweepRetry, SweepState};
 use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
 use loonfs::{LoonFs, Maintenance, Namespace, NamespaceId, SharedObjectStore, Writable};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
-use loonfs_http::{Namespaces, SweepRetry};
+use loonfs_http::{HeldNamespace, Namespaces, WriterSessions};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_test_support::clock::ManualClock;
@@ -25,6 +25,25 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 const MINUTE_MS: u64 = 60 * 1_000;
+
+/// Lists the ids of the sessions that `namespaces` holds.
+fn held_ids(namespaces: &Namespaces<SweepState>) -> Vec<NamespaceId> {
+    std::iter::successors(namespaces.next_held_id(None), |after| {
+        namespaces.next_held_id(Some(after))
+    })
+    .collect()
+}
+
+/// Reads or updates the held entry of `namespace_id` in `namespaces`.
+fn visit_held<T>(
+    namespaces: &Namespaces<SweepState>,
+    namespace_id: &NamespaceId,
+    visit: impl FnOnce(&mut HeldNamespace<SweepState>) -> T,
+) -> Option<T> {
+    namespaces
+        .entry(namespace_id)
+        .map(|entry| visit(&mut super::lock(&entry)))
+}
 const DAY_MS: u64 = 24 * 60 * MINUTE_MS;
 
 /// A server's runtime and sweep over `store`, reading `clock`.
@@ -62,13 +81,21 @@ impl SweepServer {
             )
         });
         let grep = grep_worker.clone().map(|worker| {
-            GrepIndexing::new(worker, config.grep.worker_config()).expect("build the grep indexing")
+            GrepIndexing::new(
+                worker,
+                config
+                    .grep
+                    .worker
+                    .build_policy()
+                    .expect("build the grep policy"),
+            )
         });
         let sweep = Sweep::new(
             config.sweep_config(),
             runtime.object_store(),
             maintenance.clone(),
             Arc::new(Namespaces::new(runtime.clone())),
+            runtime.monotonic_timer(),
             grep,
             recorder.as_ref(),
         );
@@ -599,7 +626,8 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
     assert_eq!(
         server.retry(&names[1], SweepCall::Metadata),
         SweepRetry {
-            retry_at_ms: server.sweep.inner.namespaces.now_ms() + config.maintenance_interval_ms,
+            retry_at_ms: server.sweep.inner.timer.monotonic_now_ms()
+                + config.maintenance_interval_ms,
             attempts: 1,
         },
         "the panic counts as a failure, and ticks wait for its retry time"
@@ -661,12 +689,11 @@ impl SweepServer {
     }
 
     fn retry(&self, namespace_id: &NamespaceId, call: SweepCall) -> SweepRetry {
-        self.sweep
-            .inner
-            .namespaces
-            .visit_held(namespace_id, |held| call.retry(held))
-            .expect("a held session")
-            .expect("a call that keeps retry state")
+        visit_held(&self.sweep.inner.namespaces, namespace_id, |held| {
+            call.retry(&held.host_state)
+        })
+        .expect("a held session")
+        .expect("a call that keeps retry state")
     }
 
     async fn pass_after(&self, elapsed_ms: u64) {
@@ -792,7 +819,7 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
     server.tick_after(config.tick_interval_ms).await;
     assert_eq!(server.visit_failures(SweepCall::Metadata), 2);
     assert_eq!(
-        namespaces.held_ids(),
+        held_ids(namespaces),
         std::slice::from_ref(&namespace_id),
         "a transient failure keeps the idle session held"
     );
@@ -806,11 +833,11 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
             failures + 1,
             "ticks retry the call on its backoff"
         );
-        assert!(!namespaces.held_ids().is_empty());
+        assert!(!held_ids(namespaces).is_empty());
     }
     server.tick_after(config.tick_interval_ms).await;
     assert!(
-        namespaces.held_ids().is_empty(),
+        held_ids(namespaces).is_empty(),
         "a call whose backoff reached the cap doesn't keep an idle session open"
     );
 }

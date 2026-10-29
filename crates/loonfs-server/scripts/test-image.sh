@@ -130,9 +130,11 @@ CONTENT_TOKEN_SECRET="$(random_hex)"
 cat >"$WORK_DIR/config.toml" <<'CONFIG'
 bind = "0.0.0.0:9400"
 writer_id = "loonfs-server-container-test"
+
 # The bind serves every interface, so the config has to say that something
 # else terminates TLS. Here that something else is the test itself.
-allow_remote_without_tls = true
+[transport]
+kind = "plaintext_behind_proxy"
 
 [store]
 kind = "local_fs"

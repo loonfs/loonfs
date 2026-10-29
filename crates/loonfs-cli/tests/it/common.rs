@@ -294,9 +294,12 @@ auth_token = "test-token"
         let contents = format!(
             r#"
 bind = "{bind}"
-auth_token = "test-token"
 content_token_secret = "test-content-token-secret"
 writer_id = "{name}"
+
+[auth]
+kind = "bearer_token"
+token = "test-token"
 
 [store]
 kind = "local_fs"

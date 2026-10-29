@@ -1,7 +1,7 @@
 //! The HTTP error envelope served by every v0 endpoint, and the mapping
 //! from error kinds to HTTP statuses.
 
-use crate::Namespaces;
+use crate::WriterSessions;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -140,7 +140,7 @@ impl ApiResponseError {
     /// Maps a failure from the host's writable handle for `namespace_id`, and
     /// stops holding it when its session is fenced or its namespace is gone.
     pub(super) fn runtime_for_namespace_writer(
-        namespaces: &Namespaces,
+        namespaces: &dyn WriterSessions,
         namespace_id: &NamespaceId,
         error: loonfs::Error,
     ) -> Self {
@@ -152,7 +152,7 @@ impl ApiResponseError {
     }
 
     pub(super) fn for_namespace_writer<'a>(
-        namespaces: &'a Namespaces,
+        namespaces: &'a dyn WriterSessions,
         namespace_id: &'a NamespaceId,
     ) -> impl FnOnce(loonfs::Error) -> Self + 'a {
         |error| Self::runtime_for_namespace_writer(namespaces, namespace_id, error)

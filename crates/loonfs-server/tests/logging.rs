@@ -219,8 +219,13 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
         "logging-missing-path",
     );
     config.maintenance = JobMode::ServeOnly;
-    let (router, state) = app(config, AppConfig::default()).await.expect("build app");
-    let writer = state.runtime;
+    let (router, state) = app(
+        config.validate().expect("validate the test config"),
+        AppConfig::default(),
+    )
+    .await
+    .expect("build app");
+    let writer = state.binding.runtime;
     writer
         .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
@@ -263,8 +268,13 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
     );
     config.maintenance = JobMode::ServeOnly;
     config.max_concurrent_uploads = std::num::NonZeroUsize::MIN;
-    let (router, state) = app(config, AppConfig::default()).await.expect("build app");
-    let writer = state.runtime;
+    let (router, state) = app(
+        config.validate().expect("validate the test config"),
+        AppConfig::default(),
+    )
+    .await
+    .expect("build app");
+    let writer = state.binding.runtime;
     let namespace = namespace_id("demo");
     writer
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
@@ -405,7 +415,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
 
     failing.fail_all();
     let router = app(
-        config,
+        config.validate().expect("validate the test config"),
         AppConfig {
             store: Some(store),
             direct_transfers: None,

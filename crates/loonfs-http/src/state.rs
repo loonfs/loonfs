@@ -1,4 +1,5 @@
-//! Host-supplied options and handles for HTTP requests.
+//! Host-supplied options and handles for HTTP requests, and the table of
+//! writer sessions that a host holds.
 
 use crate::http::ApiResponseError;
 use crate::{HttpMetrics, RequestLimit, UsageRecorder};
@@ -10,11 +11,10 @@ use loonfs::{
 };
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
-use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{ErrorCode, MonotonicTimer, NamespaceId, SecretString, Subject};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Semaphore;
 
@@ -27,12 +27,6 @@ pub enum AuthPolicy {
 pub const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 8;
 pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 16;
 pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 60_000;
-
-/// Builds the semaphore that admits `count` concurrent transfers, clamped to
-/// the most permits a semaphore holds.
-pub fn transfer_permits(count: usize) -> Arc<Semaphore> {
-    Arc::new(Semaphore::new(count.min(Semaphore::MAX_PERMITS)))
-}
 
 /// Which of two jobs a host does for one subsystem: serve its requests, do
 /// its background work, both, or neither.
@@ -66,6 +60,16 @@ impl JobMode {
     pub fn maintains(self) -> bool {
         matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
     }
+
+    /// Returns the mode's spelling in a config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::ServeOnly => "serve_only",
+            Self::MaintainOnly => "maintain_only",
+            Self::ServeAndMaintain => "serve_and_maintain",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -79,9 +83,10 @@ pub struct BindingConfig {
     pub max_upload_bytes: Option<u64>,
     pub max_concurrent_uploads: usize,
     pub max_concurrent_downloads: usize,
+    /// Most requests the binding serves at once, or `None` for no limit.
+    pub max_in_flight_requests: Option<NonZeroUsize>,
     pub content_token_secret: SecretString,
     pub request_deadline_ms: u64,
-    pub store_kind: ConfiguredObjectStoreKind,
     pub auth_policy: AuthPolicy,
 }
 
@@ -131,26 +136,81 @@ impl GrepBinding {
     }
 }
 
-/// Hosts supply one runtime over one store, with permit limits matching
-/// `options`. The grep handles live in `grep`.
-#[derive(Clone)]
-pub struct BindingState {
-    pub options: Arc<BindingConfig>,
+/// The handles that a host supplies to a binding: one runtime over one
+/// store, and the grep handles in `grep`.
+pub struct BindingHandles {
     pub runtime: LoonFs<Writable>,
-    pub namespaces: Arc<Namespaces>,
+    pub namespaces: Arc<dyn WriterSessions>,
     pub maintenance: Maintenance,
-    pub probe_store: SharedObjectStore,
     pub direct_transfers: Option<DirectTransferIssuers>,
     pub grep: GrepBinding,
-    pub request_limit: Option<RequestLimit>,
-    pub upload_permits: Arc<Semaphore>,
-    pub download_permits: Arc<Semaphore>,
     pub metrics: Arc<HttpMetrics>,
     /// The recorder of one usage report for each namespace request, or `None` to record none.
     pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
 }
 
+/// A binding's options and handles, and the permits that enforce the
+/// concurrency limits in its options.
+#[derive(Clone)]
+pub struct BindingState {
+    pub options: Arc<BindingConfig>,
+    pub runtime: LoonFs<Writable>,
+    pub namespaces: Arc<dyn WriterSessions>,
+    pub maintenance: Maintenance,
+    pub direct_transfers: Option<DirectTransferIssuers>,
+    pub grep: GrepBinding,
+    pub metrics: Arc<HttpMetrics>,
+    pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
+    request_limit: Option<RequestLimit>,
+    upload_permits: Arc<Semaphore>,
+    download_permits: Arc<Semaphore>,
+}
+
 impl BindingState {
+    /// Builds a binding whose permits admit the concurrency that `config`
+    /// advertises.
+    pub fn new(config: BindingConfig, handles: BindingHandles) -> Self {
+        let BindingHandles {
+            runtime,
+            namespaces,
+            maintenance,
+            direct_transfers,
+            grep,
+            metrics,
+            usage_recorder,
+        } = handles;
+        let permits = |count: usize| Arc::new(Semaphore::new(count.min(Semaphore::MAX_PERMITS)));
+        Self {
+            request_limit: config.max_in_flight_requests.map(RequestLimit::new),
+            upload_permits: permits(config.max_concurrent_uploads),
+            download_permits: permits(config.max_concurrent_downloads),
+            options: Arc::new(config),
+            runtime,
+            namespaces,
+            maintenance,
+            direct_transfers,
+            grep,
+            metrics,
+            usage_recorder,
+        }
+    }
+
+    /// Returns the permits of proxied uploads.
+    pub fn upload_permits(&self) -> &Arc<Semaphore> {
+        &self.upload_permits
+    }
+
+    /// Returns the permits of proxied content reads.
+    pub fn download_permits(&self) -> &Arc<Semaphore> {
+        &self.download_permits
+    }
+
+    /// Returns the cap on requests in flight, or `None` when the binding has
+    /// no cap.
+    pub fn request_limit(&self) -> Option<&RequestLimit> {
+        self.request_limit.as_ref()
+    }
+
     /// Returns the runtime scoped to `subject`, or the service runtime when
     /// the request has no subject.
     pub(crate) fn runtime_for(&self, subject: Option<Subject>) -> LoonFs<Writable> {
@@ -179,6 +239,48 @@ impl BindingState {
     }
 }
 
+/// The writer sessions that a host holds for the handlers.
+///
+/// The handlers open a namespace's writable handle through these methods,
+/// and call them when a request finds the namespace gone or the session
+/// fenced, so that the host stops holding the handle.
+pub trait WriterSessions: Send + Sync {
+    /// Opens the writable handle of an existing namespace.
+    fn open<'a>(
+        &'a self,
+        namespace_id: &'a NamespaceId,
+    ) -> BoxFuture<'a, loonfs::Result<Namespace<Writable>>>;
+
+    /// Stops holding the handle of a deleted namespace.
+    fn forget(&self, namespace_id: &NamespaceId);
+
+    /// Stops holding the handle after a request through it found the
+    /// namespace missing or deleted. Another writer can delete a namespace
+    /// after this host holds its handle.
+    fn forget_if_gone(&self, namespace_id: &NamespaceId, code: ErrorCode);
+
+    /// Stops holding the handle when its session is fenced, and returns
+    /// whether a fenced handle was dropped. `error` supplies the winning
+    /// writer for the warning.
+    fn forget_if_fenced(&self, namespace_id: &NamespaceId, error: &loonfs::Error) -> bool;
+
+    /// Records that the namespace's grep index has work for the host's
+    /// maintenance.
+    fn mark_index_dirty(&self, namespace_id: &NamespaceId);
+}
+
+/// The state that a host keeps beside each writer session that
+/// [`Namespaces`] holds.
+pub trait HostState: Send + 'static {
+    /// Returns the state of a session that the table opened at
+    /// `opened_at_ms`, on the runtime's monotonic timer.
+    fn new(opened_at_ms: u64) -> Self;
+}
+
+impl HostState for () {
+    fn new(_opened_at_ms: u64) -> Self {}
+}
+
 /// The writable handle this host holds for each namespace.
 ///
 /// The host decides which writer sessions stay open and for how long: a
@@ -193,59 +295,27 @@ impl BindingState {
 /// new session, whose first publish takes the namespace back. While the old
 /// session's work ends, an open can fail with retryable `writer_session_closed`.
 /// Sustained fencing of one namespace means two writers receive its traffic.
-pub struct Namespaces {
+pub struct Namespaces<S> {
     runtime: LoonFs<Writable>,
-    handles: Mutex<BTreeMap<NamespaceId, Arc<Mutex<HeldNamespace>>>>,
+    handles: Mutex<BTreeMap<NamespaceId, Arc<Mutex<HeldNamespace<S>>>>>,
     timer: Arc<dyn MonotonicTimer>,
-    fenced_sessions_dropped: AtomicU64,
 }
 
-pub struct HeldNamespace {
+/// One writer session that the table holds, and the state that its host
+/// keeps beside the session.
+pub struct HeldNamespace<S> {
     pub handle: Namespace<Writable>,
     last_opened_at_ms: u64,
     closing: Option<NamespaceClose>,
-    pub indexed_seq: Option<ChangeSeq>,
+    /// Whether the grep index has work that the host's maintenance hasn't
+    /// done. The grep enable and disable routes set this flag.
     pub index_dirty: bool,
-    pub collected_seq: Option<ChangeSeq>,
-    pub collected_at_ms: u64,
-    pub metadata_retry: SweepRetry,
-    pub index_retry: SweepRetry,
-    pub gc_retry: SweepRetry,
-}
-
-/// When a host's maintenance sweep next makes one call on a held namespace,
-/// and how many times in a row that call has failed there.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SweepRetry {
-    /// The earliest time the sweep's ticks make the call again, on the
-    /// table's monotonic timer.
-    pub retry_at_ms: u64,
-    /// The call's failures in a row, zero after an attempt that didn't fail.
-    pub attempts: u32,
+    pub host_state: S,
 }
 
 type NamespaceClose = Shared<BoxFuture<'static, loonfs::Result<CloseNamespaceReport>>>;
 
-impl HeldNamespace {
-    /// Whether the grep index has work for a session at `seq`: the index is
-    /// marked dirty, or the sweep last brought the index up to date at
-    /// another seq.
-    pub fn index_pending(&self, seq: Option<ChangeSeq>) -> bool {
-        self.index_dirty || self.indexed_seq != seq
-    }
-
-    /// Whether garbage collection is due for a session at `seq`: the seq
-    /// moved since the last collection, and at least `interval_ms` passed
-    /// since that collection.
-    pub fn collection_pending(
-        &self,
-        seq: Option<ChangeSeq>,
-        now_ms: u64,
-        interval_ms: u64,
-    ) -> bool {
-        seq != self.collected_seq && now_ms.saturating_sub(self.collected_at_ms) >= interval_ms
-    }
-
+impl<S> HeldNamespace<S> {
     fn begin_close(&mut self) -> NamespaceClose {
         self.closing
             .get_or_insert_with(|| self.handle.clone().close().boxed().shared())
@@ -253,19 +323,18 @@ impl HeldNamespace {
     }
 }
 
-impl Namespaces {
+impl<S: HostState> Namespaces<S> {
     /// Builds an empty table that measures idle ages on the runtime's monotonic timer.
     pub fn new(runtime: LoonFs<Writable>) -> Self {
         Self {
             timer: runtime.monotonic_timer(),
             runtime,
             handles: Mutex::default(),
-            fenced_sessions_dropped: AtomicU64::new(0),
         }
     }
 
     /// Opens an existing namespace. An open during a close waits for its drain.
-    pub async fn open(&self, namespace_id: &NamespaceId) -> loonfs::Result<Namespace<Writable>> {
+    async fn open_held(&self, namespace_id: &NamespaceId) -> loonfs::Result<Namespace<Writable>> {
         let mut checked = false;
         loop {
             let closing = {
@@ -277,26 +346,21 @@ impl Namespaces {
                     if held.closing.is_none()
                         && held.handle.session_status() != NamespaceSessionStatus::Closed
                     {
-                        held.last_opened_at_ms = self.now_ms();
+                        held.last_opened_at_ms = self.timer.monotonic_now_ms();
                         return Ok(held.handle.clone());
                     }
                     Some((entry.clone(), held.begin_close()))
                 } else if checked {
                     let handle = self.runtime.open_namespace(namespace_id)?;
-                    let now_ms = self.now_ms();
+                    let now_ms = self.timer.monotonic_now_ms();
                     handles.insert(
                         namespace_id.clone(),
                         Arc::new(Mutex::new(HeldNamespace {
                             handle: handle.clone(),
                             last_opened_at_ms: now_ms,
                             closing: None,
-                            indexed_seq: None,
                             index_dirty: false,
-                            collected_seq: None,
-                            collected_at_ms: now_ms,
-                            metadata_retry: SweepRetry::default(),
-                            index_retry: SweepRetry::default(),
-                            gc_retry: SweepRetry::default(),
+                            host_state: S::new(now_ms),
                         })),
                     );
                     return Ok(handle);
@@ -319,7 +383,7 @@ impl Namespaces {
         namespace_id: &NamespaceId,
         expected_seq: Option<ChangeSeq>,
         idle_after_ms: u64,
-        is_quiet: impl FnOnce(&HeldNamespace) -> bool,
+        is_quiet: impl FnOnce(&HeldNamespace<S>) -> bool,
     ) -> loonfs::Result<Option<CloseNamespaceReport>> {
         let (entry, closing) = {
             let handles = self.lock();
@@ -332,7 +396,11 @@ impl Namespaces {
             if !held.handle.is_exclusively_held()
                 || held.handle.last_published_seq() != expected_seq
                 || !is_quiet(&held)
-                || self.now_ms().saturating_sub(held.last_opened_at_ms) <= idle_after_ms
+                || self
+                    .timer
+                    .monotonic_now_ms()
+                    .saturating_sub(held.last_opened_at_ms)
+                    <= idle_after_ms
             {
                 return Ok(None);
             }
@@ -343,30 +411,10 @@ impl Namespaces {
             .map(Some)
     }
 
-    /// Ends the held session before a waiting open can create its replacement.
-    pub async fn close(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> loonfs::Result<Option<CloseNamespaceReport>> {
-        let (entry, closing) = {
-            let handles = self.lock();
-            let Some(entry) = handles.get(namespace_id) else {
-                return Ok(None);
-            };
-            let mut held = entry
-                .lock()
-                .expect("a held namespace lock should not be poisoned");
-            (entry.clone(), held.begin_close())
-        };
-        self.finish_close(namespace_id, &entry, closing)
-            .await
-            .map(Some)
-    }
-
     async fn finish_close(
         &self,
         namespace_id: &NamespaceId,
-        entry: &Arc<Mutex<HeldNamespace>>,
+        entry: &Arc<Mutex<HeldNamespace<S>>>,
         closing: NamespaceClose,
     ) -> loonfs::Result<CloseNamespaceReport> {
         let result = closing.await;
@@ -378,11 +426,6 @@ impl Namespaces {
             handles.remove(namespace_id);
         }
         result
-    }
-
-    /// Lists held ids without extending any writer handle's lifetime.
-    pub fn held_ids(&self) -> Vec<NamespaceId> {
-        self.lock().keys().cloned().collect()
     }
 
     /// Advances a host walk with one table lookup, without holding the lock between entries.
@@ -398,40 +441,42 @@ impl Namespaces {
         .map(|(namespace_id, _)| namespace_id.clone())
     }
 
-    /// Reads or updates one held entry without cloning its handle.
-    pub fn visit_held<T>(
-        &self,
-        namespace_id: &NamespaceId,
-        visit: impl FnOnce(&mut HeldNamespace) -> T,
-    ) -> Option<T> {
-        self.lock().get(namespace_id).map(|entry| {
-            visit(
-                &mut entry
-                    .lock()
-                    .expect("a held namespace lock should not be poisoned"),
-            )
-        })
-    }
-
     /// Keeps a visit's facts attached to its original entry through a concurrent close.
-    pub fn entry(&self, namespace_id: &NamespaceId) -> Option<Arc<Mutex<HeldNamespace>>> {
+    pub fn entry(&self, namespace_id: &NamespaceId) -> Option<Arc<Mutex<HeldNamespace<S>>>> {
         self.lock().get(namespace_id).cloned()
     }
 
-    /// Reads the runtime's monotonic timer, which the host measures idle ages
-    /// and retry times on.
-    pub fn now_ms(&self) -> u64 {
-        self.timer.monotonic_now_ms()
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<NamespaceId, Arc<Mutex<HeldNamespace<S>>>>> {
+        self.handles
+            .lock()
+            .expect("the held namespace table lock should not be poisoned")
+    }
+}
+
+impl<S: HostState> WriterSessions for Namespaces<S> {
+    fn open<'a>(
+        &'a self,
+        namespace_id: &'a NamespaceId,
+    ) -> BoxFuture<'a, loonfs::Result<Namespace<Writable>>> {
+        self.open_held(namespace_id).boxed()
     }
 
-    pub fn mark_index_dirty(&self, namespace_id: &NamespaceId) {
-        self.visit_held(namespace_id, |held| held.index_dirty = true);
+    fn forget(&self, namespace_id: &NamespaceId) {
+        self.lock().remove(namespace_id);
     }
 
-    /// Checks the held session under the table lock, so a late error cannot
-    /// drop a healthy replacement. `error` supplies the winning writer for
-    /// the warning. Returns whether a fenced handle was dropped.
-    pub fn forget_if_fenced(&self, namespace_id: &NamespaceId, error: &loonfs::Error) -> bool {
+    fn forget_if_gone(&self, namespace_id: &NamespaceId, code: ErrorCode) {
+        if matches!(
+            code,
+            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted
+        ) {
+            self.forget(namespace_id);
+        }
+    }
+
+    fn forget_if_fenced(&self, namespace_id: &NamespaceId, error: &loonfs::Error) -> bool {
+        // The status is checked under the table lock, so a late error can't
+        // drop a healthy replacement.
         let mut handles = self.lock();
         if !handles.get(namespace_id).is_some_and(|entry| {
             entry
@@ -444,7 +489,6 @@ impl Namespaces {
             return false;
         }
         handles.remove(namespace_id);
-        self.fenced_sessions_dropped.fetch_add(1, Ordering::Relaxed);
         drop(handles);
         let active_writer_id = error
             .to_error_response()
@@ -459,31 +503,44 @@ impl Namespaces {
         true
     }
 
-    /// Counts fenced handles dropped over this table's lifetime.
-    pub fn fenced_sessions_dropped(&self) -> u64 {
-        self.fenced_sessions_dropped.load(Ordering::Relaxed)
-    }
-
-    /// Stops holding the handle of a deleted namespace.
-    pub(crate) fn forget(&self, namespace_id: &NamespaceId) {
-        self.lock().remove(namespace_id);
-    }
-
-    /// Stops holding the handle after a request through it found the
-    /// namespace missing or deleted. Another writer can delete a namespace
-    /// after this host holds its handle.
-    pub(crate) fn forget_if_gone(&self, namespace_id: &NamespaceId, code: ErrorCode) {
-        if matches!(
-            code,
-            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted
-        ) {
-            self.forget(namespace_id);
+    fn mark_index_dirty(&self, namespace_id: &NamespaceId) {
+        if let Some(entry) = self.entry(namespace_id) {
+            entry
+                .lock()
+                .expect("a held namespace lock should not be poisoned")
+                .index_dirty = true;
         }
     }
+}
 
-    fn lock(&self) -> MutexGuard<'_, BTreeMap<NamespaceId, Arc<Mutex<HeldNamespace>>>> {
-        self.handles
-            .lock()
-            .expect("the held namespace table lock should not be poisoned")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl<S: HostState> Namespaces<S> {
+        /// Ends the held session before a waiting open can create its replacement.
+        pub(crate) async fn close(
+            &self,
+            namespace_id: &NamespaceId,
+        ) -> loonfs::Result<Option<CloseNamespaceReport>> {
+            let (entry, closing) = {
+                let handles = self.lock();
+                let Some(entry) = handles.get(namespace_id) else {
+                    return Ok(None);
+                };
+                let mut held = entry
+                    .lock()
+                    .expect("a held namespace lock should not be poisoned");
+                (entry.clone(), held.begin_close())
+            };
+            self.finish_close(namespace_id, &entry, closing)
+                .await
+                .map(Some)
+        }
+
+        /// Lists held ids without extending any writer handle's lifetime.
+        pub(crate) fn held_ids(&self) -> Vec<NamespaceId> {
+            self.lock().keys().cloned().collect()
+        }
     }
 }

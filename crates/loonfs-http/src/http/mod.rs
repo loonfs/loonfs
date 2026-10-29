@@ -33,7 +33,7 @@ pub use self::router::router;
 
 use self::extractors::{
     acquire_download_permit, AppJson, AppPath, AppQuery, NamespaceIdPath, NoBody, NoQuery,
-    OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
-    MAX_COMPLETION_BODY_BYTES, MAX_JSON_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
+    OptionalAppJson, UploadBodyStream, MAX_COMPLETION_BODY_BYTES, MAX_JSON_BODY_BYTES,
+    MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use crate::BindingState;

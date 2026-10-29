@@ -1027,13 +1027,12 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     );
 
     let host_c_target = NamespacePath::parse("demo", "/docs/host-c.txt").expect("host c target");
-    for (loser, winner, winning_writer_id, expected_drops) in [
-        (&server_a, &server_b, "loonfs-server-b", 1),
-        (&server_b, &server_a, "loonfs-server-a", 1),
-        (&server_a, &server_b, "loonfs-server-b", 2),
-        (&server_b, &server_a, "loonfs-server-a", 2),
+    for (loser, winning_writer_id) in [
+        (&server_a, "loonfs-server-b"),
+        (&server_b, "loonfs-server-a"),
+        (&server_a, "loonfs-server-b"),
+        (&server_b, "loonfs-server-a"),
     ] {
-        let winner_drops = winner.namespaces.fenced_sessions_dropped();
         match loser
             .client
             .put_file_with_options(
@@ -1061,8 +1060,8 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
             }
             other => panic!("expected writer_fenced, got {other:?}"),
         }
-        assert_eq!(loser.namespaces.fenced_sessions_dropped(), expected_drops);
-        assert_eq!(winner.namespaces.fenced_sessions_dropped(), winner_drops);
+        // The fenced request dropped the loser's session, so the next
+        // request opens a new one instead of failing the same way.
         loser
             .client
             .put_file_with_options(
@@ -1073,7 +1072,6 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
             )
             .await
             .expect("next request takes the namespace back");
-        assert_eq!(loser.namespaces.fenced_sessions_dropped(), expected_drops);
     }
 
     // Fencing gates writes only; server A still reads the moved file.

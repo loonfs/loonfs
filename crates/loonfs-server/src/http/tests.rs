@@ -3,9 +3,9 @@
 mod admission;
 mod composition;
 
-use super::serve::{build_handles, serve_on, RuntimeHandles};
+use super::serve::{build_handles, serve_on, RuntimeHandles, Settlement};
 use super::{app, AppConfig};
-use crate::{ServerConfig, StoreConfig};
+use crate::{AuthConfig, ServerConfig, StoreConfig};
 use axum::http::StatusCode;
 use loonfs::metrics::MetricValue;
 use loonfs::{ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, TraceMode, Writable};
@@ -26,13 +26,16 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     let store_dir = tempdir().expect("store tempdir");
     let metrics_dir = tempdir().expect("metrics tempdir");
     let store = Arc::new(LocalFsStore::new(store_dir.path()).expect("store")) as SharedObjectStore;
-    let config = test_config(store_dir.path(), "server-writer");
+    let config = test_config(store_dir.path(), "server-writer")
+        .validate()
+        .expect("valid config");
     let metrics_path = metrics_dir.path().join("object-store.ndjson");
 
     {
         let RuntimeHandles { runtime, .. } = build_handles(
-            &config,
-            &config.validate().expect("valid config"),
+            &config.config,
+            &config.memory,
+            config.maintenance_writer_id.clone(),
             store,
             &HttpMetrics::new(),
             Some(metrics_path.clone().into_os_string()),
@@ -50,22 +53,6 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     assert!(!jsonl.contains("namespaces/metrics"));
 }
 
-#[tokio::test]
-async fn app_validates_directly_built_configs() {
-    let temp_dir = tempdir().expect("tempdir");
-    let mut config = test_config(temp_dir.path(), "app-validate-writer");
-    config.max_upload_bytes = 0;
-    match app(config, AppConfig::default()).await {
-        Err(crate::config::ServerConfigError::Field(
-            loonfs_types::config::ConfigFieldError::Invalid { field, .. },
-        )) => {
-            assert_eq!(field, "max_upload_bytes");
-        }
-        Err(other) => panic!("expected invalid field error, got {other:?}"),
-        Ok(_) => panic!("app must reject a zero upload size"),
-    }
-}
-
 /// Checks that a scrape renders every counter and gauge of the metadata
 /// cache and the grep cache exactly once, so the recorder's snapshot
 /// doesn't include a second copy of any of them.
@@ -75,9 +62,12 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "cache-metrics-writer");
 
-    let (_router, state) = app(config, options_with_store(store))
-        .await
-        .expect("build app");
+    let (_router, state) = app(
+        config.validate().expect("validate the test config"),
+        options_with_store(store),
+    )
+    .await
+    .expect("build app");
     assert!(
         state.grep_block_cache.is_some(),
         "the test config serves grep"
@@ -170,9 +160,11 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
-        writer.clone(),
-        None,
-        shutdown_deadline_ms,
+        Settlement {
+            runtime: writer.clone(),
+            sweep: None,
+            deadline_ms: shutdown_deadline_ms,
+        },
         async move {
             let _ = shutdown_rx.await;
         },
@@ -222,9 +214,13 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve_on(listener, config, async move {
-        let _ = shutdown_rx.await;
-    }));
+    let server = tokio::spawn(serve_on(
+        listener,
+        config.validate().expect("validate the test config"),
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
 
     // The server accepts work while running.
     let client = Client::new(ClientConfig {
@@ -299,9 +295,12 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
     ));
     let mut config = test_config(temp_dir.path(), "sweep-shutdown-server");
     config.max_concurrent_maintenance = std::num::NonZeroUsize::MIN;
-    let (router, state) = app(config, options_with_store(store.clone()))
-        .await
-        .expect("build app");
+    let (router, state) = app(
+        config.validate().expect("validate the test config"),
+        options_with_store(store.clone()),
+    )
+    .await
+    .expect("build app");
     store.inner().block_next();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -310,9 +309,11 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
-        state.runtime.clone(),
-        state.sweep.clone(),
-        60_000,
+        Settlement {
+            runtime: state.binding.runtime.clone(),
+            sweep: state.sweep.clone(),
+            deadline_ms: 60_000,
+        },
         async move {
             let _ = shutdown_rx.await;
         },
@@ -325,7 +326,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
     .expect("the sweep's compaction unit reaches its first segment write");
 
     shutdown_tx.send(()).expect("trigger shutdown");
-    while !state.runtime.is_shutting_down() {
+    while !state.binding.runtime.is_shutting_down() {
         tokio::task::yield_now().await;
     }
     store.inner().release();
@@ -366,10 +367,14 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
     let shutdown_deadline_ms = 25;
     let mut config = test_config(temp_dir.path(), "parked-sweep-server");
     config.shutdown_deadline_ms = shutdown_deadline_ms;
-    let (router, state) = app(config, options_with_store(store.clone()))
-        .await
-        .expect("build app");
+    let (router, state) = app(
+        config.validate().expect("validate the test config"),
+        options_with_store(store.clone()),
+    )
+    .await
+    .expect("build app");
     state
+        .binding
         .runtime
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -382,9 +387,11 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
-        state.runtime.clone(),
-        state.sweep.clone(),
-        shutdown_deadline_ms,
+        Settlement {
+            runtime: state.binding.runtime.clone(),
+            sweep: state.sweep.clone(),
+            deadline_ms: shutdown_deadline_ms,
+        },
         async move {
             let _ = shutdown_rx.await;
         },
@@ -402,7 +409,7 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
         .expect("shutdown does not wait for a parked visit past its deadline")
         .expect("join the server task")
         .expect("an abandoned visit does not fail the shutdown");
-    assert!(state.runtime.is_shutting_down());
+    assert!(state.binding.runtime.is_shutting_down());
     store.release();
 }
 
@@ -413,7 +420,9 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let router = app(
-        test_config(temp_dir.path(), "server-writer"),
+        test_config(temp_dir.path(), "server-writer")
+            .validate()
+            .expect("validate the test config"),
         options_with_store(store),
     )
     .await
@@ -511,9 +520,12 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let mut config = test_config(temp_dir.path(), "hidden-maintenance-writer");
     config.maintenance = crate::config::JobMode::MaintainOnly;
-    let (router, state) = app(config, options_with_store(store))
-        .await
-        .expect("build app");
+    let (router, state) = app(
+        config.validate().expect("validate the test config"),
+        options_with_store(store),
+    )
+    .await
+    .expect("build app");
     assert!(state.sweep.is_some());
 
     let capabilities_response = router
@@ -572,6 +584,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
 
     let namespace_id = namespace_id("hidden");
     state
+        .binding
         .runtime
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -630,9 +643,12 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = app(config, options_with_store(store))
-        .await
-        .expect("build app");
+    let (router, state) = app(
+        config.validate().expect("validate the test config"),
+        options_with_store(store),
+    )
+    .await
+    .expect("build app");
     let slow_started = Arc::new(tokio::sync::Notify::new());
     let slow_release = Arc::new(tokio::sync::Notify::new());
     let router = router.route(
@@ -655,9 +671,11 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
-        state.runtime.clone(),
-        state.sweep.clone(),
-        shutdown_deadline_ms,
+        Settlement {
+            runtime: state.binding.runtime.clone(),
+            sweep: state.sweep.clone(),
+            deadline_ms: shutdown_deadline_ms,
+        },
         async move {
             let _ = shutdown_rx.await;
         },
@@ -671,7 +689,7 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     let shutdown_started = tokio::time::Instant::now();
     shutdown_tx.send(()).expect("trigger shutdown");
     loonfs_test_support::clock::bounded(std::time::Duration::from_secs(1), async {
-        while !state.runtime.is_shutting_down() {
+        while !state.binding.runtime.is_shutting_down() {
             tokio::task::yield_now().await;
         }
     })
@@ -746,7 +764,9 @@ root = "unused"
 "#,
     )
     .expect("parse the test config");
-    config.auth_token = Some("test-token".into());
+    config.auth = Some(AuthConfig::BearerToken {
+        token: "test-token".into(),
+    });
     config.content_token_secret = "test-content-token-secret".into();
     config.writer_id = loonfs_test_support::ids::writer_id(writer_id);
     config.grep.mode = crate::config::JobMode::ServeAndMaintain;

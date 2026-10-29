@@ -102,7 +102,7 @@ pub struct CreateSnapshotOptions {
 }
 
 /// Options for a streaming file read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadFileStreamOptions {
     /// Bytes one ranged read fetches, which is the most of the file the read
     /// holds at once. Defaults to
@@ -116,9 +116,10 @@ pub struct ReadFileStreamOptions {
     /// byte. See [`StreamRange`](loonfs_core::StreamRange) for how a resumed
     /// read and a ranged read are verified.
     pub range: StreamRange,
-    /// How recently the read confirms the live head, or `None` for the
-    /// runtime's default.
-    pub consistency: Option<Consistency>,
+    /// The live head or the snapshot that the read reads, by default the
+    /// live head at the runtime's default consistency. A snapshot read
+    /// returns the file revision that the snapshot captured.
+    pub at: ReadAt,
 }
 
 impl Default for ReadFileStreamOptions {
@@ -126,7 +127,7 @@ impl Default for ReadFileStreamOptions {
         Self {
             chunk_bytes: const { NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES).unwrap() },
             range: StreamRange::default(),
-            consistency: None,
+            at: ReadAt::default(),
         }
     }
 }
