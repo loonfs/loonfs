@@ -168,8 +168,7 @@ impl ChangeFeedResume {
 
     pub(crate) fn start_event_index(self, change_seq: ChangeSeq) -> usize {
         if change_seq == self.built_through_seq {
-            usize::try_from(self.next_event_index)
-                .expect("a `u32` event index should fit in `usize`")
+            self.next_event_index as usize
         } else {
             0
         }

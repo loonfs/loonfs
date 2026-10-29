@@ -41,7 +41,8 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
         schemas.remove(&name);
     }
     for (name, schema) in named.schemas {
-        let schema = serde_json::from_value(schema).expect("valid assembled HTTP schema");
+        let schema = serde_json::from_value(schema)
+            .expect("an assembled HTTP schema should decode as an OpenAPI schema");
         assert!(
             schemas
                 .get(&name)
@@ -73,7 +74,9 @@ impl NamedSchemas {
     fn plain<T: ToSchema>(&mut self, catch_all: &str) {
         let name = T::name().into_owned();
         let mut schema = Source::of::<T>().schema;
-        let values = schema["enum"].as_array_mut().expect("string enum values");
+        let values = schema["enum"]
+            .as_array_mut()
+            .expect("a derived string enum schema should have an `enum` array");
         let derived = values.len();
         values.retain(|value| value != catch_all);
         assert_eq!(
@@ -91,23 +94,29 @@ impl NamedSchemas {
     fn composite<T: ToSchema, Kind: ToSchema>(&mut self, tag: &str, catch_all: Option<&str>) {
         let source = Source::of::<T>();
         let mut envelope = source.schema.clone();
-        let members = envelope["allOf"].as_array_mut().expect("composite fields");
+        let members = envelope["allOf"]
+            .as_array_mut()
+            .expect("a derived composite schema should have an `allOf` array");
         let kind_ref = reference(&Kind::name());
         let index = members
             .iter()
             .position(|s| s["$ref"] == kind_ref)
-            .expect("declared flattened union");
+            .expect("a composite schema should reference its declared flattened union");
         members.remove(index);
         let fields = self.flatten(envelope, &source);
-        let mut union = serde_json::to_value(Kind::schema()).expect("derived union");
+        let mut union = serde_json::to_value(Kind::schema())
+            .expect("a derived union schema should serialize to JSON");
         if let Some(catch_all) = catch_all {
             strip_catch_all(&mut union, tag, catch_all, &Kind::name());
         }
-        for variant in union["oneOf"].as_array_mut().expect("kind variants") {
+        for variant in union["oneOf"]
+            .as_array_mut()
+            .expect("a derived kind union should have a `oneOf` array")
+        {
             if variant.get("title").is_none() {
                 let value = variant["properties"][tag]["enum"][0]
                     .as_str()
-                    .expect("kind tag");
+                    .expect("each kind variant should have a string tag value");
                 variant["title"] = json!(format!("{}{}", Kind::name(), pascal_case(value)));
             }
         }
@@ -127,28 +136,34 @@ impl NamedSchemas {
     ) {
         let variants = union
             .as_object_mut()
-            .expect("union object")
+            .expect("a derived union schema should be a JSON object")
             .remove("oneOf")
-            .expect("tagged union");
+            .expect("a derived union schema should have `oneOf` variants");
         let mut references = Vec::new();
         let mut mapping = Map::new();
-        for variant in variants.as_array().expect("union variants") {
+        for variant in variants
+            .as_array()
+            .expect("a union's `oneOf` value should be an array")
+        {
             let mut variant = self.flatten(variant.clone(), source);
             let values = variant["properties"][tag]["enum"]
                 .as_array()
-                .expect("fixed tag");
+                .expect("each union variant should have a fixed tag in an `enum` array");
             assert_eq!(values.len(), 1, "{name}: tag must have one value");
-            let value = values[0].as_str().expect("string tag").to_owned();
+            let value = values[0]
+                .as_str()
+                .expect("a union variant's tag value should be a string")
+                .to_owned();
             assert!(
                 variant["required"]
                     .as_array()
-                    .expect("required fields")
+                    .expect("each union variant should have a `required` array")
                     .contains(&json!(tag)),
                 "{name}: tag must be required"
             );
             let title = variant
                 .as_object_mut()
-                .expect("variant object")
+                .expect("each union variant should be a JSON object")
                 .remove("title");
             let variant_name = title
                 .and_then(|v| v.as_str().map(str::to_owned))
@@ -189,13 +204,16 @@ impl NamedSchemas {
     fn flatten(&mut self, mut schema: Value, source: &Source) -> Value {
         let Some(members) = schema
             .as_object_mut()
-            .expect("schema object")
+            .expect("a schema to flatten should be a JSON object")
             .remove("allOf")
         else {
             return schema;
         };
         schema["type"] = json!("object");
-        for member in members.as_array().expect("composite members") {
+        for member in members
+            .as_array()
+            .expect("a schema's `allOf` value should be an array")
+        {
             let member = if let Some(name) = member["$ref"]
                 .as_str()
                 .and_then(|r| r.strip_prefix("#/components/schemas/"))
@@ -204,7 +222,7 @@ impl NamedSchemas {
                 source
                     .dependencies
                     .get(name)
-                    .expect("derived component dependency")
+                    .expect("a referenced component should be among the derived dependencies")
             } else {
                 member
             };
@@ -228,13 +246,15 @@ impl Source {
         let mut dependencies = Vec::new();
         T::schemas(&mut dependencies);
         Self {
-            schema: serde_json::to_value(T::schema()).expect("derived schema"),
+            schema: serde_json::to_value(T::schema())
+                .expect("a derived schema should serialize to JSON"),
             dependencies: dependencies
                 .into_iter()
                 .map(|(name, schema)| {
                     (
                         name,
-                        serde_json::to_value(schema).expect("derived dependency"),
+                        serde_json::to_value(schema)
+                            .expect("a derived dependency schema should serialize to JSON"),
                     )
                 })
                 .collect(),
@@ -243,7 +263,9 @@ impl Source {
 }
 
 fn strip_catch_all(union: &mut Value, tag: &str, catch_all: &str, name: &str) {
-    let variants = union["oneOf"].as_array_mut().expect("tagged union");
+    let variants = union["oneOf"]
+        .as_array_mut()
+        .expect("a tagged union schema should have a `oneOf` array");
     let derived = variants.len();
     variants.retain(|variant| variant["properties"][tag]["enum"][0] != catch_all);
     assert_eq!(
@@ -254,12 +276,14 @@ fn strip_catch_all(union: &mut Value, tag: &str, catch_all: &str, name: &str) {
 }
 
 fn merge_fields(target: &mut Value, source: &Value) {
-    let target = target.as_object_mut().expect("object schema");
+    let target = target
+        .as_object_mut()
+        .expect("a schema that receives fields should be a JSON object");
     let properties = target
         .entry("properties")
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .expect("properties");
+        .expect("a schema's `properties` value should be an object");
     if let Some(fields) = source["properties"].as_object() {
         for (name, field) in fields {
             assert!(
@@ -272,7 +296,7 @@ fn merge_fields(target: &mut Value, source: &Value) {
         .entry("required")
         .or_insert_with(|| json!([]))
         .as_array_mut()
-        .expect("required fields");
+        .expect("a schema's `required` value should be an array");
     if let Some(fields) = source["required"].as_array() {
         for field in fields {
             if !required.contains(field) {

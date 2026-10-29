@@ -1469,7 +1469,7 @@ fn decode_namespace_manifest_json_with_limit(
     };
     let expected_kind = NamespaceManifestKind::Manifest;
     crate::envelope::decode_json_envelope(&document, NAMESPACE_MANIFEST_FORMAT_VERSION, |found| {
-        crate::envelope::verify_kind(expected_kind.as_str(), found)
+        crate::envelope::ensure_kind(expected_kind.as_str(), found)
     })
 }
 

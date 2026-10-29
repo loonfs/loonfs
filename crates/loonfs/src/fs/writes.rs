@@ -305,9 +305,9 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record(
             "payload_class",
-            crate::trace::payload_class(
-                usize::try_from(prepared_content.content_ref().size_bytes).unwrap_or(usize::MAX),
-            ),
+            crate::trace::payload_class(loonfs_types::usize_from_u64(
+                prepared_content.content_ref().size_bytes,
+            )),
         );
         self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
             .await
@@ -381,9 +381,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record(
             "payload_class",
-            crate::trace::payload_class(
-                usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
-            ),
+            crate::trace::payload_class(loonfs_types::usize_from_u64(content_ref.size_bytes)),
         );
         let prepared_content = self.prepare_content_ref_inner(content_ref).await?;
         self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
@@ -414,9 +412,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record(
             "payload_class",
-            crate::trace::payload_class(
-                usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
-            ),
+            crate::trace::payload_class(loonfs_types::usize_from_u64(content_ref.size_bytes)),
         );
         self.prepare_content_ref_inner(content_ref).await
     }

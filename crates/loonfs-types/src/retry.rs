@@ -27,7 +27,11 @@ impl MonotonicTimer for StdMonotonicTimer {
 
 /// These clocks count host sleep, so publication budgets keep advancing where `Instant` would stop.
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-#[allow(clippy::disallowed_methods, unsafe_code)]
+#[expect(
+    clippy::disallowed_methods,
+    unsafe_code,
+    reason = "the boot-time clock reads through libc, because Instant stops during host sleep"
+)]
 fn monotonic_now() -> Duration {
     #[cfg(target_os = "linux")]
     const CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
@@ -50,7 +54,10 @@ fn monotonic_now() -> Duration {
 /// `Instant` stops during host sleep. That is adequate for the client's retry timing, and the
 /// runtime refuses to build on these platforms.
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "this platform has no boot-time clock, so Instant is the fallback"
+)]
 fn monotonic_now() -> Duration {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     let start = START.get_or_init(std::time::Instant::now);

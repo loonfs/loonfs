@@ -259,7 +259,7 @@ impl utoipa::PartialSchema for OpenApiPageLimit {
                 utoipa::openapi::KnownFormat::Int32,
             )))
             .minimum(Some(1u32))
-            .maximum(Some(loonfs_types::DEFAULT_MAX_PAGE_LIMIT))
+            .maximum(Some(loonfs_types::MAX_PAGE_LIMIT))
             .default(Some(serde_json::json!(loonfs_types::DEFAULT_PAGE_LIMIT)))
             .into()
     }

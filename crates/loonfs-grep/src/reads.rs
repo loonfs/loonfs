@@ -300,7 +300,7 @@ fn contract_page_limit(limit: usize) -> std::result::Result<EffectiveLimit, Limi
 mod tests {
     use super::{contract_page_limit, effective_batch_size};
     use loonfs::MAX_CURRENT_FILES_PER_STAT;
-    use loonfs_types::{LimitError, DEFAULT_MAX_PAGE_LIMIT};
+    use loonfs_types::{LimitError, MAX_PAGE_LIMIT};
 
     #[test]
     fn page_limits_enforce_the_pagination_contract() {
@@ -310,7 +310,7 @@ mod tests {
             contract_page_limit(usize::MAX),
             Err(LimitError::ExceedsMax {
                 requested: u32::MAX,
-                max_limit: DEFAULT_MAX_PAGE_LIMIT,
+                max_limit: MAX_PAGE_LIMIT,
             })
         );
     }

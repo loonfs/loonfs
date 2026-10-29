@@ -110,9 +110,9 @@ limit_keys! {
     /// Advisory limit: the largest accepted commit `message`, in bytes.
     LIMIT_COMMIT_MAX_MESSAGE_BYTES = "commit.max_message_bytes";
     /// Advisory capability key for the default page size applied when callers omit `limit`.
-    LIMIT_PAGINATION_DEFAULT = "pagination.default_limit";
+    LIMIT_PAGINATION_DEFAULT_LIMIT = "pagination.default_limit";
     /// Advisory capability key for the largest page size accepted by a deployment.
-    LIMIT_PAGINATION_MAX = "pagination.max_limit";
+    LIMIT_PAGINATION_MAX_LIMIT = "pagination.max_limit";
     /// Advisory limit: the smallest accepted `grace_window_ms` on a `gc`
     /// request; smaller values answer `invalid_request`. Derived from the
     /// publication budgets, not tuned.
@@ -176,11 +176,7 @@ impl CapabilityDocument {
 
     /// Requires at least two non-empty dotted components, starting with an advertised group name.
     pub fn validate(&self) -> Result<(), CapabilityDocumentError> {
-        let advertised_api_groups: Vec<&str> = self
-            .api_groups
-            .iter()
-            .map(|api_group| api_group_name(api_group))
-            .collect();
+        let advertised_api_groups = api_group_names(&self.api_groups);
         for feature in self.features.keys() {
             if !feature_is_well_formed(&advertised_api_groups, feature) {
                 return Err(CapabilityDocumentError::MalformedFeature {
@@ -194,11 +190,7 @@ impl CapabilityDocument {
     /// Drops feature keys that violate the feature-key rule, the
     /// client-side "ignore" handling for malformed documents.
     pub fn retain_well_formed(&mut self) {
-        let advertised_api_groups: Vec<&str> = self
-            .api_groups
-            .iter()
-            .map(|api_group| api_group_name(api_group))
-            .collect();
+        let advertised_api_groups = api_group_names(&self.api_groups);
         self.features
             .retain(|feature, _| feature_is_well_formed(&advertised_api_groups, feature));
     }
@@ -211,6 +203,13 @@ fn feature_is_well_formed(api_group_names: &[&str], feature: &str) -> bool {
     !api_group.is_empty()
         && api_group_names.contains(&api_group)
         && components.split('.').all(|component| !component.is_empty())
+}
+
+fn api_group_names(api_groups: &[String]) -> Vec<&str> {
+    api_groups
+        .iter()
+        .map(|api_group| api_group_name(api_group))
+        .collect()
 }
 
 /// The group name of a versioned API group: `filesystem/v0` has group `filesystem`.

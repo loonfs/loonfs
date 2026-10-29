@@ -570,7 +570,7 @@ impl SegmentFilter {
         let (h1, h2) = filter_key_hashes(filter_key);
         for probe in 0..u64::from(self.n_hashes) {
             let bit = h1.wrapping_add(probe.wrapping_mul(h2)) % self.bit_len;
-            let byte = self.bits[(bit / 8) as usize];
+            let byte = self.bits[crate::usize_from_u64(bit / 8)];
             if byte & (1 << (bit % 8)) == 0 {
                 return false;
             }
@@ -695,7 +695,7 @@ fn build_filter_payload(hashes: &[(u64, u64)]) -> Vec<u8> {
     for (h1, h2) in hashes {
         for probe in 0..u64::from(FILTER_HASH_COUNT) {
             let bit = h1.wrapping_add(probe.wrapping_mul(*h2)) % bit_len;
-            bits[(bit / 8) as usize] |= 1 << (bit % 8);
+            bits[crate::usize_from_u64(bit / 8)] |= 1 << (bit % 8);
         }
     }
     let mut payload = Vec::with_capacity(12 + bits.len());

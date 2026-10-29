@@ -1,6 +1,6 @@
 //! Page-size policy, page envelopes, and opaque cursors for paginated endpoints.
 
-use crate::capability::{LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX};
+use crate::capability::{LIMIT_PAGINATION_DEFAULT_LIMIT, LIMIT_PAGINATION_MAX_LIMIT};
 use crate::{ChangeSeq, InodeId, NameKey, RevisionNo};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -281,7 +281,7 @@ pub const DEFAULT_PAGE_LIMIT: u32 = 1_000;
 /// Contract maximum accepted page size.
 ///
 /// This value is deliberately fixed and advertised through capabilities.
-pub const DEFAULT_MAX_PAGE_LIMIT: u32 = 1_000;
+pub const MAX_PAGE_LIMIT: u32 = 1_000;
 
 /// Format version written into every encoded cursor.
 pub const PAGE_CURSOR_FORMAT_VERSION: u8 = 1;
@@ -357,11 +357,11 @@ impl PaginationPolicy {
     pub fn capability_limits(self) -> BTreeMap<String, u64> {
         BTreeMap::from([
             (
-                LIMIT_PAGINATION_DEFAULT.to_owned(),
+                LIMIT_PAGINATION_DEFAULT_LIMIT.to_owned(),
                 u64::from(self.default_limit.get()),
             ),
             (
-                LIMIT_PAGINATION_MAX.to_owned(),
+                LIMIT_PAGINATION_MAX_LIMIT.to_owned(),
                 u64::from(self.max_limit.get()),
             ),
         ])
@@ -374,7 +374,7 @@ impl Default for PaginationPolicy {
         // them together here makes every consumer enforce and advertise the
         // same deliberate contract.
         let default_limit = const { NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap() };
-        let max_limit = const { NonZeroU32::new(DEFAULT_MAX_PAGE_LIMIT).unwrap() };
+        let max_limit = const { NonZeroU32::new(MAX_PAGE_LIMIT).unwrap() };
         Self {
             default_limit,
             max_limit,
@@ -873,10 +873,10 @@ mod tests {
 
         assert_eq!(policy.effective_limit(Some(0)), Err(LimitError::Zero));
         assert_eq!(
-            policy.effective_limit(Some(DEFAULT_MAX_PAGE_LIMIT + 1)),
+            policy.effective_limit(Some(MAX_PAGE_LIMIT + 1)),
             Err(LimitError::ExceedsMax {
-                requested: DEFAULT_MAX_PAGE_LIMIT + 1,
-                max_limit: DEFAULT_MAX_PAGE_LIMIT,
+                requested: MAX_PAGE_LIMIT + 1,
+                max_limit: MAX_PAGE_LIMIT,
             })
         );
     }
@@ -891,7 +891,7 @@ mod tests {
         );
         assert_eq!(
             limits.get("pagination.max_limit"),
-            Some(&u64::from(DEFAULT_MAX_PAGE_LIMIT))
+            Some(&u64::from(MAX_PAGE_LIMIT))
         );
     }
 

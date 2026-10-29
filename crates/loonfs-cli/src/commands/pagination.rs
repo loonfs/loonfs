@@ -89,7 +89,7 @@ fn invalid_limit(error: LimitError) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_types::{ErrorCode, PageRequest, DEFAULT_MAX_PAGE_LIMIT};
+    use loonfs_types::{ErrorCode, PageRequest, MAX_PAGE_LIMIT};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -207,7 +207,7 @@ mod tests {
         for invalid in [
             args(Some(0), None, false, false),
             args(None, Some(0), false, false),
-            args(None, Some(DEFAULT_MAX_PAGE_LIMIT + 1), false, false),
+            args(None, Some(MAX_PAGE_LIMIT + 1), false, false),
         ] {
             let requests = Arc::new(Mutex::new(Vec::new()));
             let error = visit_pages(numbers(20, requests.clone()), &invalid, |_| Ok(()))

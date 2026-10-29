@@ -58,7 +58,7 @@ impl ContentLayout {
         self.extents.iter().map(|extent| extent.length).sum()
     }
 
-    /// Checks coverage, object bounds, and identifiers.
+    /// Checks coverage and object bounds.
     pub fn validate(&self, size_bytes: u64) -> Result<(), ContentLayoutError> {
         let invalid = |reason| ContentLayoutError { reason };
         if size_bytes == 0
@@ -77,10 +77,6 @@ impl ContentLayout {
         }
         let mut length = 0_u64;
         for extent in &self.extents {
-            NamespaceId::parse(extent.owner_namespace_id.as_str())
-                .map_err(|_| invalid("invalid extent owner namespace id"))?;
-            ContentId::parse(extent.content_id.as_str())
-                .map_err(|_| invalid("invalid extent content id"))?;
             if size_bytes > 0 && extent.length == 0 {
                 return Err(invalid("extent lengths must be positive"));
             }

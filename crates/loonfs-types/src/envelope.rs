@@ -126,7 +126,7 @@ pub enum EnvelopeCodecError {
 }
 
 /// Requires the probed kind to be exactly `expected`.
-pub fn verify_kind(expected: &str, found: &str) -> Result<(), EnvelopeCodecError> {
+pub fn ensure_kind(expected: &str, found: &str) -> Result<(), EnvelopeCodecError> {
     if found != expected {
         return Err(EnvelopeCodecError::KindMismatch {
             expected: expected.to_owned(),
@@ -138,7 +138,7 @@ pub fn verify_kind(expected: &str, found: &str) -> Result<(), EnvelopeCodecError
 
 /// Requires the probed format version to be exactly what this build writes
 /// for `kind` — no envelope family tolerates version skew.
-pub fn verify_version(kind: &str, found: u32, supported: u32) -> Result<(), EnvelopeCodecError> {
+pub fn ensure_version(kind: &str, found: u32, supported: u32) -> Result<(), EnvelopeCodecError> {
     if found != supported {
         return Err(EnvelopeCodecError::UnsupportedFormatVersion {
             kind: kind.to_owned(),
@@ -307,7 +307,7 @@ pub fn encode_json_envelope<T: Serialize>(
 ///
 /// `classify_kind` lets a family with a kind registry report unknown kinds
 /// distinctly from mismatched ones; families with one kind pass
-/// [`verify_kind`] directly.
+/// [`ensure_kind`] directly.
 pub fn decode_json_envelope<T: DeserializeOwned>(
     bytes: &[u8],
     supported_version: u32,
@@ -316,7 +316,7 @@ pub fn decode_json_envelope<T: DeserializeOwned>(
     let probe: EnvelopeProbe = serde_json::from_slice(bytes)
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     classify_kind(&probe.kind)?;
-    verify_version(&probe.kind, probe.format_version, supported_version)?;
+    ensure_version(&probe.kind, probe.format_version, supported_version)?;
     let document: JsonEnvelopeDocument = serde_json::from_slice(bytes)
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     decode_json_envelope_payload(document)
@@ -373,14 +373,14 @@ mod tests {
             r#"{{"kind":"test","format_version":1,"payload_checksum":"{checksum}","payload":{payload}}}"#
         );
         let decoded: VerifiedEnvelope<serde_json::Value> =
-            decode_json_envelope(bytes.as_bytes(), 1, |kind| verify_kind("test", kind))
+            decode_json_envelope(bytes.as_bytes(), 1, |kind| ensure_kind("test", kind))
                 .expect("decode exact stored bytes");
         assert_eq!(decoded.payload_checksum(), checksum);
         let successor =
             encode_json_envelope("test", 1, decoded.into_payload()).expect("canonical encoding");
         assert_ne!(successor.envelope().payload_checksum(), checksum);
         let reread: VerifiedEnvelope<serde_json::Value> =
-            decode_json_envelope(successor.as_bytes(), 1, |kind| verify_kind("test", kind))
+            decode_json_envelope(successor.as_bytes(), 1, |kind| ensure_kind("test", kind))
                 .expect("decode canonical bytes");
         assert_eq!(&reread, successor.envelope());
     }

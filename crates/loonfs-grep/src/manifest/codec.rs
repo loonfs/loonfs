@@ -3,7 +3,7 @@
 use super::error::GrepEnvelopeCodecError;
 use super::state::{GrepHint, GrepManifestState};
 use loonfs_types::format::envelope::{
-    decode_json_envelope, encode_json_envelope, verify_kind, EncodedEnvelope, VerifiedEnvelope,
+    decode_json_envelope, encode_json_envelope, ensure_kind, EncodedEnvelope, VerifiedEnvelope,
 };
 
 /// Durable kind string for a grep hint envelope.
@@ -37,7 +37,7 @@ pub fn decode_grep_hint(bytes: &[u8]) -> Result<GrepHintEnvelope, GrepEnvelopeCo
     Ok(decode_json_envelope(
         bytes,
         GREP_HINT_FORMAT_VERSION,
-        |found| verify_kind(GREP_HINT_KIND, found),
+        |found| ensure_kind(GREP_HINT_KIND, found),
     )?)
 }
 
@@ -58,7 +58,7 @@ pub fn encode_grep_manifest(
 pub fn decode_grep_manifest(bytes: &[u8]) -> Result<GrepManifestEnvelope, GrepEnvelopeCodecError> {
     let decoded: GrepManifestEnvelope =
         decode_json_envelope(bytes, GREP_MANIFEST_FORMAT_VERSION, |found| {
-            verify_kind(GREP_MANIFEST_KIND, found)
+            ensure_kind(GREP_MANIFEST_KIND, found)
         })?;
     decoded.payload().validate()?;
     Ok(decoded)
