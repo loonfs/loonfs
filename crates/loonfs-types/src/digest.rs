@@ -2,6 +2,9 @@
 
 use sha2::{Digest, Sha256};
 
+/// Length of a [`sha256_digest`] string in bytes.
+pub const SHA256_DIGEST_BYTES: usize = "sha256:".len() + 64;
+
 /// Computes the durable `sha256:` digest spelling used by envelope payloads
 /// and local compare tokens.
 pub fn sha256_digest(bytes: &[u8]) -> String {

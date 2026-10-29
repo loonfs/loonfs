@@ -124,7 +124,7 @@ pub use content::{
     ChecksumValidationError, ChunkAfterEndError, ContentMismatchError, ContentRef, ContentRefKind,
     ContentRefValidationError, ContentVerifier, ResumedPrefixError, ResumedPrefixIncompleteError,
 };
-pub use digest::{sha256_digest, sha256_hex};
+pub use digest::{sha256_digest, sha256_hex, SHA256_DIGEST_BYTES};
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, next_public_ordinal, BindingVersion, BindingVersionValidationError, ChangeSeq,
