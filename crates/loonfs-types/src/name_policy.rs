@@ -5,73 +5,55 @@
 
 use icu_casemap::CaseMapper;
 use icu_normalizer::ComposingNormalizer;
-use serde::{Deserialize, Serialize};
 
-/// How a namespace compares sibling names, for example whether Report.txt and report.txt are the
-/// same name.
-///
-/// The mode is set when the namespace is created and can't be changed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum NamespaceNaming {
-    /// Names that differ only in letter case or Unicode normalization are
-    /// the same name.
-    #[default]
-    CaseInsensitive,
-    /// Names that differ only in Unicode normalization are the same name.
-    CaseSensitive,
-}
-
-impl NamespaceNaming {
-    /// Returns the serialized value.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::CaseInsensitive => "case_insensitive",
-            Self::CaseSensitive => "case_sensitive",
-        }
-    }
-}
-
-/// Derives the canonical lookup key for a display name under `naming`.
-pub fn name_key_for_display_name(naming: NamespaceNaming, display_name: &str) -> String {
+/// Derives the canonical lookup key for a display name.
+pub fn name_key_for_display_name(display_name: &str) -> String {
     let normalizer = ComposingNormalizer::new_nfc();
     let normalized = normalizer.normalize(display_name);
-    match naming {
-        NamespaceNaming::CaseInsensitive => {
-            let folded = CaseMapper::new().fold_string(&normalized);
-            normalizer.normalize(&folded).into_owned()
-        }
-        NamespaceNaming::CaseSensitive => normalized.into_owned(),
-    }
+    let folded = CaseMapper::new().fold_string(&normalized);
+    normalizer.normalize(&folded).into_owned()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{name_key_for_display_name, NamespaceNaming};
+    use super::name_key_for_display_name;
 
     #[test]
-    fn each_mode_normalizes_and_only_case_insensitive_folds() {
-        let decomposed = "Cafe\u{301}.TXT";
-        let composed = "CAFÉ.txt";
-
-        let insensitive = NamespaceNaming::CaseInsensitive;
-        assert_eq!(
-            name_key_for_display_name(insensitive, decomposed),
-            name_key_for_display_name(insensitive, composed)
-        );
-        assert_eq!(name_key_for_display_name(insensitive, composed), "café.txt");
-
-        let sensitive = NamespaceNaming::CaseSensitive;
-        assert_eq!(name_key_for_display_name(sensitive, decomposed), "Café.TXT");
-        assert_ne!(
-            name_key_for_display_name(sensitive, decomposed),
-            name_key_for_display_name(sensitive, composed)
-        );
+    fn keys_are_normalized_then_fully_case_folded_then_normalized_again() {
+        let cases: &[(&[&str], &str)] = &[
+            // A decomposed and a precomposed spelling share one key.
+            (&["Cafe\u{301}.TXT", "CAFÉ.txt", "café.txt"], "café.txt"),
+            (&["A\u{30a}ngstro\u{308}m", "Ångström"], "ångström"),
+            // Full folding expands one code point into several.
+            (&["Straße", "STRASSE"], "strasse"),
+            (&["ẞ", "ß", "SS"], "ss"),
+            (&["ﬃ", "FFI"], "ffi"),
+            // Every case form of a letter, including final sigma, shares one
+            // key.
+            (&["Σ", "σ", "ς"], "σ"),
+            // Folding can leave a decomposed sequence that composes, so the
+            // second normalization composes it.
+            (&["Ϊ\u{301}", "ΐ"], "ΐ"),
+            // The default folding, not the Turkic variant: dotless i keeps
+            // its own key, and dotted capital I folds to i and a combining
+            // dot above.
+            (&["I", "i"], "i"),
+            (&["ı"], "ı"),
+            (&["İ", "i\u{307}"], "i\u{307}"),
+        ];
+        for (display_names, key) in cases {
+            for display_name in *display_names {
+                assert_eq!(
+                    name_key_for_display_name(display_name),
+                    *key,
+                    "{display_name:?}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn every_scalar_value_expands_at_most_threefold_in_either_mode() {
+    fn every_scalar_value_expands_at_most_threefold() {
         // Normalization and case folding act on one code point at a time and
         // composition only shortens, so the worst code point bounds every
         // name, and `ids.rs` asserts at compile time that three times
@@ -80,18 +62,13 @@ mod tests {
         for scalar in char::MIN..=char::MAX {
             name.clear();
             name.push(scalar);
-            for naming in [
-                NamespaceNaming::CaseInsensitive,
-                NamespaceNaming::CaseSensitive,
-            ] {
-                let key_bytes = name_key_for_display_name(naming, &name).len();
-                assert!(
-                    key_bytes <= 3 * name.len(),
-                    "U+{:04X} has a {key_bytes}-byte key from {} bytes ({naming:?})",
-                    u32::from(scalar),
-                    name.len()
-                );
-            }
+            let key_bytes = name_key_for_display_name(&name).len();
+            assert!(
+                key_bytes <= 3 * name.len(),
+                "U+{:04X} has a {key_bytes}-byte key from {} bytes",
+                u32::from(scalar),
+                name.len()
+            );
         }
     }
 }

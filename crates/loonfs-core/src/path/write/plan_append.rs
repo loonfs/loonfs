@@ -47,7 +47,6 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
         resolve_visible_path_for_authorization(view, absolute_path, write, absence).await?;
     view.authorize(target.inode_id, write, absence).await?;
     ensure_expected_inode(
-        view.view.naming(),
         &target,
         expected.map(|expected| expected.inode_id),
         &final_component(absolute_path)?,

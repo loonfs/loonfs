@@ -30,7 +30,6 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
             context.now_ms,
             actor_id.clone(),
             options.access.clone(),
-            options.naming,
         )
     };
     let created = async {

@@ -12,7 +12,7 @@ use crate::namespace::state::NamespaceReadState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingVersion, CommitPrecondition,
-    DisplayName, InodeId, InodeKind, NameKey, NamespaceNaming, ROOT_INODE_ID,
+    DisplayName, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
 };
 
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
@@ -155,7 +155,7 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                     Err(CoreError::InodeNotFound(_)) => continue,
                     Err(error) => return Err(error),
                 }
-                let name_key = NameKey::for_display_name(view.view.naming(), display_name);
+                let name_key = NameKey::for_display_name(display_name);
                 if let Some(binding) = view.view.visible_child(*parent_inode_id, &name_key).await? {
                     return Err(CommitValidationError::BindingPreconditionMismatch {
                         target: format!("name `{name_key}` under parent inode `{parent_inode_id}`"),
@@ -302,7 +302,6 @@ fn at_precondition(error: CoreError, precondition_index: Option<u32>) -> CoreErr
 }
 
 pub(super) fn ensure_expected_inode(
-    naming: NamespaceNaming,
     resolved: &ResolvedVisiblePath,
     expected: Option<InodeId>,
     name: &DisplayName,
@@ -313,7 +312,7 @@ pub(super) fn ensure_expected_inode(
                 crate::commit::CommitValidationError::BindingPreconditionMismatch {
                     target: format!(
                         "name `{}` under parent inode `{}`",
-                        NameKey::for_display_name(naming, name),
+                        NameKey::for_display_name(name),
                         resolved.parent_inode_id.unwrap_or(ROOT_INODE_ID)
                     ),
                     expected_inode_id: Some(expected),

@@ -699,7 +699,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Check server health | `get_health` | `idempotent` | `GET /health` |
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `access`, `naming`, and `retention_window_ms` body fields. |
+| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `access` and `retention_window_ms` body fields. |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`, and `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`, and `snapshot_id` is optional) |
@@ -1204,8 +1204,7 @@ Creating a namespace uses the namespace ID directly. In v0, there are no namespa
 ```json
 {
   "namespace_id": "demo",
-  "access": {"kind":"unrestricted"},
-  "naming": "case_insensitive"
+  "access": {"kind":"unrestricted"}
 }
 ```
 
@@ -1217,7 +1216,6 @@ The response contains the new namespace's initial state. A new namespace starts 
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "access": {"kind":"unrestricted"},
-  "naming": "case_insensitive",
   "head_seq": 0,
   "retention_floor_seq": 0
 }
@@ -1243,7 +1241,6 @@ Returns the metadata of one namespace, without listing every namespace. A missin
 {
   "namespace_id": "demo",
   "access": {"kind": "unrestricted"},
-  "naming": "case_insensitive",
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "head_seq": 418,
@@ -1257,7 +1254,6 @@ The `NamespaceMetadata` object has exactly these fields:
 | --- | --- |
 | `namespace_id` | The durable namespace ID. |
 | `access` | The access mode, either `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
-| `naming` | The naming mode, either `"case_insensitive"` or `"case_sensitive"`. It controls how sibling names are compared (see [Names and paths](format.md#14-names-and-paths)). |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
@@ -1265,7 +1261,7 @@ The `NamespaceMetadata` object has exactly these fields:
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
 | `retention_window_ms` | The namespace's [retention window](glossary.md#retention-window), in milliseconds. Only a namespace with its own window has this field. |
 
-The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The create request also includes `naming`, which defaults to `case_insensitive`. Both modes are set when the namespace is created and can't be changed, and a fork uses its source's modes. The create request can also include `retention_window_ms`, a positive number of milliseconds that sets the namespace's retention window, and zero returns `invalid_request`. Unlike the modes, the window can be changed later with a `retention_window` run (see [Retention runs](#retention-runs)), and a fork copies its source's window.
+The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The access mode is set when the namespace is created and can't be changed, and a fork uses its source's access mode. The create request can also include `retention_window_ms`, a positive number of milliseconds that sets the namespace's retention window, and zero returns `invalid_request`. Unlike the access mode, the window can be changed later with a `retention_window` run (see [Retention runs](#retention-runs)), and a fork copies its source's window.
 
 LoonFS derives the namespace's live sequence from the manifest and the numbered WAL tip. A cold read starts at the hint, and if the hint lags, the read probes forward. If the hint is missing, the read treats the namespace as absent. In a runtime without the namespace's writer session, a `strong` read (see [Read consistency](#read-consistency)) from a cached view probes the next WAL number with GET, applies any new WAL objects, and continues until it gets a 404. Commits are visible on the next `strong` read even when the hint hasn't been raised.
 
@@ -2430,7 +2426,6 @@ Representative response:
   "created_at_ms": 1752625000000,
   "created_by": "usr_8f3c",
   "access": {"kind":"unrestricted"},
-  "naming": "case_insensitive",
   "fork_basis": {
     "source_namespace_id": "demo",
     "source_head_seq": 418
@@ -2523,7 +2518,7 @@ A pattern with no required literal bytes is rejected with `query_unindexable`, u
 
 The index covers every retained file, including deleted files and files under a deleted directory, and each query checks the current visibility of every candidate. So a delete or an undelete changes no postings, and an exact query after an undelete includes the restored files without a rebuild.
 
-The `path_prefix` value is a complete absolute path, not a partial prefix of a path segment. The server resolves it using the namespace's naming mode ([Names and paths](format.md#14-names-and-paths)), and then limits results to descendants of that inode. So `path_prefix` MUST use the same canonical spelling as any other path. A scope that doesn't exist returns `path_not_found`, and an existing scope that's empty returns a successful response with no matches.
+The `path_prefix` value is a complete absolute path, not a partial prefix of a path segment. The server resolves it by name key, like any other path (see [Names and paths](format.md#14-names-and-paths)), and then limits results to descendants of that inode. So `path_prefix` MUST use the same canonical spelling as any other path. A scope that doesn't exist returns `path_not_found`, and an existing scope that's empty returns a successful response with no matches.
 
 `inode_id` selects the scope by inode instead, and limits results to the inode's descendants wherever the inode is bound. A request can include `path_prefix` or `inode_id`, but not both. A request with both returns `invalid_request` with `param` set to `inode_id`. An inode that isn't visible returns `inode_not_found`.
 
@@ -2558,7 +2553,7 @@ A conforming server MUST:
 5. Resolve content through the reference's owner namespace and content ID.
 6. Implement tombstone-first delete.
 7. Serve replay from the highest-numbered verified manifest found through `hint.json`, plus the numbered WAL objects after the folded boundary, replayed as logical commits. Pins keep manifest versions for retention, stable reads, restore, and forks.
-8. Map sibling names to name keys by each namespace's naming mode, and apply each mode's rule exactly (see [Names and paths](format.md#14-names-and-paths)).
+8. Map sibling names to name keys exactly as described in [Names and paths](format.md#14-names-and-paths).
 9. Keep upload sessions out of namespace history and the change feed.
 10. Preserve per-commit idempotency, ordering, and change-feed identity, even when it physically batches logical commits in one WAL object.
 11. Advertise its API groups and features truthfully in the capability document, and never advertise an API group whose required operations aren't implemented.

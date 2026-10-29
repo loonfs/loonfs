@@ -11,7 +11,7 @@ use loonfs_types::format::segment_blocks::key_range_may_intersect;
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
     AccessGrants, AccessRevisionNo, AccessRight, AccessRights, AttributeKey, AttributeValue,
-    Attributes, AttributesRevisionNo, NamespaceNaming, PrincipalId,
+    Attributes, AttributesRevisionNo, PrincipalId,
 };
 use tempfile::TempDir;
 
@@ -102,11 +102,7 @@ async fn inodes_at<S: ObjectStore + ?Sized>(
         .iter()
         .map(|path| {
             state
-                .resolve_visible_path(
-                    NamespaceNaming::CaseInsensitive,
-                    &AbsolutePath::parse(path).expect("path"),
-                    head.seq,
-                )
+                .resolve_visible_path(&AbsolutePath::parse(path).expect("path"), head.seq)
                 .expect("a visible path")
                 .inode_id
         })

@@ -37,8 +37,8 @@ use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
     ChecksumHex, CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
-    MetadataSegmentId, NameKey, NamespaceId, NamespaceNaming, PinId, PrincipalId, PrincipalScope,
-    RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
+    MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, RevisionNo, RunNo,
+    UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -467,7 +467,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         created_at_ms: 1_000,
         created_by: loonfs_types::ActorId::parse("test").expect("actor"),
         access: NamespaceAccess::Unrestricted {},
-        naming: NamespaceNaming::CaseInsensitive,
         retention_window_ms: None,
         fork_basis: None,
         status: NamespaceStatus::Active {},
@@ -548,13 +547,6 @@ fn sample_acl_manifest() -> NamespaceManifestPayload {
             )]))
             .expect("grants"),
         },
-        ..sample_manifest_payload()
-    }
-}
-
-fn sample_case_sensitive_manifest() -> NamespaceManifestPayload {
-    NamespaceManifestPayload {
-        naming: NamespaceNaming::CaseSensitive,
         ..sample_manifest_payload()
     }
 }
@@ -2953,8 +2945,7 @@ fn name_folding_matches_the_fixed_unicode_corpus() {
     #[derive(Serialize)]
     struct NameVector {
         display_name: &'static str,
-        case_insensitive: String,
-        case_sensitive: String,
+        name_key: String,
     }
 
     let display_names = [
@@ -3004,14 +2995,7 @@ fn name_folding_matches_the_fixed_unicode_corpus() {
         .into_iter()
         .map(|display_name| NameVector {
             display_name,
-            case_insensitive: loonfs_types::name_key_for_display_name(
-                NamespaceNaming::CaseInsensitive,
-                display_name,
-            ),
-            case_sensitive: loonfs_types::name_key_for_display_name(
-                NamespaceNaming::CaseSensitive,
-                display_name,
-            ),
+            name_key: loonfs_types::name_key_for_display_name(display_name),
         })
         .collect();
     let mut bytes = serde_json::to_vec_pretty(&corpus).expect("encode folding corpus");
@@ -3025,10 +3009,6 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
         ("manifest.deleted.v1.json", sample_deleted_manifest()),
         ("manifest.fork.v1.json", sample_fork_manifest()),
         ("manifest.acl.v1.json", sample_acl_manifest()),
-        (
-            "manifest.case_sensitive.v1.json",
-            sample_case_sensitive_manifest(),
-        ),
         (
             "manifest.retention_window.v1.json",
             sample_retention_window_manifest(),
@@ -3047,6 +3027,20 @@ fn namespace_manifest_rejects_a_zero_retention_window() {
     assert_matches!(
         decode_namespace_manifest_json(&rezstd(&encoded)),
         Err(EnvelopeCodecError::PayloadDecode(message)) if message.contains("nonzero")
+    );
+}
+
+#[test]
+fn namespace_manifest_rejects_a_naming_field() {
+    // Every namespace compares sibling names by the same rule, so a manifest
+    // has no naming mode, and a payload with a `naming` field fails to load.
+    let encoded = control_document_with_payload_edit("manifest.v1.json", |payload| {
+        payload["naming"] = serde_json::Value::from("case_insensitive");
+    });
+    assert_matches!(
+        decode_namespace_manifest_json(&rezstd(&encoded)),
+        Err(EnvelopeCodecError::PayloadDecode(message))
+            if message.contains("unknown field `naming`")
     );
 }
 

@@ -174,9 +174,9 @@ impl<Destination> RemoteListing<Destination> {
 /// of `source`, or `None` when the entry's path isn't below `source`.
 ///
 /// The entry's path starts with the listed directory's stored path, which can
-/// differ from the spelling on the command line in a case-insensitive
-/// namespace, so only the components below the listed directory are joined to
-/// the walk's own paths.
+/// differ from the spelling on the command line in case or Unicode
+/// normalization, so only the components below the listed directory are
+/// joined to the walk's own paths.
 fn entry_paths<Destination: TreePath>(
     source: &AbsolutePath,
     destination: &Destination,

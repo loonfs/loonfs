@@ -8,7 +8,7 @@ use crate::{
     DisplayName, InodeId, ManifestNo, NamespaceId, PinId, ProbeRunId, RevisionNo, WriterEpoch,
     WriterId,
 };
-use crate::{NamespaceAccess, NamespaceNaming, PrincipalId, PrincipalScope};
+use crate::{NamespaceAccess, PrincipalId, PrincipalScope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -184,10 +184,6 @@ pub struct CreateNamespaceRequest {
     /// default is unrestricted.
     #[serde(default = "NamespaceAccess::unrestricted")]
     pub access: NamespaceAccess,
-    /// How the namespace compares sibling names. The mode can't be changed after the namespace is
-    /// created, and it defaults to `case_insensitive`.
-    #[serde(default)]
-    pub naming: NamespaceNaming,
     /// The durable ID of the new namespace.
     pub namespace_id: NamespaceId,
     /// The namespace's retention window, in milliseconds, which must be positive. The reference
@@ -218,8 +214,6 @@ pub struct ForkNamespaceRequest {
 pub struct NamespaceMetadata {
     /// The namespace's access mode.
     pub access: NamespaceAccessMode,
-    /// How the namespace compares sibling names.
-    pub naming: NamespaceNaming,
     /// The namespace ID.
     pub namespace_id: NamespaceId,
     /// The time the namespace was created, in Unix milliseconds.
@@ -1983,7 +1977,6 @@ mod tests {
     fn namespace_wire_shape_has_only_core_state() {
         let namespace = NamespaceMetadata {
             access: NamespaceAccessMode::Unrestricted {},
-            naming: NamespaceNaming::CaseSensitive,
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
@@ -1997,7 +1990,6 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo",
                 "access": {"kind": "unrestricted"},
-                "naming": "case_sensitive",
                 "created_at_ms": 1000,
                 "created_by": "test",
                 "head_seq": 11,

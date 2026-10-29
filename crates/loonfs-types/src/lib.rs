@@ -138,7 +138,7 @@ pub use ids::{
 };
 pub use layout::{ContentExtent, ContentLayout, ContentLayoutError, ExtentObject};
 pub use manifest::{MetadataFamilyGroup, NamespaceAccess};
-pub use name_policy::{name_key_for_display_name, NamespaceNaming};
+pub use name_policy::name_key_for_display_name;
 pub use options::AttributeInclusion;
 pub use pagination::{
     decode_cursor, decode_token, decode_token_bytes, encode_cursor, encode_token,

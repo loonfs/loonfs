@@ -121,7 +121,6 @@ fn namespace_metadata(
 ) -> NamespaceMetadata {
     NamespaceMetadata {
         access: (&head.access).into(),
-        naming: head.naming,
         created_at_ms: head.created_at_ms,
         created_by: head.created_by,
         fork_basis: fork_basis(head.fork_basis),

@@ -236,7 +236,6 @@ pub(super) async fn create_namespace(
             &actor_id,
             &CreateNamespaceOptions {
                 access: request.access,
-                naming: request.naming,
                 retention_window_ms: retention_window_ms(request.retention_window_ms)?,
                 ..Default::default()
             },

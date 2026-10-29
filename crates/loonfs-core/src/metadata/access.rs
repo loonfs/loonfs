@@ -126,7 +126,7 @@ mod tests {
     use loonfs_types::format::manifest::DeletedBinding;
     use loonfs_types::{
         AccessGrants, AccessRevisionNo, ActorId, ChangeSeq, CommitId, DisplayName, InodeKind,
-        NameKey, NamespaceNaming, PrincipalId,
+        NameKey, PrincipalId,
     };
     use std::assert_matches;
 
@@ -178,10 +178,7 @@ mod tests {
             let display_name = DisplayName::parse(name).expect("display name");
             builder.push_direntry_binding(DirentryBindingRecord {
                 parent_inode_id: InodeId(parent),
-                name_key: NameKey::for_display_name(
-                    NamespaceNaming::CaseInsensitive,
-                    &display_name,
-                ),
+                name_key: NameKey::for_display_name(&display_name),
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id: InodeId(child),
                 child_kind: if matches!(child, 4 | 7 | 8) {
@@ -204,10 +201,7 @@ mod tests {
             action: TombstoneRowAction::Set {
                 deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(5),
-                    name_key: NameKey::for_display_name(
-                        NamespaceNaming::CaseInsensitive,
-                        &display_name,
-                    ),
+                    name_key: NameKey::for_display_name(&display_name),
                     display_name,
                 },
             },
@@ -313,10 +307,7 @@ mod tests {
             let display_name = DisplayName::parse(name).expect("display name");
             builder.push_direntry_binding(DirentryBindingRecord {
                 parent_inode_id,
-                name_key: NameKey::for_display_name(
-                    NamespaceNaming::CaseInsensitive,
-                    &display_name,
-                ),
+                name_key: NameKey::for_display_name(&display_name),
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id,
                 child_kind: InodeKind::Directory,

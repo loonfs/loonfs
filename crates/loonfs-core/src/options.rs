@@ -11,8 +11,6 @@ use std::num::NonZeroU64;
 pub struct CreateNamespaceOptions {
     /// Access mode the namespace is created with.
     pub access: loonfs_types::NamespaceAccess,
-    /// How sibling names compare in the namespace.
-    pub naming: loonfs_types::NamespaceNaming,
     /// The namespace's retention window, which a host's scheduled retention
     /// advance uses instead of the host's own setting.
     pub retention_window_ms: Option<NonZeroU64>,
@@ -24,7 +22,6 @@ impl Default for CreateNamespaceOptions {
     fn default() -> Self {
         Self {
             access: loonfs_types::NamespaceAccess::Unrestricted {},
-            naming: loonfs_types::NamespaceNaming::CaseInsensitive,
             retention_window_ms: None,
             allow_existing: false,
         }

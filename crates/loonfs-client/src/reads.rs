@@ -17,8 +17,6 @@ use loonfs_types::PageRequest;
 pub struct CreateNamespaceOptions {
     /// The access mode, fixed for the namespace's life.
     pub access: loonfs_types::NamespaceAccess,
-    /// How sibling names compare, fixed for the namespace's life.
-    pub naming: loonfs_types::NamespaceNaming,
     /// The namespace's retention window in milliseconds, or `None` when the
     /// namespace has no window of its own and the server's window applies.
     pub retention_window_ms: Option<u64>,
@@ -28,7 +26,6 @@ impl Default for CreateNamespaceOptions {
     fn default() -> Self {
         Self {
             access: loonfs_types::NamespaceAccess::Unrestricted {},
-            naming: loonfs_types::NamespaceNaming::CaseInsensitive,
             retention_window_ms: None,
         }
     }
@@ -189,8 +186,8 @@ impl Client {
         .await
     }
 
-    /// Creates an empty unrestricted, case-insensitive namespace with the
-    /// given ID and returns its genesis state.
+    /// Creates an empty unrestricted namespace with the given ID and returns
+    /// its genesis state.
     pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -214,7 +211,6 @@ impl Client {
             self.post(&url).header("Loonfs-Actor", actor.as_str()),
             Some(&CreateNamespaceRequest {
                 access: options.access.clone(),
-                naming: options.naming,
                 namespace_id: namespace_id.clone(),
                 retention_window_ms: options.retention_window_ms,
             }),

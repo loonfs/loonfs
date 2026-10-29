@@ -30,13 +30,12 @@ pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
         }
     };
     format!(
-        "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}\nnaming: {}\n\
+        "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}\n\
          retention_window_ms: {}",
         namespace.namespace_id,
         namespace.head_seq.0,
         namespace.retention_floor_seq.0,
         namespace.created_by,
-        namespace.naming.as_str(),
         retention_window(namespace.retention_window_ms),
     )
 }
