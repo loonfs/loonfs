@@ -9,7 +9,6 @@ use super::runs::{flatten_manifest_segments, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit_engine::WalFoldInput;
 use crate::error::CoreError;
-use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
@@ -413,13 +412,7 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     let basis = anchor.basis();
     let basis_checked = anchor.checked.clone();
     let head = anchor.read_state;
-    if head.status.is_deleted() {
-        return Err(CoreError::MetadataProjection(
-            MetadataProjectionLoadError::NamespaceDeleted {
-                namespace_id: namespace_id.clone(),
-            },
-        ));
-    }
+    crate::namespace::control::ensure_namespace_live(&head)?;
     let loaded_basis =
         super::load::metadata_basis_from_manifest(store, segment_cache, &anchor.manifest);
     let manifest_head = loaded_basis.replay_head(&head);

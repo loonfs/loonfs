@@ -738,17 +738,14 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
         (1, 0, None),
     ] {
         let view = InMemoryMetadataView::in_memory(&base, None, ChangeSeq(visible_seq));
-        let (revision, attributes) = view
-            .attributes_at_visible_seq(InodeId(7))
-            .await
-            .expect("read attributes");
+        let projection = view.attributes(InodeId(7)).await.expect("read attributes");
         assert_eq!(
-            revision,
+            projection.attributes_revision_no,
             AttributesRevisionNo(expected_revision),
             "at seq {visible_seq}"
         );
         assert_eq!(
-            attributes,
+            projection.attributes,
             expected
                 .map(|owner| attribute_map(&[("owner", owner)]))
                 .unwrap_or_default(),
@@ -758,10 +755,9 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
 
     // An inode that never had attributes is at the concrete empty state.
     let view = InMemoryMetadataView::in_memory(&base, None, ChangeSeq(5));
+    let projection = view.attributes(InodeId(8)).await.expect("read attributes");
     assert_eq!(
-        view.attributes_at_visible_seq(InodeId(8))
-            .await
-            .expect("read attributes"),
+        (projection.attributes_revision_no, projection.attributes),
         (AttributesRevisionNo(0), Attributes::default())
     );
 }

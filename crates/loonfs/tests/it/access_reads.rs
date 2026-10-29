@@ -28,7 +28,7 @@ fn subject(principal: &str) -> Subject {
 fn grants(principal: &str, right: AccessRight) -> AccessGrants {
     AccessGrants::new(std::collections::BTreeMap::from([(
         PrincipalId::parse(principal).expect("principal"),
-        AccessRights::from_iter([right]),
+        AccessRights::from(right),
     )]))
     .expect("grants")
 }

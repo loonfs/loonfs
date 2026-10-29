@@ -1,6 +1,6 @@
 //! Publish-time metadata and the numbered WAL tip retained between batches.
 
-use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::error::{CoreError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::manifest::same_head;
 use crate::manifest::{
@@ -9,6 +9,7 @@ use crate::manifest::{
 };
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control::ensure_namespace_live;
 use crate::namespace::read_anchor::{load_read_anchor, NamespaceReadAnchor};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -194,13 +195,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         ),
     };
     ensure_writer_not_fenced(head, &acquired_writer)?;
-    if head.status.is_deleted() {
-        return Err(CoreError::MetadataProjection(
-            MetadataProjectionLoadError::NamespaceDeleted {
-                namespace_id: namespace_id.clone(),
-            },
-        ));
-    }
+    ensure_namespace_live(head)?;
     let tail_discovered = matches!(source, ViewSource::Cold(_));
     let position = match source {
         ViewSource::Cached(cached) => *cached,

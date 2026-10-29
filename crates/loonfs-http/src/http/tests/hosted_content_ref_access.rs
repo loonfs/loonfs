@@ -6,8 +6,8 @@ use axum::http::{Request, StatusCode};
 use loonfs::{CreateNamespaceOptions, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    AccessGrants, AccessRight, AccessRights, ErrorCode, ErrorResponse, NamespaceAccess,
-    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, ErrorCode, ErrorResponse, NamespaceAccess, PrincipalId,
+    PrincipalScope, PrincipalSet, Subject, SubjectId,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,7 +30,7 @@ fn acl(administrator: &str) -> NamespaceAccess {
         principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         root_grants: AccessGrants::new(BTreeMap::from([(
             PrincipalId::parse(administrator).expect("principal"),
-            AccessRights::from_iter([AccessRight::Admin]),
+            AccessRight::Admin.into(),
         )]))
         .expect("grants"),
     }

@@ -10,8 +10,8 @@ use loonfs_test_support::stores::ConcurrencyWatchStore;
 use loonfs_types::format::segment_blocks::key_range_may_intersect;
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
-    AccessGrants, AccessRevisionNo, AccessRight, AccessRights, AttributeKey, AttributeValue,
-    Attributes, AttributesRevisionNo, PrincipalId,
+    AccessGrants, AccessRevisionNo, AccessRight, AttributeKey, AttributeValue, Attributes,
+    AttributesRevisionNo, PrincipalId,
 };
 use tempfile::TempDir;
 
@@ -123,7 +123,7 @@ async fn append_whole_state_revisions<S: ObjectStore + ?Sized>(
     .expect("attribute map");
     let grants = AccessGrants::new(BTreeMap::from([(
         PrincipalId::parse(format!("prn_{revision}")).expect("principal id"),
-        AccessRights::from_iter([AccessRight::Read]),
+        AccessRight::Read.into(),
     )]))
     .expect("access grants");
     let mut deltas = Vec::new();

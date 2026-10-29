@@ -5,17 +5,19 @@
 
 use super::durable_cache::ParentNameCacheKey;
 use super::manifest_index;
-use super::view::DIRECTORY_PAGE_RAW_SCAN_LIMIT;
+use super::view::{
+    latest_visible_binding, DirentryBindingPageCandidate, DIRECTORY_PAGE_RAW_SCAN_LIMIT,
+};
 use super::visibility::{self, MetadataVisibilityReads};
 use super::{
-    AccessRevisionRecord, ActiveDeletionRange, AttributesProjection, DirentryBindingRecord,
-    InodeRecord, MetadataView, RecoverableDeletion, ResolvedVisiblePath, RevisionRecord,
-    SubtreeTombstoneRecord,
+    AccessRevisionRecord, ActiveDeletionRange, DirentryBindingRecord, InodeRecord, MetadataView,
+    RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::{CoreError, Result};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::lookup_keys;
-use loonfs_types::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
+use loonfs_types::{
+    AbsolutePath, AttributesProjection, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
+};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 
@@ -46,51 +48,6 @@ where
         }))
         .await?;
     Ok(loaded.into_iter().flatten().collect())
-}
-
-pub(super) fn latest_visible_binding<'a>(
-    rows: impl Iterator<Item = &'a DirentryBindingRecord>,
-    visible_seq: ChangeSeq,
-) -> Option<DirentryBindingRecord> {
-    rows.filter(|direntry| direntry.committed_seq <= visible_seq)
-        .max_by_key(|direntry| direntry.position())
-        .cloned()
-}
-
-impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
-    /// Opens a fresh session over this view; the view is `Copy`, so the
-    /// session owns its copy.
-    pub(crate) fn session(self) -> MetadataViewSession<'a, 'store, S> {
-        MetadataViewSession::new(self)
-    }
-
-    fn tail_direntry_bind_page_candidates(
-        &self,
-        parent_inode_id: InodeId,
-        start_after_name_key: Option<&NameKey>,
-    ) -> Vec<DirentryBindingPageCandidate> {
-        let mut candidates = self
-            .row_states()
-            .flat_map(|state| state.direntry_binds())
-            .filter(|direntry| {
-                direntry.parent_inode_id == parent_inode_id
-                    && start_after_name_key
-                        .is_none_or(|last_name_key| &direntry.name_key > last_name_key)
-            })
-            .map(|record| DirentryBindingPageCandidate {
-                row_key: lookup_keys::direntry_bind_row_key(
-                    record.parent_inode_id,
-                    &record.name_key,
-                    record.child_inode_id,
-                    record.committed_seq,
-                    record.delta_index,
-                ),
-                record: record.clone(),
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| left.row_key.cmp(&right.row_key));
-        candidates
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -182,7 +139,7 @@ pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
-    fn new(base: MetadataView<'a, 'store, S>) -> Self {
+    pub(super) fn new(base: MetadataView<'a, 'store, S>) -> Self {
         Self {
             base,
             inode_at_seq_cache: HashMap::new(),
@@ -700,10 +657,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         if let Some(cached) = self.attributes_cache.get(&inode_id).cloned() {
             return Ok(cached);
         }
-        let attributes = self
-            .base
-            .attributes_projection_at_visible_seq(inode_id)
-            .await?;
+        let attributes = self.base.attributes(inode_id).await?;
         self.attributes_cache.insert(inode_id, attributes.clone());
         Ok(attributes)
     }
@@ -732,10 +686,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .saturating_add(pending.len() as u64);
 
         let base = &self.base;
-        let loaded = preload_inode_groups(&pending, |inode_id| {
-            base.attributes_projection_at_visible_seq(inode_id)
-        })
-        .await?;
+        let loaded = preload_inode_groups(&pending, |inode_id| base.attributes(inode_id)).await?;
         self.attributes_cache.extend(loaded);
         Ok(())
     }
@@ -963,10 +914,4 @@ impl ScanPosition {
 struct DirentryBindingNameGroup {
     name_key: NameKey,
     rows: Vec<DirentryBindingRecord>,
-}
-
-#[derive(Clone)]
-struct DirentryBindingPageCandidate {
-    row_key: String,
-    record: DirentryBindingRecord,
 }

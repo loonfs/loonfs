@@ -11,8 +11,8 @@ use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingVersion, CommitPrecondition,
-    DisplayName, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
+    AbsolutePath, AccessRevisionNo, AccessRight, BindingVersion, CommitPrecondition, DisplayName,
+    InodeId, InodeKind, NameKey, ROOT_INODE_ID,
 };
 
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
@@ -44,12 +44,8 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 expected_revision_no,
             } => {
-                view.authorize(
-                    *inode_id,
-                    AccessRights::from_iter([AccessRight::Read]),
-                    Absence::Inode,
-                )
-                .await?;
+                view.authorize(*inode_id, AccessRight::Read.into(), Absence::Inode)
+                    .await?;
                 let actual = if inode_is_visible(&view, *inode_id).await? {
                     pre_state
                         .latest_revision_head(*inode_id)
@@ -86,12 +82,8 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 expected_binding_version,
             } => {
-                view.authorize(
-                    *inode_id,
-                    AccessRights::from_iter([AccessRight::Read]),
-                    Absence::Inode,
-                )
-                .await?;
+                view.authorize(*inode_id, AccessRight::Read.into(), Absence::Inode)
+                    .await?;
                 let checked = match resolve_visible_inode(&view, *inode_id).await {
                     Ok(resolved) => {
                         ensure_binding_version(&view, &resolved, expected_binding_version)
@@ -111,7 +103,7 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                     Ok(parent) => {
                         view.authorize(
                             parent.inode_id,
-                            AccessRights::from_iter([AccessRight::Read]),
+                            AccessRight::Read.into(),
                             Absence::Path(path.as_str()),
                         )
                         .await?;
@@ -126,7 +118,7 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                     })) => {
                         view.authorize(
                             inode_id,
-                            AccessRights::from_iter([AccessRight::Read]),
+                            AccessRight::Read.into(),
                             Absence::Path(path.as_str()),
                         )
                         .await?;
@@ -142,12 +134,8 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
             } => {
                 match resolve_visible_inode(&view, *parent_inode_id).await {
                     Ok(parent) => {
-                        view.authorize(
-                            *parent_inode_id,
-                            AccessRights::from_iter([AccessRight::Read]),
-                            Absence::Inode,
-                        )
-                        .await?;
+                        view.authorize(*parent_inode_id, AccessRight::Read.into(), Absence::Inode)
+                            .await?;
                         if parent.inode_kind != InodeKind::Directory {
                             continue;
                         }
@@ -170,14 +158,15 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 expected_attributes_revision_no,
             } => {
-                view.authorize(
-                    *inode_id,
-                    AccessRights::from_iter([AccessRight::Read]),
-                    Absence::Inode,
-                )
-                .await?;
+                view.authorize(*inode_id, AccessRight::Read.into(), Absence::Inode)
+                    .await?;
                 let actual = if inode_is_visible(&view, *inode_id).await? {
-                    Some(pre_state.attributes_at_visible_seq(*inode_id).await?.0)
+                    Some(
+                        pre_state
+                            .attributes(*inode_id)
+                            .await?
+                            .attributes_revision_no,
+                    )
                 } else {
                     None
                 };
@@ -197,12 +186,8 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 expected_access_revision_no,
             } => {
-                view.authorize(
-                    *inode_id,
-                    AccessRights::from_iter([AccessRight::Read]),
-                    Absence::Inode,
-                )
-                .await?;
+                view.authorize(*inode_id, AccessRight::Read.into(), Absence::Inode)
+                    .await?;
                 let actual = if inode_is_visible(&view, *inode_id).await? {
                     Some(
                         pre_state
@@ -251,7 +236,7 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
             if expected_inode_id.is_some() {
                 view.authorize(
                     binding.inode_id,
-                    AccessRights::from_iter([AccessRight::Read]),
+                    AccessRight::Read.into(),
                     Absence::Path(path.as_str()),
                 )
                 .await?;

@@ -911,7 +911,7 @@ mod tests {
                 (
                     loonfs_types::PrincipalId::parse(format!("prn_{index:056}"))
                         .expect("principal"),
-                    loonfs_types::AccessRights::from_iter([loonfs_types::AccessRight::Read]),
+                    loonfs_types::AccessRights::from(loonfs_types::AccessRight::Read),
                 )
             })
             .collect();

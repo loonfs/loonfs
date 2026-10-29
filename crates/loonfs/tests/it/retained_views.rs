@@ -18,9 +18,9 @@ use loonfs_test_support::test_actor;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, RunTier};
 use loonfs_types::format::segment_blocks::{decode_data_block, decode_index_block};
 use loonfs_types::{
-    AccessGrants, AccessRevisionNo, AccessRight, AccessRights, Attributes, AttributesRevisionNo,
-    ChangeSeq, ErrorCode, NamespaceAccess, PathEntry, PrincipalId, PrincipalScope, PrincipalSet,
-    RevisionNo, Subject, SubjectId,
+    AccessGrants, AccessRevisionNo, AccessRight, Attributes, AttributesRevisionNo, ChangeSeq,
+    ErrorCode, NamespaceAccess, PathEntry, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo,
+    Subject, SubjectId,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,7 +58,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     principal_scope: subject.principal_scope.clone(),
                     root_grants: AccessGrants::new(BTreeMap::from([(
                         principal,
-                        AccessRights::from_iter([AccessRight::Admin]),
+                        AccessRight::Admin.into(),
                     )]))
                     .expect("root grants"),
                 },
@@ -141,7 +141,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             true,
             AccessGrants::new(BTreeMap::from([(
                 PrincipalId::parse("prn_reader").expect("principal"),
-                AccessRights::from_iter([AccessRight::Read]),
+                AccessRight::Read.into(),
             )]))
             .expect("directory grants"),
         ),

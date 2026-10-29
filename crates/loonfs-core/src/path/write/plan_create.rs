@@ -15,8 +15,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::TombstoneRowAction;
 use loonfs_types::options::UndeleteDestination;
 use loonfs_types::{
-    AbsolutePath, AccessRight, AccessRights, ChangeSeq, ContentRef, DestinationBehavior,
-    DisplayName, ExpectedFileState, InodeId, InodeKind, ROOT_INODE_ID,
+    AbsolutePath, AccessRight, ChangeSeq, ContentRef, DestinationBehavior, DisplayName,
+    ExpectedFileState, InodeId, InodeKind, ROOT_INODE_ID,
 };
 
 pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
@@ -40,7 +40,7 @@ pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
     };
     view.authorize(
         parents.deepest_existing,
-        AccessRights::from_iter([AccessRight::Create]),
+        AccessRight::Create.into(),
         Absence::Path(absolute_path.as_str()),
     )
     .await?;
@@ -109,7 +109,7 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
                 .map_or(inode_id, |binding| binding.parent_inode_id);
             view.authorize(
                 authorization_target,
-                AccessRights::from_iter([AccessRight::Remove]),
+                AccessRight::Remove.into(),
                 Absence::Inode,
             )
             .await?;
@@ -117,12 +117,8 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
         }
     };
     let saved_parent = deleted_binding.parent_inode_id;
-    view.authorize(
-        saved_parent,
-        AccessRights::from_iter([AccessRight::Remove]),
-        Absence::Inode,
-    )
-    .await?;
+    view.authorize(saved_parent, AccessRight::Remove.into(), Absence::Inode)
+        .await?;
     let (parent_inode_id, display_name) = match destination {
         UndeleteDestination::Path(absolute_path) => {
             ensure_mutation_path(&absolute_path)?;
@@ -134,7 +130,7 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
             .await?;
             view.authorize(
                 parent_inode_id,
-                AccessRights::from_iter([AccessRight::Create]),
+                AccessRight::Create.into(),
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
@@ -148,12 +144,8 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
             display_name,
         } => {
             let parent = resolve_visible_inode(view, parent_inode_id).await?;
-            view.authorize(
-                parent_inode_id,
-                AccessRights::from_iter([AccessRight::Create]),
-                Absence::Inode,
-            )
-            .await?;
+            view.authorize(parent_inode_id, AccessRight::Create.into(), Absence::Inode)
+                .await?;
             if parent.inode_kind != InodeKind::Directory {
                 return Err(CoreError::ExpectedDirectory {
                     target: parent.absolute_path.to_string(),
@@ -173,12 +165,8 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
             (parent_inode_id, display_name)
         }
         UndeleteDestination::Recorded => {
-            view.authorize(
-                saved_parent,
-                AccessRights::from_iter([AccessRight::Create]),
-                Absence::Inode,
-            )
-            .await?;
+            view.authorize(saved_parent, AccessRight::Create.into(), Absence::Inode)
+                .await?;
             (saved_parent, deleted_binding.display_name)
         }
     };
@@ -204,7 +192,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     let target = resolve_visible_path_for_authorization(
         view,
         absolute_path,
-        AccessRights::from_iter([AccessRight::Create]),
+        AccessRight::Create.into(),
         Absence::Path(absolute_path.as_str()),
     )
     .await;
@@ -217,7 +205,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
             if behavior == DestinationBehavior::NoReplace {
                 view.authorize(
                     existing.parent_inode_id.unwrap_or(ROOT_INODE_ID),
-                    AccessRights::from_iter([AccessRight::Create]),
+                    AccessRight::Create.into(),
                     Absence::Path(absolute_path.as_str()),
                 )
                 .await?;
@@ -228,7 +216,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
             }
             view.authorize(
                 existing.inode_id,
-                AccessRights::from_iter([AccessRight::Write]),
+                AccessRight::Write.into(),
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
@@ -263,7 +251,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
                 ensure_parent_directories(absolute_path, view, &mut ops, allocation).await?;
             view.authorize(
                 parents.deepest_existing,
-                AccessRights::from_iter([AccessRight::Create]),
+                AccessRight::Create.into(),
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;

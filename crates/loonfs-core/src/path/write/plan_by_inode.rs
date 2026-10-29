@@ -7,18 +7,13 @@ use super::publish_path_planning::{
     resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Replacement};
-use crate::commit::{CandidateAllocation, CommitOperation};
+use crate::commit::{CandidateAllocation, CommitOperation, NewChild};
 use crate::error::{CoreError, Result};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AccessRight, AccessRights, BindingVersion, ContentRef, DeleteDirectoryBehavior,
-    DestinationBehavior, DisplayName, ExpectedFileState, InodeId, InodeKind, RevisionNo,
+    AccessRight, BindingVersion, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+    DisplayName, ExpectedFileState, InodeId, InodeKind, RevisionNo,
 };
-
-pub(super) enum NewChild {
-    Directory,
-    File(ContentRef),
-}
 
 pub(super) async fn plan_create_by_inode<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
@@ -28,12 +23,8 @@ pub(super) async fn plan_create_by_inode<S: ObjectStore + ?Sized>(
     allocation: &mut CandidateAllocation,
 ) -> Result<CompiledFilesystemOperation> {
     let parent = resolve_visible_inode(view, parent_inode_id).await?;
-    view.authorize(
-        parent_inode_id,
-        AccessRights::from_iter([AccessRight::Create]),
-        Absence::Inode,
-    )
-    .await?;
+    view.authorize(parent_inode_id, AccessRight::Create.into(), Absence::Inode)
+        .await?;
     if parent.inode_kind != InodeKind::Directory {
         return Err(CoreError::ExpectedDirectory {
             target: parent.absolute_path.to_string(),
@@ -70,12 +61,8 @@ pub(super) async fn plan_put_file_revision_by_inode<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
-    view.authorize(
-        inode_id,
-        AccessRights::from_iter([AccessRight::Write]),
-        Absence::Inode,
-    )
-    .await?;
+    view.authorize(inode_id, AccessRight::Write.into(), Absence::Inode)
+        .await?;
     if target.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             target: target.absolute_path.to_string(),
@@ -106,7 +93,7 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
         source
             .parent_inode_id
             .ok_or(CoreError::RootMutationForbidden)?,
-        AccessRights::from_iter([AccessRight::Remove]),
+        AccessRight::Remove.into(),
         Absence::Inode,
     )
     .await?;
@@ -114,7 +101,7 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
     if target_parent.inode_kind != InodeKind::Directory {
         view.authorize(
             to_parent_inode_id,
-            AccessRights::from_iter([AccessRight::Create]),
+            AccessRight::Create.into(),
             Absence::Inode,
         )
         .await?;

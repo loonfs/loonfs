@@ -17,9 +17,9 @@ use loonfs_test_support::stores::{
     KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
-    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, ContentRef,
-    DestinationBehavior, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet,
-    RevisionNo, Subject, SubjectId, WriterId,
+    AbsolutePath, AccessGrants, AccessRight, CommitId, ContentId, ContentRef, DestinationBehavior,
+    NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo, Subject,
+    SubjectId, WriterId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -181,7 +181,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
                     principal_scope: PrincipalScope::parse("scope").expect("scope"),
                     root_grants: AccessGrants::new(BTreeMap::from([(
                         principal,
-                        AccessRights::from_iter([AccessRight::Admin]),
+                        AccessRight::Admin.into(),
                     )]))
                     .expect("grants"),
                 },

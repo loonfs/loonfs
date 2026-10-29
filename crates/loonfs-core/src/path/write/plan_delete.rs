@@ -11,9 +11,7 @@ use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{
-    AbsolutePath, AccessRight, AccessRights, DeleteDirectoryBehavior, InodeId, InodeKind,
-};
+use loonfs_types::{AbsolutePath, AccessRight, DeleteDirectoryBehavior, InodeId, InodeKind};
 
 pub(super) async fn plan_delete_path<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
@@ -25,7 +23,7 @@ pub(super) async fn plan_delete_path<S: ObjectStore + ?Sized>(
     let resolved = resolve_visible_path_for_authorization(
         view,
         absolute_path,
-        AccessRights::from_iter([AccessRight::Remove]),
+        AccessRight::Remove.into(),
         Absence::Path(absolute_path.as_str()),
     )
     .await?;
@@ -53,7 +51,7 @@ pub(super) async fn plan_delete<S: ObjectStore + ?Sized>(
         resolved
             .parent_inode_id
             .ok_or(CoreError::RootMutationForbidden)?,
-        AccessRights::from_iter([AccessRight::Remove]),
+        AccessRight::Remove.into(),
         absence,
     )
     .await?;

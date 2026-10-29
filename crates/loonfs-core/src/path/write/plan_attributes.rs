@@ -11,8 +11,8 @@ use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AbsolutePath, AccessRight, AccessRights, AttributeKey, AttributeValue, Attributes,
-    AttributesRevisionNo, InodeId,
+    AbsolutePath, AccessRight, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo,
+    InodeId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,13 +36,13 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
     let target = resolve_visible_path_for_authorization(
         view,
         absolute_path,
-        AccessRights::from_iter([AccessRight::Write]),
+        AccessRight::Write.into(),
         Absence::Path(absolute_path.as_str()),
     )
     .await?;
     view.authorize(
         target.inode_id,
-        AccessRights::from_iter([AccessRight::Write]),
+        AccessRight::Write.into(),
         Absence::Path(absolute_path.as_str()),
     )
     .await?;
@@ -67,12 +67,8 @@ pub(super) async fn plan_update_attributes_by_inode<S: ObjectStore + ?Sized>(
     ensure_mutation_inode(inode_id)?;
     validate_request_shape(set, remove)?;
     resolve_visible_inode(view, inode_id).await?;
-    view.authorize(
-        inode_id,
-        AccessRights::from_iter([AccessRight::Write]),
-        Absence::Inode,
-    )
-    .await?;
+    view.authorize(inode_id, AccessRight::Write.into(), Absence::Inode)
+        .await?;
     update_attributes(view, inode_id, set, remove, expected_attributes_revision_no).await
 }
 
@@ -83,14 +79,14 @@ async fn update_attributes<S: ObjectStore + ?Sized>(
     remove: &[AttributeKey],
     expected_attributes_revision_no: Option<AttributesRevisionNo>,
 ) -> Result<CompiledFilesystemOperation> {
-    let (current_revision_no, current) = view.view.attributes_at_visible_seq(inode_id).await?;
+    let current = view.view.attributes(inode_id).await?;
     // A caller-supplied precondition replaces the freshly-read revision in the op,
     // so commit validation rejects a raced update with the stale-attributes
     // error and its expected/actual details.
     let base_attributes_revision_no =
-        expected_attributes_revision_no.unwrap_or(current_revision_no);
+        expected_attributes_revision_no.unwrap_or(current.attributes_revision_no);
 
-    let mut updated: BTreeMap<AttributeKey, AttributeValue> = current.as_map().clone();
+    let mut updated: BTreeMap<AttributeKey, AttributeValue> = current.attributes.as_map().clone();
     for (key, value) in set {
         updated.insert(key.clone(), value.clone());
     }

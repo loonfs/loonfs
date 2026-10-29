@@ -41,7 +41,7 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
         expected_revision_no,
     }
     .resolve(PreconditionFields::Put)?;
-    let write = AccessRights::from_iter([AccessRight::Write]);
+    let write = AccessRights::from(AccessRight::Write);
     let absence = Absence::Path(absolute_path.as_str());
     let target =
         resolve_visible_path_for_authorization(view, absolute_path, write, absence).await?;
@@ -84,12 +84,8 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
     pieces: &CommitPieces<'_>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
-    view.authorize(
-        inode_id,
-        AccessRights::from_iter([AccessRight::Write]),
-        Absence::Inode,
-    )
-    .await?;
+    view.authorize(inode_id, AccessRight::Write.into(), Absence::Inode)
+        .await?;
     if target.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             target: target.absolute_path.to_string(),

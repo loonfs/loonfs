@@ -1117,7 +1117,7 @@ impl crate::Namespace<crate::Writable> {
         actor: &loonfs_types::ActorId,
     ) -> Result<loonfs_types::RecoverAdministratorResponse> {
         use loonfs_types::api::v0::FilesystemChange;
-        use loonfs_types::{AccessGrants, AccessRight, AccessRights};
+        use loonfs_types::{AccessGrants, AccessRight};
 
         self.core.record_trace_context(&tracing::Span::current());
         let crate::cache::PinnedRead { engine, context } = self
@@ -1130,9 +1130,7 @@ impl crate::Namespace<crate::Writable> {
             .iter()
             .map(|(principal, rights)| (principal.clone(), rights))
             .collect();
-        let rights = grants
-            .get(principal_id)
-            .union(AccessRights::from_iter([AccessRight::Admin]));
+        let rights = grants.get(principal_id).union(AccessRight::Admin.into());
         entries.insert(principal_id.clone(), rights);
         let grants = AccessGrants::new(entries).map_err(|error| {
             Error::Core(crate::CoreError::InvalidCommitField {

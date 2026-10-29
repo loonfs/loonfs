@@ -253,30 +253,6 @@ impl MetadataState {
         &self.content_layouts
     }
 
-    pub fn content_head(&self, content_id: &loonfs_types::ContentId) -> Option<u64> {
-        self.revisions
-            .iter()
-            .filter(|row| &row.content_ref.content_id == content_id)
-            .max_by_key(|row| {
-                (
-                    row.content_ref.size_bytes,
-                    row.committed_seq,
-                    row.delta_index,
-                )
-            })
-            .map(|row| row.content_ref.size_bytes)
-            .into_iter()
-            .chain(self.content_layout(content_id).map(|row| row.size_bytes))
-            .max()
-    }
-
-    pub fn content_layout(
-        &self,
-        content_id: &loonfs_types::ContentId,
-    ) -> Option<&ContentLayoutRecord> {
-        self.indexes.content_layout(content_id)
-    }
-
     pub(crate) fn push_content_layout_record(&mut self, record: ContentLayoutRecord) {
         self.indexes.record_content_layout(&record);
         self.record_row_weight(record.heap_bytes());

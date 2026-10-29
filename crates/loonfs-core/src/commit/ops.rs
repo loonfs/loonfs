@@ -13,6 +13,12 @@ use loonfs_types::{
 
 use super::ResolvedBinding;
 
+/// The kind of inode a create makes, with a file's initial content.
+pub(crate) enum NewChild {
+    Directory,
+    File(ContentRef),
+}
+
 /// Semantic operation inside a planned commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommitOperation {

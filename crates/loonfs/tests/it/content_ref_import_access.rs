@@ -6,8 +6,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::{
-    AccessGrants, AccessRight, AccessRights, ContentRef, ErrorCode, NamespaceAccess, NamespaceId,
-    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, ContentRef, ErrorCode, NamespaceAccess, NamespaceId, PrincipalId,
+    PrincipalScope, PrincipalSet, Subject, SubjectId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -33,7 +33,7 @@ fn acl(administrator: &str) -> NamespaceAccess {
 fn administrator_grants(administrator: &str) -> AccessGrants {
     AccessGrants::new(BTreeMap::from([(
         PrincipalId::parse(administrator).expect("principal"),
-        AccessRights::from_iter([AccessRight::Admin]),
+        AccessRight::Admin.into(),
     )]))
     .expect("grants")
 }

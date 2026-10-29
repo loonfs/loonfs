@@ -33,9 +33,9 @@ pub(crate) use self::rows::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, ActiveDeletionRange,
     RecoverableDeletion,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use self::view::InMemoryMetadataView;
-pub(crate) use self::view::{AttributesProjection, MetadataView, DIRECTORY_PAGE_RAW_SCAN_LIMIT};
+pub(crate) use self::view::{MetadataView, DIRECTORY_PAGE_RAW_SCAN_LIMIT};
 pub(crate) use self::view_session::{
     LeafRevisionPreload, MetadataViewSession, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,

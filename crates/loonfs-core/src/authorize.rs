@@ -161,7 +161,7 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
         absence: Absence<'_>,
     ) -> Result<()> {
         if let Some(head) = self.at_head {
-            let rights = rights.union(AccessRights::from_iter([AccessRight::History]));
+            let rights = rights.union(AccessRight::History.into());
             let mut head = head.metadata_view().session();
             if self.refuses_at_head(&mut head, inode_id).await? {
                 return Err(absence.not_found(inode_id));
@@ -184,9 +184,9 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
         let Authorizer::Subject { principals } = &self.authorizer else {
             return Ok(true);
         };
-        let mut rights = AccessRights::from_iter([AccessRight::Read]);
+        let mut rights = AccessRights::from(AccessRight::Read);
         let effective = if let Some(head) = self.at_head {
-            rights = rights.union(AccessRights::from_iter([AccessRight::History]));
+            rights = rights.union(AccessRight::History.into());
             let mut head = head.metadata_view().session();
             if self.refuses_at_head(&mut head, inode_id).await? {
                 return Ok(false);

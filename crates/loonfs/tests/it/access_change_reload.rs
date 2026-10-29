@@ -43,7 +43,7 @@ fn grants(principals: &[&str], right: AccessRight) -> AccessGrants {
             .map(|principal| {
                 (
                     PrincipalId::parse(*principal).expect("principal"),
-                    AccessRights::from_iter([right]),
+                    AccessRights::from(right),
                 )
             })
             .collect::<BTreeMap<_, _>>(),

@@ -137,6 +137,21 @@ pub fn mutation_context(writer_id: &str, now_ms: u64) -> crate::MutationContext 
     }
 }
 
+/// Returns the content head of `content_id` that commit validation reads,
+/// from a view over `state` at its newest sequence.
+pub fn content_head(
+    state: &crate::metadata::MetadataState,
+    content_id: &loonfs_types::ContentId,
+) -> Option<u64> {
+    use futures::FutureExt;
+    let tail = crate::wal::ProjectedWalTail::from_rows(state.clone());
+    crate::metadata::InMemoryMetadataView::in_memory(&tail, None, state.indexed_seq())
+        .content_head(content_id)
+        .now_or_never()
+        .expect("a view without manifest segments should answer without waiting")
+        .expect("a view without manifest segments should not fail")
+}
+
 // These path-mutation helpers use dev-dependencies and are only needed by
 // in-crate checkpoint and planner tests.
 #[cfg(test)]
