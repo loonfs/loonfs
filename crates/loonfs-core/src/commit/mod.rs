@@ -11,7 +11,7 @@ mod validate;
 mod wal_payload;
 
 pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation, InodeAllocator};
-pub(crate) use self::ops::CommitOperation;
+pub(crate) use self::ops::{CommitOperation, NewChild};
 pub(crate) use self::plan::{
     AppendedContent, CommitPlan, PreparedCommit, ResolvedBinding, ValidatedCommitPlan,
 };

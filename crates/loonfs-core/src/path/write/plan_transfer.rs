@@ -15,8 +15,8 @@ use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AbsolutePath, AccessRight, AccessRights, AttributesRevisionNo, DestinationBehavior,
-    DisplayName, ExpectedFileState, InodeId, InodeKind,
+    AbsolutePath, AccessRight, AttributesRevisionNo, DestinationBehavior, DisplayName,
+    ExpectedFileState, InodeId, InodeKind,
 };
 
 pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(
@@ -31,7 +31,7 @@ pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(
     let source = resolve_visible_path_for_authorization(
         view,
         from_path,
-        AccessRights::from_iter([AccessRight::Remove]),
+        AccessRight::Remove.into(),
         Absence::Path(from_path.as_str()),
     )
     .await?;
@@ -39,7 +39,7 @@ pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(
         source
             .parent_inode_id
             .ok_or(CoreError::RootMutationForbidden)?,
-        AccessRights::from_iter([AccessRight::Remove]),
+        AccessRight::Remove.into(),
         Absence::Path(from_path.as_str()),
     )
     .await?;
@@ -157,13 +157,13 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     let source = resolve_visible_path_for_authorization(
         view,
         from_path,
-        AccessRights::from_iter([AccessRight::Read]),
+        AccessRight::Read.into(),
         Absence::Path(from_path.as_str()),
     )
     .await?;
     view.authorize(
         source.inode_id,
-        AccessRights::from_iter([AccessRight::Read]),
+        AccessRight::Read.into(),
         Absence::Path(from_path.as_str()),
     )
     .await?;
@@ -220,12 +220,8 @@ pub(super) async fn plan_copy_by_inode<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_inode(inode_id)?;
     let source = resolve_visible_inode(view, inode_id).await?;
-    view.authorize(
-        inode_id,
-        AccessRights::from_iter([AccessRight::Read]),
-        Absence::Inode,
-    )
-    .await?;
+    view.authorize(inode_id, AccessRight::Read.into(), Absence::Inode)
+        .await?;
     if source.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             target: source.absolute_path.to_string(),
@@ -236,7 +232,7 @@ pub(super) async fn plan_copy_by_inode<S: ObjectStore + ?Sized>(
     if target_parent.inode_kind != InodeKind::Directory {
         view.authorize(
             destination_parent_inode_id,
-            AccessRights::from_iter([AccessRight::Create]),
+            AccessRight::Create.into(),
             Absence::Inode,
         )
         .await?;
@@ -343,8 +339,7 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
             // Copying over an existing file changes nothing about that
             // file's attributes: the destination is a resource that already
             // exists and keeps what it holds.
-            let (_, source_attributes) =
-                view.view.attributes_at_visible_seq(source.inode_id).await?;
+            let source_attributes = view.view.attributes(source.inode_id).await?.attributes;
             if !source_attributes.is_empty() {
                 // Both operations carry the one identity assigned above, so
                 // validation cannot allocate a different inode for either.

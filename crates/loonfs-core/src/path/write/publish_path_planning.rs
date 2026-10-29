@@ -266,7 +266,7 @@ pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
                 if child.child_kind != InodeKind::Directory {
                     view.authorize(
                         child.child_inode_id,
-                        AccessRights::from_iter([AccessRight::Create]),
+                        AccessRight::Create.into(),
                         Absence::Path(absolute_path.as_str()),
                     )
                     .await?;
@@ -312,17 +312,13 @@ pub(super) async fn resolve_parent_directory<S: ObjectStore + ?Sized>(
     let resolved = resolve_visible_path_for_authorization(
         view,
         &parent_path,
-        AccessRights::from_iter([AccessRight::Create]),
+        AccessRight::Create.into(),
         absence,
     )
     .await?;
     if resolved.inode_kind != InodeKind::Directory {
-        view.authorize(
-            resolved.inode_id,
-            AccessRights::from_iter([AccessRight::Create]),
-            absence,
-        )
-        .await?;
+        view.authorize(resolved.inode_id, AccessRight::Create.into(), absence)
+            .await?;
         return Err(CoreError::ExpectedDirectory {
             target: parent_path.as_str().to_owned(),
             kind: resolved.inode_kind,
@@ -364,28 +360,18 @@ impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
             return Ok(());
         }
         let (inode_id, rights) = match occupant {
-            None => (
-                destination_parent,
-                AccessRights::from_iter([AccessRight::Create]),
-            ),
-            Some(existing) if Some(existing.inode_id) == source_inode_id => (
-                destination_parent,
-                AccessRights::from_iter([AccessRight::Create]),
-            ),
+            None => (destination_parent, AccessRight::Create.into()),
+            Some(existing) if Some(existing.inode_id) == source_inode_id => {
+                (destination_parent, AccessRight::Create.into())
+            }
             Some(existing) if behavior == DestinationBehavior::Replace => match replacement {
                 Replacement::RemovesEntry => (
                     destination_parent,
                     AccessRights::from_iter([AccessRight::Create, AccessRight::Remove]),
                 ),
-                Replacement::WritesFile => (
-                    existing.inode_id,
-                    AccessRights::from_iter([AccessRight::Write]),
-                ),
+                Replacement::WritesFile => (existing.inode_id, AccessRight::Write.into()),
             },
-            Some(_) => (
-                destination_parent,
-                AccessRights::from_iter([AccessRight::Create]),
-            ),
+            Some(_) => (destination_parent, AccessRight::Create.into()),
         };
         self.authorize(inode_id, rights, absence).await
     }

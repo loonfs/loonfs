@@ -1,6 +1,6 @@
 //! Operation validation for one commit.
 
-use super::super::{CommitOperation, CommitValidationError, ResolvedBinding};
+use super::super::{CommitOperation, CommitValidationError, NewChild, ResolvedBinding};
 use super::error::CommitOperand;
 use super::session::PublishValidationSession;
 use crate::error::{CoreError, Result};
@@ -58,12 +58,13 @@ pub(crate) async fn validate_operations<S: ObjectStore + ?Sized>(
                 parent_inode_id,
                 display_name,
             } => {
-                validate_create_directory(
+                validate_create(
                     view,
                     numbering,
                     *child_inode_id,
                     *parent_inode_id,
                     display_name,
+                    NewChild::Directory,
                     (actor, committed_at_ms),
                 )
                 .await?
@@ -74,13 +75,13 @@ pub(crate) async fn validate_operations<S: ObjectStore + ?Sized>(
                 display_name,
                 content_ref,
             } => {
-                validate_create_file(
+                validate_create(
                     view,
                     numbering,
                     *child_inode_id,
                     *parent_inode_id,
                     display_name,
-                    content_ref,
+                    NewChild::File(content_ref.clone()),
                     (actor, committed_at_ms),
                 )
                 .await?
@@ -217,12 +218,13 @@ pub(crate) async fn validate_operations<S: ObjectStore + ?Sized>(
     Ok(deltas)
 }
 
-async fn validate_create_directory<S: ObjectStore + ?Sized>(
+async fn validate_create<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     child_inode_id: InodeId,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
+    child: NewChild,
     (created_by, created_at_ms): (&ActorId, u64),
 ) -> Result<Vec<WalDelta>> {
     let name_key = validate_name_absent(
@@ -235,11 +237,15 @@ async fn validate_create_directory<S: ObjectStore + ?Sized>(
     .await?;
     validate_child_unbound(view, child_inode_id, None).await?;
     validate_not_covered_by_tombstone(view, parent_inode_id, CommitOperand::CreateParent).await?;
-    Ok(vec![
+    let inode_kind = match child {
+        NewChild::Directory => InodeKind::Directory,
+        NewChild::File(_) => InodeKind::File,
+    };
+    let mut deltas = vec![
         WalDelta::CreateInode {
             delta_index: numbering.reserve_delta_index()?,
             inode_id: child_inode_id,
-            inode_kind: InodeKind::Directory,
+            inode_kind,
         },
         WalDelta::BindDirentry {
             delta_index: numbering.reserve_delta_index()?,
@@ -247,57 +253,22 @@ async fn validate_create_directory<S: ObjectStore + ?Sized>(
             name_key,
             display_name: display_name.clone(),
             child_inode_id,
-            child_kind: InodeKind::Directory,
+            child_kind: inode_kind,
             child_created_by: created_by.clone(),
             child_created_at_ms: created_at_ms,
         },
-    ])
-}
-
-async fn validate_create_file<S: ObjectStore + ?Sized>(
-    view: &PublishValidationSession<'_, S>,
-    numbering: &mut CommitNumbering,
-    child_inode_id: InodeId,
-    parent_inode_id: InodeId,
-    display_name: &DisplayName,
-    content_ref: &ContentRef,
-    (created_by, created_at_ms): (&ActorId, u64),
-) -> Result<Vec<WalDelta>> {
-    let name_key = validate_name_absent(
-        view,
-        parent_inode_id,
-        display_name,
-        None,
-        CommitOperand::CreateParent,
-    )
-    .await?;
-    validate_child_unbound(view, child_inode_id, None).await?;
-    validate_not_covered_by_tombstone(view, parent_inode_id, CommitOperand::CreateParent).await?;
-    Ok(vec![
-        WalDelta::CreateInode {
-            delta_index: numbering.reserve_delta_index()?,
-            inode_id: child_inode_id,
-            inode_kind: InodeKind::File,
-        },
-        WalDelta::BindDirentry {
-            delta_index: numbering.reserve_delta_index()?,
-            parent_inode_id,
-            name_key,
-            display_name: display_name.clone(),
-            child_inode_id,
-            child_kind: InodeKind::File,
-            child_created_by: created_by.clone(),
-            child_created_at_ms: created_at_ms,
-        },
-        WalDelta::AppendFileRevision {
+    ];
+    if let NewChild::File(content_ref) = child {
+        deltas.push(WalDelta::AppendFileRevision {
             delta_index: numbering.reserve_delta_index()?,
             inode_id: child_inode_id,
             revision_no: RevisionNo(1),
-            content_ref: content_ref.clone(),
+            content_ref,
             layout: None,
             append_offset: None,
-        },
-    ])
+        });
+    }
+    Ok(deltas)
 }
 
 async fn validate_replace_file<S: ObjectStore + ?Sized>(
@@ -315,13 +286,7 @@ async fn validate_replace_file<S: ObjectStore + ?Sized>(
         CommitOperand::ReplaceTarget,
     )
     .await?;
-    let revision_no =
-        next_revision_no(inode_id, base_revision_no, |inode_id, base_revision_no| {
-            CommitValidationError::ReplaceFileRevisionOverflow {
-                inode_id,
-                base_revision_no,
-            }
-        })?;
+    let revision_no = next_revision_no(inode_id, base_revision_no)?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::ReplaceTarget).await?;
     Ok(vec![WalDelta::AppendFileRevision {
         delta_index: numbering.reserve_delta_index()?,
@@ -349,13 +314,7 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
     .await?;
     let source_revision =
         validate_restore_source_revision(view, inode_id, source_revision_no).await?;
-    let revision_no =
-        next_revision_no(inode_id, base_revision_no, |inode_id, base_revision_no| {
-            CommitValidationError::RestoreRevisionOverflow {
-                inode_id,
-                base_revision_no,
-            }
-        })?;
+    let revision_no = next_revision_no(inode_id, base_revision_no)?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::RestoreTarget).await?;
     Ok(vec![WalDelta::AppendFileRevision {
         delta_index: numbering.reserve_delta_index()?,
@@ -586,11 +545,13 @@ fn next_access_revision_no(
 fn next_revision_no(
     inode_id: InodeId,
     base_revision_no: RevisionNo,
-    overflow: impl FnOnce(InodeId, RevisionNo) -> CommitValidationError,
 ) -> std::result::Result<RevisionNo, CommitValidationError> {
     next_public_ordinal(base_revision_no.0)
         .map(RevisionNo)
-        .ok_or_else(|| overflow(inode_id, base_revision_no))
+        .ok_or(CommitValidationError::RevisionOverflow {
+            inode_id,
+            base_revision_no,
+        })
 }
 
 fn next_attributes_revision_no(
@@ -656,8 +617,12 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     expected: AttributesRevisionNo,
-) -> Result<Attributes> {
-    let (actual, attributes) = view.view().attributes_at_visible_seq(inode_id).await?;
+) -> Result<()> {
+    let actual = view
+        .view()
+        .attributes(inode_id)
+        .await?
+        .attributes_revision_no;
     if actual != expected {
         return Err(
             CommitValidationError::UpdateAttributesBaseRevisionMismatch {
@@ -669,7 +634,7 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
             .into(),
         );
     }
-    Ok(attributes)
+    Ok(())
 }
 
 async fn validate_inode_access_revision_is<S: ObjectStore + ?Sized>(
@@ -888,27 +853,13 @@ mod ordinal_tests {
 
     #[test]
     fn revision_advancement_accepts_the_maximum_and_rejects_the_next_value() {
-        let at_maximum = next_revision_no(
-            InodeId(2),
-            RevisionNo(MAX_PUBLIC_INTEGER - 1),
-            |inode_id, base_revision_no| CommitValidationError::RestoreRevisionOverflow {
-                inode_id,
-                base_revision_no,
-            },
-        )
-        .expect("advance to public maximum");
+        let at_maximum = next_revision_no(InodeId(2), RevisionNo(MAX_PUBLIC_INTEGER - 1))
+            .expect("advance to public maximum");
         assert_eq!(at_maximum, RevisionNo(MAX_PUBLIC_INTEGER));
 
         assert_matches!(
-            next_revision_no(
-                InodeId(2),
-                RevisionNo(MAX_PUBLIC_INTEGER),
-                |inode_id, base_revision_no| CommitValidationError::RestoreRevisionOverflow {
-                    inode_id,
-                    base_revision_no,
-                },
-            ),
-            Err(CommitValidationError::RestoreRevisionOverflow {
+            next_revision_no(InodeId(2), RevisionNo(MAX_PUBLIC_INTEGER)),
+            Err(CommitValidationError::RevisionOverflow {
                 inode_id: InodeId(2),
                 base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
             })

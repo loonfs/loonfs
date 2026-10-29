@@ -132,16 +132,9 @@ pub enum CommitValidationError {
         active_seq: ChangeSeq,
     },
     #[error(
-        "cannot restore inode `{inode_id}` because revision `{base_revision_no}` is already at the maximum 9007199254740991"
+        "cannot add a revision to inode `{inode_id}` because revision `{base_revision_no}` is already at the maximum 9007199254740991"
     )]
-    RestoreRevisionOverflow {
-        inode_id: InodeId,
-        base_revision_no: RevisionNo,
-    },
-    #[error(
-        "cannot replace inode `{inode_id}` because revision `{base_revision_no}` is already at the maximum 9007199254740991"
-    )]
-    ReplaceFileRevisionOverflow {
+    RevisionOverflow {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
     },
@@ -203,8 +196,7 @@ impl CommitValidationError {
             | Self::UndeleteTargetsCurrentCommit { .. }
             | Self::UndeleteSequenceMismatch { .. } => ErrorCode::NotDeleted,
             Self::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
-            Self::RestoreRevisionOverflow { .. }
-            | Self::ReplaceFileRevisionOverflow { .. }
+            Self::RevisionOverflow { .. }
             | Self::OperationIndexOverflow
             | Self::DeltaIndexOverflow => ErrorCode::ServerError,
         }

@@ -399,6 +399,12 @@ impl AccessRights {
     }
 }
 
+impl From<AccessRight> for AccessRights {
+    fn from(right: AccessRight) -> Self {
+        Self(right.bit())
+    }
+}
+
 impl AccessRights {
     /// Builds the set from rights named once each, refusing a repeated right.
     ///

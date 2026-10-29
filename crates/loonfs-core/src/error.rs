@@ -310,8 +310,6 @@ impl MetadataViewError {
 pub enum MetadataProjectionLoadError {
     #[error(transparent)]
     LoadHead(#[from] ControlObjectLoadError),
-    #[error("namespace `{namespace_id}` is deleted")]
-    NamespaceDeleted { namespace_id: NamespaceId },
     #[error(transparent)]
     WalTailLoad(#[from] WalTailLoadError),
     #[error(transparent)]
@@ -326,7 +324,6 @@ pub enum MetadataProjectionLoadError {
 impl MetadataProjectionLoadError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             Self::LoadHead(error) => error.code(),
             Self::WalTailLoad(error) => error.code(),
             Self::WalReplay { .. } => ErrorCode::NamespaceCorrupt,

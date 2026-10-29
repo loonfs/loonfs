@@ -5,7 +5,7 @@ use super::durable_cache::{
     DurableVisibilityCache, DurableVisibilityCacheInner, ParentNameCacheKey, SharedRows,
 };
 use super::manifest_index;
-use super::view_session::{latest_visible_binding, LeafRevisionPreload};
+use super::view_session::{LeafRevisionPreload, MetadataViewSession};
 use super::visibility::{self, MetadataVisibilityReads};
 use crate::error::{CoreError, Result};
 use crate::manifest::VerifiedMetadataSegments;
@@ -17,14 +17,14 @@ use crate::metadata::{
 };
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::ProjectedWalTail;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{
-    AbsolutePath, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId, InodeId,
-    InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
+    AbsolutePath, AccessRevisionNo, Attributes, AttributesProjection, AttributesRevisionNo,
+    ChangeSeq, CommitId, InodeId, InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
 };
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -69,6 +69,12 @@ impl ActiveDeletionScan {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct DirentryBindingPageCandidate {
+    pub(super) row_key: String,
+    pub(super) record: DirentryBindingRecord,
+}
+
 pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
     overlay: Option<&'a MetadataState>,
     batch_accepted: Option<&'a MetadataState>,
@@ -103,15 +109,7 @@ impl<S: ObjectStore + ?Sized> crate::storage::content_location::LayoutLookup
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AttributesProjection {
-    pub(crate) revision_no: AttributesRevisionNo,
-    pub(crate) attributes: Attributes,
-    pub(crate) updated_by: Option<loonfs_types::ActorId>,
-    pub(crate) updated_at_ms: Option<u64>,
-}
-
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) type InMemoryMetadataView<'a> = MetadataView<'a, 'a, LocalFsStore>;
 
 impl<S: ObjectStore + ?Sized> Copy for MetadataSourceStack<'_, '_, S> {}
@@ -130,7 +128,7 @@ impl<S: ObjectStore + ?Sized> Clone for MetadataView<'_, '_, S> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<'a> InMemoryMetadataView<'a> {
     pub(crate) fn in_memory(
         base: &'a ProjectedWalTail,
@@ -323,6 +321,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// `self`.
     pub(crate) fn reads(&self) -> MetadataViewReads<'a, 'store, S> {
         MetadataViewReads { view: *self }
+    }
+
+    /// Opens a fresh session over this view; the view is `Copy`, so the
+    /// session owns its copy.
+    pub(crate) fn session(self) -> MetadataViewSession<'a, 'store, S> {
+        MetadataViewSession::new(self)
     }
 
     /// Returns whether the directory has at least one visible child.
@@ -529,44 +533,27 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(access_order_key))
     }
 
-    /// The inode's attribute state at the visible sequence: the revision
-    /// counter and the complete map.
+    /// Returns the inode's attributes at the visible sequence, with the actor
+    /// and time of the latest stored revision.
     ///
-    /// An inode with no record anywhere is at revision 0 with an empty map.
-    /// That state is concrete, not a missing answer, so nothing writes a
-    /// durable row to represent it.
-    pub(crate) async fn attributes_at_visible_seq(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<(AttributesRevisionNo, Attributes)> {
-        Ok(self
-            .latest_attributes_revision(inode_id)
-            .await?
-            .map(|record| (record.attributes_revision_no, record.attributes))
-            .unwrap_or_else(|| (AttributesRevisionNo(0), Attributes::default())))
-    }
-
-    /// Returns the inode's attributes with the actor and timestamp from the
-    /// latest stored revision. Revision 0 returns `None` for both values.
-    pub(crate) async fn attributes_projection_at_visible_seq(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<AttributesProjection> {
-        Ok(self
-            .latest_attributes_revision(inode_id)
-            .await?
-            .map(|record| AttributesProjection {
-                revision_no: record.attributes_revision_no,
+    /// An inode with no record anywhere is at revision 0 with an empty map and
+    /// no actor or time. That state is concrete, not a missing answer, so
+    /// nothing writes a durable row to represent it.
+    pub(crate) async fn attributes(&self, inode_id: InodeId) -> Result<AttributesProjection> {
+        Ok(match self.latest_attributes_revision(inode_id).await? {
+            Some(record) => AttributesProjection {
+                attributes_revision_no: record.attributes_revision_no,
+                attributes_updated_by: Some(record.committed_by),
+                attributes_updated_at_ms: Some(record.committed_at_ms),
                 attributes: record.attributes,
-                updated_by: Some(record.committed_by),
-                updated_at_ms: Some(record.committed_at_ms),
-            })
-            .unwrap_or_else(|| AttributesProjection {
-                revision_no: AttributesRevisionNo(0),
+            },
+            None => AttributesProjection {
+                attributes_revision_no: AttributesRevisionNo(0),
+                attributes_updated_by: None,
+                attributes_updated_at_ms: None,
                 attributes: Attributes::default(),
-                updated_by: None,
-                updated_at_ms: None,
-            }))
+            },
+        })
     }
 
     /// Returns the largest visible chain size so a shorter restore or copy cannot
@@ -608,10 +595,22 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         content_id: &loonfs_types::ContentId,
     ) -> Result<Option<ContentLayoutRecord>> {
+        let visible_seq = self.visible_seq();
         let tail = self
             .row_states()
-            .flat_map(|state| state.content_layouts())
-            .filter(|row| &row.content_id == content_id && row.committed_seq <= self.visible_seq())
+            .filter_map(|state| {
+                if state.indexed_seq() <= visible_seq {
+                    state.indexes.content_layout(content_id)
+                } else {
+                    state
+                        .content_layouts()
+                        .iter()
+                        .filter(|row| {
+                            &row.content_id == content_id && row.committed_seq <= visible_seq
+                        })
+                        .max_by_key(|row| (row.size_bytes, row.committed_seq))
+                }
+            })
             .max_by_key(|row| (row.size_bytes, row.committed_seq));
         let folded = match self.manifest_segments() {
             Some(segments) => manifest_index::content_layout(segments, content_id).await?,
@@ -838,6 +837,34 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         .await
     }
 
+    pub(super) fn tail_direntry_bind_page_candidates(
+        &self,
+        parent_inode_id: InodeId,
+        start_after_name_key: Option<&NameKey>,
+    ) -> Vec<DirentryBindingPageCandidate> {
+        let mut candidates = self
+            .row_states()
+            .flat_map(|state| state.direntry_binds())
+            .filter(|direntry| {
+                direntry.parent_inode_id == parent_inode_id
+                    && start_after_name_key
+                        .is_none_or(|last_name_key| &direntry.name_key > last_name_key)
+            })
+            .map(|record| DirentryBindingPageCandidate {
+                row_key: lookup_keys::direntry_bind_row_key(
+                    record.parent_inode_id,
+                    &record.name_key,
+                    record.child_inode_id,
+                    record.committed_seq,
+                    record.delta_index,
+                ),
+                record: record.clone(),
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.row_key.cmp(&right.row_key));
+        candidates
+    }
+
     fn row_latest_revision_by_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
         self.row_states()
             .flat_map(|state| state.revisions())
@@ -1057,6 +1084,15 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
     ) -> std::result::Result<Option<AccessRevisionRecord>, Self::Error> {
         self.view.latest_access_revision(inode_id).await
     }
+}
+
+pub(super) fn latest_visible_binding<'a>(
+    rows: impl Iterator<Item = &'a DirentryBindingRecord>,
+    visible_seq: ChangeSeq,
+) -> Option<DirentryBindingRecord> {
+    rows.filter(|direntry| direntry.committed_seq <= visible_seq)
+        .max_by_key(|direntry| direntry.position())
+        .cloned()
 }
 
 fn attributes_order_key(

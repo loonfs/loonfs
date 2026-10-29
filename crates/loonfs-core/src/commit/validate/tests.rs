@@ -896,7 +896,7 @@ async fn restore_revision_overflow_is_rejected() {
         .expect_err("restore overflow");
     assert_matches!(
         error,
-        CommitValidationError::RestoreRevisionOverflow {
+        CommitValidationError::RevisionOverflow {
             inode_id: InodeId(2),
             base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         }

@@ -8,9 +8,8 @@ use crate::metadata::{DirentryBindingRecord, RevisionRecord};
 use crate::path::read::load_current_metadata_view;
 use loonfs_types::format::manifest::{AccessRevisionRecord, DirentryBindingState, InodeRecord};
 use loonfs_types::{
-    AccessGrants, AccessRevisionNo, AccessRight, AccessRights, ActorId, ContentId, ContentRef,
-    DisplayName, EffectiveLimit, InodeKind, NameKey, PageRequest, PrincipalId, PrincipalSet,
-    RevisionNo,
+    AccessGrants, AccessRevisionNo, AccessRight, ActorId, ContentId, ContentRef, DisplayName,
+    EffectiveLimit, InodeKind, NameKey, PageRequest, PrincipalId, PrincipalSet, RevisionNo,
 };
 
 const ROOT: InodeId = InodeId(1);
@@ -206,7 +205,7 @@ async fn a_read_by_inode_whose_ancestry_was_compacted_away_is_refused_for_every_
             .require(
                 &mut view.metadata_view().session(),
                 NOTES,
-                AccessRights::from_iter([AccessRight::Read]),
+                AccessRight::Read.into(),
                 Absence::Inode,
             )
             .await;

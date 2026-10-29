@@ -33,10 +33,10 @@ use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::options::ListOptions;
 use loonfs_types::{
-    AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
-    ContentRef, DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId,
-    InodeKind, ListPageCursor, ManifestNo, NameKey, NamespaceId, Page, PageRequest, PathEntry,
-    PathEntryKind, RevisionNo, TrashEntry, TrashPageCursor,
+    AbsolutePath, AccessRight, AttributeInclusion, ChangeSeq, ContentRef, DirectoryPageCursor,
+    DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ListPageCursor,
+    ManifestNo, NameKey, NamespaceId, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo,
+    TrashEntry, TrashPageCursor,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -300,7 +300,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .require(
                 &mut session,
                 resolved.inode_id,
-                AccessRights::from_iter([AccessRight::Read]),
+                AccessRight::Read.into(),
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
@@ -325,7 +325,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .require(
                 &mut session,
                 inode_id,
-                AccessRights::from_iter([AccessRight::Read]),
+                AccessRight::Read.into(),
                 Absence::Inode,
             )
             .await?;
@@ -398,7 +398,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     .require(
                         &mut self.metadata_view().session(),
                         entry.inode_id,
-                        AccessRights::from_iter([AccessRight::History]),
+                        AccessRight::History.into(),
                         Absence::Path(absolute_path),
                     )
                     .await?;
@@ -575,7 +575,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .require(
                 &mut session,
                 inode_id,
-                AccessRights::from_iter([AccessRight::Read]),
+                AccessRight::Read.into(),
                 Absence::Inode,
             )
             .await?;
@@ -590,7 +590,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .require(
                     &mut session,
                     inode_id,
-                    AccessRights::from_iter([AccessRight::History]),
+                    AccessRight::History.into(),
                     Absence::Inode,
                 )
                 .await?;
@@ -614,7 +614,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .require(
                 &mut session,
                 inode_id,
-                AccessRights::from_iter([AccessRight::Read]),
+                AccessRight::Read.into(),
                 Absence::Inode,
             )
             .await?;
@@ -679,7 +679,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .require(
                 &mut self.metadata_view().session(),
                 entry.inode_id,
-                AccessRights::from_iter([AccessRight::History]),
+                AccessRight::History.into(),
                 Absence::Path(absolute_path),
             )
             .await?;
@@ -800,7 +800,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .require(
                 &mut session,
                 inode_id,
-                AccessRights::from_iter([AccessRight::Read]),
+                AccessRight::Read.into(),
                 Absence::Inode,
             )
             .await?;
@@ -808,7 +808,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .require(
                 &mut session,
                 inode_id,
-                AccessRights::from_iter([AccessRight::History]),
+                AccessRight::History.into(),
                 Absence::Inode,
             )
             .await?;
@@ -953,7 +953,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .require(
                 &mut session,
                 resolved.inode_id,
-                AccessRights::from_iter([AccessRight::Read]),
+                AccessRight::Read.into(),
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
@@ -1013,7 +1013,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .require(
                 &mut session,
                 inode_id,
-                AccessRights::from_iter([AccessRight::Read]),
+                AccessRight::Read.into(),
                 Absence::Inode,
             )
             .await?;
@@ -1264,13 +1264,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         // as a file; only the projection decides whether the read happens.
         let attributes = match attributes {
             AttributeInclusion::Include => {
-                let projection = session.attributes_of_visible(resolved.inode_id).await?;
-                Some(AttributesProjection {
-                    attributes_revision_no: projection.revision_no,
-                    attributes_updated_by: projection.updated_by,
-                    attributes_updated_at_ms: projection.updated_at_ms,
-                    attributes: projection.attributes,
-                })
+                Some(session.attributes_of_visible(resolved.inode_id).await?)
             }
             AttributeInclusion::Omit => None,
         };

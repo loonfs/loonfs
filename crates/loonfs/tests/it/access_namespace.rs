@@ -33,7 +33,7 @@ fn root_grants(administrator: bool) -> AccessGrants {
     if administrator {
         grants.insert(
             PrincipalId::parse("prn_root").expect("principal"),
-            AccessRights::from_iter([AccessRight::Admin]),
+            AccessRight::Admin.into(),
         );
     }
     AccessGrants::new(grants).expect("grants")
@@ -370,7 +370,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
             boundary: false,
             grants: AccessGrants::new(BTreeMap::from([(
                 PrincipalId::parse("prn_new_root").expect("principal"),
-                AccessRights::from_iter([AccessRight::Admin]),
+                AccessRight::Admin.into(),
             )]))
             .expect("grants"),
             expected_inode_id: None,
@@ -482,7 +482,7 @@ async fn snapshot_after_administrator_change() -> (
             boundary: false,
             grants: AccessGrants::new(BTreeMap::from([(
                 PrincipalId::parse("prn_new_root").expect("principal"),
-                AccessRights::from_iter([AccessRight::Admin]),
+                AccessRight::Admin.into(),
             )]))
             .expect("grants"),
             expected_inode_id: None,

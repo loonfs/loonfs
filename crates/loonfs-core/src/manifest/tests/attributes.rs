@@ -210,13 +210,13 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         (5, 1, "ada"),
     ] {
         let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(visible_seq));
-        let (revision, map) = view
-            .attributes_at_visible_seq(InodeId(7))
-            .await
-            .expect("read attributes");
-        assert_eq!(revision, AttributesRevisionNo(expected_revision));
+        let projection = view.attributes(InodeId(7)).await.expect("read attributes");
         assert_eq!(
-            map,
+            projection.attributes_revision_no,
+            AttributesRevisionNo(expected_revision)
+        );
+        assert_eq!(
+            projection.attributes,
             attributes(&[("owner", expected_owner)]),
             "at seq {visible_seq}"
         );
@@ -225,17 +225,15 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
     // Below every row, and for an inode that has none: the concrete empty
     // state, not a missing answer.
     let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(2));
+    let projection = view.attributes(InodeId(7)).await.expect("read attributes");
     assert_eq!(
-        view.attributes_at_visible_seq(InodeId(7))
-            .await
-            .expect("read attributes"),
+        (projection.attributes_revision_no, projection.attributes),
         (AttributesRevisionNo(0), Attributes::default())
     );
     let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(9));
+    let projection = view.attributes(InodeId(8)).await.expect("read attributes");
     assert_eq!(
-        view.attributes_at_visible_seq(InodeId(8))
-            .await
-            .expect("read attributes"),
+        (projection.attributes_revision_no, projection.attributes),
         (AttributesRevisionNo(0), Attributes::default())
     );
 }

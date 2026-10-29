@@ -1347,7 +1347,7 @@ fn assert_attributed_commits_match_model(
     );
     for (content_id, _, _) in &published {
         assert_eq!(
-            core_state.content_head(content_id),
+            loonfs_core::test_support::content_head(&core_state, content_id),
             model_state.content_head(content_id)
         );
     }

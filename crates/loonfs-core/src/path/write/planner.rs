@@ -6,8 +6,7 @@ use super::plan_access::{plan_update_access, plan_update_access_by_inode};
 use super::plan_append::{plan_append_file, plan_append_file_by_inode};
 use super::plan_attributes::{plan_update_attributes, plan_update_attributes_by_inode};
 use super::plan_by_inode::{
-    plan_create_by_inode, plan_delete_by_inode, plan_move_by_inode,
-    plan_put_file_revision_by_inode, NewChild,
+    plan_create_by_inode, plan_delete_by_inode, plan_move_by_inode, plan_put_file_revision_by_inode,
 };
 use super::plan_create::{
     plan_create_directory, plan_put_file_content_ref, plan_undelete, undelete_destination,
@@ -21,7 +20,7 @@ use super::session::PublishPlanningSession;
 use crate::authorize::Authorizer;
 use crate::commit::{
     validate_operations, AppendedContent, CandidateAllocation, CommitFingerprint, CommitNumbering,
-    PublishValidationSession, ValidatedCommitPlan,
+    NewChild, PublishValidationSession, ValidatedCommitPlan,
 };
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
@@ -1079,7 +1078,7 @@ mod tests {
                 (administrator.clone(), AccessRights::ADMIN),
                 (
                     PrincipalId::parse("prn_team").expect("principal id"),
-                    AccessRights::from_iter([AccessRight::Read]),
+                    AccessRight::Read.into(),
                 ),
             ]))
             .expect("grants"),
