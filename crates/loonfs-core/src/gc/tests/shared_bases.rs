@@ -154,21 +154,17 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_across_the_sh
         orphans.insert(key);
     }
     let memory = Arc::new(crate::cache::ReadWorkingMemory::new(244 * 1024, None));
-    let cache = root_scan_cache(Arc::clone(&memory));
+    let cache = Arc::new(root_scan_cache(Arc::clone(&memory)));
     let options = GcOptions {
         content_shard_rows: 128,
         ..options()
     };
     store.reset();
-    let report = gc_namespace(
-        &store,
-        Some(&cache),
-        None,
-        &namespace_id,
-        &options,
-        &context(GRACE_MS + 1),
-        crate::test_support::std_timer(),
-    )
+    let report = crate::NamespaceStore {
+        segment_cache: Arc::clone(&cache),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .gc(None, &options, &context(GRACE_MS + 1))
     .await
     .expect("pass fits the read budget");
     assert_eq!(report.deleted.content_objects, 8);
@@ -242,17 +238,10 @@ async fn a_shared_base_false_positive_is_collected_with_a_later_pass_seed() {
         .expect("orphan");
     for (now_ms, expected) in [(GRACE_MS + 1, 0), (GRACE_MS + 2, 1)] {
         store.reset();
-        let report = gc_namespace(
-            &store,
-            None,
-            None,
-            &namespace_id,
-            &options(),
-            &context(now_ms),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("pass");
+        let report = crate::test_support::namespace_store(&store, &namespace_id)
+            .gc(None, &options(), &context(now_ms))
+            .await
+            .expect("pass");
         assert_eq!(report.deleted.content_objects, expected);
         let deleted: Vec<_> = store
             .snapshot()
@@ -310,17 +299,10 @@ async fn a_shared_filter_over_its_cap_skips_content_and_still_sweeps_other_famil
     }
     let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
     store.reset();
-    let report = gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &options(),
-        &context(GRACE_MS + 1),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("pass");
+    let report = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &options(), &context(GRACE_MS + 1))
+        .await
+        .expect("pass");
     assert_eq!(report.deleted.content_objects, 0);
     assert_eq!(report.deleted.temporary_objects, 1);
     assert_eq!(report.listed_bytes, listed_bytes);
@@ -366,21 +348,12 @@ async fn shared_filter_growth_over_the_cap_skips_content_before_any_content_requ
     let (manifest, _) = layout_manifest(&store, &namespace_id, [row]).await;
     publish_layout_manifest(&store, manifest).await;
     let context = context(GRACE_MS + 1);
-    let live = LiveSet::load(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        GRACE_MS,
-        &context,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("roots");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let live = LiveSet::load(&namespace, None, GRACE_MS, &context)
+        .await
+        .expect("roots");
     let sweep = Sweep {
-        store: &store,
-        segment_cache: None,
-        namespace_id: &namespace_id,
+        namespace: &namespace,
         grace_window_ms: GRACE_MS,
         mutation: &context,
         live: &live,
@@ -474,17 +447,10 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     let aged = MetadataMapStore::aged(&store, KeyPredicate::any());
     let both = superseded.union(&kept).cloned().collect::<BTreeSet<_>>();
     for (pass_store, deleted, survivors) in [(&young_successor, 0, both), (&aged, 1, kept)] {
-        let report = gc_namespace(
-            pass_store,
-            None,
-            None,
-            &namespace_id,
-            &options(),
-            &context(now_ms),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("pass");
+        let report = crate::test_support::namespace_store(pass_store, &namespace_id)
+            .gc(None, &options(), &context(now_ms))
+            .await
+            .expect("pass");
         assert_eq!(report.deleted.content_objects, deleted);
         assert_eq!(
             store

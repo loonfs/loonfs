@@ -38,7 +38,7 @@ impl PublishedManifest {
     pub(crate) fn new(manifest: &NamespaceManifestEnvelope, started: Option<Observation>) -> Self {
         let payload = manifest.payload();
         Self {
-            manifest: super::publish::manifest_ref_for(&payload.namespace_id, manifest),
+            manifest: super::publish::manifest_ref_for(manifest),
             writer_epoch: payload.writer_epoch,
             status: payload.status,
             folded_wal_no: payload.folded_wal_no,

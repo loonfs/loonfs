@@ -185,18 +185,20 @@ pub mod downloads {
     pub use loonfs_core::{DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange};
 }
 
-/// Typed loaders for inspecting durable namespace control objects.
+/// Durable namespace control objects, as the loaders of [`NamespaceStore`]
+/// return them.
 ///
-/// These functions bypass the runtime and are intended for layout tests and
+/// The loaders bypass the runtime and are intended for layout tests and
 /// operational inspection. Normal application reads and writes go through a
 /// [`LoonFs`] runtime and its [`Namespace`] handles.
+///
+/// [`NamespaceStore`]: loonfs_core::NamespaceStore
 pub mod control {
     pub use loonfs_core::control::{
-        load_checkpoint_statistics, load_namespace_catalog_entry, load_namespace_current_manifest,
-        load_namespace_read_state, load_namespace_statistics, ControlObjectLoadError,
-        CurrentManifest, LoadedControl, LoadedManifest, NamespaceReadState, NamespaceStatistics,
-        VerifiedNamespaceCatalogEntry,
+        ControlObjectLoadError, CurrentManifest, LoadedControl, LoadedManifest, NamespaceReadState,
+        NamespaceStatistics, VerifiedNamespaceCatalogEntry,
     };
+    pub use loonfs_core::NamespaceStore;
 }
 
 pub use loonfs_objectstore::{

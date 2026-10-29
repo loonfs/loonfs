@@ -15,8 +15,7 @@ use crate::{Consistency, CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    load_read_anchor, load_snapshot_read_basis, manifest_has_successor, project_anchor_tail,
-    MetadataBasis, NamespaceReadAnchor, NamespaceReadState, SnapshotReadBasis,
+    project_anchor_tail, MetadataBasis, NamespaceReadAnchor, NamespaceReadState, SnapshotReadBasis,
     VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
@@ -146,6 +145,7 @@ impl RuntimeCore {
         cached: Option<CachedHead>,
     ) -> std::result::Result<CachedHead, CoreError> {
         self.record_head_lookup(cached.is_some());
+        let namespace = self.namespace_store(namespace_id);
         if let Some(mut head) = cached {
             // Measure every answer against the previous check, not against the probe
             // it answers. A successor published after that check cannot be collected
@@ -157,7 +157,7 @@ impl RuntimeCore {
                 let check_due =
                     checked.age_ms() >= self.inner.config.manifest_revalidation_interval_ms;
                 let observed = Observation::now(Arc::clone(&self.inner.timer));
-                let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
+                let matches = !check_due || !namespace.manifest_has_successor(head.basis.manifest_no())
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
                     .await.map_err(MetadataProjectionLoadError::LoadHead)?;
                 if matches {
@@ -185,16 +185,13 @@ impl RuntimeCore {
             }
         }
         let observed = Observation::now(Arc::clone(&self.inner.timer));
-        let loaded = load_read_anchor(self.store(), namespace_id, observed.clone())
+        let loaded = namespace.load_read_anchor(observed.clone())
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_anchor_load"))
             .await
             .map_err(MetadataProjectionLoadError::LoadHead)?;
         if !loaded.read_state.status.is_deleted() {
-            let tail = project_anchor_tail(
-                self.store(),
-                Some(self.inner.metadata_segment_cache.as_ref()),
-                &loaded,
-            )?;
+            let tail =
+                project_anchor_tail(self.store(), &self.inner.metadata_segment_cache, &loaded)?;
             self.inner.head_and_wal_tail_cache.insert_tail(
                 WalTailCacheKey {
                     namespace_id: namespace_id.clone(),
@@ -342,15 +339,11 @@ impl RuntimeCore {
         let live = self
             .current_read_context(namespace_id, Consistency::Strong)
             .await?;
-        let pinned = load_snapshot_read_basis(
-            self.store(),
-            Some(self.inner.metadata_segment_cache.as_ref()),
-            &live.head,
-            snapshot_id,
-            self.now_ms(),
-        )
-        .await
-        .map_err(Error::from)?;
+        let pinned = self
+            .namespace_store(namespace_id)
+            .load_snapshot_read_basis(&live.head, snapshot_id, self.now_ms())
+            .await
+            .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, pinned, live))
     }
 

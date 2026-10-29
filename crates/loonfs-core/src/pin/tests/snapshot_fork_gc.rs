@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::gc::{gc_namespace, GcOptions};
+use crate::gc::GcOptions;
 use loonfs_objectstore::keys::{pin, pin_prefix};
 use loonfs_test_support::stores::{MetadataMapStore, OperationKind};
 use loonfs_types::format::control::{PinOwner, PinPayload};
@@ -22,7 +22,6 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let content_writes = crate::test_support::content_writes();
         let directory = tempdir().expect("directory");
         let source = NamespaceId::parse("snapshot-source").expect("source");
         let target = NamespaceId::parse("snapshot-target").expect("target");
@@ -35,50 +34,56 @@ impl Fixture {
             .await
             .expect("bootstrap");
         for path in ["/one", "/two"] {
-            write_file_bytes(&store, &source, path, b"snapshot bytes", &setup, None)
+            crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+                .write_file_bytes(path, b"snapshot bytes", None)
                 .await
                 .expect("write");
-            fold_wal(&store, &source).await.expect("fold");
+            crate::test_support::namespace_store(&store, &source)
+                .fold_wal()
+                .await
+                .expect("fold");
         }
-        let snapshot = crate::pin::create_pin(
-            &store,
-            &source,
-            PinOwner::User {
-                name: "historical".into(),
-                expires_at_ms: Some(u64::MAX),
-            },
-            &setup,
-            Default::default(),
-            None,
-            &content_writes,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("snapshot")
-        .response;
-        let selected = load_current_manifest(&store, &source)
+        let snapshot = crate::test_support::namespace_store(&store, &source)
+            .create_pin(
+                PinOwner::User {
+                    name: "historical".into(),
+                    expires_at_ms: Some(u64::MAX),
+                },
+                &setup,
+            )
+            .await
+            .expect("snapshot")
+            .response;
+        let selected = crate::test_support::namespace_store(&store, &source)
+            .load_current_manifest()
             .await
             .expect("snapshot manifest");
-        write_file_bytes(&store, &source, "/later", b"new bytes", &setup, None)
+        crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+            .write_file_bytes("/later", b"new bytes", None)
             .await
             .expect("advance source");
-        fold_wal(&store, &source).await.expect("fold");
-        let report = compact_unit(
+        crate::test_support::namespace_store(&store, &source)
+            .fold_wal()
+            .await
+            .expect("fold");
+        let report = crate::test_support::NamespaceFixture::new(
             &store,
-            None,
             &source,
+            &crate::test_support::mutation_context("test-writer", 0),
+        )
+        .engine()
+        .compact_metadata_unit(
             None,
-            selected.state.compactor_epoch(),
-            MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             crate::manifest::CompactionAdmission::AnySize,
+            selected.state.compactor_epoch(),
             &crate::manifest::MetadataCompactionCancellation::default(),
-            crate::test_support::std_timer(),
         )
         .await
         .expect("replace old runs");
         assert_matches!(report, CompactionUnitOutcome::Published { .. });
-        let current = load_current_manifest(&store, &source)
+        let current = crate::test_support::namespace_store(&store, &source)
+            .load_current_manifest()
             .await
             .expect("current");
         let current_segments: BTreeSet<_> = current
@@ -118,9 +123,15 @@ impl Fixture {
     }
 
     async fn delete_snapshot(&self) {
-        crate::pin::delete_snapshot(&self.store, &self.source, &self.snapshot.pin_id)
-            .await
-            .expect("delete snapshot");
+        crate::test_support::NamespaceFixture::new(
+            self.store.as_ref(),
+            &self.source,
+            &crate::test_support::mutation_context("test-writer", 0),
+        )
+        .engine()
+        .delete_snapshot(&self.snapshot.pin_id)
+        .await
+        .expect("delete snapshot");
     }
 
     async fn assert_replaced_present(&self, present: bool) {
@@ -135,7 +146,6 @@ impl Fixture {
 
 #[tokio::test]
 async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
-    let content_writes = crate::test_support::content_writes();
     let fixture = Fixture::new().await;
     let gc_gate = BlockingStore::new(
         fixture.store.clone(),
@@ -150,37 +160,25 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
     gc_gate.block_next();
     fork_gate.block_next();
     let collect = async {
-        gc_namespace(
-            &gc_gate,
-            None,
-            None,
-            &fixture.source,
-            &GcOptions::default(),
-            &fixture.context,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("old collector keeps its captured snapshot root");
+        crate::test_support::namespace_store(&gc_gate, &fixture.source)
+            .gc(None, &GcOptions::default(), &fixture.context)
+            .await
+            .expect("old collector keeps its captured snapshot root");
         fixture.assert_replaced_present(true).await;
         fork_gate.release();
     };
     let fork = async {
         // The collector has captured its pins before this attempt creates one.
         gc_gate.wait_until_blocked().await;
-        crate::namespace::fork::fork_namespace(
-            &fork_gate,
-            &fixture.source,
-            &fixture.target,
-            &loonfs_test_support::test_actor(),
-            Some(&fixture.snapshot.pin_id),
-            &fixture.context,
-            Arc::new(StdMonotonicTimer::default()),
-            Default::default(),
-            None,
-            &content_writes,
-        )
-        .await
-        .expect("install historical fork")
+        crate::test_support::NamespaceFixture::new(&fork_gate, &fixture.source, &fixture.context)
+            .engine()
+            .fork_namespace(
+                &fixture.target,
+                &loonfs_test_support::test_actor(),
+                Some(&fixture.snapshot.pin_id),
+            )
+            .await
+            .expect("install historical fork")
     };
     let release_snapshot = async {
         fork_gate.wait_until_blocked().await;
@@ -188,19 +186,14 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
         gc_gate.release();
     };
     tokio::join!(collect, fork, release_snapshot);
-    gc_namespace(
-        &fixture.store,
-        None,
-        None,
-        &fixture.source,
-        &GcOptions::default(),
-        &fixture.context,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("new collector keeps the fork root");
+    crate::test_support::namespace_store(&fixture.store, &fixture.source)
+        .gc(None, &GcOptions::default(), &fixture.context)
+        .await
+        .expect("new collector keeps the fork root");
     fixture.assert_replaced_present(true).await;
-    let view = load_current_metadata_view(&fixture.store, &fixture.target)
+    let namespace = crate::test_support::namespace_store(&fixture.store, &fixture.target);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("fresh fork reader");
     let access = ReadAccess::live(Authorizer::Unrestricted);
@@ -220,7 +213,6 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
 
 #[tokio::test]
 async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification() {
-    let content_writes = crate::test_support::content_writes();
     let fixture = Fixture::new().await;
     let key = pin(&fixture.source, &fixture.snapshot.pin_id);
     let reads = AtomicUsize::new(0);
@@ -231,19 +223,11 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
     });
     gate.block_next();
     let actor = loonfs_test_support::test_actor();
+    let engine =
+        crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
+            .engine();
     let (fork, ()) = tokio::join!(
-        crate::namespace::fork::fork_namespace(
-            &gate,
-            &fixture.source,
-            &fixture.target,
-            &actor,
-            Some(&fixture.snapshot.pin_id),
-            &fixture.context,
-            Arc::new(StdMonotonicTimer::default()),
-            Default::default(),
-            None,
-            &content_writes,
-        ),
+        engine.fork_namespace(&fixture.target, &actor, Some(&fixture.snapshot.pin_id)),
         async {
             gate.wait_until_blocked().await;
             assert_eq!(
@@ -256,17 +240,10 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
                 2
             );
             fixture.delete_snapshot().await;
-            gc_namespace(
-                &fixture.store,
-                None,
-                None,
-                &fixture.source,
-                &GcOptions::default(),
-                &fixture.context,
-                crate::test_support::std_timer(),
-            )
-            .await
-            .expect("tentative pin remains a root during verification");
+            crate::test_support::namespace_store(&fixture.store, &fixture.source)
+                .gc(None, &GcOptions::default(), &fixture.context)
+                .await
+                .expect("tentative pin remains a root during verification");
             fixture.assert_replaced_present(true).await;
             gate.release();
         }
@@ -284,25 +261,18 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         .await
         .expect("no target installed")
         .is_none());
-    gc_namespace(
-        &fixture.store,
-        None,
-        None,
-        &fixture.source,
-        &GcOptions::default(),
-        &fixture.context,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("later collection sees no historical root");
+    crate::test_support::namespace_store(&fixture.store, &fixture.source)
+        .gc(None, &GcOptions::default(), &fixture.context)
+        .await
+        .expect("later collection sees no historical root");
     fixture.assert_replaced_present(false).await;
 }
 
 #[tokio::test]
 async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification() {
-    let content_writes = crate::test_support::content_writes();
     let fixture = Fixture::new().await;
-    let writer = acquire_writer_epoch(fixture.store.as_ref(), &fixture.source, &fixture.context)
+    let writer = crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
+        .acquire_writer_epoch(&fixture.context)
         .await
         .expect("writer");
     let gate = BlockingStore::new(
@@ -312,35 +282,23 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
     );
     gate.block_next();
     let actor = loonfs_test_support::test_actor();
+    let engine =
+        crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
+            .engine();
     let (fork, ()) = tokio::join!(
-        crate::namespace::fork::fork_namespace(
-            &gate,
-            &fixture.source,
-            &fixture.target,
-            &actor,
-            Some(&fixture.snapshot.pin_id),
-            &fixture.context,
-            Arc::new(StdMonotonicTimer::default()),
-            Default::default(),
-            None,
-            &content_writes,
-        ),
+        engine.fork_namespace(&fixture.target, &actor, Some(&fixture.snapshot.pin_id)),
         async {
             gate.wait_until_blocked().await;
-            crate::namespace::delete::delete_namespace(
-                fixture.store.as_ref(),
-                &fixture.source,
-                Default::default(),
-                writer,
-                None,
-                &fixture.context,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                MetadataRunPolicy::default(),
-                None,
-                &content_writes,
-            )
-            .await
-            .expect("delete source before the fork pin lands");
+            crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
+                .delete_namespace(
+                    Default::default(),
+                    writer,
+                    None,
+                    &fixture.context,
+                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                )
+                .await
+                .expect("delete source before the fork pin lands");
             gate.release();
         }
     );
@@ -366,7 +324,6 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
 
 #[tokio::test]
 async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began() {
-    let content_writes = crate::test_support::content_writes();
     let directory = tempdir().expect("directory");
     let source = NamespaceId::parse("snapshot-source").expect("source");
     let target = NamespaceId::parse("snapshot-target").expect("target");
@@ -375,22 +332,17 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     bootstrap_namespace(&inner, &source, &context)
         .await
         .expect("bootstrap");
-    let snapshot = crate::pin::create_pin(
-        &inner,
-        &source,
-        PinOwner::User {
-            name: "short".into(),
-            expires_at_ms: Some(context.now_ms + 10),
-        },
-        &context,
-        Default::default(),
-        None,
-        &content_writes,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("snapshot")
-    .response;
+    let snapshot = crate::test_support::namespace_store(&inner, &source)
+        .create_pin(
+            PinOwner::User {
+                name: "short".into(),
+                expires_at_ms: Some(context.now_ms + 10),
+            },
+            &context,
+        )
+        .await
+        .expect("snapshot")
+        .response;
     let store = BlockingStore::new(
         RecordingStore::new(inner, KeyPredicate::prefix(pin_prefix(&source))),
         KeyPredicate::exact(hint(&target)),
@@ -399,19 +351,14 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let actor = loonfs_test_support::test_actor();
     store.block_next();
+    let namespace = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context);
+        fixture.namespace.timer = clock.clone();
+        fixture
+    }
+    .engine();
     let (fork, ()) = tokio::join!(
-        crate::namespace::fork::fork_namespace(
-            &store,
-            &source,
-            &target,
-            &actor,
-            Some(&snapshot.pin_id),
-            &context,
-            clock.clone(),
-            Default::default(),
-            None,
-            &content_writes,
-        ),
+        namespace.fork_namespace(&target, &actor, Some(&snapshot.pin_id)),
         async {
             store.wait_until_blocked().await;
             clock.advance_ms(10);

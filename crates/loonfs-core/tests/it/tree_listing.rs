@@ -2,12 +2,12 @@
 //! cursor, which cursors resume which listing, and the store requests a page
 //! costs.
 
-use crate::common::commit_split_support::{
-    bootstrap_namespace, create_checkpoint, mutation_context, submit_commit, submit_operation,
+use crate::common::{
+    create_checkpoint, mutation_context, namespace_engine, read_context, submit_commit,
+    submit_operation,
 };
-use crate::common::{namespace_engine, read_context};
-use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::CoreError;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -54,10 +54,12 @@ const SMALL_TREE_LISTING: &[&str] = &[
 /// each path that ends in `/` and a file for every other path.
 async fn seed<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId, paths: &[&str]) {
     let context = mutation_context();
-    bootstrap_namespace(store, namespace_id, &context)
+    NamespaceFixture::new(store, namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    let content_ref = store_bytes_as_content(store, namespace_id, b"body")
+    let content_ref = namespace_store(store, namespace_id)
+        .store_bytes_as_content(b"body")
         .await
         .expect("content")
         .into_content_ref();

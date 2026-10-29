@@ -13,6 +13,7 @@ use loonfs_core::metadata::{
 use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::time::Deadline;
 use loonfs_model::metadata::{
     DirentryBindingRecord as ModelBindingRecord, DirentryBindingState as ModelBindingState,
@@ -1004,8 +1005,9 @@ async fn planned_appends_match_the_model() {
     let directory = tempfile::tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = loonfs_types::NamespaceId::parse("appends").expect("namespace");
-    let context = crate::common::mutation_context("differential", 1_000);
-    crate::common::commit_split_support::bootstrap_namespace(&store, &namespace_id, &context)
+    let context = loonfs_core::test_support::mutation_context("differential", 1_000);
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("namespace");
     let path = |path: &str| AbsolutePath::parse(path).expect("path");
@@ -1046,10 +1048,7 @@ async fn planned_appends_match_the_model() {
         vec![append("/copy", b"five")],
         vec![append("/log", b"six")],
     ];
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    );
+    let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
     for (index, operations) in requests.into_iter().enumerate() {
         let request = CommitIntent {
             commit_id: CommitId::generate(),
@@ -1066,7 +1065,6 @@ async fn planned_appends_match_the_model() {
         };
         engine
             .publish_batch(
-                &store,
                 [CommitCandidate::with_inline_content(
                     request,
                     Vec::new(),
@@ -1117,8 +1115,9 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
     let directory = tempfile::tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = loonfs_types::NamespaceId::parse("crc-base").expect("namespace");
-    let context = crate::common::mutation_context("differential", 1_000);
-    crate::common::commit_split_support::bootstrap_namespace(&store, &namespace_id, &context)
+    let context = loonfs_core::test_support::mutation_context("differential", 1_000);
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("namespace");
     let upload = ContentRef {
@@ -1161,10 +1160,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         append(b"+four"),
     ];
     let deadline = || Deadline::start(Arc::new(StdMonotonicTimer::default()));
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    );
+    let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
     for operation in operations {
         let request = CommitIntent {
             commit_id: CommitId::generate(),
@@ -1174,27 +1170,18 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
             preconditions: Vec::new(),
             operations: vec![operation],
         };
-        let candidate =
-            crate::common::commit_split_support::prepared_candidate(&store, &namespace_id, request)
-                .await;
+        let candidate = crate::common::prepared_candidate(&store, &namespace_id, request).await;
         engine
-            .publish_batch(&store, [candidate], &context, &deadline())
+            .publish_batch([candidate], &context, &deadline())
             .await
             .results
             .pop()
             .expect("one result")
             .expect("commit");
-        loonfs_core::fold_wal_tail(
-            &store,
-            None,
-            &namespace_id,
-            None,
-            &deadline(),
-            loonfs_core::MetadataRunPolicy::default(),
-            &loonfs_core::test_support::content_writes(),
-        )
-        .await
-        .expect("fold");
+        namespace_store(&store, &namespace_id)
+            .fold_wal_tail(None, &deadline())
+            .await
+            .expect("fold");
         engine.invalidate_projection();
     }
 
@@ -1300,7 +1287,8 @@ async fn reads_at_or_above_the_retention_floor_match_the_model_after_compaction(
         } else {
             0
         };
-        let statistics = loonfs_core::control::load_namespace_statistics(&store, &namespace_id)
+        let statistics = namespace_store(&store, &namespace_id)
+            .load_statistics()
             .await
             .expect("statistics");
         assert_eq!(
@@ -1323,16 +1311,19 @@ async fn commit_and_compact_at_the_floor(
     namespace_id: &loonfs_types::NamespaceId,
     steps: &[RetentionStep],
 ) {
-    let context = crate::common::commit_split_support::mutation_context();
-    crate::common::commit_split_support::bootstrap_namespace(store, namespace_id, &context)
+    let context = crate::common::mutation_context();
+    NamespaceFixture::new(store, namespace_id, &context)
+        .create()
         .await
         .expect("namespace");
     // The floor passes a commit once the commit is one grace window old.
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(
         context.now_ms + loonfs_core::limits::GC_DEFAULT_GRACE_WINDOW_MS,
     ));
-    let maintenance =
-        crate::common::namespace_engine(store, namespace_id, &context).with_wall_clock(clock);
+    let maintenance = loonfs_core::NamespaceWriterEngine::writer(
+        loonfs_core::test_support::namespace_store_with_wall_clock(store, namespace_id, clock),
+        context.writer_id.clone(),
+    );
     for (index, step) in steps.iter().enumerate() {
         commit_retention_step(store, namespace_id, *step, &context).await;
         if ChangeSeq(u64::try_from(index + 1).expect("seq")) == RETENTION_FLOOR {
@@ -1370,16 +1361,16 @@ async fn commit_retention_step(
     step: RetentionStep,
     context: &loonfs_core::MutationContext,
 ) {
-    use crate::common::commit_split_support::{
-        create_directory_path, submit_operation, test_commit_id, write_file_bytes,
-    };
+    use crate::common::{create_directory_path, submit_operation};
     let path = |value: &str| AbsolutePath::parse(value).expect("path");
     let committed = match step {
         RetentionStep::Directory(target) => {
             create_directory_path(store, namespace_id, target, context, None).await
         }
         RetentionStep::File(target) => {
-            write_file_bytes(store, namespace_id, target, b"body", context, None).await
+            NamespaceFixture::new(store, namespace_id, context)
+                .write_file_bytes(target, b"body", None)
+                .await
         }
         RetentionStep::Delete(target) => {
             let operation = FilesystemOperation::DeletePath {
@@ -1390,7 +1381,7 @@ async fn commit_retention_step(
             submit_operation(
                 store,
                 namespace_id,
-                test_commit_id(None),
+                loonfs_types::CommitId::generate(),
                 operation,
                 context,
             )
@@ -1405,7 +1396,7 @@ async fn commit_retention_step(
             submit_operation(
                 store,
                 namespace_id,
-                test_commit_id(None),
+                loonfs_types::CommitId::generate(),
                 operation,
                 context,
             )
@@ -1462,11 +1453,8 @@ async fn assert_head_reads_match_model(
             .iter()
             .flat_map(|commit| commit.deltas.iter().map(|delta| &delta.delta)),
     );
-    let engine = crate::common::namespace_engine(
-        store,
-        namespace_id,
-        &crate::common::commit_split_support::mutation_context(),
-    );
+    let engine =
+        crate::common::namespace_engine(store, namespace_id, &crate::common::mutation_context());
     let stat = loonfs_types::options::StatOptions::default;
     for path in &questions.paths {
         let read = engine.resolve_path(path.as_str(), stat(), &context).await;

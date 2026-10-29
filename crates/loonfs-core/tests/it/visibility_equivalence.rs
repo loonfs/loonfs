@@ -4,8 +4,9 @@
 //! with one hand-written expectation.
 
 use crate::common::read_context;
-use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
+use loonfs_core::content::prepare_stored_content;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::namespace_store;
 use loonfs_core::{
     CompactionUnitOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
     NamespaceWriterEngine, RuntimeReadContext,
@@ -35,12 +36,17 @@ impl VisibilityHarness {
         let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
         let clock = Arc::new(ManualClock::new(1_000));
         let engine = NamespaceWriterEngine::writer(
-            Arc::clone(&store),
-            namespace_id,
+            loonfs_core::NamespaceStore::new(
+                Arc::clone(&store),
+                namespace_id.clone(),
+                std::sync::Arc::new(loonfs_core::cache::MetadataSegmentCache::unshared(0)),
+                clock.clone(),
+                loonfs_core::test_support::std_timer(),
+                std::sync::Arc::new(loonfs_core::test_support::content_writes()),
+                loonfs_core::MetadataRunPolicy::default(),
+            ),
             loonfs_types::WriterId::parse("visibility-equivalence").expect("writer id"),
-            std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-        )
-        .with_wall_clock(clock.clone());
+        );
         engine
             .bootstrap_namespace(
                 &loonfs_test_support::test_actor(),
@@ -114,14 +120,15 @@ impl VisibilityHarness {
         bytes: &[u8],
         behavior: DestinationBehavior,
     ) -> Result<Commit, CoreError> {
-        let stored = store_bytes_as_content(&self.store, self.namespace_id(), bytes)
+        let stored = namespace_store(&self.store, self.namespace_id())
+            .store_bytes_as_content(bytes)
             .await
             .expect("stage content");
         let content_ref = stored.content_ref().clone();
-        let catalog =
-            loonfs_core::control::load_namespace_catalog_entry(&self.store, self.namespace_id())
-                .await
-                .expect("load namespace catalog");
+        let catalog = namespace_store(&self.store, self.namespace_id())
+            .load_catalog_entry()
+            .await
+            .expect("load namespace catalog");
         let prepared = prepare_stored_content(&catalog, stored);
         self.publish(CommitCandidate::prepared(
             CommitIntent::single(
@@ -241,7 +248,8 @@ impl VisibilityHarness {
 
     /// The inode rows that the current manifest's segments store.
     async fn inode_rows(&self) -> u64 {
-        loonfs_core::control::load_namespace_statistics(&*self.store, self.namespace_id())
+        namespace_store(&*self.store, self.namespace_id())
+            .load_statistics()
             .await
             .expect("load the namespace's statistics")
             .inode_record_count

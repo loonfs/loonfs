@@ -4,28 +4,25 @@
 use super::*;
 
 async fn seed_unfolded_tail<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) {
-    append_wal_objects(
+    loonfs_core::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        2,
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("tail-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )
+    .append_wal_objects(2)
     .await
     .expect("seed an unfolded WAL tail");
 }
 
 async fn wal_tail_objects<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> u64 {
-    loonfs_core::cache::load_namespace_diagnostics(
-        store,
-        namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("load namespace diagnostics")
-    .wal_tail_objects
+    loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_diagnostics()
+        .await
+        .expect("load namespace diagnostics")
+        .wal_tail_objects
 }
 
 async fn writer_over(

@@ -6,7 +6,6 @@
 //! delete removes them from the answer, and a passed expiry does not.
 
 use super::*;
-use crate::pin::list::list_checkpoints_page;
 use loonfs_objectstore::ListedObject;
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::format::control::PinOwner;
@@ -20,8 +19,12 @@ async fn list_all_checkpoints<S: ObjectStore + ?Sized>(
     let mut checkpoints = Vec::new();
     let mut cursor = None;
     loop {
-        let page =
-            list_checkpoints_page(store, namespace_id, PageRequest { limit, cursor }).await?;
+        let page = crate::NamespaceEngine::reader(crate::test_support::namespace_store(
+            store,
+            namespace_id,
+        ))
+        .list_checkpoints_page(PageRequest { limit, cursor })
+        .await?;
         checkpoints.extend(page.items);
         let Some(next_cursor) = page.next_cursor else {
             break;
@@ -42,23 +45,18 @@ async fn pin_named<S: ObjectStore + ?Sized>(
     expires_at_ms: Option<u64>,
     context: &MutationContext,
 ) -> PinId {
-    create::create_pin(
-        store,
-        namespace_id,
-        PinOwner::User {
-            name: name.to_owned(),
-            expires_at_ms,
-        },
-        context,
-        Default::default(),
-        None,
-        &crate::test_support::content_writes(),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .map(|report| crate::pin::checkpoint_summary(report.response))
-    .expect("create checkpoint")
-    .checkpoint_id
+    crate::test_support::namespace_store(store, namespace_id)
+        .create_pin(
+            PinOwner::User {
+                name: name.to_owned(),
+                expires_at_ms,
+            },
+            context,
+        )
+        .await
+        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .expect("create checkpoint")
+        .checkpoint_id
 }
 
 #[tokio::test]
@@ -98,9 +96,15 @@ async fn two_pins_under_one_label_list_as_two_records() {
 
     // Delete is what takes a record out of the answer, and it takes out
     // exactly the one named.
-    crate::pin::delete_snapshot(&store, &namespace_id, &first)
-        .await
-        .expect("delete checkpoint");
+    crate::test_support::NamespaceFixture::new(
+        &store,
+        &namespace_id,
+        &crate::test_support::mutation_context("test-writer", 0),
+    )
+    .engine()
+    .delete_snapshot(&first)
+    .await
+    .expect("delete checkpoint");
     let after_delete = list_all_checkpoints(&store, &namespace_id)
         .await
         .expect("list checkpoints");
@@ -177,14 +181,14 @@ async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
     let mut cursor = None;
     let mut page_count = 0;
     loop {
-        let page = list_checkpoints_page(
+        let page = crate::NamespaceEngine::reader(crate::test_support::namespace_store(
             &store,
             &namespace_id,
-            PageRequest {
-                limit: page_limit(2),
-                cursor,
-            },
-        )
+        ))
+        .list_checkpoints_page(PageRequest {
+            limit: page_limit(2),
+            cursor,
+        })
         .await
         .expect("list checkpoint page");
         page_count += 1;
@@ -228,33 +232,35 @@ async fn deleted_pins_are_absent_from_later_pages() {
     }
     ids.sort();
     for checkpoint_id in &ids[1..6] {
-        crate::pin::delete_snapshot(&store, &namespace_id, checkpoint_id)
-            .await
-            .expect("delete checkpoint in filtered run");
+        crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        )
+        .engine()
+        .delete_snapshot(checkpoint_id)
+        .await
+        .expect("delete checkpoint in filtered run");
     }
 
-    let first = list_checkpoints_page(
-        &store,
-        &namespace_id,
-        PageRequest {
-            limit: page_limit(1),
-            cursor: None,
-        },
-    )
-    .await
-    .expect("first page");
+    let first =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
+            .list_checkpoints_page(PageRequest {
+                limit: page_limit(1),
+                cursor: None,
+            })
+            .await
+            .expect("first page");
     assert_eq!(first.items[0].checkpoint_id, ids[0]);
 
-    let second = list_checkpoints_page(
-        &store,
-        &namespace_id,
-        PageRequest {
-            limit: page_limit(1),
-            cursor: first.next_cursor,
-        },
-    )
-    .await
-    .expect("second page across deleted run");
+    let second =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
+            .list_checkpoints_page(PageRequest {
+                limit: page_limit(1),
+                cursor: first.next_cursor,
+            })
+            .await
+            .expect("second page across deleted run");
     assert_eq!(second.items[0].checkpoint_id, ids[6]);
     assert_eq!(
         second
@@ -264,16 +270,14 @@ async fn deleted_pins_are_absent_from_later_pages() {
         Some(loonfs_objectstore::keys::pin(&namespace_id, &ids[6]).as_str())
     );
 
-    let third = list_checkpoints_page(
-        &store,
-        &namespace_id,
-        PageRequest {
-            limit: page_limit(1),
-            cursor: second.next_cursor,
-        },
-    )
-    .await
-    .expect("third page");
+    let third =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
+            .list_checkpoints_page(PageRequest {
+                limit: page_limit(1),
+                cursor: second.next_cursor,
+            })
+            .await
+            .expect("third page");
     assert_eq!(third.items[0].checkpoint_id, ids[7]);
     assert!(third.next_cursor.is_none());
 }
@@ -415,16 +419,14 @@ async fn first_page_loads_only_the_records_needed_to_fill_it() {
     let prefix = loonfs_objectstore::keys::pin_prefix(&namespace_id);
     let store = RecordingStore::new(inner, KeyPredicate::prefix(prefix));
 
-    let page = list_checkpoints_page(
-        &store,
-        &namespace_id,
-        PageRequest {
-            limit: page_limit(2),
-            cursor: None,
-        },
-    )
-    .await
-    .expect("first checkpoint page");
+    let page =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
+            .list_checkpoints_page(PageRequest {
+                limit: page_limit(2),
+                cursor: None,
+            })
+            .await
+            .expect("first checkpoint page");
 
     assert_eq!(page.items.len(), 2);
     assert!(page.next_cursor.is_some());
@@ -448,27 +450,23 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
     for index in 0..2 {
         pin_named(&store, &source, &format!("pin-{index}"), None, &context).await;
     }
-    let source_page = list_checkpoints_page(
-        &store,
-        &source,
-        PageRequest {
-            limit: page_limit(1),
-            cursor: None,
-        },
-    )
-    .await
-    .expect("source page");
+    let source_page =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &source))
+            .list_checkpoints_page(PageRequest {
+                limit: page_limit(1),
+                cursor: None,
+            })
+            .await
+            .expect("source page");
 
-    let error = list_checkpoints_page(
-        &store,
-        &target,
-        PageRequest {
-            limit: page_limit(1),
-            cursor: source_page.next_cursor.clone(),
-        },
-    )
-    .await
-    .expect_err("foreign cursor should fail");
+    let error =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &target))
+            .list_checkpoints_page(PageRequest {
+                limit: page_limit(1),
+                cursor: source_page.next_cursor.clone(),
+            })
+            .await
+            .expect_err("foreign cursor should fail");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }
 
@@ -499,31 +497,23 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
             )
             .await,
         );
-        create::create_pin(
-            &store,
-            &namespace_id,
-            fork_owner.clone(),
-            &context,
-            Default::default(),
-            None,
-            &crate::test_support::content_writes(),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("create fork pin");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .create_pin(fork_owner.clone(), &context)
+            .await
+            .expect("create fork pin");
     }
 
     let mut listed = BTreeSet::new();
     let mut cursor = None;
     loop {
-        let page = crate::pin::list_snapshots_page(
+        let page = crate::NamespaceEngine::reader(crate::test_support::namespace_store(
             &store,
             &namespace_id,
-            PageRequest {
-                limit: page_limit(2),
-                cursor,
-            },
-        )
+        ))
+        .list_snapshots_page(PageRequest {
+            limit: page_limit(2),
+            cursor,
+        })
         .await
         .expect("list snapshots");
         for snapshot in page.items {
@@ -567,19 +557,11 @@ async fn a_refused_owner_writes_no_record_to_find() {
         },
     ];
     for owner in refused {
-        let error = create::create_pin(
-            &store,
-            &namespace_id,
-            owner.clone(),
-            &context,
-            Default::default(),
-            None,
-            &crate::test_support::content_writes(),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
-        .expect_err("the owner is not creatable");
+        let error = crate::test_support::namespace_store(&store, &namespace_id)
+            .create_pin(owner.clone(), &context)
+            .await
+            .map(|report| crate::pin::checkpoint_summary(report.response))
+            .expect_err("the owner is not creatable");
         assert_eq!(error.code(), ErrorCode::InvalidRequest, "owner: {owner:?}");
     }
 
@@ -604,43 +586,44 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
     let unexpiring = pin_named(&store, &namespace_id, "nightly", None, &context).await;
     let expires_at_ms = context.now_ms + 10;
     let expiring = pin_named(&store, &namespace_id, "view", Some(expires_at_ms), &context).await;
-    let fork = create::create_pin(
-        &store,
-        &namespace_id,
-        PinOwner::Fork {
-            target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
-        },
-        &context,
-        Default::default(),
-        None,
-        &crate::test_support::content_writes(),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("create fork pin")
-    .response
-    .pin_id;
+    let fork = crate::test_support::namespace_store(&store, &namespace_id)
+        .create_pin(
+            PinOwner::Fork {
+                target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
+            },
+            &context,
+        )
+        .await
+        .expect("create fork pin")
+        .response
+        .pin_id;
 
     let listed = list_all_checkpoints(&store, &namespace_id)
         .await
         .expect("list checkpoints");
     assert_eq!(listed.checkpoints.len(), 3);
     for row in &listed.checkpoints {
-        let read = crate::pin::get_checkpoint(&store, &namespace_id, &row.checkpoint_id)
-            .await
-            .expect("read checkpoint");
+        let read = crate::NamespaceEngine::reader(crate::test_support::namespace_store(
+            &store,
+            &namespace_id,
+        ))
+        .get_checkpoint(&row.checkpoint_id)
+        .await
+        .expect("read checkpoint");
         assert_eq!(&read, row);
     }
-    let expired = crate::pin::get_snapshot(&store, &namespace_id, &expiring)
-        .await
-        .expect("read an expired snapshot by its ID");
+    let expired =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
+            .get_snapshot(&expiring)
+            .await
+            .expect("read an expired snapshot by its ID");
     assert_eq!(expired.expires_at_ms, Some(expires_at_ms));
 
     fn code<T: std::fmt::Debug>(result: crate::error::Result<T>) -> ErrorCode {
         result.expect_err("refused").code()
     }
-    let read_at =
-        |pin_id, now_ms| crate::pin::load_unexpired_snapshot(&store, &namespace_id, pin_id, now_ms);
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let read_at = |pin_id, now_ms| namespace.load_unexpired_snapshot(pin_id, now_ms);
     read_at(&expiring, expires_at_ms - 1)
         .await
         .expect("an unexpired snapshot is readable");
@@ -656,12 +639,26 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
         ErrorCode::SnapshotNotFound
     );
     assert_eq!(
-        code(crate::pin::get_snapshot(&store, &namespace_id, &fork).await),
+        code(
+            crate::NamespaceEngine::reader(crate::test_support::namespace_store(
+                &store,
+                &namespace_id
+            ))
+            .get_snapshot(&fork)
+            .await
+        ),
         ErrorCode::SnapshotNotFound
     );
     let missing = PinId::parse("pin_00000000000000000009-0000000000000009").expect("pin id");
     assert_eq!(
-        code(crate::pin::get_checkpoint(&store, &namespace_id, &missing).await),
+        code(
+            crate::NamespaceEngine::reader(crate::test_support::namespace_store(
+                &store,
+                &namespace_id
+            ))
+            .get_checkpoint(&missing)
+            .await
+        ),
         ErrorCode::SnapshotNotFound
     );
 }
@@ -681,28 +678,29 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
         .await
         .expect("bootstrap namespace");
     let snapshot = pin_named(&store, &namespace_id, "nightly", None, &context).await;
-    let fork = create::create_pin(
-        &store,
-        &namespace_id,
-        PinOwner::Fork {
-            target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
-        },
-        &context,
-        Default::default(),
-        None,
-        &crate::test_support::content_writes(),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("create fork pin")
-    .response
-    .pin_id;
+    let fork = crate::test_support::namespace_store(&store, &namespace_id)
+        .create_pin(
+            PinOwner::Fork {
+                target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
+            },
+            &context,
+        )
+        .await
+        .expect("create fork pin")
+        .response
+        .pin_id;
 
     for attempt in 0..2 {
         store.reset();
-        let deleted = crate::pin::delete_snapshot(&store, &namespace_id, &snapshot)
-            .await
-            .expect("delete succeeds whether or not the snapshot exists");
+        let deleted = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        )
+        .engine()
+        .delete_snapshot(&snapshot)
+        .await
+        .expect("delete succeeds whether or not the snapshot exists");
         assert_eq!(deleted.snapshot_id, snapshot);
         assert_eq!(
             store.counts().deletes,
@@ -711,12 +709,19 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
         );
     }
     store.reset();
-    let error = crate::pin::delete_snapshot(&store, &namespace_id, &fork)
-        .await
-        .expect_err("a fork pin isn't a snapshot");
+    let error = crate::test_support::NamespaceFixture::new(
+        &store,
+        &namespace_id,
+        &crate::test_support::mutation_context("test-writer", 0),
+    )
+    .engine()
+    .delete_snapshot(&fork)
+    .await
+    .expect_err("a fork pin isn't a snapshot");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert_eq!(store.counts().deletes, 0);
-    assert!(load_pin(&store, &namespace_id, &fork)
+    assert!(crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&fork)
         .await
         .expect("load")
         .is_some());

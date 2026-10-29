@@ -44,20 +44,17 @@ async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_i
     let now_ms = loonfs::current_time_ms()
         + 2 * loonfs_core::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
         + 2 * loonfs::GcOptions::default().grace_window_ms;
-    loonfs_core::gc_namespace(
-        store,
-        None,
-        None,
-        namespace_id,
-        &loonfs::GcOptions::default(),
-        &loonfs_core::MutationContext {
-            writer_id: loonfs_types::WriterId::parse("import-access-gc").expect("writer id"),
-            now_ms,
-        },
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("garbage collection");
+    loonfs_core::test_support::namespace_store(store, namespace_id)
+        .gc(
+            None,
+            &loonfs::GcOptions::default(),
+            &loonfs_core::MutationContext {
+                writer_id: loonfs_types::WriterId::parse("import-access-gc").expect("writer id"),
+                now_ms,
+            },
+        )
+        .await
+        .expect("garbage collection");
 }
 
 async fn open_writer() -> (
@@ -340,25 +337,22 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
     let destination_writer = writer.open_namespace(&destination).expect("open namespace");
     let content_ref = publish_inline(&writer, &source).await;
     source_writer.delete().await.expect("delete owner");
-    let report = loonfs_core::gc_namespace(
-        recording.as_ref(),
-        None,
-        None,
-        &source,
-        &loonfs_core::GcOptions {
-            grace_window_ms: loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,
-            ..Default::default()
-        },
-        &loonfs_core::MutationContext {
-            writer_id: loonfs_types::WriterId::parse("collector").expect("writer id"),
-            now_ms: loonfs::current_time_ms()
-                + loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
-                + 1,
-        },
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("collect retired content");
+    let report = loonfs_core::test_support::namespace_store(recording.as_ref(), &source)
+        .gc(
+            None,
+            &loonfs_core::GcOptions {
+                grace_window_ms: loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,
+                ..Default::default()
+            },
+            &loonfs_core::MutationContext {
+                writer_id: loonfs_types::WriterId::parse("collector").expect("writer id"),
+                now_ms: loonfs::current_time_ms()
+                    + loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
+                    + 1,
+            },
+        )
+        .await
+        .expect("collect retired content");
     assert_eq!(report.deleted.retired_content_objects, 1);
     // Retirement comes long after the revalidation bound, so by then the
     // runtime no longer trusts its cached view of the deleted owner, which

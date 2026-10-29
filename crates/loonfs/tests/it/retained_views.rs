@@ -9,7 +9,6 @@ use loonfs::{
     GcOptions, InlineContentPolicy, LoonFs, MaintainMetadataOptions, MetadataCompactionOutcome,
     MetadataCompactionPolicy, PutFileOptions, WalFoldStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS,
 };
-use loonfs_core::control::load_namespace_current_manifest;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ByteRange;
@@ -259,9 +258,11 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     rebuilt = true;
                 }
                 assert!(rebuilt && finished, "metadata must rebuild and finish");
-                let manifest = load_namespace_current_manifest(object_store.as_ref(), &source)
-                    .await
-                    .expect("rebuilt manifest");
+                let manifest =
+                    loonfs_core::test_support::namespace_store(object_store.as_ref(), &source)
+                        .load_current_manifest()
+                        .await
+                        .expect("rebuilt manifest");
                 assert!(manifest
                     .state
                     .envelope
@@ -285,24 +286,22 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
                     + GC_DEFAULT_GRACE_WINDOW_MS
                     + 1;
-                let collected = loonfs_core::gc_namespace(
-                    object_store.as_ref(),
-                    None,
-                    None,
-                    &source,
-                    &GcOptions {
-                        grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
-                        ..Default::default()
-                    },
-                    &MutationContext {
-                        writer_id: loonfs_types::WriterId::parse("retained-views-gc")
-                            .expect("writer id"),
-                        now_ms,
-                    },
-                    loonfs_core::test_support::std_timer(),
-                )
-                .await
-                .expect("collect aged objects");
+                let collected =
+                    loonfs_core::test_support::namespace_store(object_store.as_ref(), &source)
+                        .gc(
+                            None,
+                            &GcOptions {
+                                grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
+                                ..Default::default()
+                            },
+                            &MutationContext {
+                                writer_id: loonfs_types::WriterId::parse("retained-views-gc")
+                                    .expect("writer id"),
+                                now_ms,
+                            },
+                        )
+                        .await
+                        .expect("collect aged objects");
                 assert!(collected.deleted.wal_objects > 0, "{collected:?}");
                 assert!(collected.deleted.metadata_segments > 0, "{collected:?}");
                 assert!(collected.deleted.manifests > 0, "{collected:?}");
@@ -473,9 +472,11 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .await
                     .expect("directory")
                     .inode_id;
-                let manifest = load_namespace_current_manifest(object_store.as_ref(), namespace)
-                    .await
-                    .expect("manifest with access rows");
+                let manifest =
+                    loonfs_core::test_support::namespace_store(object_store.as_ref(), namespace)
+                        .load_current_manifest()
+                        .await
+                        .expect("manifest with access rows");
                 let mut access_rows = Vec::new();
                 for segment in manifest
                     .state

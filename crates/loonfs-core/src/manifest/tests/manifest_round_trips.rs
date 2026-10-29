@@ -53,21 +53,19 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    crate::test_support::append_wal_objects(&store, &namespace_id, 3, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .append_wal_objects(3)
         .await
         .expect("build WAL tail");
     let expected_tail = Arc::clone(
-        &fold::load_manifest_projection(
-            &store,
-            &namespace_id,
-            None,
-            crate::test_support::observed_now(),
-        )
-        .await
-        .expect("load store projection")
-        .tail_state,
+        &crate::test_support::namespace_store(&store, &namespace_id)
+            .load_manifest_projection(crate::test_support::observed_now())
+            .await
+            .expect("load store projection")
+            .tail_state,
     );
-    let head = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+    let head = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
         .await
         .expect("load head");
     let acquired_writer = crate::namespace::writer_epoch::AcquiredWriter {
@@ -76,18 +74,11 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     };
     // The view's discovery confirms its basis after this observation.
     let basis_checked = crate::test_support::observed_now();
-    let position = crate::protocol::load_publish_metadata_view(
-        &store,
-        None,
-        &namespace_id,
-        acquired_writer,
-        None,
-        None,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("load publish position")
-    .into_position();
+    let position = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_publish_metadata_view(acquired_writer, None, None)
+        .await
+        .expect("load publish position")
+        .into_position();
 
     let input = crate::publish::WalFoldInput {
         wal_tail_inline_bytes: 0,
@@ -97,18 +88,14 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         tail_state: Arc::clone(&position.tail),
         wal_tail_objects: position.head.unfolded_wal_objects(),
     };
-    let response = fold::fold_wal_tail(
-        &store,
-        None,
-        &namespace_id,
-        Some(input),
-        &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
-        crate::manifest::MetadataRunPolicy::default(),
-        &crate::test_support::content_writes(),
-    )
-    .await
-    .expect("fold publish projection")
-    .response;
+    let response = crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal_tail(
+            Some(input),
+            &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("fold publish projection")
+        .response;
     assert_eq!(response.outcome, crate::FoldWalOutcome::Published);
     let materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, response.manifest_no)
@@ -153,37 +140,23 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/second.txt",
-        b"second\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write second");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello again\n",
-        DestinationBehavior::Replace,
-        &context,
-        None,
-    )
-    .await
-    .expect("replace");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/second.txt", b"second\n", None)
+        .await
+        .expect("write second");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/hello.txt",
+            b"hello again\n",
+            DestinationBehavior::Replace,
+            None,
+        )
+        .await
+        .expect("replace");
 
     let before = load_current_projection(&store, &namespace_id)
         .await
@@ -215,26 +188,14 @@ async fn manifest_round_trip_preserves_unbound_values() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    move_path(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        "/docs/moved.txt",
-        &context,
-        None,
-    )
-    .await
-    .expect("move hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .move_path("/docs/hello.txt", "/docs/moved.txt", None)
+        .await
+        .expect("move hello");
 
     let before = load_current_projection(&store, &namespace_id)
         .await
@@ -271,7 +232,8 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
 
@@ -279,7 +241,8 @@ async fn manifest_round_trip_supports_empty_namespace() {
         &store,
         None,
         &crate::namespace::basis::MetadataBasis(
-            load_current_manifest(&store, &namespace_id)
+            crate::test_support::namespace_store(&store, &namespace_id)
+                .load_current_manifest()
                 .await
                 .expect("manifest")
                 .state
@@ -288,7 +251,8 @@ async fn manifest_round_trip_supports_empty_namespace() {
     )
     .await
     .expect("load genesis from manifest one");
-    let head = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+    let head = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
         .await
         .expect("head");
     assert_eq!(genesis.replay_head(&head), head);
@@ -314,7 +278,8 @@ async fn manifest_round_trip_supports_empty_namespace() {
         materialization.manifest.manifest().manifest_no,
         ManifestNo(1)
     );
-    let record = load_pin(&store, &namespace_id, &checkpoint.checkpoint_id)
+    let record = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&checkpoint.checkpoint_id)
         .await
         .expect("read pin")
         .expect("record exists")
@@ -337,16 +302,10 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -377,18 +336,13 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &inner,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
 
-    let current = load_current_manifest(&inner, &namespace_id)
+    let current = crate::test_support::namespace_store(&inner, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("manifest");
     let manifest_key = metadata_manifest_object(
@@ -421,16 +375,10 @@ async fn pins_are_standalone_files_one_per_pin() {
         .await
         .expect("bootstrap");
 
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file.txt", b"body\n", None)
+        .await
+        .expect("write");
     let first = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -444,7 +392,8 @@ async fn pins_are_standalone_files_one_per_pin() {
     assert_eq!(repeated.manifest_no, first.manifest_no);
     assert_eq!(repeated.captured_seq, first.captured_seq);
 
-    let record = load_pin(&store, &namespace_id, &first.checkpoint_id)
+    let record = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&first.checkpoint_id)
         .await
         .expect("read pin")
         .expect("record exists")
@@ -453,21 +402,16 @@ async fn pins_are_standalone_files_one_per_pin() {
     assert_eq!(record.head_seq, first.captured_seq);
 
     // A new basis mints a new record; both files exist side by side.
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file-2.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write 2");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file-2.txt", b"body\n", None)
+        .await
+        .expect("write 2");
     let second = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("second checkpoint");
     assert_ne!(second.checkpoint_id, first.checkpoint_id);
-    assert!(load_pin(&store, &namespace_id, &first.checkpoint_id)
+    assert!(crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&first.checkpoint_id)
         .await
         .expect("read first record")
         .is_some());
@@ -482,16 +426,10 @@ async fn manifest_materialization_uses_written_segments() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -543,16 +481,10 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     let first = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("first checkpoint");
@@ -561,16 +493,10 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
             .await
             .expect("load first manifest");
 
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/second.txt",
-        b"second\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write second");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/second.txt", b"second\n", None)
+        .await
+        .expect("write second");
     let second = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("second checkpoint");
@@ -598,7 +524,8 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     assert_eq!(delta_runs[1].run_seq, second.captured_seq);
     assert!(delta_runs.iter().all(|run| run.tier == RunTier::Delta));
     for response in [&first, &second] {
-        let record = load_pin(&store, &namespace_id, &response.checkpoint_id)
+        let record = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_pin(&response.checkpoint_id)
             .await
             .expect("read pin")
             .expect("record exists")
@@ -613,16 +540,14 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     let mut captured_seqs = vec![first.captured_seq, second.captured_seq];
     let mut latest = second;
     for index in 3..=4u64 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{index}.txt"),
-            format!("file {index}\n").as_bytes(),
-            &context,
-            None,
-        )
-        .await
-        .expect("write file");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(
+                &format!("/docs/file-{index}.txt"),
+                format!("file {index}\n").as_bytes(),
+                None,
+            )
+            .await
+            .expect("write file");
         latest = create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("create checkpoint");
@@ -654,29 +579,17 @@ async fn manifest_delta_run_missing_segment_fails_load() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("first checkpoint");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/second.txt",
-        b"second\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write second");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/second.txt", b"second\n", None)
+        .await
+        .expect("write second");
     let second = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("second checkpoint");
@@ -717,47 +630,39 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         .await
         .expect("bootstrap");
     let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file-2.txt",
-        b"file 2\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write second file");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file-2.txt", b"file 2\n", None)
+        .await
+        .expect("write second file");
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    let malformed_run_segments = build_manifest_segments_from_rows(
-        &store,
-        None,
-        &namespace_id,
-        |family| manifest_rows_for_family(&materialization.metadata_state, family),
-        MetadataRunPolicy {
+    let malformed_run_segments = crate::NamespaceStore {
+        run_policy: MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::MAX,
             ..MetadataRunPolicy::default()
         },
-    )
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .build_manifest_segments_from_rows(|family| {
+        manifest_rows_for_family(&materialization.metadata_state, family)
+    })
     .await
     .expect("write malformed run segments");
-    let metadata_segments = build_manifest_segments_from_rows(
-        &store,
-        None,
-        &namespace_id,
-        |family| {
-            super::row::manifest_rows_for_family_after_seq(
-                &materialization.metadata_state,
-                family,
-                first,
-            )
-        },
-        MetadataRunPolicy {
+    let metadata_segments = crate::NamespaceStore {
+        run_policy: MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::MAX,
             ..MetadataRunPolicy::default()
         },
-    )
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .build_manifest_segments_from_rows(|family| {
+        super::row::manifest_rows_for_family_after_seq(
+            &materialization.metadata_state,
+            family,
+            first,
+        )
+    })
     .await
     .expect("write empty metadata run segments");
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
@@ -824,7 +729,8 @@ async fn manifest_base_run_segments_have_sorted_segment_coverage() {
         .expect("bootstrap");
     for index in 0..6 {
         let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&path, b"file\n", None)
             .await
             .expect("write file");
     }
@@ -884,16 +790,10 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
 
     let materialization = load_current_projection(&store, &namespace_id)
         .await
@@ -929,7 +829,8 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     // writes a checkpoint file against it instead of building a new
     // manifest.
     assert_eq!(checkpoint.manifest_no, covering_manifest_no);
-    let record = load_pin(&store, &namespace_id, &checkpoint.checkpoint_id)
+    let record = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&checkpoint.checkpoint_id)
         .await
         .expect("read pin")
         .expect("record exists")

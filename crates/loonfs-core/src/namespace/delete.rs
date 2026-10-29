@@ -3,131 +3,110 @@
 use crate::commit_engine::WalFoldInput;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
-use crate::manifest::publish::{update_manifest, ManifestChange};
-use crate::manifest::{
-    load_position_basis, MetadataRunPolicy, PublicationReport, PublishedManifest,
-};
+use crate::manifest::publish::ManifestChange;
+use crate::manifest::{load_position_basis, PublicationReport, PublishedManifest};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::LoadedManifest;
-use crate::namespace::read_anchor::load_read_anchor;
+use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
 use crate::time::Deadline;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
-use loonfs_types::{DeleteNamespaceResponse, NamespaceId};
+use loonfs_types::DeleteNamespaceResponse;
 use std::sync::Mutex;
 
-/// Publishes the namespace's tombstone, after a fold of the WAL tail when
-/// the current manifest doesn't include the tail.
-///
-/// A writer session passes its writer position as `position`. An attempt
-/// that builds on the position's manifest takes the head from the position
-/// instead of reading the WAL tail, and the attempt's fold folds the
-/// position's tail. After that fold, the position moves onto the fold's
-/// manifest when that manifest has folded the WAL through the position's
-/// head, under the session's writer epoch.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "deletion passes the session's position, the fold policy, the segment cache, and the content write permits to its fold"
-)]
-pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    options: DeleteNamespaceOptions,
-    acquired_writer: AcquiredWriter,
-    position: Option<WalFoldInput>,
-    context: &crate::context::MutationContext,
-    deadline: &Deadline,
-    fold_policy: MetadataRunPolicy,
-    segment_cache: Option<&crate::cache::MetadataSegmentCache>,
-    content_writes: &crate::PermitPool,
-) -> Result<PublicationReport<DeleteNamespaceResponse>> {
-    let basis = match &position {
-        Some(position) => load_position_basis(store, segment_cache, position).await?,
-        None => None,
-    };
-    // Each attempt's future reads and updates the position through this
-    // lock, because a future that a closure returns can't borrow the
-    // closure's own state.
-    let position = Mutex::new(position);
-    update_manifest(
-        store,
-        namespace_id,
-        basis,
-        deadline,
-        MAX_CONTENTION_ATTEMPTS,
-        |current: LoadedManifest| {
-            let acquired_writer = &acquired_writer;
-            let position = &position;
-            async move {
-                let mut payload = current.state.envelope.payload().clone();
-                let held = position
-                    .lock()
-                    .expect("the deletion's position lock should not be poisoned")
-                    .clone()
-                    .filter(|held| held.basis.manifest() == &current.state.manifest());
-                let head = match &held {
-                    Some(held) => held.head.clone(),
-                    None => {
-                        load_read_anchor(store, namespace_id, deadline.observe())
-                            .await?
-                            .read_state
-                    }
-                };
-                super::control::ensure_namespace_live(&head)?;
-                ensure_writer_not_fenced(&head, acquired_writer)?;
-                if let Some(expected) = options.expected_head_seq {
-                    if head.seq != expected {
-                        return Err(CoreError::StaleHeadPrecondition {
-                            precondition_index: None,
-                            expected,
-                            actual: head.seq,
-                        });
-                    }
-                }
-                if payload.folded_wal_no < head.wal_no {
-                    deadline.ensure_metadata_publication_budget(namespace_id)?;
-                    let folded = crate::manifest::fold_wal_tail(
-                        store,
-                        segment_cache,
-                        namespace_id,
-                        held.clone(),
-                        deadline,
-                        fold_policy,
-                        content_writes,
-                    )
-                    .await?;
-                    *position
-                        .lock()
-                        .expect("the deletion's position lock should not be poisoned") = held
-                        .filter(|_| folds_head(&folded.manifest, &head))
-                        .map(|held| WalFoldInput {
-                            basis: MetadataBasis(folded.manifest.manifest.clone()),
-                            ..held
-                        });
-                    return Ok(ManifestChange::Again);
-                }
-                payload.status = NamespaceStatus::Deleted {
-                    deleted_at_ms: context.now_ms,
-                };
-                let response = DeleteNamespaceResponse {
-                    namespace_id: namespace_id.clone(),
-                    head_seq: payload.head_seq,
-                };
-                Ok(ManifestChange::Next(Box::new(payload), response))
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Publishes the namespace's tombstone, after a fold of the WAL tail when
+    /// the current manifest doesn't include the tail.
+    ///
+    /// A writer session passes its writer position as `position`. An attempt
+    /// that builds on the position's manifest takes the head from the position
+    /// instead of reading the WAL tail, and the attempt's fold folds the
+    /// position's tail. After that fold, the position moves onto the fold's
+    /// manifest when that manifest has folded the WAL through the position's
+    /// head, under the session's writer epoch.
+    pub(crate) async fn delete_namespace(
+        &self,
+        options: DeleteNamespaceOptions,
+        acquired_writer: AcquiredWriter,
+        position: Option<WalFoldInput>,
+        context: &crate::context::MutationContext,
+        deadline: &Deadline,
+    ) -> Result<PublicationReport<DeleteNamespaceResponse>> {
+        let basis = match &position {
+            Some(position) => {
+                load_position_basis(&self.store, &self.segment_cache, position).await?
             }
-        },
-    )
-    .await
-    .map(|(response, tombstone, _)| PublicationReport {
-        response,
-        published: Some(PublishedManifest::new(
-            &tombstone.state.envelope,
-            Some(deadline.origin()),
-        )),
-    })
+            None => None,
+        };
+        // Each attempt's future reads and updates the position through this
+        // lock, because a future that a closure returns can't borrow the
+        // closure's own state.
+        let position = Mutex::new(position);
+        self.update_manifest(
+            basis,
+            deadline,
+            MAX_CONTENTION_ATTEMPTS,
+            |current: LoadedManifest| {
+                let acquired_writer = &acquired_writer;
+                let position = &position;
+                async move {
+                    let mut payload = current.state.envelope.payload().clone();
+                    let held = position
+                        .lock()
+                        .expect("the deletion's position lock should not be poisoned")
+                        .clone()
+                        .filter(|held| held.basis.manifest() == &current.state.manifest());
+                    let head = match &held {
+                        Some(held) => held.head.clone(),
+                        None => self.load_read_anchor(deadline.observe()).await?.read_state,
+                    };
+                    super::control::ensure_namespace_live(&head)?;
+                    ensure_writer_not_fenced(&head, acquired_writer)?;
+                    if let Some(expected) = options.expected_head_seq {
+                        if head.seq != expected {
+                            return Err(CoreError::StaleHeadPrecondition {
+                                precondition_index: None,
+                                expected,
+                                actual: head.seq,
+                            });
+                        }
+                    }
+                    if payload.folded_wal_no < head.wal_no {
+                        deadline.ensure_metadata_publication_budget(&self.namespace_id)?;
+                        let folded = self.fold_wal_tail(held.clone(), deadline).await?;
+                        *position
+                            .lock()
+                            .expect("the deletion's position lock should not be poisoned") = held
+                            .filter(|_| folds_head(&folded.manifest, &head))
+                            .map(|held| WalFoldInput {
+                                basis: MetadataBasis(folded.manifest.manifest.clone()),
+                                ..held
+                            });
+                        return Ok(ManifestChange::Again);
+                    }
+                    payload.status = NamespaceStatus::Deleted {
+                        deleted_at_ms: context.now_ms,
+                    };
+                    let response = DeleteNamespaceResponse {
+                        namespace_id: self.namespace_id.clone(),
+                        head_seq: payload.head_seq,
+                    };
+                    Ok(ManifestChange::Next(Box::new(payload), response))
+                }
+            },
+        )
+        .await
+        .map(|(response, tombstone, _)| PublicationReport {
+            response,
+            published: Some(PublishedManifest::new(
+                &tombstone.state.envelope,
+                Some(deadline.origin()),
+            )),
+        })
+    }
 }
 
 /// Returns whether `manifest` is an active manifest, with the writer epoch

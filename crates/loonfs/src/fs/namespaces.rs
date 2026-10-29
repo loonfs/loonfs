@@ -212,17 +212,12 @@ pub(crate) async fn delete_namespace_with_engine(
     core: &RuntimeCore,
     writer: &WriterBits,
     namespace_id: &NamespaceId,
-    engine: &mut loonfs_core::publish::NamespaceCommitEngine,
+    engine: &mut loonfs_core::publish::NamespaceCommitEngine<crate::SharedObjectStore>,
     options: DeleteNamespaceOptions,
 ) -> Result<DeleteNamespaceResponse> {
     let context = core.mutation_context(&writer.identity);
     let result = engine
-        .delete_namespace(
-            core.store(),
-            options,
-            &context,
-            core.inner.config.metadata_run_policy,
-        )
+        .delete_namespace(options, &context)
         .await
         .map_err(Error::from);
     // What follows a deletion depends on the namespace being deleted, not on

@@ -163,17 +163,14 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         attributes_record(InodeId(7), 3, 9, &[("owner", "hopper")]),
     ]);
 
-    let segments = build_manifest_segments(
-        &store,
-        None,
-        &namespace_id,
-        &state,
-        &HashMap::new(),
-        MetadataRunPolicy {
+    let segments = crate::NamespaceStore {
+        run_policy: MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
             ..MetadataRunPolicy::default()
         },
-    )
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .build_manifest_segments(&state, &HashMap::new())
     .await
     .expect("build segments");
     let attribute_segments = segments
@@ -261,10 +258,13 @@ async fn wide_attribute_rows_roll_segments_by_bytes_and_preserve_every_row() {
             target_segment_bytes: NonZeroUsize::new(target_bytes).expect("target"),
             ..MetadataRunPolicy::default()
         };
-        let families =
-            build_manifest_segments(&store, None, &namespace, &state, &HashMap::new(), policy)
-                .await
-                .expect("write byte-bounded segments");
+        let families = crate::NamespaceStore {
+            run_policy: policy,
+            ..crate::test_support::namespace_store(&store, &namespace)
+        }
+        .build_manifest_segments(&state, &HashMap::new())
+        .await
+        .expect("write byte-bounded segments");
         let family = families
             .iter()
             .find(|family| family.family == ApiMetadataRowFamily::Attributes)

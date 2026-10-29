@@ -85,13 +85,10 @@ fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &st
 }
 
 async fn head_state(store: &SharedObjectStore, namespace_id: &NamespaceId) -> NamespaceReadState {
-    loonfs_core::control::load_namespace_read_state(
-        store,
-        namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("load head")
+    loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_read_state()
+        .await
+        .expect("load head")
 }
 
 #[tokio::test]
@@ -419,7 +416,8 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .expect("commit file");
     writer.drain().await.expect("finish hints");
     namespace.stat("/file.txt").await.expect("cache a view");
-    let manifest_no = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+    let manifest_no = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest")
         .state

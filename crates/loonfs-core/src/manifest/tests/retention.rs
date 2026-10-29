@@ -11,7 +11,8 @@ async fn current_manifest_no<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> ManifestNo {
-    load_current_manifest(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("read metadata manifest")
         .state
@@ -140,14 +141,16 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .expect("bootstrap");
 
     store.reset();
-    let unchanged = advance_retention_floor(
+    let unchanged = crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("initial manifest already covers floor zero")
     .response;
@@ -161,25 +164,26 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     // The test folds three commits with one row per segment, so the segments
     // that the advance reads show which commit rows the advance read.
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
-        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, b"body\n", None)
             .await
             .expect("write a file");
     }
-    crate::manifest::fold_wal_tail(
-        &store,
-        None,
-        &namespace_id,
-        None,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        MetadataRunPolicy {
+    crate::NamespaceStore {
+        run_policy: MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::MIN,
             ..MetadataRunPolicy::default()
         },
-        &crate::test_support::content_writes(),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .fold_wal_tail(
+        None,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
     )
     .await
     .expect("fold the commits");
-    let manifest = load_current_manifest(&store, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("load metadata manifest")
         .state;
@@ -215,14 +219,16 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .await
         .expect("list wal");
     store.reset();
-    let advanced = advance_retention_floor(
+    let advanced = crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance retention")
     .response;
@@ -275,7 +281,8 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
             now_ms: committed_at_ms,
             ..context.clone()
         };
-        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, b"body\n", None)
             .await
             .expect("commit");
     }
@@ -308,14 +315,16 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
         (RetentionTarget::Seq(ChangeSeq(99)), ChangeSeq(4)),
     ] {
         let before = current_manifest_no(&store, &namespace_id).await;
-        let floor = advance_retention_floor(
+        let floor = crate::test_support::NamespaceFixture::new(
             &store,
-            None,
             &namespace_id,
-            target,
-            crate::test_support::grace_elapsed_after(5_000),
-            crate::test_support::std_timer(),
+            &crate::test_support::mutation_context(
+                "test-writer",
+                crate::test_support::grace_elapsed_after(5_000),
+            ),
         )
+        .engine()
+        .advance_retention_floor(target)
         .await
         .expect("advance the floor")
         .response
@@ -357,7 +366,8 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
             now_ms: committed_at_ms,
             ..context.clone()
         };
-        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, b"body\n", None)
             .await
             .expect("commit");
     }
@@ -391,14 +401,13 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
         // Commit 6 is exactly one window old, so the floor reaches the head.
         (RetentionTarget::Head, now_ms + 4 * grace_ms, ChangeSeq(6)),
     ] {
-        let floor = advance_retention_floor(
+        let floor = crate::test_support::NamespaceFixture::new(
             &store,
-            None,
             &namespace_id,
-            target,
-            advance_at_ms,
-            crate::test_support::std_timer(),
+            &crate::test_support::mutation_context("test-writer", advance_at_ms),
         )
+        .engine()
+        .advance_retention_floor(target)
         .await
         .expect("advance the floor")
         .response
@@ -451,18 +460,15 @@ async fn commit_directories_with_long_messages<S: ObjectStore + ?Sized>(
         now_ms: committed_at_ms,
         ..test_context()
     };
-    for result in NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        Arc::new(crate::test_support::content_writes()),
-    )
-    .publish_batch(
-        store,
-        candidates,
-        &context,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
+    for result in
+        NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
+            .publish_batch(
+                candidates,
+                &context,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
+            .await
+            .results
     {
         result.expect("commit a directory");
     }
@@ -473,7 +479,8 @@ async fn commit_segment_with_index<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> (MetadataSegmentRef, Arc<Vec<SegmentIndexEntry>>) {
-    let manifest = load_current_manifest(store, namespace_id)
+    let manifest = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the manifest")
         .state;
@@ -533,7 +540,8 @@ impl LongCommitHistory {
                 .await;
             }
         }
-        fold::fold_wal(&store, &namespace_id)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
             .await
             .expect("fold the commits");
         let (segment, index) = commit_segment_with_index(&store, &namespace_id).await;
@@ -622,14 +630,17 @@ async fn an_advance_sends_one_get_for_each_commit_block_up_to_where_it_stops() {
         let history =
             LongCommitHistory::new(&[(64, now_ms - 2 * grace_ms), (64, now_ms - grace_ms / 2)])
                 .await;
-        let floor = advance_retention_floor(
-            &history.store,
-            Some(&cache_reading_one_block_at_a_time()),
-            &history.namespace_id,
-            target,
-            now_ms,
-            crate::test_support::std_timer(),
-        )
+        let floor = {
+            let mut fixture = crate::test_support::NamespaceFixture::new(
+                &history.store,
+                &history.namespace_id,
+                &crate::test_support::mutation_context("test-writer", now_ms),
+            );
+            fixture.namespace.segment_cache = Arc::new(cache_reading_one_block_at_a_time());
+            fixture
+        }
+        .engine()
+        .advance_retention_floor(target)
         .await
         .expect("advance the floor")
         .response
@@ -663,14 +674,17 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
         let floor = ChangeSeq(u64::try_from(old_commits).expect("a count fits a u64"));
         for advance in ["first", "second"] {
             history.store.reset();
-            let report = advance_retention_floor(
-                &history.store,
-                Some(&cache_reading_one_block_at_a_time()),
-                &history.namespace_id,
-                RetentionTarget::Head,
-                now_ms,
-                crate::test_support::std_timer(),
-            )
+            let report = {
+                let mut fixture = crate::test_support::NamespaceFixture::new(
+                    &history.store,
+                    &history.namespace_id,
+                    &crate::test_support::mutation_context("test-writer", now_ms),
+                );
+                fixture.namespace.segment_cache = Arc::new(cache_reading_one_block_at_a_time());
+                fixture
+            }
+            .engine()
+            .advance_retention_floor(RetentionTarget::Head)
             .await
             .expect("advance the floor");
             assert_eq!(
@@ -710,14 +724,13 @@ async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once
         let history =
             LongCommitHistory::new(&[(64, now_ms - 3 * grace_ms), (64, now_ms - 2 * grace_ms)])
                 .await;
-        let floor = advance_retention_floor(
+        let floor = crate::test_support::NamespaceFixture::new(
             &history.store,
-            None,
             &history.namespace_id,
-            target,
-            now_ms,
-            crate::test_support::std_timer(),
+            &crate::test_support::mutation_context("test-writer", now_ms),
         )
+        .engine()
+        .advance_retention_floor(target)
         .await
         .expect("advance the floor")
         .response
@@ -755,7 +768,8 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
             now_ms: committed_at_ms,
             ..context.clone()
         };
-        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, b"body\n", None)
             .await
             .expect("commit");
     }
@@ -763,14 +777,14 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
         .await
         .expect("fold the commits");
     let window = |window_ms: u64| std::num::NonZeroU64::new(window_ms);
-    let set_window = |window_ms: Option<u64>| {
-        crate::manifest::set_retention_window(
-            &store,
-            &namespace_id,
-            window_ms.and_then(window),
-            crate::test_support::std_timer(),
-        )
-    };
+    let engine = crate::test_support::NamespaceFixture::new(
+        &store,
+        &namespace_id,
+        &crate::test_support::mutation_context("test-writer", 0),
+    )
+    .engine();
+    let set_window =
+        |window_ms: Option<u64>| engine.set_retention_window(window_ms.and_then(window));
 
     // Each step sets the namespace's window, then advances at five hours
     // with a default window. The cutoffs are five hours minus the window
@@ -803,14 +817,13 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
         let target = RetentionTarget::Window {
             default_window_ms: default_window_ms.and_then(window),
         };
-        let floor = advance_retention_floor(
+        let floor = crate::test_support::NamespaceFixture::new(
             &store,
-            None,
             &namespace_id,
-            target,
-            now_ms,
-            crate::test_support::std_timer(),
+            &crate::test_support::mutation_context("test-writer", now_ms),
         )
+        .engine()
+        .advance_retention_floor(target)
         .await
         .expect("advance the floor")
         .response
@@ -839,7 +852,8 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
         .await
         .expect("bootstrap");
     for path in ["/a.txt", "/b.txt"] {
-        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, b"body\n", None)
             .await
             .expect("commit");
     }
@@ -849,7 +863,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
 
     let peak = Arc::new(Peak(AtomicUsize::new(0)));
     let observer: Arc<dyn crate::cache::ReadWorkingMemoryObserver> = peak.clone();
-    let cache = MetadataSegmentCache::new(
+    let cache = Arc::new(MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(0, 0)),
         ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(
@@ -857,17 +871,23 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
             Some(observer),
         )),
         crate::limits::READAHEAD_WINDOW_BYTES,
-    );
-    let floor = advance_retention_floor(
-        &store,
-        Some(&cache),
-        &namespace_id,
-        RetentionTarget::Cutoff {
-            cutoff_at_ms: u64::MAX,
-        },
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
-    )
+    ));
+    let floor = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context(
+                "test-writer",
+                crate::test_support::grace_elapsed_after(context.now_ms),
+            ),
+        );
+        fixture.namespace.segment_cache = Arc::clone(&cache);
+        fixture
+    }
+    .engine()
+    .advance_retention_floor(RetentionTarget::Cutoff {
+        cutoff_at_ms: u64::MAX,
+    })
     .await
     .expect("advance to the newest commit")
     .response
@@ -888,21 +908,16 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
 
-    let manifest = load_current_manifest(&store, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("load metadata manifest")
         .state;
@@ -928,14 +943,16 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .await
         .expect("delete referenced segment");
 
-    let error = advance_retention_floor(
+    let error = crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect_err("missing basis segment blocks floor advancement");
     assert_matches!(
@@ -960,21 +977,16 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     bootstrap_namespace(&setup_store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &setup_store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&setup_store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     create_checkpoint(&setup_store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
 
-    let manifest = load_current_manifest(&setup_store, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&setup_store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("load metadata manifest")
         .state;
@@ -1009,14 +1021,16 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     );
     store.fail_next(1);
 
-    let error = advance_retention_floor(
+    let error = crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect_err("failed basis probe blocks floor advancement");
     assert_eq!(error.code(), ErrorCode::ServerError);
@@ -1036,9 +1050,8 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
 
 /// Publishes `count` commits through `writer` in one batch, each creating
 /// the directory `/{prefix}-{index}`.
-async fn publish_directories<S: ObjectStore + ?Sized>(
-    writer: &mut NamespaceCommitEngine,
-    store: &S,
+async fn publish_directories<S: ObjectStore>(
+    writer: &mut NamespaceCommitEngine<S>,
     prefix: &str,
     count: usize,
 ) {
@@ -1057,7 +1070,7 @@ async fn publish_directories<S: ObjectStore + ?Sized>(
         .collect();
     let batch = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     for result in writer
-        .publish_batch(store, candidates, &test_context(), &batch)
+        .publish_batch(candidates, &test_context(), &batch)
         .await
         .results
     {
@@ -1070,7 +1083,8 @@ async fn current_floors<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> (ChangeSeq, ChangeSeq) {
-    let manifest = load_current_manifest(store, namespace_id)
+    let manifest = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest")
         .state;
@@ -1084,18 +1098,15 @@ async fn tail_basis_floors<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<ChangeSeq> {
-    crate::namespace::read_anchor::load_read_anchor(
-        store,
-        namespace_id,
-        crate::test_support::observed_now(),
-    )
-    .await
-    .expect("load the WAL tail")
-    .tail
-    .objects()
-    .iter()
-    .map(|object| object.envelope().payload().basis_floor_seq)
-    .collect()
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
+        .await
+        .expect("load the WAL tail")
+        .tail
+        .objects()
+        .iter()
+        .map(|object| object.envelope().payload().basis_floor_seq)
+        .collect()
 }
 
 /// Advances the floor to the folded head, at a time when every commit is a
@@ -1104,14 +1115,16 @@ async fn advance_to_folded_head<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> PublicationReport<loonfs_types::api::v0::AdvanceRetentionResponse> {
-    advance_retention_floor(
+    crate::test_support::NamespaceFixture::new(
         store,
-        None,
         namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(test_context().now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(test_context().now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance the floor")
 }
@@ -1124,14 +1137,15 @@ async fn a_fold_acknowledges_the_highest_basis_floor_that_it_folds() {
     bootstrap_namespace(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
-    let mut writer = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        Arc::new(crate::test_support::content_writes()),
-    );
-    publish_directories(&mut writer, &store, "folded", 20).await;
-    fold::fold_wal(&store, &namespace_id).await.expect("fold");
-    publish_directories(&mut writer, &store, "first", 1).await;
-    publish_directories(&mut writer, &store, "second", 1).await;
+    let mut writer =
+        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    publish_directories(&mut writer, "folded", 20).await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
+    publish_directories(&mut writer, "first", 1).await;
+    publish_directories(&mut writer, "second", 1).await;
 
     // An advance raises the floor and copies the acknowledged floor.
     let advance = advance_to_folded_head(&store, &namespace_id).await;
@@ -1144,24 +1158,30 @@ async fn a_fold_acknowledges_the_highest_basis_floor_that_it_folds() {
     // The session's position moves onto the advance's manifest, so its next
     // WAL object records the new floor.
     writer.record_manifest_published(advance.published.expect("the advance publishes"));
-    publish_directories(&mut writer, &store, "third", 1).await;
+    publish_directories(&mut writer, "third", 1).await;
     assert_eq!(
         tail_basis_floors(&store, &namespace_id).await,
         [ChangeSeq(0), ChangeSeq(0), ChangeSeq(20)]
     );
-    fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     assert_eq!(
         current_floors(&store, &namespace_id).await,
         (ChangeSeq(20), ChangeSeq(20))
     );
 
     // A fold of objects that record the acknowledged floor keeps it.
-    publish_directories(&mut writer, &store, "fourth", 1).await;
+    publish_directories(&mut writer, "fourth", 1).await;
     assert_eq!(
         tail_basis_floors(&store, &namespace_id).await,
         [ChangeSeq(20)]
     );
-    fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     assert_eq!(
         current_floors(&store, &namespace_id).await,
         (ChangeSeq(20), ChangeSeq(20))
@@ -1171,7 +1191,8 @@ async fn a_fold_acknowledges_the_highest_basis_floor_that_it_folds() {
     // acknowledged floor stays where it is.
     let unchanged = current_manifest_no(&store, &namespace_id).await;
     assert_eq!(
-        fold::fold_wal(&store, &namespace_id)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
             .await
             .expect("fold")
             .outcome,
@@ -1190,18 +1211,23 @@ async fn a_fence_acknowledges_the_floor_of_a_namespace_that_nobody_writes_to() {
         .await
         .expect("bootstrap");
     for path in ["/a.txt", "/b.txt"] {
-        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, b"body\n", None)
             .await
             .expect("commit");
     }
-    fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     advance_to_folded_head(&store, &namespace_id).await;
     assert_eq!(
         current_floors(&store, &namespace_id).await,
         (ChangeSeq(2), ChangeSeq(0))
     );
     assert_eq!(
-        fold::fold_wal(&store, &namespace_id)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
             .await
             .expect("fold")
             .outcome,
@@ -1211,14 +1237,18 @@ async fn a_fence_acknowledges_the_floor_of_a_namespace_that_nobody_writes_to() {
 
     // A new session's fence records the floor of the manifest it found, and
     // a fold of the fence acknowledges that floor.
-    acquire_writer_epoch(&store, &namespace_id, &context)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer_epoch(&context)
         .await
         .expect("acquire the writer epoch");
     assert_eq!(
         tail_basis_floors(&store, &namespace_id).await,
         [ChangeSeq(2)]
     );
-    fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     assert_eq!(
         current_floors(&store, &namespace_id).await,
         (ChangeSeq(2), ChangeSeq(2))
@@ -1282,24 +1312,17 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &PinId,
 ) -> crate::error::Result<Vec<InodeId>> {
-    let page = crate::pin::list_checkpoint_files_page(
-        store,
-        None,
-        &crate::namespace::control::load_namespace_read_state(
-            store,
-            namespace_id,
-            crate::test_support::std_timer(),
+    let page = crate::test_support::namespace_store(store, namespace_id)
+        .list_checkpoint_files_page(
+            checkpoint_id,
+            loonfs_types::PageRequest {
+                cursor: None,
+                limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
+            },
+            crate::pin::ListCheckpointFilesOptions::default(),
+            test_context().now_ms,
         )
-        .await?,
-        checkpoint_id,
-        loonfs_types::PageRequest {
-            cursor: None,
-            limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
-        },
-        crate::pin::ListCheckpointFilesOptions::default(),
-        test_context().now_ms,
-    )
-    .await?;
+        .await?;
     Ok(page.files.into_iter().map(|file| file.inode_id).collect())
 }
 
@@ -1316,16 +1339,10 @@ async fn deleting_a_pin_never_reuses_its_id() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file.txt", b"body\n", None)
+        .await
+        .expect("write");
     let first = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -1336,7 +1353,13 @@ async fn deleting_a_pin_never_reuses_its_id() {
             .is_empty()
     );
 
-    let delete = crate::pin::delete_snapshot(&store, &namespace_id, &first.checkpoint_id);
+    let engine = crate::test_support::NamespaceFixture::new(
+        &store,
+        &namespace_id,
+        &crate::test_support::mutation_context("test-writer", 0),
+    )
+    .engine();
+    let delete = engine.delete_snapshot(&first.checkpoint_id);
     let recreate = create_checkpoint(&store, &namespace_id, &context);
     let (delete, second) = tokio::join!(delete, recreate);
     assert_eq!(delete.expect("delete").snapshot_id, first.checkpoint_id);
@@ -1346,7 +1369,8 @@ async fn deleting_a_pin_never_reuses_its_id() {
         "a new pin never lands on a deleted record's key"
     );
 
-    assert!(load_pin(&store, &namespace_id, &first.checkpoint_id)
+    assert!(crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&first.checkpoint_id)
         .await
         .expect("load pin")
         .is_none());
@@ -1361,9 +1385,15 @@ async fn deleting_a_pin_never_reuses_its_id() {
             .is_empty()
     );
 
-    crate::pin::delete_snapshot(&store, &namespace_id, &first.checkpoint_id)
-        .await
-        .expect("a second delete succeeds");
+    crate::test_support::NamespaceFixture::new(
+        &store,
+        &namespace_id,
+        &crate::test_support::mutation_context("test-writer", 0),
+    )
+    .engine()
+    .delete_snapshot(&first.checkpoint_id)
+    .await
+    .expect("a second delete succeeds");
 }
 
 #[tokio::test]
@@ -1382,55 +1412,34 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file.txt", b"body\n", None)
+        .await
+        .expect("write");
 
-    let first = crate::pin::create_pin(
-        &store,
-        &namespace_id,
-        owner(Some(10_000)),
-        &context,
-        Default::default(),
-        None,
-        &crate::test_support::content_writes(),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .map(|report| crate::pin::checkpoint_summary(report.response))
-    .expect("create checkpoint");
+    let first = crate::test_support::namespace_store(&store, &namespace_id)
+        .create_pin(owner(Some(10_000)), &context)
+        .await
+        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .expect("create checkpoint");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
     let mut later_context = test_context();
     later_context.now_ms = 2_000;
     let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
     for expiry in [Some(99_000), Some(5_000), None] {
-        let next = crate::pin::create_pin(
-            &store,
-            &namespace_id,
-            owner(expiry),
-            &later_context,
-            Default::default(),
-            None,
-            &crate::test_support::content_writes(),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
-        .expect("create checkpoint");
+        let next = crate::test_support::namespace_store(&store, &namespace_id)
+            .create_pin(owner(expiry), &later_context)
+            .await
+            .map(|report| crate::pin::checkpoint_summary(report.response))
+            .expect("create checkpoint");
         assert!(
             minted.insert(next.checkpoint_id.clone()),
             "each pin gets an id of its own"
         );
         assert_eq!(next.expires_at_ms, expiry);
-        let record = load_pin(&store, &namespace_id, &next.checkpoint_id)
+        let record = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_pin(&next.checkpoint_id)
             .await
             .expect("read pin")
             .expect("record exists")
@@ -1441,7 +1450,8 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
 
     // The very first record is untouched by any of it: a pin taken without
     // an expiry, or with one, is held until something deletes it.
-    let original = load_pin(&store, &namespace_id, &first.checkpoint_id)
+    let original = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&first.checkpoint_id)
         .await
         .expect("read pin")
         .expect("record exists")
@@ -1462,68 +1472,52 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write");
-    let already_expired = crate::pin::create_pin(
-        &store,
-        &namespace_id,
-        loonfs_types::format::control::PinOwner::User {
-            name: "test-pin".to_owned(),
-            expires_at_ms: Some(context.now_ms),
-        },
-        &context,
-        Default::default(),
-        None,
-        &crate::test_support::content_writes(),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .map(|report| crate::pin::checkpoint_summary(report.response))
-    .expect("create checkpoint whose expiry has already passed");
-    assert!(
-        load_pin(&store, &namespace_id, &already_expired.checkpoint_id)
-            .await
-            .expect("load pin")
-            .is_some()
-    );
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file.txt", b"body\n", None)
+        .await
+        .expect("write");
+    let already_expired = crate::test_support::namespace_store(&store, &namespace_id)
+        .create_pin(
+            loonfs_types::format::control::PinOwner::User {
+                name: "test-pin".to_owned(),
+                expires_at_ms: Some(context.now_ms),
+            },
+            &context,
+        )
+        .await
+        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .expect("create checkpoint whose expiry has already passed");
+    assert!(crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&already_expired.checkpoint_id)
+        .await
+        .expect("load pin")
+        .is_some());
     let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
         .await
         .expect_err("an expired pin serves no read");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 
     // The pass after the grace deletes the record.
-    crate::gc::gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &crate::gc::GcOptions::default(),
-        &mutation_context(
-            "expired",
-            context.now_ms + crate::gc::GcOptions::default().grace_window_ms,
-        ),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("gc pass");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(
+            None,
+            &crate::gc::GcOptions::default(),
+            &mutation_context(
+                "expired",
+                context.now_ms + crate::gc::GcOptions::default().grace_window_ms,
+            ),
+        )
+        .await
+        .expect("gc pass");
     let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
         .await
         .expect_err("a deleted pin serves nothing");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
-    assert!(
-        load_pin(&store, &namespace_id, &already_expired.checkpoint_id)
-            .await
-            .expect("load pin")
-            .is_none()
-    );
+    assert!(crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&already_expired.checkpoint_id)
+        .await
+        .expect("load pin")
+        .is_none());
 }
 
 #[tokio::test]
@@ -1537,16 +1531,10 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file.txt", b"body\n", None)
+        .await
+        .expect("write");
     let pin = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -1555,19 +1543,13 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     let mut distant = test_context();
     distant.now_ms = u64::MAX / 2;
     for _ in 0..3 {
-        crate::gc::gc_namespace(
-            &store,
-            None,
-            None,
-            &namespace_id,
-            &crate::gc::GcOptions::default(),
-            &distant,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("gc pass");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .gc(None, &crate::gc::GcOptions::default(), &distant)
+            .await
+            .expect("gc pass");
     }
-    load_pin(&store, &namespace_id, &pin.checkpoint_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&pin.checkpoint_id)
         .await
         .expect("read pin")
         .expect("an unexpiring pin survives every pass");
@@ -1578,9 +1560,15 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
             .is_empty()
     );
 
-    crate::pin::delete_snapshot(&store, &namespace_id, &pin.checkpoint_id)
-        .await
-        .expect("delete");
+    crate::test_support::NamespaceFixture::new(
+        &store,
+        &namespace_id,
+        &crate::test_support::mutation_context("test-writer", 0),
+    )
+    .engine()
+    .delete_snapshot(&pin.checkpoint_id)
+    .await
+    .expect("delete");
     let error = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
         .await
         .expect_err("delete ends it");
@@ -1596,46 +1584,46 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let initial = crate::namespace::read_anchor::load_read_anchor(
-        &store,
-        &namespace_id,
-        crate::test_support::observed_now(),
-    )
-    .await
-    .expect("initial manifest");
-    write_file_bytes(&store, &namespace_id, "/file", b"content", &context, None)
+    let initial = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
+        .await
+        .expect("initial manifest");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/file", b"content", None)
         .await
         .expect("write");
-    crate::manifest::fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold");
-    advance_retention_floor(
+    crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance floor");
     let store = loonfs_test_support::stores::RecordingStore::new(
         store,
         loonfs_test_support::stores::KeyPredicate::prefix(pin_prefix(&namespace_id)),
     );
-    let error = crate::pin::create_pin_at_basis(
-        &store,
-        &namespace_id,
-        loonfs_types::format::control::PinOwner::User {
-            name: "old".to_owned(),
-            expires_at_ms: None,
-        },
-        initial.basis().manifest().clone(),
-        &context,
-    )
-    .await
-    .map(crate::pin::checkpoint_summary)
-    .expect_err("floor passed pin");
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .create_pin_at_basis(
+            loonfs_types::format::control::PinOwner::User {
+                name: "old".to_owned(),
+                expires_at_ms: None,
+            },
+            initial.basis().manifest().clone(),
+            &context,
+        )
+        .await
+        .map(crate::pin::checkpoint_summary)
+        .expect_err("floor passed pin");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     assert!(store
         .list_prefix(&pin_prefix(&namespace_id))
@@ -1655,44 +1643,37 @@ async fn pin_verification_rejects_a_deleted_namespace() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file.txt", b"body\n", None)
+        .await
+        .expect("write");
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let record = load_pin(&store, &namespace_id, &checkpoint.checkpoint_id)
+    let record = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&checkpoint.checkpoint_id)
         .await
         .expect("load checkpoint")
         .expect("checkpoint exists")
         .state;
 
-    let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
+    let acquired = crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer_epoch(&context)
         .await
         .expect("writer");
-    crate::namespace::delete::delete_namespace(
-        &store,
-        &namespace_id,
-        Default::default(),
-        acquired,
-        None,
-        &context,
-        &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
-        MetadataRunPolicy::default(),
-        None,
-        &crate::test_support::content_writes(),
-    )
-    .await
-    .expect("delete");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .delete_namespace(
+            Default::default(),
+            acquired,
+            None,
+            &context,
+            &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("delete");
 
-    let verified = crate::pin::record::verify_pin_basis(&store, &record)
+    let verified = crate::test_support::namespace_store(&store, &record.namespace_id)
+        .verify_pin_basis(&record)
         .await
         .expect("verification runs");
     assert_eq!(
@@ -1711,13 +1692,10 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let initial = crate::namespace::read_anchor::load_read_anchor(
-        &store,
-        &namespace_id,
-        crate::test_support::observed_now(),
-    )
-    .await
-    .expect("initial manifest");
+    let initial = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
+        .await
+        .expect("initial manifest");
     let store = loonfs_test_support::stores::FailStore::new(
         store,
         loonfs_test_support::stores::KeyPredicate::exact(loonfs_objectstore::keys::hint(
@@ -1727,19 +1705,18 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
         loonfs_test_support::stores::InjectedError::Transport("verification failed".to_owned()),
     );
     store.fail_next(1);
-    let error = crate::pin::create_pin_at_basis(
-        &store,
-        &namespace_id,
-        loonfs_types::format::control::PinOwner::User {
-            name: "failed".to_owned(),
-            expires_at_ms: None,
-        },
-        initial.basis().manifest().clone(),
-        &context,
-    )
-    .await
-    .map(crate::pin::checkpoint_summary)
-    .expect_err("verification failed");
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .create_pin_at_basis(
+            loonfs_types::format::control::PinOwner::User {
+                name: "failed".to_owned(),
+                expires_at_ms: None,
+            },
+            initial.basis().manifest().clone(),
+            &context,
+        )
+        .await
+        .map(crate::pin::checkpoint_summary)
+        .expect_err("verification failed");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(store
         .list_prefix(&pin_prefix(&namespace_id))
@@ -1759,8 +1736,13 @@ async fn wal_object_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
 #[tokio::test]
 async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let hint_key = hint(&namespace_id);
+    let wal_prefix = wal_prefix(&namespace_id);
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::new(move |key| key == hint_key || key.starts_with(&wal_prefix)),
+    );
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
@@ -1768,10 +1750,8 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let boundary = usize::try_from(crate::limits::MAX_UNFOLDED_WAL_OBJECTS)
         .expect("the write-stop bound fits a WAL object count");
 
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+    let mut engine =
+        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
     for round in 0..boundary - 2 {
         let request = CommitIntent::single(
             CommitId::generate(),
@@ -1784,7 +1764,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         );
         engine
             .publish_batch(
-                &store,
                 vec![CommitCandidate::new(request)],
                 &context,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -1794,12 +1773,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             .remove(0)
             .expect("write within backpressure window");
     }
-    let hint_key = hint(&namespace_id);
-    let wal_prefix = wal_prefix(&namespace_id);
-    let store = RecordingStore::new(
-        store,
-        KeyPredicate::new(move |key| key == hint_key || key.starts_with(&wal_prefix)),
-    );
     let request = CommitIntent::single(
         CommitId::parse("at-the-boundary").expect("commit id"),
         loonfs_test_support::test_actor(),
@@ -1811,7 +1784,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     );
     let original = engine
         .publish_batch(
-            &store,
             vec![CommitCandidate::new(request.clone())],
             &context,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -1826,7 +1798,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
 
     let replay = engine
         .publish_batch(
-            &store,
             vec![CommitCandidate::new(request.clone())],
             &context,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -1857,7 +1828,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     ] {
         let result = engine
             .publish_batch(
-                &store,
                 vec![CommitCandidate::new(candidate)],
                 &context,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -1874,7 +1844,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     }
     let mixed = engine
         .publish_batch(
-            &store,
             vec![
                 CommitCandidate::new(request),
                 CommitCandidate::new(new_request.clone()),
@@ -1914,7 +1883,9 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     );
 
     // Reads never gate: the change feed still serves the whole tail.
-    let view = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("load feed view");
     let changes = list_changes_after(
@@ -1965,17 +1936,22 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     let mut units = 0usize;
     let mut last_manifest_no = None;
     loop {
-        let report = super::compact_unit(
-            &store,
+        let report = {
+            let mut fixture = crate::test_support::NamespaceFixture::new(
+                &store,
+                &namespace_id,
+                &crate::test_support::mutation_context("test-writer", 0),
+            );
+            fixture.namespace.run_policy = policy;
+            fixture
+        }
+        .engine()
+        .compact_metadata_unit(
             None,
-            &namespace_id,
-            None,
-            loonfs_types::CompactorEpoch(0),
-            policy,
             MetadataCompactionPolicy::default(),
             crate::manifest::CompactionAdmission::AnySize,
+            loonfs_types::CompactorEpoch(0),
             &crate::manifest::MetadataCompactionCancellation::default(),
-            crate::test_support::std_timer(),
         )
         .await
         .expect("compaction step");
@@ -2033,16 +2009,10 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
         .await
         .expect("bootstrap");
     for index in 1..=5 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{index}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write file");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&format!("/docs/file-{index}.txt"), b"body\n", None)
+            .await
+            .expect("write file");
         create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("create checkpoint");
@@ -2056,17 +2026,22 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
         ..MetadataRunPolicy::default()
     };
     store.reset();
-    let blocked = super::compact_unit(
-        &store,
+    let blocked = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        );
+        fixture.namespace.run_policy = tiny_row_policy;
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
         None,
-        &namespace_id,
-        None,
-        loonfs_types::CompactorEpoch(0),
-        tiny_row_policy,
         MetadataCompactionPolicy::default(),
         crate::manifest::CompactionAdmission::WithinRowBudget,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("budgeted unit");
@@ -2095,17 +2070,22 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
         ..MetadataRunPolicy::default()
     };
     store.reset();
-    let published = super::compact_unit(
-        &store,
+    let published = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        );
+        fixture.namespace.run_policy = policy;
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
         None,
-        &namespace_id,
-        None,
-        loonfs_types::CompactorEpoch(0),
-        policy,
         MetadataCompactionPolicy::default(),
         crate::manifest::CompactionAdmission::WithinRowBudget,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("admitted unit");
@@ -2148,16 +2128,14 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         for index in 1..=6 {
             let commit_id =
                 CommitId::parse(format!("bounded-convergence-{index}")).expect("commit id");
-            write_file_bytes(
-                store,
-                &namespace_id,
-                &format!("/docs/file-{index}.txt"),
-                format!("file {index}\n").as_bytes(),
-                &context,
-                Some(&commit_id),
-            )
-            .await
-            .expect("write file");
+            crate::test_support::NamespaceFixture::new(store, &namespace_id, &context)
+                .write_file_bytes(
+                    &format!("/docs/file-{index}.txt"),
+                    format!("file {index}\n").as_bytes(),
+                    Some(&commit_id),
+                )
+                .await
+                .expect("write file");
             create_checkpoint(store, &namespace_id, &context)
                 .await
                 .expect("create checkpoint");
@@ -2175,17 +2153,22 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         max_decoded_input_bytes_per_step: unlimited,
         ..MetadataRunPolicy::default()
     };
-    let first = super::compact_unit(
-        &bounded_store,
+    let first = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &bounded_store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        );
+        fixture.namespace.run_policy = bounded_policy;
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
         None,
-        &namespace_id,
-        None,
-        loonfs_types::CompactorEpoch(0),
-        bounded_policy,
         MetadataCompactionPolicy::default(),
         crate::manifest::CompactionAdmission::AnySize,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("first compaction unit");
@@ -2250,30 +2233,29 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     );
 
     let later_commit = CommitId::parse("bounded-convergence-later").expect("commit id");
-    write_file_bytes(
-        &unbounded_store,
-        &namespace_id,
-        "/docs/later.txt",
-        b"later\n",
-        &context,
-        Some(&later_commit),
-    )
-    .await
-    .expect("write later file");
+    crate::test_support::NamespaceFixture::new(&unbounded_store, &namespace_id, &context)
+        .write_file_bytes("/docs/later.txt", b"later\n", Some(&later_commit))
+        .await
+        .expect("write later file");
     create_checkpoint(&unbounded_store, &namespace_id, &context)
         .await
         .expect("checkpoint later file");
-    let below_trigger = super::compact_unit(
-        &unbounded_store,
+    let below_trigger = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &unbounded_store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        );
+        fixture.namespace.run_policy = unbounded_policy;
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
         None,
-        &namespace_id,
-        None,
-        loonfs_types::CompactorEpoch(0),
-        unbounded_policy,
         MetadataCompactionPolicy::default(),
         crate::manifest::CompactionAdmission::AnySize,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("below-trigger step");
@@ -2295,26 +2277,14 @@ async fn whole_run_compaction_rewrites_base_segments() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/hot/original.txt",
-        b"hot\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hot");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/cold/original.txt",
-        b"cold\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write cold");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/hot/original.txt", b"hot\n", None)
+        .await
+        .expect("write hot");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/cold/original.txt", b"cold\n", None)
+        .await
+        .expect("write cold");
 
     let first_manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
     let first_materialized =
@@ -2323,27 +2293,15 @@ async fn whole_run_compaction_rewrites_base_segments() {
             .expect("load first manifest");
     let first_run_keys = run_segment_object_keys(&first_materialized.manifest);
 
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/hot/after-delta.txt",
-        b"hot 2\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hot delta");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/hot/after-delta.txt", b"hot 2\n", None)
+        .await
+        .expect("write hot delta");
     checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/hot/after-compact.txt",
-        b"hot 3\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hot compact");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/hot/after-compact.txt", b"hot 3\n", None)
+        .await
+        .expect("write hot compact");
     let compacted = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("compacted checkpoint");
@@ -2412,7 +2370,8 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
         .expect("bootstrap");
     for index in 0..6 {
         let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"initial\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&path, b"initial\n", None)
             .await
             .expect("write initial file");
     }
@@ -2428,27 +2387,15 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
     );
     assert!(revision_keys_before.len() >= 3);
 
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file-0.txt",
-        b"delta\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write delta revision");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file-0.txt", b"delta\n", None)
+        .await
+        .expect("write delta revision");
     checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file-0.txt",
-        b"compact\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write compaction revision");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/file-0.txt", b"compact\n", None)
+        .await
+        .expect("write compaction revision");
     let _compacted = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("compacted checkpoint");
@@ -2509,17 +2456,22 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
 
     // One unit runs, then the process "crashes": nothing is carried over
     // but the published manifest.
-    let first_report = super::compact_unit(
-        &store,
+    let first_report = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        );
+        fixture.namespace.run_policy = policy;
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
         None,
-        &namespace_id,
-        None,
-        loonfs_types::CompactorEpoch(0),
-        policy,
         MetadataCompactionPolicy::default(),
         crate::manifest::CompactionAdmission::AnySize,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("first unit");
@@ -2537,17 +2489,22 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
     // job, including the delta the interleaved checkpoint added.
     let mut merged_groups = vec![first_group];
     loop {
-        let report = super::compact_unit(
-            &store,
+        let report = {
+            let mut fixture = crate::test_support::NamespaceFixture::new(
+                &store,
+                &namespace_id,
+                &crate::test_support::mutation_context("test-writer", 0),
+            );
+            fixture.namespace.run_policy = policy;
+            fixture
+        }
+        .engine()
+        .compact_metadata_unit(
             None,
-            &namespace_id,
-            None,
-            loonfs_types::CompactorEpoch(0),
-            policy,
             MetadataCompactionPolicy::default(),
             crate::manifest::CompactionAdmission::AnySize,
+            loonfs_types::CompactorEpoch(0),
             &crate::manifest::MetadataCompactionCancellation::default(),
-            crate::test_support::std_timer(),
         )
         .await
         .expect("resumed unit");
@@ -2590,18 +2547,17 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/budget.txt",
-        b"body",
-        DestinationBehavior::NoReplace,
-        &context,
-        None,
-    )
-    .await
-    .expect("seed file");
-    let manifest_before = load_current_manifest(&store, &namespace_id)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/budget.txt",
+            b"body",
+            DestinationBehavior::NoReplace,
+            None,
+        )
+        .await
+        .expect("seed file");
+    let manifest_before = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("read manifest")
         .state;
@@ -2622,16 +2578,9 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         },
     );
     let overrun = Deadline::start(clock);
-    let Err(error) = super::fold::fold_wal_tail(
-        &store,
-        None,
-        &namespace_id,
-        None,
-        &overrun,
-        MetadataRunPolicy::default(),
-        &crate::test_support::content_writes(),
-    )
-    .await
+    let Err(error) = crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal_tail(None, &overrun)
+        .await
     else {
         panic!("over-budget publication must abort");
     };
@@ -2641,7 +2590,8 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         "expected budget error, got {error:?}"
     );
 
-    let manifest_after = load_current_manifest(&store, &namespace_id)
+    let manifest_after = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("read manifest")
         .state;
@@ -2651,7 +2601,8 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     );
 
     // The in-budget retry publishes normally over fresh outputs.
-    let advanced = super::fold::fold_wal(&store, &namespace_id)
+    let advanced = crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("in-budget retry succeeds");
     assert_eq!(advanced.outcome, crate::FoldWalOutcome::Published);
@@ -2672,7 +2623,8 @@ async fn a_read_anchor_that_goes_stale_on_every_check_stops_at_the_contention_li
         crate::limits::READ_REVALIDATION_BOUND_MS + 1,
     )));
 
-    let error = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id, stale)
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_anchor(stale)
         .await
         .expect_err("a check that never confirms its manifest stops");
 
@@ -2699,21 +2651,21 @@ async fn over_budget_compaction_aborts_without_publishing() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/merge.txt",
-        b"body",
-        DestinationBehavior::NoReplace,
-        &context,
-        None,
-    )
-    .await
-    .expect("seed file");
-    super::fold::fold_wal(&store, &namespace_id)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/merge.txt",
+            b"body",
+            DestinationBehavior::NoReplace,
+            None,
+        )
+        .await
+        .expect("seed file");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("publish a delta run to merge");
-    let manifest_before = load_current_manifest(&store, &namespace_id)
+    let manifest_before = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("read manifest")
         .state;
@@ -2722,17 +2674,23 @@ async fn over_budget_compaction_aborts_without_publishing() {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
-    let error = super::compaction_step::compact_unit(
-        &store,
+    let error = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        );
+        fixture.namespace.run_policy = merge_everything;
+        fixture.namespace.timer = Arc::new(ManualClock::stepping(20 * 60 * 1000));
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
         None,
-        &namespace_id,
-        None,
-        loonfs_types::CompactorEpoch(0),
-        merge_everything,
         MetadataCompactionPolicy::default(),
         crate::manifest::CompactionAdmission::AnySize,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        Arc::new(ManualClock::stepping(20 * 60 * 1000)),
     )
     .await
     .expect_err("over-budget compaction must abort");
@@ -2742,23 +2700,29 @@ async fn over_budget_compaction_aborts_without_publishing() {
         "expected budget error, got {error:?}"
     );
 
-    let manifest_after = load_current_manifest(&store, &namespace_id)
+    let manifest_after = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("read manifest")
         .state;
     assert_eq!(manifest_after, manifest_before);
 
-    let report = super::compaction_step::compact_unit(
-        &store,
+    let report = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        );
+        fixture.namespace.run_policy = merge_everything;
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
         None,
-        &namespace_id,
-        None,
-        loonfs_types::CompactorEpoch(0),
-        merge_everything,
         MetadataCompactionPolicy::default(),
         crate::manifest::CompactionAdmission::AnySize,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("in-budget retry merges the unit");
@@ -2805,17 +2769,22 @@ async fn compact_with<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
     admission: crate::manifest::CompactionAdmission,
 ) -> super::CompactionUnitOutcome {
-    super::compact_unit(
-        store,
+    {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            store,
+            namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        );
+        fixture.namespace.run_policy = policy;
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
         None,
-        namespace_id,
-        None,
-        loonfs_types::CompactorEpoch(0),
-        policy,
         MetadataCompactionPolicy::default(),
         admission,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("run a compaction unit")
@@ -2970,23 +2939,18 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
 
     // The base run holds both bindings.
     for name in ["keep", "gone"] {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/{name}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("seed file");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&format!("/docs/{name}.txt"), b"body\n", None)
+            .await
+            .expect("seed file");
     }
     // A base far larger than the delta runs, written 32 files per commit.
     for batch in 0..16 {
         let paths: Vec<_> = (batch * 32..(batch + 1) * 32)
             .map(|index| format!("/docs/retained-{index}.txt"))
             .collect();
-        write_files_bytes(&store, &namespace_id, &paths, b"body", &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_files_bytes(&paths, b"body")
             .await
             .expect("grow the base");
     }
@@ -3006,35 +2970,32 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     // One delta run cancels a binding the base holds, more delta runs land
     // above it until they make a tier, and the floor moves past the
     // cancellation.
-    let deleted = delete_path(&store, &namespace_id, "/docs/gone.txt", &context, None)
+    let deleted = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/docs/gone.txt", None)
         .await
         .expect("delete");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint the delete");
     for extra in 1..MetadataRunPolicy::default().min_compaction_runs.get() {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/extra-{extra}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write extra");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&format!("/docs/extra-{extra}.txt"), b"body\n", None)
+            .await
+            .expect("write extra");
         create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("checkpoint the extra file");
     }
-    advance_retention_floor(
+    crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance the floor");
     assert!(
@@ -3155,42 +3116,37 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
     let mut compacted_groups = 0usize;
     for cycle in 0..4u64 {
         for file in 0..4u64 {
-            write_file_bytes(
-                &store,
-                &namespace_id,
-                &format!("/d{cycle}/f{file}.txt"),
-                format!("body {cycle}/{file}\n").as_bytes(),
-                &context,
-                None,
-            )
-            .await
-            .expect("write file");
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                .write_file_bytes(
+                    &format!("/d{cycle}/f{file}.txt"),
+                    format!("body {cycle}/{file}\n").as_bytes(),
+                    None,
+                )
+                .await
+                .expect("write file");
         }
         create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("checkpoint the writes");
         for file in 0..3u64 {
-            delete_path(
-                &store,
-                &namespace_id,
-                &format!("/d{cycle}/f{file}.txt"),
-                &context,
-                None,
-            )
-            .await
-            .expect("delete a file");
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                .delete_path(&format!("/d{cycle}/f{file}.txt"), None)
+                .await
+                .expect("delete a file");
         }
         create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("checkpoint the deletions");
-        advance_retention_floor(
+        crate::test_support::NamespaceFixture::new(
             &store,
-            None,
             &namespace_id,
-            RetentionTarget::Head,
-            crate::test_support::grace_elapsed_after(context.now_ms),
-            crate::test_support::std_timer(),
+            &crate::test_support::mutation_context(
+                "test-writer",
+                crate::test_support::grace_elapsed_after(context.now_ms),
+            ),
         )
+        .engine()
+        .advance_retention_floor(RetentionTarget::Head)
         .await
         .expect("advance the floor past the deletions");
         let visible = visible_namespace(&store, &namespace_id).await;
@@ -3280,7 +3236,8 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(&store, &namespace_id, "/first", b"first", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/first", b"first", None)
         .await
         .expect("first write");
     let pin = create_checkpoint(&store, &namespace_id, &context)
@@ -3290,10 +3247,12 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .await
         .expect("pinned files");
     let pinned_segments = super::segment_keys_of_the_current_manifest(&store, &namespace_id).await;
-    write_file_bytes(&store, &namespace_id, "/second", b"second", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/second", b"second", None)
         .await
         .expect("second write");
-    crate::manifest::fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold");
     let current_segments = super::compact_a_family_group(&store, &namespace_id, &context).await;
@@ -3302,32 +3261,29 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .cloned()
         .collect();
     assert!(!only_pinned.is_empty());
-    let floor = advance_retention_floor(
+    let floor = crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance floor")
     .response;
     assert!(floor.retention_floor_seq > pin.captured_seq);
     // The runtime that published the advance raises the hint.
-    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
     let aged = mutation_context("gc", u64::MAX / 2);
-    crate::gc::gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &crate::gc::GcOptions::default(),
-        &aged,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect past the floor");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &crate::gc::GcOptions::default(), &aged)
+        .await
+        .expect("collect past the floor");
     assert_eq!(
         read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
             .await
@@ -3343,20 +3299,19 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .await
         .expect("pinned manifest")
         .is_some());
-    crate::pin::delete_snapshot(&store, &namespace_id, &pin.checkpoint_id)
-        .await
-        .expect("delete pin");
-    crate::gc::gc_namespace(
+    crate::test_support::NamespaceFixture::new(
         &store,
-        None,
-        None,
         &namespace_id,
-        &crate::gc::GcOptions::default(),
-        &aged,
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context("test-writer", 0),
     )
+    .engine()
+    .delete_snapshot(&pin.checkpoint_id)
     .await
-    .expect("collect deleted basis");
+    .expect("delete pin");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &crate::gc::GcOptions::default(), &aged)
+        .await
+        .expect("collect deleted basis");
     assert!(store
         .head(&manifest_key)
         .await

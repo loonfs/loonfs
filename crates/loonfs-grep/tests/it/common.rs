@@ -190,20 +190,18 @@ pub(crate) mod control {
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
     ) -> NamespaceReadState {
-        loonfs::control::load_namespace_read_state(
-            store,
-            namespace_id,
-            std::sync::Arc::new(loonfs_types::StdMonotonicTimer::default()),
-        )
-        .await
-        .expect("namespace state")
+        loonfs_core::test_support::namespace_store(store, namespace_id)
+            .load_read_state()
+            .await
+            .expect("namespace state")
     }
 
     pub(crate) async fn metadata_manifest(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
     ) -> loonfs::control::CurrentManifest {
-        loonfs::control::load_namespace_current_manifest(store.as_ref(), namespace_id)
+        loonfs_core::test_support::namespace_store(store.as_ref(), namespace_id)
+            .load_current_manifest()
             .await
             .expect("current manifest")
             .state

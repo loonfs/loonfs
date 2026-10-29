@@ -153,7 +153,7 @@ pub(crate) struct ReadConfig {
     /// The consistency of a read that doesn't set its own.
     pub consistency: ReadConsistency,
     /// Layout and input limits for metadata compactions.
-    pub metadata_run_policy: loonfs_core::MetadataRunPolicy,
+    pub run_policy: loonfs_core::MetadataRunPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
     /// Object-store kind label used by tracing, or `None` when the caller

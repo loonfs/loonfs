@@ -107,14 +107,11 @@ async fn unfolded_wal_objects<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> u64 {
-    loonfs_core::cache::load_namespace_diagnostics(
-        store,
-        namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("load namespace diagnostics")
-    .wal_tail_objects
+    loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_diagnostics()
+        .await
+        .expect("load namespace diagnostics")
+        .wal_tail_objects
 }
 
 /// Appends WAL objects from another writer until the namespace's tail has
@@ -129,15 +126,15 @@ async fn seed_wal_tail<S: ObjectStore + ?Sized>(
 ) {
     // The other writer's epoch fence is one of the appended objects.
     let count = objects - unfolded_wal_objects(store, namespace_id).await - 1;
-    append_wal_objects(
+    loonfs_core::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        count,
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("tail-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )
+    .append_wal_objects(count)
     .await
     .expect("seed the WAL tail");
     assert_eq!(unfolded_wal_objects(store, namespace_id).await, objects);

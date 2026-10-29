@@ -13,6 +13,7 @@
 use crate::authorize::{Authorizer, CommitAuthority};
 use crate::context::MutationContext;
 use crate::control_update::create_control_object_under_generated_id;
+use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, MAX_MULTIPART_PARTS,
@@ -20,16 +21,15 @@ use crate::limits::{
     UPLOAD_SESSION_LEASE_MS,
 };
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-use crate::namespace::control::load_current_manifest;
+use crate::namespace::store::NamespaceStore;
 use crate::storage::content::{
     abort_unpublished_multipart_upload, delete_unpublished_content_object,
-    stage_bytes_under_content_id, stage_streamed_under_content_id, verify_durable_content_checksum,
-    DurableContentValidationError, StreamedPayloadKind,
+    open_content_import_reader, stage_bytes_under_content_id, stage_streamed_under_content_id,
+    verify_durable_content_checksum, ContentLocation, DurableContentValidationError,
+    StreamedPayloadKind,
 };
 use crate::storage::content_admission::{CompletedUploadEvidence, PreparedContent};
-use crate::upload_records::{
-    create_upload_outcome, load_upload_session_state, OutcomeCreation, UploadSessionState,
-};
+use crate::upload_records::{OutcomeCreation, UploadSessionState};
 use bytes::Bytes;
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::{
@@ -85,97 +85,347 @@ pub struct MultipartPartTargets {
     pub parts: Vec<MultipartPartTarget>,
 }
 
-pub(crate) async fn begin_service_proxied_upload<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    subject: Option<&Subject>,
-    context: &MutationContext,
-) -> Result<UploadSession> {
-    let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
-    let recorded = recorded_subject(namespace_id, catalog.access(), subject)?;
-    create_upload_session(
-        store,
-        &catalog,
-        recorded,
-        NewUploadSession::service_proxied(),
-        context,
-    )
-    .await
-}
-
-/// Starts a direct PUT session and assigns its content identity.
-pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    subject: Option<&Subject>,
-    context: &MutationContext,
-) -> Result<DirectPutUploadTarget> {
-    let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
-    let recorded = recorded_subject(namespace_id, catalog.access(), subject)?;
-    let content_id = ContentId::generate();
-    let object_key = content_blob(namespace_id, &content_id);
-    let session = create_upload_session(
-        store,
-        &catalog,
-        recorded,
-        NewUploadSession::direct_put(content_id, store.checksum_algorithm()),
-        context,
-    )
-    .await?;
-    Ok(DirectPutUploadTarget {
-        session,
-        object_key,
-    })
-}
-
-/// Creates a multipart upload session and the corresponding provider upload.
-///
-/// Size and checksum are supplied at completion because they may be unknown
-/// when streaming begins. The provider upload is created first and then
-/// stored in the session record. If the session record cannot be written,
-/// the provider upload is aborted.
-pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    subject: Option<&Subject>,
-    options: DirectMultipartUploadOptions,
-    context: &MutationContext,
-) -> Result<DirectMultipartUploadTarget> {
-    let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
-    let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
-    let recorded = recorded_subject(namespace_id, catalog.access(), subject)?;
-    let content_id = ContentId::generate();
-    let object_key = content_blob(namespace_id, &content_id);
-    let provider_upload_id = store
-        .create_multipart_upload(&object_key)
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
+    /// Starts a service-proxied upload session. Direct transports use
+    /// [`Self::begin_direct_put_upload_target`] or [`Self::begin_direct_multipart_upload_target`].
+    pub async fn begin_upload(&self) -> Result<UploadSession> {
+        let context = self.mutation_context();
+        let catalog = self.namespace.ensure_upload_namespace_available().await?;
+        let recorded = recorded_subject(
+            &self.namespace.namespace_id,
+            catalog.access(),
+            self.subject.as_ref(),
+        )?;
+        create_upload_session(
+            &self.namespace.store,
+            &catalog,
+            recorded,
+            NewUploadSession::service_proxied(),
+            &context,
+        )
         .await
-        .map_err(|error| CoreError::store(&object_key, &error))?;
-    let session = NewUploadSession::direct_multipart(
-        content_id.clone(),
-        &provider_upload_id,
-        part_size_bytes,
-        store.checksum_algorithm(),
-    );
-    let session = match create_upload_session(store, &catalog, recorded, session, context).await {
-        Ok(session) => session,
-        Err(error) => {
-            let _ = abort_unpublished_multipart_upload(
-                store,
-                namespace_id,
-                &content_id,
-                &provider_upload_id,
-            )
-            .await;
-            return Err(error);
-        }
-    };
+    }
 
-    Ok(DirectMultipartUploadTarget {
-        session,
-        object_key,
-        part_size_bytes: part_size_bytes.get(),
-        checksum_algorithm: store.checksum_algorithm(),
-    })
+    /// Starts a direct PUT upload and assigns its content identity.
+    pub async fn begin_direct_put_upload_target(&self) -> Result<DirectPutUploadTarget> {
+        let context = self.mutation_context();
+        let catalog = self.namespace.ensure_upload_namespace_available().await?;
+        let recorded = recorded_subject(
+            &self.namespace.namespace_id,
+            catalog.access(),
+            self.subject.as_ref(),
+        )?;
+        let content_id = ContentId::generate();
+        let object_key = content_blob(&self.namespace.namespace_id, &content_id);
+        let session = create_upload_session(
+            &self.namespace.store,
+            &catalog,
+            recorded,
+            NewUploadSession::direct_put(content_id, self.namespace.store.checksum_algorithm()),
+            &context,
+        )
+        .await?;
+        Ok(DirectPutUploadTarget {
+            session,
+            object_key,
+        })
+    }
+
+    /// Creates a direct multipart upload target with a new object identity,
+    /// provider upload ID, and required part size.
+    ///
+    /// The final size and checksum are supplied when the upload is completed,
+    /// because they may be unknown when streaming begins. The provider upload
+    /// is created first and then stored in the session record. If the session
+    /// record cannot be written, the provider upload is aborted.
+    pub async fn begin_direct_multipart_upload_target(
+        &self,
+        options: DirectMultipartUploadOptions,
+    ) -> Result<DirectMultipartUploadTarget> {
+        let context = self.mutation_context();
+        let catalog = self.namespace.ensure_upload_namespace_available().await?;
+        let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
+        let recorded = recorded_subject(
+            &self.namespace.namespace_id,
+            catalog.access(),
+            self.subject.as_ref(),
+        )?;
+        let content_id = ContentId::generate();
+        let object_key = content_blob(&self.namespace.namespace_id, &content_id);
+        let provider_upload_id = self
+            .namespace
+            .store
+            .create_multipart_upload(&object_key)
+            .await
+            .map_err(|error| CoreError::store(&object_key, &error))?;
+        let session = NewUploadSession::direct_multipart(
+            content_id.clone(),
+            &provider_upload_id,
+            part_size_bytes,
+            self.namespace.store.checksum_algorithm(),
+        );
+        let session = match create_upload_session(
+            &self.namespace.store,
+            &catalog,
+            recorded,
+            session,
+            &context,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = abort_unpublished_multipart_upload(
+                    &self.namespace.store,
+                    &self.namespace.namespace_id,
+                    &content_id,
+                    &provider_upload_id,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+
+        Ok(DirectMultipartUploadTarget {
+            session,
+            object_key,
+            part_size_bytes: part_size_bytes.get(),
+            checksum_algorithm: self.namespace.store.checksum_algorithm(),
+        })
+    }
+
+    /// Uploads whole-file content into an upload session.
+    ///
+    /// Retries to the same session use the same object identity. Matching bytes
+    /// are idempotent; different bytes return a content conflict. Separate
+    /// sessions always use separate object identities.
+    pub async fn upload_content(
+        &self,
+        upload_id: &UploadId,
+        bytes: &[u8],
+    ) -> Result<UploadSession> {
+        let _permit = self.namespace.content_writes.acquire().await;
+        let now_ms = self.now_ms();
+        self.namespace
+            .upload_proxied_content(
+                upload_id,
+                self.subject.as_ref(),
+                ProxiedPayload::Bytes(bytes),
+                now_ms,
+            )
+            .await
+    }
+
+    /// Uploads content that arrives as a stream into an upload session,
+    /// hashing it on the way through instead of holding it.
+    pub async fn upload_content_stream(
+        &self,
+        upload_id: &UploadId,
+        body: ByteStream,
+    ) -> Result<UploadSession> {
+        let _permit = self.namespace.content_writes.acquire().await;
+        let now_ms = self.now_ms();
+        self.namespace
+            .upload_proxied_content(
+                upload_id,
+                self.subject.as_ref(),
+                ProxiedPayload::Stream(body),
+                now_ms,
+            )
+            .await
+    }
+
+    /// Completes an upload session and returns time-bounded proof for later
+    /// publication. The caller passes the catalog it already holds, which
+    /// must be this engine's namespace's.
+    ///
+    /// Verification of the content happens before the outcome record is
+    /// created. An abort can still end the session between this completion's
+    /// read of the session and its check of the content object, and the
+    /// put-if-absent of the outcome record settles that race: if the abort's
+    /// outcome is created first, the completion finds it and fails.
+    pub async fn complete_upload(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        upload_id: &UploadId,
+        completion: CompleteUploadBody,
+    ) -> Result<CompletedUpload> {
+        self.own_catalog(catalog);
+        let context = self.mutation_context();
+        let catalog = self.namespace.ensure_upload_namespace_available().await?;
+        authorize_upload_subject(
+            &self.namespace.namespace_id,
+            catalog.access(),
+            self.subject.as_ref(),
+        )?;
+        let now_ms = context.now_ms;
+        let loaded = self.namespace.load_upload_session_state(upload_id).await?;
+        ensure_session_subject(&loaded.session, self.subject.as_ref())?;
+        if !matches!(loaded.outcome, Some(UploadOutcome::Completed { .. })) {
+            ensure_session_open(&loaded, now_ms)?;
+        }
+        let mode = upload_mode(&loaded.session.mode);
+        let plan = completion_plan(&loaded.session, &completion)?;
+        if let Some(outcome) = &loaded.outcome {
+            return replay_terminal_completion(
+                outcome,
+                &self.namespace.namespace_id,
+                upload_id,
+                plan.expected_completed_content(),
+                mode,
+                now_ms,
+            );
+        }
+
+        let verified = verify_completion(&self.namespace.store, plan).await?;
+        self.namespace
+            .record_completion(&loaded.session, verified, now_ms)
+            .await
+    }
+
+    /// Stores in-process bytes as prepared content and completes the associated
+    /// upload session.
+    ///
+    /// This combines session creation, content upload, and completion without a
+    /// network round trip or receipt. It still writes the upload session's
+    /// records that garbage collection needs: the session record before the
+    /// content write, so collection always has a durable owner for the object,
+    /// and the outcome record after it.
+    pub async fn stage_owned_bytes(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        subject_id: Option<&SubjectId>,
+        bytes: &[u8],
+    ) -> Result<PreparedContent> {
+        let _permit = self.namespace.content_writes.acquire().await;
+        let catalog = self.own_catalog(catalog);
+        let context = self.mutation_context();
+        let session =
+            open_owned_staging_session(&self.namespace.store, catalog, subject_id, &context)
+                .await?;
+        let stored = stage_bytes_under_content_id(
+            &self.namespace.store,
+            catalog.namespace_id().clone(),
+            session.content_id.clone(),
+            bytes,
+        )
+        .await?;
+        self.namespace
+            .complete_owned_staging(&session, stored.content_ref, &context)
+            .await
+    }
+
+    /// Stages a streamed payload as content a session owns, hashing it on
+    /// the way through instead of holding it.
+    ///
+    /// The streaming twin of [`Self::stage_owned_bytes`]; ownership and cost
+    /// are identical.
+    pub async fn stage_owned_stream(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        subject_id: Option<&SubjectId>,
+        body: ByteStream,
+    ) -> Result<PreparedContent> {
+        let _permit = self.namespace.content_writes.acquire().await;
+        self.namespace
+            .stage_owned_stream(
+                self.own_catalog(catalog),
+                subject_id,
+                body,
+                StreamedPayloadKind::Request,
+                &self.mutation_context(),
+            )
+            .await
+    }
+
+    /// Imports existing content under a fresh identity owned by this
+    /// namespace.
+    ///
+    /// A content reference locates bytes but does not identify the namespace
+    /// whose upload session keeps them alive. This streams the source bytes
+    /// chunk by chunk into a new local upload session, verifying the claimed
+    /// size and checksum against what was staged, so collection in the source
+    /// namespace cannot invalidate a later publication here. `owner_location`
+    /// is where the owner's view finds the bytes; without one, they are read
+    /// from the content object.
+    pub async fn import_content_ref(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        subject_id: Option<&SubjectId>,
+        content_ref: &ContentRef,
+        owner_location: Option<ContentLocation>,
+    ) -> Result<PreparedContent>
+    where
+        S: Clone + 'static,
+    {
+        let catalog = self.own_catalog(catalog);
+        let context = self.mutation_context();
+        let location = match owner_location {
+            Some(location) => location,
+            None => ContentLocation::whole(content_ref),
+        };
+        let body =
+            open_content_import_reader(self.namespace.store.clone(), location, content_ref).await?;
+        let _permit = self.namespace.content_writes.acquire().await;
+        self.namespace
+            .stage_owned_stream(
+                catalog,
+                subject_id,
+                body,
+                StreamedPayloadKind::ContentImport,
+                &context,
+            )
+            .await
+    }
+
+    /// Aborts an upload session, then deletes the content object it owned
+    /// and cleans up its provider state.
+    ///
+    /// Cleanup starts only after the durable transition. Terminal and
+    /// idempotent: repeating it succeeds and returns the original abort
+    /// timestamp, and it refuses a session that already completed, whose
+    /// content may be published.
+    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<UploadSession> {
+        let catalog = self.namespace.load_catalog_entry().await?;
+        let context = self.mutation_context();
+        let namespace_id = catalog.namespace_id();
+        authorize_upload_subject(namespace_id, catalog.access(), self.subject.as_ref())?;
+        let loaded = self.namespace.load_upload_session_state(upload_id).await?;
+        ensure_session_subject(&loaded.session, self.subject.as_ref())?;
+        let aborted_at_ms = match &loaded.outcome {
+            Some(outcome) => repeated_abort(outcome, upload_id)?,
+            None => {
+                let outcome = UploadOutcome::Aborted {
+                    aborted_at_ms: context.now_ms,
+                };
+                match self
+                    .namespace
+                    .create_upload_outcome(&loaded.session, &outcome)
+                    .await?
+                {
+                    OutcomeCreation::Created => context.now_ms,
+                    OutcomeCreation::Existing(existing) => repeated_abort(&existing, upload_id)?,
+                }
+            }
+        };
+
+        if !AbandonedUpload::of(&loaded.session)
+            .release(&self.namespace.store)
+            .await
+        {
+            tracing::debug!(
+                namespace_id = %namespace_id,
+                upload_id = %upload_id,
+                "upload cleanup remains for garbage collection"
+            );
+        }
+        Ok(UploadSession {
+            namespace_id: namespace_id.clone(),
+            upload_id: upload_id.clone(),
+            mode: upload_mode(&loaded.session.mode),
+            status: UploadSessionStatus::Aborted { aborted_at_ms },
+        })
+    }
 }
 
 /// Validates the multipart part size against provider limits.
@@ -194,58 +444,102 @@ fn multipart_part_size(requested: Option<u64>) -> Result<NonZeroU64> {
         })
 }
 
-/// Validates requested multipart parts and returns the data needed to sign
-/// them.
-///
-/// Part state remains client-managed. This method writes no durable state.
-pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    subject: Option<&Subject>,
-    requested: &[UploadPartChecksumClaim],
-    now_ms: u64,
-) -> Result<MultipartPartTargets> {
-    let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
-    authorize_upload_subject(namespace_id, catalog.access(), subject)?;
-    if requested.is_empty() {
-        return Err(CoreError::InvalidUploadContent(
-            "a part-signing request names at least one part".to_owned(),
-        ));
-    }
-    if requested.len() > MAX_SIGNED_PARTS_PER_REQUEST {
-        return Err(CoreError::InvalidUploadContent(format!(
-            "a part-signing request names at most {MAX_SIGNED_PARTS_PER_REQUEST} parts"
-        )));
-    }
-    let state = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&state.session, subject)?;
-    ensure_session_open(&state, now_ms)?;
-    let session = &state.session;
-    let (provider_upload_id, checksum_algorithm) = multipart_session_upload(session)?;
-
-    let mut parts = Vec::with_capacity(requested.len());
-    for claim in requested {
-        // The only bound is the provider's own part-number range: the
-        // session never learned how long the payload would be, so there is
-        // no part count to check against.
-        if claim.part_number == 0 || claim.part_number > MAX_MULTIPART_PARTS {
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
+    /// Validates a group of multipart parts and returns the information needed
+    /// to sign their upload URLs.
+    ///
+    /// Part state remains client-managed. This method writes no durable state.
+    pub async fn direct_multipart_part_targets(
+        &self,
+        upload_id: &UploadId,
+        requested: &[UploadPartChecksumClaim],
+    ) -> Result<MultipartPartTargets> {
+        let now_ms = self.now_ms();
+        let catalog = self.namespace.ensure_upload_namespace_available().await?;
+        authorize_upload_subject(
+            &self.namespace.namespace_id,
+            catalog.access(),
+            self.subject.as_ref(),
+        )?;
+        if requested.is_empty() {
+            return Err(CoreError::InvalidUploadContent(
+                "a part-signing request names at least one part".to_owned(),
+            ));
+        }
+        if requested.len() > MAX_SIGNED_PARTS_PER_REQUEST {
             return Err(CoreError::InvalidUploadContent(format!(
-                "part {} is outside the provider's 1..={MAX_MULTIPART_PARTS} part range",
-                claim.part_number
+                "a part-signing request names at most {MAX_SIGNED_PARTS_PER_REQUEST} parts"
             )));
         }
-        parts.push(MultipartPartTarget {
-            part_number: claim.part_number,
-            checksum: validate_upload_checksum(&claim.checksum, checksum_algorithm)?.clone(),
-        });
+        let state = self.namespace.load_upload_session_state(upload_id).await?;
+        ensure_session_subject(&state.session, self.subject.as_ref())?;
+        ensure_session_open(&state, now_ms)?;
+        let session = &state.session;
+        let (provider_upload_id, checksum_algorithm) = multipart_session_upload(session)?;
+
+        let mut parts = Vec::with_capacity(requested.len());
+        for claim in requested {
+            // The only bound is the provider's own part-number range: the
+            // session never learned how long the payload would be, so there is
+            // no part count to check against.
+            if claim.part_number == 0 || claim.part_number > MAX_MULTIPART_PARTS {
+                return Err(CoreError::InvalidUploadContent(format!(
+                    "part {} is outside the provider's 1..={MAX_MULTIPART_PARTS} part range",
+                    claim.part_number
+                )));
+            }
+            parts.push(MultipartPartTarget {
+                part_number: claim.part_number,
+                checksum: validate_upload_checksum(&claim.checksum, checksum_algorithm)?.clone(),
+            });
+        }
+
+        Ok(MultipartPartTargets {
+            object_key: content_blob(&session.namespace_id, &session.content_id),
+            provider_upload_id: provider_upload_id.to_owned(),
+            parts,
+        })
     }
 
-    Ok(MultipartPartTargets {
-        object_key: content_blob(&session.namespace_id, &session.content_id),
-        provider_upload_id: provider_upload_id.to_owned(),
-        parts,
-    })
+    /// Returns an upload session. Completed uploads include new evidence so
+    /// the caller can retry publication without uploading the content again.
+    pub async fn get_upload(&self, upload_id: &UploadId) -> Result<UploadSessionView> {
+        let now_ms = self.now_ms();
+        let catalog = self.namespace.ensure_upload_namespace_available().await?;
+        authorize_upload_subject(
+            &self.namespace.namespace_id,
+            catalog.access(),
+            self.subject.as_ref(),
+        )?;
+        let loaded = self.namespace.load_upload_session_state(upload_id).await?;
+        ensure_session_subject(&loaded.session, self.subject.as_ref())?;
+        let evidence = match &loaded.outcome {
+            Some(UploadOutcome::Completed {
+                completed_at_ms,
+                content_ref,
+            }) => evidence_within_window(content_ref, *completed_at_ms, now_ms),
+            Some(UploadOutcome::Aborted { .. }) | None => None,
+        };
+        let (uploaded, direct_put_object_key) = match (&loaded.outcome, &loaded.session.mode) {
+            (None, UploadSessionMode::ServiceProxied {}) => (
+                find_proxied_content_ref(&self.namespace.store, &loaded.session).await?,
+                None,
+            ),
+            (None, UploadSessionMode::DirectPut { .. }) => (
+                None,
+                Some(content_blob(
+                    &self.namespace.namespace_id,
+                    &loaded.session.content_id,
+                )),
+            ),
+            _ => (None, None),
+        };
+        Ok(UploadSessionView {
+            session: session_response(&loaded, uploaded, self.namespace.store.checksum_algorithm()),
+            evidence,
+            direct_put_object_key,
+        })
+    }
 }
 
 /// Returns the provider upload ID for a direct multipart session.
@@ -449,14 +743,118 @@ fn ensure_session_subject(session: &UploadSessionPayload, subject: Option<&Subje
     }
 }
 
-async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<VerifiedNamespaceCatalogEntry> {
-    let manifest = load_current_manifest(store, namespace_id).await?;
-    let head = crate::namespace::state::NamespaceReadState::from(manifest.state.envelope.payload());
-    crate::namespace::control::ensure_namespace_live(&head)?;
-    Ok(VerifiedNamespaceCatalogEntry::from_head(&head))
+impl<S: ObjectStore> NamespaceStore<S> {
+    async fn ensure_upload_namespace_available(&self) -> Result<VerifiedNamespaceCatalogEntry> {
+        let manifest = self.load_current_manifest().await?;
+        let head =
+            crate::namespace::state::NamespaceReadState::from(manifest.state.envelope.payload());
+        crate::namespace::control::ensure_namespace_live(&head)?;
+        Ok(VerifiedNamespaceCatalogEntry::from_head(&head))
+    }
+
+    /// Checks, just before a streamed write sends its final request, that the
+    /// session is still open.
+    ///
+    /// A session aborted after this check keeps its records for a grace period
+    /// longer than the final request can take, so a later cleanup removes any
+    /// object the request writes.
+    async fn ensure_session_still_open(&self, upload_id: &UploadId, now_ms: u64) -> Result<()> {
+        let state = self.load_upload_session_state(upload_id).await?;
+        ensure_session_open(&state, now_ms)
+    }
+
+    /// Writes a service-proxied session's content object and returns the open
+    /// session with the uploaded reference.
+    ///
+    /// The write is create-only and writes no session record. The store makes
+    /// the create conditional at every size, so when two requests upload to one
+    /// session, only one of them creates the object. A request that finds the
+    /// object already written succeeds if the stored size and checksum match its
+    /// bytes (a retry of the same upload), and returns a content conflict if
+    /// they don't.
+    pub(crate) async fn upload_proxied_content(
+        &self,
+        upload_id: &UploadId,
+        subject: Option<&Subject>,
+        payload: ProxiedPayload<'_>,
+        now_ms: u64,
+    ) -> Result<UploadSession> {
+        let catalog = self.ensure_upload_namespace_available().await?;
+        authorize_upload_subject(&self.namespace_id, catalog.access(), subject)?;
+        let loaded = self
+            .load_open_proxied_session(upload_id, subject, now_ms)
+            .await?;
+        let session = &loaded.session;
+        let content_ref = match payload {
+            ProxiedPayload::Bytes(bytes) => {
+                write_proxied_bytes(&self.store, session, bytes).await?
+            }
+            ProxiedPayload::Stream(body) => {
+                let staged = stage_streamed_under_content_id(
+                    &self.store,
+                    session.namespace_id.clone(),
+                    session.content_id.clone(),
+                    body,
+                    StreamedPayloadKind::Request,
+                    self.ensure_session_still_open(upload_id, now_ms),
+                )
+                .await?;
+                if staged.already_present {
+                    ensure_stored_content_matches(&self.store, upload_id, &staged.content_ref)
+                        .await?;
+                }
+                staged.content_ref
+            }
+        };
+        // An abort during the write deletes the object it was writing, so the
+        // bytes are reported as uploaded only if the session is still open.
+        let state = self.load_upload_session_state(upload_id).await?;
+        ensure_session_open(&state, now_ms)?;
+        Ok(session_response(
+            &state,
+            Some(content_ref),
+            self.store.checksum_algorithm(),
+        ))
+    }
+
+    /// Stages a payload this runtime forwards under a session that owns it.
+    ///
+    /// The streaming twin of [`stage_owned_bytes`]: the bytes are hashed on
+    /// their way to the store rather than held, and everything about ownership
+    /// is identical.
+    pub(crate) async fn stage_owned_stream(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        subject_id: Option<&SubjectId>,
+        body: ByteStream,
+        payload_kind: StreamedPayloadKind,
+        context: &MutationContext,
+    ) -> Result<PreparedContent> {
+        let session = open_owned_staging_session(&self.store, catalog, subject_id, context).await?;
+        let staged = stage_streamed_under_content_id(
+            &self.store,
+            catalog.namespace_id().clone(),
+            session.content_id.clone(),
+            body,
+            payload_kind,
+            self.ensure_session_still_open(&session.upload_id, context.now_ms),
+        )
+        .await?;
+        if staged.already_present {
+            // The identity is 128 fresh random bits and this session has made no
+            // earlier attempt, so an occupied key is corruption rather than a
+            // replay, and it fails loudly.
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "content object `{}` already holds bytes under a freshly minted identity",
+                content_blob(
+                    &staged.content_ref.owner_namespace_id,
+                    &staged.content_ref.content_id
+                )
+            )));
+        }
+        self.complete_owned_staging(&session, staged.content_ref, context)
+            .await
+    }
 }
 
 /// Refuses an operation that needs an open session when the session is
@@ -472,137 +870,57 @@ fn ensure_session_open(state: &UploadSessionState, now_ms: u64) -> Result<()> {
     }
 }
 
-async fn load_open_proxied_session<S: ObjectStore + ?Sized>(
-    store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
-    upload_id: &UploadId,
-    subject: Option<&Subject>,
-    now_ms: u64,
-) -> Result<UploadSessionState> {
-    let state = load_upload_session_state(store, catalog.namespace_id(), upload_id).await?;
-    ensure_session_subject(&state.session, subject)?;
-    ensure_session_open(&state, now_ms)?;
-    if !matches!(state.session.mode, UploadSessionMode::ServiceProxied {}) {
-        return Err(CoreError::InvalidUploadContent(format!(
-            "{} sessions must be completed after using the presigned URLs",
-            upload_mode(&state.session.mode).as_str()
-        )));
+impl<S: ObjectStore> NamespaceStore<S> {
+    async fn load_open_proxied_session(
+        &self,
+        upload_id: &UploadId,
+        subject: Option<&Subject>,
+        now_ms: u64,
+    ) -> Result<UploadSessionState> {
+        let state = self.load_upload_session_state(upload_id).await?;
+        ensure_session_subject(&state.session, subject)?;
+        ensure_session_open(&state, now_ms)?;
+        if !matches!(state.session.mode, UploadSessionMode::ServiceProxied {}) {
+            return Err(CoreError::InvalidUploadContent(format!(
+                "{} sessions must be completed after using the presigned URLs",
+                upload_mode(&state.session.mode).as_str()
+            )));
+        }
+        Ok(state)
     }
-    Ok(state)
-}
 
-/// Checks, just before a streamed write sends its final request, that the
-/// session is still open.
-///
-/// A session aborted after this check keeps its records for a grace period
-/// longer than the final request can take, so a later cleanup removes any
-/// object the request writes.
-async fn ensure_session_still_open<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    now_ms: u64,
-) -> Result<()> {
-    let state = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_open(&state, now_ms)
+    /// Records a verified content reference as the session's completed outcome.
+    ///
+    /// All upload modes use this transition. Completion makes the content
+    /// eligible for publication and later garbage collection.
+    async fn record_completion(
+        &self,
+        session: &UploadSessionPayload,
+        verified: ContentRef,
+        now_ms: u64,
+    ) -> Result<CompletedUpload> {
+        let outcome = UploadOutcome::Completed {
+            completed_at_ms: now_ms,
+            content_ref: verified.clone(),
+        };
+        let standing = match self.create_upload_outcome(session, &outcome).await? {
+            OutcomeCreation::Created => outcome,
+            OutcomeCreation::Existing(existing) => existing,
+        };
+        replay_terminal_completion(
+            &standing,
+            &session.namespace_id,
+            &session.upload_id,
+            Some(&verified),
+            upload_mode(&session.mode),
+            now_ms,
+        )
+    }
 }
 
 pub(crate) enum ProxiedPayload<'a> {
     Bytes(&'a [u8]),
     Stream(ByteStream),
-}
-
-/// Stores bytes in a service-proxied upload session.
-///
-/// Retries to the same session use the same object identity. Matching bytes
-/// are idempotent; different bytes return a content conflict. Separate
-/// sessions always use separate object identities.
-pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    subject: Option<&Subject>,
-    bytes: &[u8],
-    now_ms: u64,
-) -> Result<UploadSession> {
-    upload_proxied_content(
-        store,
-        namespace_id,
-        upload_id,
-        subject,
-        ProxiedPayload::Bytes(bytes),
-        now_ms,
-    )
-    .await
-}
-
-pub(crate) async fn upload_content_stream<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    subject: Option<&Subject>,
-    body: ByteStream,
-    now_ms: u64,
-) -> Result<UploadSession> {
-    upload_proxied_content(
-        store,
-        namespace_id,
-        upload_id,
-        subject,
-        ProxiedPayload::Stream(body),
-        now_ms,
-    )
-    .await
-}
-
-/// Writes a service-proxied session's content object and returns the open
-/// session with the uploaded reference.
-///
-/// The write is create-only and writes no session record. The store makes
-/// the create conditional at every size, so when two requests upload to one
-/// session, only one of them creates the object. A request that finds the
-/// object already written succeeds if the stored size and checksum match its
-/// bytes (a retry of the same upload), and returns a content conflict if
-/// they don't.
-pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    subject: Option<&Subject>,
-    payload: ProxiedPayload<'_>,
-    now_ms: u64,
-) -> Result<UploadSession> {
-    let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
-    authorize_upload_subject(namespace_id, catalog.access(), subject)?;
-    let loaded = load_open_proxied_session(store, &catalog, upload_id, subject, now_ms).await?;
-    let session = &loaded.session;
-    let content_ref = match payload {
-        ProxiedPayload::Bytes(bytes) => write_proxied_bytes(store, session, bytes).await?,
-        ProxiedPayload::Stream(body) => {
-            let staged = stage_streamed_under_content_id(
-                store,
-                session.namespace_id.clone(),
-                session.content_id.clone(),
-                body,
-                StreamedPayloadKind::Request,
-                ensure_session_still_open(store, namespace_id, upload_id, now_ms),
-            )
-            .await?;
-            if staged.already_present {
-                ensure_stored_content_matches(store, upload_id, &staged.content_ref).await?;
-            }
-            staged.content_ref
-        }
-    };
-    // An abort during the write deletes the object it was writing, so the
-    // bytes are reported as uploaded only if the session is still open.
-    let state = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_open(&state, now_ms)?;
-    Ok(session_response(
-        &state,
-        Some(content_ref),
-        store.checksum_algorithm(),
-    ))
 }
 
 /// Writes a proxied upload's buffered bytes to the session's content object.
@@ -648,143 +966,6 @@ async fn ensure_stored_content_matches<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Completes an upload by verifying the content and then recording the
-/// completed outcome.
-///
-/// Verification happens before the outcome record is created. An abort can
-/// still end the session between this completion's read of the session and
-/// its check of the content object, and the put-if-absent of the outcome
-/// record settles that race: if the abort's outcome is created first, the
-/// completion finds it and fails.
-pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    subject: Option<&Subject>,
-    completion: CompleteUploadBody,
-    context: &MutationContext,
-) -> Result<CompletedUpload> {
-    let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
-    authorize_upload_subject(namespace_id, catalog.access(), subject)?;
-    let now_ms = context.now_ms;
-    let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&loaded.session, subject)?;
-    if !matches!(loaded.outcome, Some(UploadOutcome::Completed { .. })) {
-        ensure_session_open(&loaded, now_ms)?;
-    }
-    let mode = upload_mode(&loaded.session.mode);
-    let plan = completion_plan(&loaded.session, &completion)?;
-    if let Some(outcome) = &loaded.outcome {
-        return replay_terminal_completion(
-            outcome,
-            namespace_id,
-            upload_id,
-            plan.expected_completed_content(),
-            mode,
-            now_ms,
-        );
-    }
-
-    let verified = verify_completion(store, plan).await?;
-    record_completion(store, &loaded.session, verified, now_ms).await
-}
-
-/// Records a verified content reference as the session's completed outcome.
-///
-/// All upload modes use this transition. Completion makes the content
-/// eligible for publication and later garbage collection.
-async fn record_completion<S: ObjectStore + ?Sized>(
-    store: &S,
-    session: &UploadSessionPayload,
-    verified: ContentRef,
-    now_ms: u64,
-) -> Result<CompletedUpload> {
-    let outcome = UploadOutcome::Completed {
-        completed_at_ms: now_ms,
-        content_ref: verified.clone(),
-    };
-    let standing = match create_upload_outcome(store, session, &outcome).await? {
-        OutcomeCreation::Created => outcome,
-        OutcomeCreation::Existing(existing) => existing,
-    };
-    replay_terminal_completion(
-        &standing,
-        &session.namespace_id,
-        &session.upload_id,
-        Some(&verified),
-        upload_mode(&session.mode),
-        now_ms,
-    )
-}
-
-/// Stores in-process bytes through an upload session and returns prepared
-/// content.
-///
-/// The session record is written before the content object so garbage
-/// collection always has a durable owner for the object. The operation
-/// performs one content write and two control-object creates, on different
-/// keys.
-pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
-    store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
-    subject_id: Option<&SubjectId>,
-    bytes: &[u8],
-    context: &MutationContext,
-) -> Result<PreparedContent> {
-    let session = open_owned_staging_session(store, catalog, subject_id, context).await?;
-    let stored = stage_bytes_under_content_id(
-        store,
-        catalog.namespace_id().clone(),
-        session.content_id.clone(),
-        bytes,
-    )
-    .await?;
-    complete_owned_staging(store, &session, stored.content_ref, context).await
-}
-
-/// Stages a payload this runtime forwards under a session that owns it.
-///
-/// The streaming twin of [`stage_owned_bytes`]: the bytes are hashed on
-/// their way to the store rather than held, and everything about ownership
-/// is identical.
-pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
-    store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
-    subject_id: Option<&SubjectId>,
-    body: ByteStream,
-    payload_kind: StreamedPayloadKind,
-    context: &MutationContext,
-) -> Result<PreparedContent> {
-    let session = open_owned_staging_session(store, catalog, subject_id, context).await?;
-    let staged = stage_streamed_under_content_id(
-        store,
-        catalog.namespace_id().clone(),
-        session.content_id.clone(),
-        body,
-        payload_kind,
-        ensure_session_still_open(
-            store,
-            catalog.namespace_id(),
-            &session.upload_id,
-            context.now_ms,
-        ),
-    )
-    .await?;
-    if staged.already_present {
-        // The identity is 128 fresh random bits and this session has made no
-        // earlier attempt, so an occupied key is corruption rather than a
-        // replay, and it fails loudly.
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "content object `{}` already holds bytes under a freshly minted identity",
-            content_blob(
-                &staged.content_ref.owner_namespace_id,
-                &staged.content_ref.content_id
-            )
-        )));
-    }
-    complete_owned_staging(store, &session, staged.content_ref, context).await
-}
-
 /// Creates the internal upload session that owns an in-process content
 /// write.
 async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
@@ -807,65 +988,24 @@ async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Completes an in-process staging session using the content reference
-/// produced by the write.
-///
-/// No additional verification is needed because this process computed the
-/// checksum while writing. On failure, the open session eventually expires
-/// and garbage collection removes its object.
-async fn complete_owned_staging<S: ObjectStore + ?Sized>(
-    store: &S,
-    session: &UploadSessionPayload,
-    written: ContentRef,
-    context: &MutationContext,
-) -> Result<PreparedContent> {
-    Ok(record_completion(store, session, written, context.now_ms)
-        .await?
-        .prepared)
-}
-
-/// Marks an upload session aborted, then cleans up its provider state and
-/// unpublished content.
-///
-/// Cleanup starts only after the durable transition. Repeating an abort is
-/// idempotent and returns the original abort timestamp.
-pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
-    store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
-    upload_id: &UploadId,
-    subject: Option<&Subject>,
-    context: &MutationContext,
-) -> Result<UploadSession> {
-    let namespace_id = catalog.namespace_id();
-    authorize_upload_subject(namespace_id, catalog.access(), subject)?;
-    let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&loaded.session, subject)?;
-    let aborted_at_ms = match &loaded.outcome {
-        Some(outcome) => repeated_abort(outcome, upload_id)?,
-        None => {
-            let outcome = UploadOutcome::Aborted {
-                aborted_at_ms: context.now_ms,
-            };
-            match create_upload_outcome(store, &loaded.session, &outcome).await? {
-                OutcomeCreation::Created => context.now_ms,
-                OutcomeCreation::Existing(existing) => repeated_abort(&existing, upload_id)?,
-            }
-        }
-    };
-
-    if !AbandonedUpload::of(&loaded.session).release(store).await {
-        tracing::debug!(
-            namespace_id = %namespace_id,
-            upload_id = %upload_id,
-            "upload cleanup remains for garbage collection"
-        );
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Completes an in-process staging session using the content reference
+    /// produced by the write.
+    ///
+    /// No additional verification is needed because this process computed the
+    /// checksum while writing. On failure, the open session eventually expires
+    /// and garbage collection removes its object.
+    async fn complete_owned_staging(
+        &self,
+        session: &UploadSessionPayload,
+        written: ContentRef,
+        context: &MutationContext,
+    ) -> Result<PreparedContent> {
+        Ok(self
+            .record_completion(session, written, context.now_ms)
+            .await?
+            .prepared)
     }
-    Ok(UploadSession {
-        namespace_id: namespace_id.clone(),
-        upload_id: upload_id.clone(),
-        mode: upload_mode(&loaded.session.mode),
-        status: UploadSessionStatus::Aborted { aborted_at_ms },
-    })
 }
 
 /// Returns the first abort's stamp for a session that already ended, or
@@ -945,42 +1085,6 @@ pub struct UploadSessionView {
     pub evidence: Option<CompletedUploadEvidence>,
     /// Object key of an open `direct_put` session, for the server to presign.
     pub direct_put_object_key: Option<String>,
-}
-
-pub(crate) async fn get_upload<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &UploadId,
-    subject: Option<&Subject>,
-    now_ms: u64,
-) -> Result<UploadSessionView> {
-    let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
-    authorize_upload_subject(namespace_id, catalog.access(), subject)?;
-    let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&loaded.session, subject)?;
-    let evidence = match &loaded.outcome {
-        Some(UploadOutcome::Completed {
-            completed_at_ms,
-            content_ref,
-        }) => evidence_within_window(content_ref, *completed_at_ms, now_ms),
-        Some(UploadOutcome::Aborted { .. }) | None => None,
-    };
-    let (uploaded, direct_put_object_key) = match (&loaded.outcome, &loaded.session.mode) {
-        (None, UploadSessionMode::ServiceProxied {}) => (
-            find_proxied_content_ref(store, &loaded.session).await?,
-            None,
-        ),
-        (None, UploadSessionMode::DirectPut { .. }) => (
-            None,
-            Some(content_blob(namespace_id, &loaded.session.content_id)),
-        ),
-        _ => (None, None),
-    };
-    Ok(UploadSessionView {
-        session: session_response(&loaded, uploaded, store.checksum_algorithm()),
-        evidence,
-        direct_put_object_key,
-    })
 }
 
 /// Builds the reference of a proxied session's content object from the
@@ -1317,8 +1421,6 @@ fn content_failure(error: DurableContentValidationError) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::ops::create;
-    use crate::upload_records::load_upload_session_state;
     use loonfs_objectstore::keys::{upload_outcome, upload_session_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
@@ -1340,13 +1442,17 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("failed-session-check").expect("namespace id");
         let context = context(1_000);
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
-        let session = begin_service_proxied_upload(&store, &namespace_id, None, &context)
+        let session = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .engine()
+            .begin_upload()
             .await
             .expect("begin upload");
-        let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
+        let loaded = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_upload_session_state(&session.upload_id)
             .await
             .expect("load session");
         let session_key = upload_session(&namespace_id, &session.upload_id);
@@ -1371,14 +1477,13 @@ mod tests {
             .boxed()
         };
 
-        let error = upload_content_stream(
+        let error = crate::test_support::NamespaceFixture::new(
             &recording,
             &namespace_id,
-            &session.upload_id,
-            None,
-            body,
-            1_000,
+            &crate::test_support::mutation_context("test-writer", 1_000),
         )
+        .engine()
+        .upload_content_stream(&session.upload_id, body)
         .await
         .expect_err("the final session read must succeed");
 
@@ -1393,7 +1498,8 @@ mod tests {
             .await
             .expect("get content")
             .is_none());
-        let loaded = load_upload_session_state(&recording, &namespace_id, &session.upload_id)
+        let loaded = crate::test_support::namespace_store(&recording, &namespace_id)
+            .load_upload_session_state(&session.upload_id)
             .await
             .expect("load the open session");
         assert_eq!(loaded.outcome, None);
@@ -1411,43 +1517,43 @@ mod tests {
         .apply_then_fail();
         let namespace_id = NamespaceId::parse("retried-buffered-write").expect("namespace id");
         let context = context(1_000);
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
-        let session = begin_service_proxied_upload(&store, &namespace_id, None, &context)
+        let session = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .engine()
+            .begin_upload()
             .await
             .expect("begin upload");
 
         // The write is applied, but its response is lost.
         store.fail_next(1);
-        upload_content(
+        crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &session.upload_id,
-            None,
-            BYTES,
-            1_000,
+            &crate::test_support::mutation_context("test-writer", 1_000),
         )
+        .engine()
+        .upload_content(&session.upload_id, BYTES)
         .await
         .expect_err("the content write fails");
-        let retry = upload_content(
+        let retry = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &session.upload_id,
-            None,
-            BYTES,
-            1_000,
+            &crate::test_support::mutation_context("test-writer", 1_000),
         )
+        .engine()
+        .upload_content(&session.upload_id, BYTES)
         .await
         .expect("a retry of the same bytes finds its own object");
-        let other = upload_content(
+        let other = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &session.upload_id,
-            None,
-            b"other bytes\n",
-            1_000,
+            &crate::test_support::mutation_context("test-writer", 1_000),
         )
+        .engine()
+        .upload_content(&session.upload_id, b"other bytes\n")
         .await
         .expect_err("other bytes conflict with the stored object");
 
@@ -1455,7 +1561,8 @@ mod tests {
             retry.content_ref(),
             Some(&ContentRef::blob_v1(
                 namespace_id.clone(),
-                load_upload_session_state(&store, &namespace_id, &session.upload_id)
+                crate::test_support::namespace_store(&store, &namespace_id)
+                    .load_upload_session_state(&session.upload_id)
                     .await
                     .expect("load session")
                     .session
@@ -1481,33 +1588,33 @@ mod tests {
         );
         let namespace_id = NamespaceId::parse("aborted-buffered-write").expect("namespace id");
         let setup = context(1_000);
-        create(&store, &namespace_id, &setup)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .create()
             .await
             .expect("bootstrap");
-        let session = begin_service_proxied_upload(&store, &namespace_id, None, &setup)
+        let session = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .engine()
+            .begin_upload()
             .await
             .expect("begin upload");
         store.block_next();
-        let (result, ()) = tokio::join!(
-            upload_content(
-                &store,
-                &namespace_id,
-                &session.upload_id,
-                None,
-                BYTES,
-                1_000
-            ),
-            async {
-                store.wait_until_blocked().await;
-                abort(store.inner(), &namespace_id, &session.upload_id, &setup)
-                    .await
-                    .expect("abort during the write");
-                store.release();
-            }
-        );
+        let engine = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 1_000),
+        )
+        .engine();
+        let (result, ()) = tokio::join!(engine.upload_content(&session.upload_id, BYTES), async {
+            store.wait_until_blocked().await;
+            abort(store.inner(), &namespace_id, &session.upload_id, &setup)
+                .await
+                .expect("abort during the write");
+            store.release();
+        });
 
         assert_matches!(result, Err(CoreError::UploadNotFound { .. }));
-        let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
+        let loaded = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_upload_session_state(&session.upload_id)
             .await
             .expect("load session");
         assert_matches!(loaded.outcome, Some(UploadOutcome::Aborted { .. }));
@@ -1523,20 +1630,22 @@ mod tests {
         context: &MutationContext,
     ) -> (NamespaceId, UploadId, ContentRef, String) {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        create(store, &namespace_id, context)
+        crate::test_support::NamespaceFixture::new(store, &namespace_id, context)
+            .create()
             .await
             .expect("bootstrap");
-        let begin = begin_service_proxied_upload(store, &namespace_id, None, context)
+        let begin = crate::test_support::NamespaceFixture::new(store, &namespace_id, context)
+            .engine()
+            .begin_upload()
             .await
             .expect("begin upload");
-        let staged = upload_content(
+        let staged = crate::test_support::NamespaceFixture::new(
             store,
             &namespace_id,
-            &begin.upload_id,
-            None,
-            BYTES,
-            context.now_ms,
+            &crate::test_support::mutation_context("test-writer", context.now_ms),
         )
+        .engine()
+        .upload_content(&begin.upload_id, BYTES)
         .await
         .expect("stage upload");
         let content_key = content_blob(
@@ -1560,15 +1669,17 @@ mod tests {
         upload_id: &UploadId,
         context: &MutationContext,
     ) -> Result<CompletedUpload> {
-        complete_upload(
-            store,
-            namespace_id,
-            upload_id,
-            None,
-            CompleteUploadBody::ServiceProxied {},
-            context,
-        )
-        .await
+        crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+            .engine()
+            .complete_upload(
+                &crate::test_support::namespace_store(store, namespace_id)
+                    .load_catalog_entry()
+                    .await
+                    .expect("load the catalog"),
+                upload_id,
+                CompleteUploadBody::ServiceProxied {},
+            )
+            .await
     }
 
     async fn abort<S: ObjectStore + ?Sized>(
@@ -1577,9 +1688,13 @@ mod tests {
         upload_id: &UploadId,
         context: &MutationContext,
     ) -> Result<UploadSession> {
-        let catalog =
-            crate::namespace::catalog::load_namespace_catalog_entry(store, namespace_id).await?;
-        abort_upload(store, &catalog, upload_id, None, context).await
+        let catalog = crate::test_support::namespace_store(store, namespace_id)
+            .load_catalog_entry()
+            .await?;
+        crate::test_support::NamespaceFixture::new(store, catalog.namespace_id(), context)
+            .engine()
+            .abort_upload(upload_id)
+            .await
     }
 
     #[tokio::test]
@@ -1605,7 +1720,8 @@ mod tests {
             .expect("the outcome under the session is this request's own");
 
         assert_eq!(completed.response.content_ref(), Some(&content_ref));
-        let state = load_upload_session_state(&store, &namespace_id, &upload_id)
+        let state = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_upload_session_state(&upload_id)
             .await
             .expect("session");
         assert_eq!(
@@ -1688,40 +1804,44 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let setup = context(1_000);
-        create(
+        crate::test_support::NamespaceFixture::new(
             &LocalFsStore::new(temp_dir.path()).expect("store"),
             &namespace_id,
             &setup,
         )
+        .create()
         .await
         .expect("bootstrap");
         let store = RecordingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::prefix(upload_session_prefix(&namespace_id)),
         );
-        let catalog =
-            crate::namespace::catalog::load_namespace_catalog_entry(&store, &namespace_id)
-                .await
-                .expect("catalog");
+        let catalog = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_catalog_entry()
+            .await
+            .expect("catalog");
 
-        let proxied = begin_service_proxied_upload(&store, &namespace_id, None, &setup)
+        let proxied = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .engine()
+            .begin_upload()
             .await
             .expect("begin proxied upload");
-        upload_content(
+        crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &proxied.upload_id,
-            None,
-            BYTES,
-            1_000,
+            &crate::test_support::mutation_context("test-writer", 1_000),
         )
+        .engine()
+        .upload_content(&proxied.upload_id, BYTES)
         .await
         .expect("upload proxied bytes");
         complete(&store, &namespace_id, &proxied.upload_id, &setup)
             .await
             .expect("complete proxied upload");
 
-        let direct = begin_direct_put_upload_target(&store, &namespace_id, None, &setup)
+        let direct = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .engine()
+            .begin_direct_put_upload_target()
             .await
             .expect("begin direct put");
         store
@@ -1732,25 +1852,30 @@ mod tests {
             )
             .await
             .expect("write direct-put bytes");
-        complete_upload(
-            &store,
-            &namespace_id,
-            &direct.session.upload_id,
-            None,
-            CompleteUploadBody::DirectPut {
-                content: UploadContentClaim {
-                    size_bytes: BYTES.len() as u64,
-                    checksum: Checksum::crc64nvme(BYTES),
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .engine()
+            .complete_upload(
+                &crate::test_support::namespace_store(&store, &namespace_id)
+                    .load_catalog_entry()
+                    .await
+                    .expect("load the catalog"),
+                &direct.session.upload_id,
+                CompleteUploadBody::DirectPut {
+                    content: UploadContentClaim {
+                        size_bytes: BYTES.len() as u64,
+                        checksum: Checksum::crc64nvme(BYTES),
+                    },
                 },
-            },
-            &setup,
-        )
-        .await
-        .expect("complete direct put");
-
-        let prepared = stage_owned_bytes(&store, &catalog, None, BYTES, &setup)
+            )
             .await
-            .expect("stage owned bytes");
+            .expect("complete direct put");
+
+        let prepared =
+            crate::test_support::NamespaceFixture::new(&store, catalog.namespace_id(), &setup)
+                .engine()
+                .stage_owned_bytes(&catalog, None, BYTES)
+                .await
+                .expect("stage owned bytes");
         let owned = prepared.upload_id().expect("owned staging session").clone();
 
         let mut expected = Vec::new();
@@ -1850,30 +1975,37 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let setup = context(1_000);
-        create(&store, &namespace_id, &setup)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .create()
             .await
             .expect("bootstrap");
-        let begin = begin_direct_put_upload_target(&store, &namespace_id, None, &setup)
+        let begin = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .engine()
+            .begin_direct_put_upload_target()
             .await
             .expect("begin direct put");
 
-        let wrong_algorithm = complete_upload(
-            &store,
-            &namespace_id,
-            &begin.session.upload_id,
-            None,
-            CompleteUploadBody::DirectPut {
-                content: UploadContentClaim {
-                    size_bytes: BYTES.len() as u64,
-                    checksum: Checksum::crc32c(BYTES),
-                },
-            },
-            &context(2_000),
-        )
-        .await
-        .expect_err("a different checksum algorithm is invalid content");
+        let wrong_algorithm =
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(2_000))
+                .engine()
+                .complete_upload(
+                    &crate::test_support::namespace_store(&store, &namespace_id)
+                        .load_catalog_entry()
+                        .await
+                        .expect("load the catalog"),
+                    &begin.session.upload_id,
+                    CompleteUploadBody::DirectPut {
+                        content: UploadContentClaim {
+                            size_bytes: BYTES.len() as u64,
+                            checksum: Checksum::crc32c(BYTES),
+                        },
+                    },
+                )
+                .await
+                .expect_err("a different checksum algorithm is invalid content");
         assert_matches!(wrong_algorithm, CoreError::InvalidUploadContent(_));
-        let open = load_upload_session_state(&store, &namespace_id, &begin.session.upload_id)
+        let open = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_upload_session_state(&begin.session.upload_id)
             .await
             .expect("session remains readable");
         assert_eq!(open.outcome, None);
@@ -1892,26 +2024,32 @@ mod tests {
                 checksum: Checksum::crc64nvme(BYTES),
             },
         };
-        let first = complete_upload(
-            &store,
-            &namespace_id,
-            &begin.session.upload_id,
-            None,
-            completion.clone(),
-            &context(3_000),
-        )
-        .await
-        .expect("complete direct put");
-        let replay = complete_upload(
-            &store,
-            &namespace_id,
-            &begin.session.upload_id,
-            None,
-            completion,
-            &context(3_000),
-        )
-        .await
-        .expect("replay direct-put completion");
+        let first =
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(3_000))
+                .engine()
+                .complete_upload(
+                    &crate::test_support::namespace_store(&store, &namespace_id)
+                        .load_catalog_entry()
+                        .await
+                        .expect("load the catalog"),
+                    &begin.session.upload_id,
+                    completion.clone(),
+                )
+                .await
+                .expect("complete direct put");
+        let replay =
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(3_000))
+                .engine()
+                .complete_upload(
+                    &crate::test_support::namespace_store(&store, &namespace_id)
+                        .load_catalog_entry()
+                        .await
+                        .expect("load the catalog"),
+                    &begin.session.upload_id,
+                    completion,
+                )
+                .await
+                .expect("replay direct-put completion");
         assert_eq!(replay, first);
     }
 
@@ -1920,7 +2058,8 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        create(&store, &namespace_id, &context(1_000))
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+            .create()
             .await
             .expect("bootstrap");
         let content_id = ContentId::generate();
@@ -1971,7 +2110,8 @@ mod tests {
             .expect_err("an aborted session cannot complete");
         assert_matches!(error, CoreError::UploadNotFound { .. });
 
-        let state = load_upload_session_state(&store, &namespace_id, &upload_id)
+        let state = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_upload_session_state(&upload_id)
             .await
             .expect("session still readable");
         assert_eq!(
@@ -1989,10 +2129,13 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let setup = context(1_000);
-        create(&store, &namespace_id, &setup)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .create()
             .await
             .expect("bootstrap");
-        let begin = begin_direct_put_upload_target(&store, &namespace_id, None, &setup)
+        let begin = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .engine()
+            .begin_direct_put_upload_target()
             .await
             .expect("begin direct put");
         let written = vec![b'x'; BYTES.len()];
@@ -2005,23 +2148,27 @@ mod tests {
             .await
             .expect("write direct-put bytes");
 
-        let error = complete_upload(
-            &store,
-            &namespace_id,
-            &begin.session.upload_id,
-            None,
-            CompleteUploadBody::DirectPut {
-                content: UploadContentClaim {
-                    size_bytes: BYTES.len() as u64,
-                    checksum: Checksum::crc64nvme(BYTES),
-                },
-            },
-            &context(2_000),
-        )
-        .await
-        .expect_err("a claim the object does not match cannot complete");
+        let error =
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(2_000))
+                .engine()
+                .complete_upload(
+                    &crate::test_support::namespace_store(&store, &namespace_id)
+                        .load_catalog_entry()
+                        .await
+                        .expect("load the catalog"),
+                    &begin.session.upload_id,
+                    CompleteUploadBody::DirectPut {
+                        content: UploadContentClaim {
+                            size_bytes: BYTES.len() as u64,
+                            checksum: Checksum::crc64nvme(BYTES),
+                        },
+                    },
+                )
+                .await
+                .expect_err("a claim the object does not match cannot complete");
         assert_matches!(error, CoreError::InvalidUploadContent(_));
-        let state = load_upload_session_state(&store, &namespace_id, &begin.session.upload_id)
+        let state = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_upload_session_state(&begin.session.upload_id)
             .await
             .expect("session remains readable");
         assert_eq!(state.outcome, None);
@@ -2031,21 +2178,24 @@ mod tests {
             .expect("head direct-put content")
             .is_some());
 
-        let completed = complete_upload(
-            &store,
-            &namespace_id,
-            &begin.session.upload_id,
-            None,
-            CompleteUploadBody::DirectPut {
-                content: UploadContentClaim {
-                    size_bytes: written.len() as u64,
-                    checksum: Checksum::crc64nvme(&written),
-                },
-            },
-            &context(3_000),
-        )
-        .await
-        .expect("the matching claim completes the session");
+        let completed =
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(3_000))
+                .engine()
+                .complete_upload(
+                    &crate::test_support::namespace_store(&store, &namespace_id)
+                        .load_catalog_entry()
+                        .await
+                        .expect("load the catalog"),
+                    &begin.session.upload_id,
+                    CompleteUploadBody::DirectPut {
+                        content: UploadContentClaim {
+                            size_bytes: written.len() as u64,
+                            checksum: Checksum::crc64nvme(&written),
+                        },
+                    },
+                )
+                .await
+                .expect("the matching claim completes the session");
         assert_eq!(
             completed
                 .response
@@ -2112,25 +2262,32 @@ mod tests {
         complete(&store, &namespace_id, &upload_id, &context(2_000))
             .await
             .expect("complete");
-        let error = upload_content(&store, &namespace_id, &upload_id, None, BYTES, 2_000)
-            .await
-            .expect_err("a completed session takes no more bytes");
+        let error = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 2_000),
+        )
+        .engine()
+        .upload_content(&upload_id, BYTES)
+        .await
+        .expect_err("a completed session takes no more bytes");
         assert_matches!(error, CoreError::UploadAlreadyCompleted { .. });
 
-        let aborted = begin_service_proxied_upload(&store, &namespace_id, None, &setup)
+        let aborted = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .engine()
+            .begin_upload()
             .await
             .expect("begin a second upload");
         abort(&store, &namespace_id, &aborted.upload_id, &context(3_000))
             .await
             .expect("abort");
-        let error = upload_content(
+        let error = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &aborted.upload_id,
-            None,
-            BYTES,
-            3_000,
+            &crate::test_support::mutation_context("test-writer", 3_000),
         )
+        .engine()
+        .upload_content(&aborted.upload_id, BYTES)
         .await
         .expect_err("an aborted session takes no more bytes");
         assert_matches!(error, CoreError::UploadNotFound { .. });
@@ -2142,11 +2299,13 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let setup = context(1_000);
         let (namespace_id, staged_id, _, _) = staged_session(&store, &setup).await;
-        let catalog =
-            crate::namespace::catalog::load_namespace_catalog_entry(&store, &namespace_id)
-                .await
-                .expect("catalog");
-        let proxied_id = begin_service_proxied_upload(&store, &namespace_id, None, &setup)
+        let catalog = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_catalog_entry()
+            .await
+            .expect("catalog");
+        let proxied_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .engine()
+            .begin_upload()
             .await
             .expect("begin proxied upload")
             .upload_id;
@@ -2175,20 +2334,25 @@ mod tests {
             let results = [
                 (
                     "staging",
-                    upload_content(&store, &namespace_id, &proxied_id, None, BYTES, now_ms)
-                        .await
-                        .map(drop),
+                    crate::test_support::NamespaceFixture::new(
+                        &store,
+                        &namespace_id,
+                        &crate::test_support::mutation_context("test-writer", now_ms),
+                    )
+                    .engine()
+                    .upload_content(&proxied_id, BYTES)
+                    .await
+                    .map(drop),
                 ),
                 (
                     "part signing",
-                    direct_multipart_part_targets(
+                    crate::test_support::NamespaceFixture::new(
                         &store,
                         &namespace_id,
-                        &multipart_id,
-                        None,
-                        &part,
-                        now_ms,
+                        &crate::test_support::mutation_context("test-writer", now_ms),
                     )
+                    .engine()
+                    .direct_multipart_part_targets(&multipart_id, &part)
                     .await
                     .map(drop),
                 ),
@@ -2217,9 +2381,15 @@ mod tests {
         let (namespace_id, upload_id, _, _) = staged_session(&store, &setup).await;
         let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS);
 
-        let view = get_upload(&store, &namespace_id, &upload_id, None, expired.now_ms)
-            .await
-            .expect("status of an expired session");
+        let view = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", expired.now_ms),
+        )
+        .engine()
+        .get_upload(&upload_id)
+        .await
+        .expect("status of an expired session");
         assert_matches!(view.session.status, UploadSessionStatus::Open { .. });
         let aborted = abort(&store, &namespace_id, &upload_id, &expired)
             .await
@@ -2244,9 +2414,15 @@ mod tests {
             session: open,
             evidence,
             ..
-        } = get_upload(&store, &namespace_id, &upload_id, None, 1_500)
-            .await
-            .expect("status of an open session");
+        } = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 1_500),
+        )
+        .engine()
+        .get_upload(&upload_id)
+        .await
+        .expect("status of an open session");
         assert_matches!(open.status, UploadSessionStatus::Open { .. });
         assert!(
             evidence.is_none(),
@@ -2260,9 +2436,15 @@ mod tests {
             session: completed,
             evidence,
             ..
-        } = get_upload(&store, &namespace_id, &upload_id, None, 2_500)
-            .await
-            .expect("status of a completed session");
+        } = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 2_500),
+        )
+        .engine()
+        .get_upload(&upload_id)
+        .await
+        .expect("status of a completed session");
         assert_matches!(completed.status, UploadSessionStatus::Completed { .. });
         assert_eq!(
             evidence.expect("a completed session mints").content_ref(),
@@ -2270,7 +2452,9 @@ mod tests {
         );
 
         // A second session, aborted, to check the other terminal state.
-        let begin = begin_service_proxied_upload(&store, &namespace_id, None, &setup)
+        let begin = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .engine()
+            .begin_upload()
             .await
             .expect("begin second upload");
         abort(&store, &namespace_id, &begin.upload_id, &context(3_000))
@@ -2280,9 +2464,15 @@ mod tests {
             session: aborted,
             evidence,
             ..
-        } = get_upload(&store, &namespace_id, &begin.upload_id, None, 3_500)
-            .await
-            .expect("status of an aborted session");
+        } = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 3_500),
+        )
+        .engine()
+        .get_upload(&begin.upload_id)
+        .await
+        .expect("status of an aborted session");
         assert_matches!(aborted.status, UploadSessionStatus::Aborted { .. });
         assert!(
             evidence.is_none(),
@@ -2309,9 +2499,15 @@ mod tests {
             session: _,
             evidence,
             ..
-        } = get_upload(&store, &namespace_id, &upload_id, None, much_later)
-            .await
-            .expect("status inside the receipt window");
+        } = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", much_later),
+        )
+        .engine()
+        .get_upload(&upload_id)
+        .await
+        .expect("status inside the receipt window");
         assert_eq!(evidence.expect("still minting").content_ref(), &content_ref);
 
         let past = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;
@@ -2319,9 +2515,15 @@ mod tests {
             session: status,
             evidence,
             ..
-        } = get_upload(&store, &namespace_id, &upload_id, None, past)
-            .await
-            .expect("status past the receipt window");
+        } = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", past),
+        )
+        .engine()
+        .get_upload(&upload_id)
+        .await
+        .expect("status past the receipt window");
         let completed = match status.status {
             UploadSessionStatus::Completed {
                 content_ref,
@@ -2345,17 +2547,11 @@ mod tests {
         assert!(replay.evidence.is_none());
     }
     async fn delete_upload_namespace<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
-        crate::commit_engine::delete_namespace(
-            store,
-            namespace_id,
-            Default::default(),
-            &context(3_000),
-            crate::manifest::MetadataRunPolicy::default(),
-            std::sync::Arc::new(crate::test_support::content_writes()),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("delete namespace");
+        crate::test_support::NamespaceFixture::new(store, namespace_id, &context(3_000))
+            .engine()
+            .delete_namespace(Default::default())
+            .await
+            .expect("delete namespace");
     }
 
     #[tokio::test]
@@ -2363,10 +2559,10 @@ mod tests {
         let directory = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(directory.path()).expect("store");
         let (namespace_id, _, _, _) = staged_session(&inner, &context(1_000)).await;
-        let catalog =
-            crate::namespace::catalog::load_namespace_catalog_entry(&inner, &namespace_id)
-                .await
-                .expect("catalog");
+        let catalog = crate::test_support::namespace_store(&inner, &namespace_id)
+            .load_catalog_entry()
+            .await
+            .expect("catalog");
         let upload_id = create_upload_session(
             &inner,
             &catalog,
@@ -2384,16 +2580,18 @@ mod tests {
         .upload_id;
         delete_upload_namespace(&inner, &namespace_id).await;
         let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
-        let error = direct_multipart_part_targets(
+        let error = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 4_000),
+        )
+        .engine()
+        .direct_multipart_part_targets(
             &upload_id,
-            None,
             &[UploadPartChecksumClaim {
                 part_number: 1,
                 checksum: Checksum::crc64nvme(BYTES),
             }],
-            4_000,
         )
         .await
         .expect_err("deleted namespace");
@@ -2409,9 +2607,15 @@ mod tests {
         let (namespace_id, upload_id, _, _) = staged_session(&inner, &context(1_000)).await;
         delete_upload_namespace(&inner, &namespace_id).await;
         let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
-        let error = upload_content(&store, &namespace_id, &upload_id, None, BYTES, 4_000)
-            .await
-            .expect_err("deleted namespace");
+        let error = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 4_000),
+        )
+        .engine()
+        .upload_content(&upload_id, BYTES)
+        .await
+        .expect_err("deleted namespace");
         assert_matches!(error, CoreError::NamespaceDeleted { .. });
         assert_eq!(store.counts().puts, 0);
         assert_eq!(store.counts().deletes, 0);
@@ -2442,9 +2646,15 @@ mod tests {
             .expect("complete");
         delete_upload_namespace(&inner, &namespace_id).await;
         let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
-        let error = get_upload(&store, &namespace_id, &upload_id, None, 4_000)
-            .await
-            .expect_err("deleted namespace");
+        let error = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 4_000),
+        )
+        .engine()
+        .get_upload(&upload_id)
+        .await
+        .expect_err("deleted namespace");
         assert_matches!(error, CoreError::NamespaceDeleted { .. });
         assert_eq!(store.counts().puts, 0);
         assert_eq!(store.counts().deletes, 0);

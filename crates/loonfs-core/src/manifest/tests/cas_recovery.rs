@@ -14,10 +14,12 @@ async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    create(&store, &namespace_id, &test_context())
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+        .create()
         .await
         .expect("create");
-    let current = load_current_manifest(&store, &namespace_id)
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current");
     let mut payload = current.state.envelope.payload().clone();
@@ -68,10 +70,12 @@ async fn a_manifest_put_that_lands_nowhere_and_loses_its_answer_has_an_unknown_o
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
-    create(&store, &namespace_id, &test_context())
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+        .create()
         .await
         .expect("create");
-    let current = load_current_manifest(&store, &namespace_id)
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current");
     let mut payload = current.state.envelope.payload().clone();
@@ -118,10 +122,12 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                 LocalFsStore::new(directory.path()).expect("store"),
                 KeyPredicate::any(),
             );
-            create(&store, &source, &test_context())
+            crate::test_support::NamespaceFixture::new(&store, &source, &test_context())
+                .create()
                 .await
                 .expect("create");
-            let current = load_current_manifest(&store, &source)
+            let current = crate::test_support::namespace_store(&store, &source)
+                .load_current_manifest()
                 .await
                 .expect("current");
             let mut payload = current.state.envelope.payload().clone();
@@ -154,7 +160,8 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             // A fork's first manifest is created, and any other manifest
             // is published over its predecessor.
             let outcome = if fork {
-                super::super::publish::create_manifest(&store, payload, &deadline)
+                crate::test_support::namespace_store(&store, &payload.namespace_id)
+                    .create_manifest(payload, &deadline)
                     .await
                     .map(|()| None)
             } else {
@@ -206,7 +213,8 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
         bootstrap_namespace(&store, &namespace_id, &test_context())
             .await
             .expect("bootstrap");
-        let current = load_current_manifest(&store, &namespace_id)
+        let current = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("current");
         let mut payload = current.state.envelope.payload().clone();
@@ -253,13 +261,16 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             KeyPredicate::manifest(&namespace_id),
         ));
         let context = test_context();
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
-        crate::namespace::writer_epoch::acquire_writer_epoch(&store, &namespace_id, &context)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .acquire_writer_epoch(&context)
             .await
             .expect("acquire");
-        let current = load_current_manifest(&store, &namespace_id)
+        let current = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("current");
         let predecessor = current.state.manifest().manifest_no;
@@ -276,13 +287,11 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                 ),
             ));
             let mut engine = crate::commit_engine::NamespaceCommitEngine::new(
-                namespace_id.clone(),
-                std::sync::Arc::new(crate::test_support::content_writes()),
+                crate::test_support::namespace_store(&store, &namespace_id),
             )
             .writer_session(session);
             engine
                 .publish_batch(
-                    &store,
                     vec![crate::commit_engine::CommitCandidate::new(
                         crate::path::write::CommitIntent {
                             commit_id: loonfs_types::CommitId::generate(),
@@ -393,7 +402,8 @@ async fn discover_from_hint(
         .await
         .expect("rewind hint");
     store.reset();
-    let current = load_current_manifest(store, namespace_id)
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("discover");
     (
@@ -416,13 +426,20 @@ async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_abs
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    create(&store, &namespace_id, &test_context())
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+        .create()
         .await
         .expect("bootstrap");
     for _ in 2..=11 {
-        crate::manifest::claim_compactor(&store, &namespace_id, crate::test_support::std_timer())
-            .await
-            .expect("publish a claim");
+        crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        )
+        .engine()
+        .claim_compactor()
+        .await
+        .expect("publish a claim");
     }
     let window = u64::try_from(crate::limits::MANIFEST_PROBE_WINDOW).expect("a small window");
     let hint = hint(&namespace_id);
@@ -465,24 +482,23 @@ async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_abs
         );
     }
 
-    let ((), tombstone, _) = crate::manifest::publish::update_manifest(
-        &store,
-        &namespace_id,
-        None,
-        &Deadline::start(crate::test_support::std_timer()),
-        crate::limits::MAX_CONTENTION_ATTEMPTS,
-        |current: crate::namespace::control::LoadedManifest| async move {
-            let mut payload = current.state.envelope.payload().clone();
-            payload.status =
-                loonfs_types::format::control::NamespaceStatus::Deleted { deleted_at_ms: 1 };
-            Ok(crate::manifest::publish::ManifestChange::Next(
-                Box::new(payload),
-                (),
-            ))
-        },
-    )
-    .await
-    .expect("publish a tombstone");
+    let ((), tombstone, _) = crate::test_support::namespace_store(&store, &namespace_id)
+        .update_manifest(
+            None,
+            &Deadline::start(crate::test_support::std_timer()),
+            crate::limits::MAX_CONTENTION_ATTEMPTS,
+            |current: crate::namespace::control::LoadedManifest| async move {
+                let mut payload = current.state.envelope.payload().clone();
+                payload.status =
+                    loonfs_types::format::control::NamespaceStatus::Deleted { deleted_at_ms: 1 };
+                Ok(crate::manifest::publish::ManifestChange::Next(
+                    Box::new(payload),
+                    (),
+                ))
+            },
+        )
+        .await
+        .expect("publish a tombstone");
     assert_eq!(tombstone.state.manifest().manifest_no, ManifestNo(12));
     let mut expected = vec![("get", hint.clone()), get(8)];
     expected.extend(heads(9, 9 + window));
@@ -495,7 +511,8 @@ async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_abs
 
     store.delete(&hint).await.expect("delete hint");
     store.reset();
-    let error = load_current_metadata_view(&store, &namespace_id)
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_metadata_view()
         .await
         .err()
         .expect("missing hint");
@@ -512,25 +529,33 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         KeyPredicate::any(),
     );
     let context = test_context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/file", b"data", None)
         .await
         .expect("write");
-    fold::fold_wal(&store, &namespace_id).await.expect("fold");
-    let before = load_current_manifest(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
+    let before = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current");
     store.reset();
-    let advanced = advance_retention_floor(
+    let advanced = crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance")
     .response;
@@ -538,7 +563,8 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     // runtime to raise.
     assert_eq!(store.counts().create_if_absent_puts, 1);
     assert_eq!(store.counts().compare_and_swaps, 0);
-    let after = load_current_manifest(&store, &namespace_id)
+    let after = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current");
     let mut expected = before.state.envelope.payload().clone();
@@ -546,23 +572,22 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     expected.retention_floor_seq = expected.head_seq;
     assert_eq!(after.state.envelope.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, expected.head_seq);
-    let anchor = crate::namespace::read_anchor::load_read_anchor(
-        &store,
-        &namespace_id,
-        crate::test_support::observed_now(),
-    )
-    .await
-    .expect("writer floor");
+    let anchor = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
+        .await
+        .expect("writer floor");
     assert_eq!(anchor.retention_floor_seq(), expected.head_seq);
     store.reset();
-    advance_retention_floor(
+    crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("already advanced");
     assert_eq!(store.counts().puts, 0);
@@ -574,10 +599,12 @@ async fn manifest_publication_recovers_an_ambiguous_put() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let context = test_context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    let current = load_current_manifest(&store, &namespace_id)
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current");
     let mut payload = current.state.envelope.payload().clone();
@@ -597,7 +624,8 @@ async fn manifest_publication_recovers_an_ambiguous_put() {
     // the read-back counts as the current manifest.
     assert_matches!(outcome, ManifestPublicationOutcome::CoveredByCurrent(_));
     assert_eq!(
-        load_current_manifest(&store, &namespace_id)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("discover")
             .state
@@ -615,36 +643,38 @@ async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::hint(&namespace_id),
     );
-    create(&store, &namespace_id, &test_context())
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+        .create()
         .await
         .expect("bootstrap");
-    let before = crate::namespace::control::load_hint(&store, &namespace_id)
+    let before = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_hint()
         .await
         .expect("stored hint");
     store.reset();
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-    let ((), published, hint) = crate::manifest::publish::update_manifest(
-        &store,
-        &namespace_id,
-        None,
-        &deadline,
-        crate::limits::MAX_CONTENTION_ATTEMPTS,
-        |current: crate::namespace::control::LoadedManifest| async move {
-            Ok(crate::manifest::publish::ManifestChange::Next(
-                Box::new(current.state.envelope.payload().clone()),
-                (),
-            ))
-        },
-    )
-    .await
-    .expect("publish");
+    let ((), published, hint) = crate::test_support::namespace_store(&store, &namespace_id)
+        .update_manifest(
+            None,
+            &deadline,
+            crate::limits::MAX_CONTENTION_ATTEMPTS,
+            |current: crate::namespace::control::LoadedManifest| async move {
+                Ok(crate::manifest::publish::ManifestChange::Next(
+                    Box::new(current.state.envelope.payload().clone()),
+                    (),
+                ))
+            },
+        )
+        .await
+        .expect("publish");
     assert_eq!(published.state.manifest().manifest_no, ManifestNo(2));
     assert_eq!(hint.as_ref(), Some(&before));
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(
         hint,
         Some(
-            crate::namespace::control::load_hint(&store, &namespace_id)
+            crate::test_support::namespace_store(&store, &namespace_id)
+                .load_hint()
                 .await
                 .expect("stored hint")
         )
@@ -653,43 +683,43 @@ async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
 
 #[tokio::test]
 async fn a_manifest_update_stops_after_the_contention_limit() {
-    use crate::manifest::publish::{update_manifest, ManifestChange};
+    use crate::manifest::publish::ManifestChange;
 
     for rival_publishes in [false, true] {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
         let store = LocalFsStore::new(directory.path()).expect("store");
-        create(&store, &namespace_id, &test_context())
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+            .create()
             .await
             .expect("bootstrap");
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let mut attempts = 0;
-        let result = update_manifest(
-            &store,
-            &namespace_id,
-            None,
-            &deadline,
-            crate::limits::MAX_CONTENTION_ATTEMPTS,
-            |current: crate::namespace::control::LoadedManifest| {
-                attempts += 1;
-                let store = &store;
-                let payload = current.state.envelope.payload().clone();
-                async move {
-                    if !rival_publishes {
-                        return Ok(ManifestChange::Again);
+        let result = crate::test_support::namespace_store(&store, &namespace_id)
+            .update_manifest(
+                None,
+                &deadline,
+                crate::limits::MAX_CONTENTION_ATTEMPTS,
+                |current: crate::namespace::control::LoadedManifest| {
+                    attempts += 1;
+                    let store = &store;
+                    let payload = current.state.envelope.payload().clone();
+                    async move {
+                        if !rival_publishes {
+                            return Ok(ManifestChange::Again);
+                        }
+                        let mut rival = payload.clone();
+                        rival.manifest_no = rival.manifest_no.successor().expect("next number");
+                        let key = metadata_manifest_object(&rival.namespace_id, &rival.manifest_no);
+                        store
+                            .put_if_absent(&key, Bytes::from(encode_manifest(rival).into_bytes()))
+                            .await
+                            .expect("rival manifest");
+                        Ok(ManifestChange::Next(Box::new(payload), ()))
                     }
-                    let mut rival = payload.clone();
-                    rival.manifest_no = rival.manifest_no.successor().expect("next number");
-                    let key = metadata_manifest_object(&rival.namespace_id, &rival.manifest_no);
-                    store
-                        .put_if_absent(&key, Bytes::from(encode_manifest(rival).into_bytes()))
-                        .await
-                        .expect("rival manifest");
-                    Ok(ManifestChange::Next(Box::new(payload), ()))
-                }
-            },
-        )
-        .await;
+                },
+            )
+            .await;
         let Err(CoreError::StoreContention { object_key }) = result else {
             panic!("expected StoreContention, got {:?}", result.map(|_| ()));
         };
@@ -713,20 +743,26 @@ async fn a_fold_whose_manifest_put_lands_without_an_answer_reports_published() {
     )
     .apply_then_fail();
     let context = test_context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/file", b"data", None)
         .await
         .expect("write");
-    let predecessor = load_current_manifest(&store, &namespace_id)
+    let predecessor = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current")
         .state
         .manifest()
         .manifest_no;
     store.fail_next(1);
-    let folded = fold::fold_wal(&store, &namespace_id).await.expect("fold");
+    let folded = crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     assert_eq!(store.remaining(), 0);
     assert_eq!(folded.outcome, crate::FoldWalOutcome::Published);
     assert_eq!(
@@ -741,10 +777,12 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let context = test_context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/file", b"data", None)
         .await
         .expect("write");
     let blocked = BlockingStore::new(
@@ -763,16 +801,19 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
     let (losing, winning) = futures::join!(losing, winning);
     let losing = losing.expect("losing publication still pins the winner");
     let winning = winning.expect("winner");
-    let losing = load_pin(&store, &namespace_id, &losing.checkpoint_id)
+    let losing = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&losing.checkpoint_id)
         .await
         .expect("record")
         .expect("present");
-    let winning = load_pin(&store, &namespace_id, &winning.checkpoint_id)
+    let winning = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&winning.checkpoint_id)
         .await
         .expect("record")
         .expect("present");
     assert_eq!(losing.state.manifest(), winning.state.manifest());
-    let statistics = crate::control::load_namespace_statistics(&store, &namespace_id)
+    let statistics = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_statistics()
         .await
         .expect("statistics");
     assert_eq!(
@@ -864,7 +905,8 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    create(&inner, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     let stale_head = inner
@@ -873,27 +915,23 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .expect("read bootstrap head")
         .expect("bootstrap head exists");
 
-    write_file_bytes(
-        &inner,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     create_checkpoint(&inner, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    advance_retention_floor(
+    crate::test_support::NamespaceFixture::new(
         &inner,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance retention");
 
@@ -902,13 +940,10 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         key: hint(&namespace_id),
         stale: std::sync::Mutex::new(Some(stale_head.clone())),
     };
-    let namespace = crate::namespace::status::load_namespace(
-        &status_store,
-        &namespace_id,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("status reloads the stale head");
+    let namespace = crate::test_support::namespace_store(&status_store, &namespace_id)
+        .load_metadata()
+        .await
+        .expect("status reloads the stale head");
     assert_eq!(namespace.head_seq, ChangeSeq(1));
     assert_eq!(namespace.retention_floor_seq, ChangeSeq(1));
 
@@ -917,7 +952,9 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         key: hint(&namespace_id),
         stale: std::sync::Mutex::new(Some(stale_head)),
     };
-    let view = load_current_metadata_view(&feed_store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&feed_store, &namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("load feed view");
     let changes = list_changes_after(
@@ -946,21 +983,25 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
     )
     .apply_then_fail();
     store.fail_next(1);
-    create(&store, &namespace_id, &test_context())
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+        .create()
         .await
         .expect("create");
     // The claim landed, but a rival could have written the same bytes, so the
     // claimant reads it as the rival's and takes the next epoch.
-    let epoch = super::super::compactor::claim_compactor(
+    let epoch = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context("test-writer", 0),
     )
+    .engine()
+    .claim_compactor()
     .await
     .expect("claim")
     .response;
     assert_eq!(epoch, loonfs_types::CompactorEpoch(2));
-    let current = load_current_manifest(&store, &namespace_id)
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest");
     assert_eq!(current.state.envelope.payload().manifest_no, ManifestNo(3));

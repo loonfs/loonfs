@@ -325,7 +325,8 @@ async fn current_manifest_payload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> NamespaceManifestPayload {
-    let root = loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
+    let root = loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("read the metadata root");
     let key = metadata_manifest_object(namespace_id, &root.state.manifest().manifest_no);
@@ -818,30 +819,26 @@ impl Interceptor for RivalFold {
                 .is_ok()
         {
             self.races_run.fetch_add(1, SeqCst);
-            loonfs_core::test_support::append_wal_objects(
+            loonfs_core::test_support::NamespaceFixture::new(
                 &self.rival,
                 &self.namespace_id,
-                1,
                 &loonfs_core::MutationContext {
                     writer_id: loonfs_test_support::ids::writer_id("rival"),
                     now_ms: 1_000,
                 },
             )
+            .append_wal_objects(1)
             .await
             .expect("the rival writes");
-            loonfs_core::fold_wal_tail(
-                &self.rival,
-                None,
-                &self.namespace_id,
-                None,
-                &loonfs_core::time::Deadline::start(Arc::new(
-                    loonfs_types::StdMonotonicTimer::default(),
-                )),
-                loonfs_core::MetadataRunPolicy::default(),
-                &loonfs_core::test_support::content_writes(),
-            )
-            .await
-            .expect("the rival folds");
+            loonfs_core::test_support::namespace_store(&self.rival, &self.namespace_id)
+                .fold_wal_tail(
+                    None,
+                    &loonfs_core::time::Deadline::start(Arc::new(
+                        loonfs_types::StdMonotonicTimer::default(),
+                    )),
+                )
+                .await
+                .expect("the rival folds");
         }
         (Intercept::Continue, ())
     }
@@ -1090,7 +1087,9 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     // of the same hint, so the test raises each hint to its current manifest
     // before the collection below and before it counts requests.
     for namespace in [&idle, &claimed, &retired] {
-        loonfs_core::test_support::raise_hint_to_current_manifest(store.as_ref(), namespace).await;
+        loonfs_core::test_support::namespace_store(store.as_ref(), namespace)
+            .raise_hint_to_current_manifest()
+            .await;
     }
     for namespace in [&idle, &claimed, &retired] {
         maintenance
@@ -1347,16 +1346,11 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
         writer_id: loonfs_types::WriterId::parse("deleter").expect("writer id"),
         now_ms: 1_000,
     };
-    loonfs_core::publish::NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    )
-    .delete_namespace(
+    loonfs_core::publish::NamespaceCommitEngine::new(loonfs_core::test_support::namespace_store(
         store.as_ref(),
-        Default::default(),
-        &context,
-        loonfs_core::MetadataRunPolicy::default(),
-    )
+        &namespace_id,
+    ))
+    .delete_namespace(Default::default(), &context)
     .await
     .expect("delete");
     context.now_ms += crate::GcOptions::default()
@@ -1364,17 +1358,10 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
         .max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
         + GC_SAFETY_MARGIN_MS;
     store.reset();
-    let first = loonfs_core::gc_namespace(
-        store.as_ref(),
-        None,
-        None,
-        &namespace_id,
-        &crate::GcOptions::default(),
-        &context,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("first pass");
+    let first = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .gc(None, &crate::GcOptions::default(), &context)
+        .await
+        .expect("first pass");
     assert_eq!(first.deleted.retired_content_objects, 3);
     assert_eq!(
         store.counts(),
@@ -1385,17 +1372,10 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
         }
     );
     store.reset();
-    let repeated = loonfs_core::gc_namespace(
-        store.as_ref(),
-        None,
-        None,
-        &namespace_id,
-        &crate::GcOptions::default(),
-        &context,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("repeat pass");
+    let repeated = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .gc(None, &crate::GcOptions::default(), &context)
+        .await
+        .expect("repeat pass");
     assert_eq!(
         repeated.deleted,
         loonfs_types::DeletedObjectCounts::default()

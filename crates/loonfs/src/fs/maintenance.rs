@@ -113,10 +113,7 @@ impl Maintenance {
         let engine = self.core.writer_engine(&self.actor, namespace_id);
         #[cfg(test)]
         let engine = match self.compaction_row_budget {
-            Some(rows) => engine.with_metadata_run_policy(loonfs_core::MetadataRunPolicy {
-                max_decoded_input_rows_per_step: rows,
-                ..self.core.inner.config.metadata_run_policy
-            }),
+            Some(rows) => engine.narrow_compaction_input_rows(rows),
             None => engine,
         };
         #[cfg(test)]
@@ -143,12 +140,11 @@ impl Maintenance {
     pub async fn diagnostics(&self, namespace_id: &NamespaceId) -> Result<NamespaceDiagnostics> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        let diagnostics = loonfs_core::cache::load_namespace_diagnostics(
-            self.core.store(),
-            namespace_id,
-            Arc::clone(&self.core.inner.timer),
-        )
-        .await?;
+        let diagnostics = self
+            .core
+            .namespace_store(namespace_id)
+            .load_diagnostics()
+            .await?;
         let live_snapshots = self.count_live_snapshots(namespace_id).await?;
         Ok(Self::namespace_diagnostics(diagnostics, live_snapshots))
     }
@@ -199,10 +195,11 @@ impl Maintenance {
 
     async fn load_live_anchor(&self, namespace_id: &NamespaceId) -> Result<NamespaceReadAnchor> {
         let observed = loonfs_core::time::Observation::now(Arc::clone(&self.core.inner.timer));
-        Ok(
-            loonfs_core::control::load_live_read_anchor(self.core.store(), namespace_id, observed)
-                .await?,
-        )
+        Ok(self
+            .core
+            .namespace_store(namespace_id)
+            .load_live_read_anchor(observed)
+            .await?)
     }
 
     /// Loads the current manifest of a namespace that isn't deleted, without
@@ -210,10 +207,12 @@ impl Maintenance {
     /// publish from.
     async fn load_live_basis(&self, namespace_id: &NamespaceId) -> Result<PublicationBasis> {
         let checked = loonfs_core::time::Observation::now(Arc::clone(&self.core.inner.timer));
-        let manifest =
-            loonfs_core::control::load_namespace_current_manifest(self.core.store(), namespace_id)
-                .await
-                .map_err(CoreError::from)?;
+        let manifest = self
+            .core
+            .namespace_store(namespace_id)
+            .load_current_manifest()
+            .await
+            .map_err(CoreError::from)?;
         if manifest.state.envelope.payload().status.is_deleted() {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
@@ -234,12 +233,10 @@ impl Maintenance {
             return Ok(None);
         };
         let segment_cache = self.core.metadata_segment_cache();
-        Ok(loonfs_core::control::load_position_basis(
-            self.core.store(),
-            Some(segment_cache.as_ref()),
-            position,
+        Ok(
+            loonfs_core::control::load_position_basis(self.core.store(), &segment_cache, position)
+                .await?,
         )
-        .await?)
     }
 
     /// Runs [`Self::maintain_metadata_with_options`] with the default
@@ -845,18 +842,16 @@ impl Maintenance {
         options: &crate::GcOptions,
     ) -> Result<crate::GcResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let segment_cache = self.core.metadata_segment_cache();
-        let report = loonfs_core::gc_namespace(
-            self.core.store(),
-            Some(segment_cache.as_ref()),
-            Some(&self.core.inner.completed_upload_sessions),
-            namespace_id,
-            options,
-            &self.core.mutation_context(&self.actor),
-            Arc::clone(&self.core.inner.timer),
-        )
-        .await
-        .map_err(Error::Core)?;
+        let report = self
+            .core
+            .namespace_store(namespace_id)
+            .gc(
+                Some(&self.core.inner.completed_upload_sessions),
+                options,
+                &self.core.mutation_context(&self.actor),
+            )
+            .await
+            .map_err(Error::Core)?;
         // A caller may drop the response, so its counts survive only when
         // this shared pass records them here.
         self.core.instruments().gc_pass(&report);

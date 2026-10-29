@@ -1,8 +1,8 @@
 //! Listing the namespaces a store holds, including deleted ones.
 
-use crate::common::commit_split_support::{bootstrap_namespace, mutation_context};
-use crate::common::namespace_engine;
+use crate::common::{mutation_context, namespace_engine};
 use bytes::Bytes;
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_objectstore::layout::{list_namespace_ids, NamespacePageCursor};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -16,7 +16,8 @@ async fn namespace_listing_returns_every_namespace_id_and_skips_other_children()
     let context = mutation_context();
     let namespace_ids = ["alpha", "beta", "gamma"].map(namespace_id);
     for namespace_id in &namespace_ids {
-        bootstrap_namespace(&store, namespace_id, &context)
+        NamespaceFixture::new(&store, namespace_id, &context)
+            .create()
             .await
             .expect("create namespace");
     }
@@ -28,17 +29,10 @@ async fn namespace_listing_returns_every_namespace_id_and_skips_other_children()
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
     for _ in 0..2 {
-        loonfs_core::gc_namespace(
-            &store,
-            None,
-            None,
-            deleted,
-            &loonfs_core::GcOptions::default(),
-            &aged,
-            loonfs_core::test_support::std_timer(),
-        )
-        .await
-        .expect("collect the deleted namespace");
+        namespace_store(&store, deleted)
+            .gc(None, &loonfs_core::GcOptions::default(), &aged)
+            .await
+            .expect("collect the deleted namespace");
     }
     for stray in ["namespaces/Not-An-Id/hint.json", "namespaces/stray-object"] {
         store

@@ -44,17 +44,10 @@ async fn collect(
     now_ms: u64,
 ) -> (GcResponse, BTreeMap<String, usize>) {
     store.reset();
-    let report = gc_namespace(
-        store,
-        None,
-        Some(cache),
-        namespace_id,
-        &options(),
-        &context(now_ms),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("gc pass");
+    let report = crate::test_support::namespace_store(store, namespace_id)
+        .gc(Some(cache), &options(), &context(now_ms))
+        .await
+        .expect("gc pass");
     let mut reads = BTreeMap::new();
     for key in store.take_get_keys() {
         *reads.entry(key).or_default() += 1;
@@ -70,7 +63,8 @@ async fn a_second_pass_reads_no_completed_session_record() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = session_recording_store(temp_dir.path(), &namespace_id);
     let completed = context(1_000);
-    create(store.inner(), &namespace_id, &completed)
+    crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &completed)
+        .create()
         .await
         .expect("bootstrap");
     let upload_ids = completed_sessions(&store, &namespace_id, 20, &completed).await;
@@ -103,7 +97,8 @@ async fn a_pass_reads_only_the_sessions_that_the_cache_dropped() {
     let store = session_recording_store(temp_dir.path(), &namespace_id);
     let early = context(1_000);
     let late = context(early.now_ms + GRACE_MS);
-    create(store.inner(), &namespace_id, &early)
+    crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &early)
+        .create()
         .await
         .expect("bootstrap");
     let mut upload_ids = completed_sessions(&store, &namespace_id, 20, &early).await;
@@ -165,7 +160,8 @@ async fn open_and_aborted_session_records_are_read_on_every_pass() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = session_recording_store(temp_dir.path(), &namespace_id);
     let setup = context(1_000);
-    create(store.inner(), &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let expires_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS;
@@ -212,7 +208,8 @@ async fn a_session_the_sweep_deletes_leaves_the_cache() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = session_recording_store(temp_dir.path(), &namespace_id);
     let completed = context(1_000);
-    create(store.inner(), &namespace_id, &completed)
+    crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &completed)
+        .create()
         .await
         .expect("bootstrap");
     let upload_ids = completed_sessions(&store, &namespace_id, 3, &completed).await;

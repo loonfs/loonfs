@@ -14,7 +14,6 @@
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 use loonfs::{LoonFs, MaintainMetadataOptions, NamespaceId, StoreConfig, Writable};
-use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -54,15 +53,15 @@ async fn writer(root: &Path) -> LoonFs<Writable> {
 
 async fn fill_wal_tail_past_threshold(root: &Path, namespace_id: &NamespaceId) {
     let store = LocalFsStore::new(root).expect("open tail store");
-    append_wal_objects(
+    loonfs_core::test_support::NamespaceFixture::new(
         &store,
         namespace_id,
-        u64::from(writes_past_wal_tail_threshold()),
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("tracing-tail-writer").expect("writer id"),
             now_ms: 1_000,
         },
     )
+    .append_wal_objects(u64::from(writes_past_wal_tail_threshold()))
     .await
     .expect("fill WAL tail past threshold");
 }

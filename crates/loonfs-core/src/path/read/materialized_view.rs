@@ -17,9 +17,8 @@ use crate::metadata::{
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 use crate::namespace::basis::MetadataBasis;
-#[cfg(test)]
-use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
+use crate::namespace::store::NamespaceStore;
 use crate::object_cache::ObjectCache;
 use crate::path::mutation_path::parse_absolute_path_for_core;
 use crate::storage::content::ContentLocation;
@@ -94,35 +93,34 @@ struct ReadAnchor {
 /// cursor.
 const MAX_TRASH_ROWS_SCANNED_PER_PAGE: usize = 256;
 
-pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    namespace_id: &NamespaceId,
-    context: ReadLoadContext<'_, 'a>,
-) -> Result<LoadedMetadataView<'a, S>> {
-    crate::namespace::control::ensure_namespace_live(context.head)?;
-    load_metadata_view_for_authorization(store, namespace_id, context).await
-}
+impl<S: ObjectStore> NamespaceStore<S> {
+    pub(crate) async fn load_metadata_view<'a>(
+        &'a self,
+        context: ReadLoadContext<'_, 'a>,
+    ) -> Result<LoadedMetadataView<'a, S>> {
+        crate::namespace::control::ensure_namespace_live(context.head)?;
+        self.load_metadata_view_for_authorization(context).await
+    }
 
-/// Loads access rows from a deleted head when deletion does not decide authorization.
-pub(crate) async fn load_metadata_view_for_authorization<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    namespace_id: &NamespaceId,
-    context: ReadLoadContext<'_, 'a>,
-) -> Result<LoadedMetadataView<'a, S>> {
-    LoadedMetadataView::load_at_head(store, namespace_id, context).await
-}
+    /// Loads access rows from a deleted head when deletion does not decide authorization.
+    pub(crate) async fn load_metadata_view_for_authorization<'a>(
+        &'a self,
+        context: ReadLoadContext<'_, 'a>,
+    ) -> Result<LoadedMetadataView<'a, S>> {
+        LoadedMetadataView::load_at_head(&self.store, &self.namespace_id, context).await
+    }
 
-#[cfg(test)]
-pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    namespace_id: &NamespaceId,
-) -> Result<LoadedMetadataView<'a, S>> {
-    let loaded = load_read_anchor(store, namespace_id, crate::test_support::observed_now())
-        .await
-        .map_err(MetadataProjectionLoadError::LoadHead)?;
-    let basis = loaded.basis();
-    let context = ReadLoadContext::pinned_head(&loaded.read_state, &basis, None, None, None, None);
-    load_metadata_view(store, namespace_id, context).await
+    #[cfg(test)]
+    pub(crate) async fn load_current_metadata_view(&self) -> Result<LoadedMetadataView<'_, S>> {
+        let loaded = self
+            .load_read_anchor(crate::test_support::observed_now())
+            .await
+            .map_err(MetadataProjectionLoadError::LoadHead)?;
+        let basis = loaded.basis();
+        let context =
+            ReadLoadContext::pinned_head(&loaded.read_state, &basis, None, None, None, None);
+        self.load_metadata_view(context).await
+    }
 }
 
 /// File bytes plus the metadata entry they came from.
@@ -1416,11 +1414,9 @@ fn validate_file_revisions_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
+    use crate::commit_engine::CommitCandidate;
     use crate::context::MutationContext;
-    use crate::namespace::control::load_namespace_read_state;
     use crate::path::write::{CommitIntent, FilesystemOperation};
-    use crate::test_support::ops::create;
     use bytes::Bytes;
     use futures::poll;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -1445,7 +1441,8 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let context = context();
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
 
@@ -1485,24 +1482,18 @@ mod tests {
                 },
             ),
         ] {
-            publish_namespace_commits_batch(
-                &store,
-                &namespace_id,
-                vec![CommitCandidate::new(CommitIntent::single(
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                .publish_candidates(vec![CommitCandidate::new(CommitIntent::single(
                     CommitId::parse(commit_id).expect("commit id"),
                     loonfs_test_support::test_actor(),
                     None,
                     operation,
-                ))],
-                &context,
-                std::sync::Arc::new(crate::test_support::content_writes()),
-                crate::test_support::std_timer(),
-            )
-            .await
-            .into_iter()
-            .next()
-            .expect("one result")
-            .expect("commit lands");
+                ))])
+                .await
+                .into_iter()
+                .next()
+                .expect("one result")
+                .expect("commit lands");
         }
         (temp_dir, store, namespace_id)
     }
@@ -1512,10 +1503,10 @@ mod tests {
     #[tokio::test]
     async fn a_tail_that_replays_to_another_head_is_refused_by_reads_and_publishes_alike() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let head =
-            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
-                .await
-                .expect("state");
+        let head = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_read_state()
+            .await
+            .expect("state");
         let key = loonfs_objectstore::keys::wal_object(&namespace_id, &head.wal_no);
         let bytes = store.get(&key, None).await.expect("WAL").expect("exists");
         let mut payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
@@ -1529,33 +1520,29 @@ mod tests {
             .await
             .expect("corrupt allocation");
 
-        let read = load_current_metadata_view(&store, &namespace_id)
+        let read = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_metadata_view()
             .await
             .err()
             .expect("a head the tail does not reconstruct is corruption");
         assert_eq!(read.code(), ErrorCode::NamespaceCorrupt);
 
-        let published = publish_namespace_commits_batch(
-            &store,
-            &namespace_id,
-            vec![CommitCandidate::new(CommitIntent::single(
-                CommitId::parse("create-after-tamper").expect("commit id"),
-                loonfs_test_support::test_actor(),
-                None,
-                FilesystemOperation::CreateDirectory {
-                    path: AbsolutePath::parse("/docs/after").expect("path"),
-                    parents: false,
-                },
-            ))],
-            &context(),
-            std::sync::Arc::new(crate::test_support::content_writes()),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .into_iter()
-        .next()
-        .expect("one result")
-        .expect_err("the publish path refuses the same state");
+        let published =
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+                .publish_candidates(vec![CommitCandidate::new(CommitIntent::single(
+                    CommitId::parse("create-after-tamper").expect("commit id"),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::CreateDirectory {
+                        path: AbsolutePath::parse("/docs/after").expect("path"),
+                        parents: false,
+                    },
+                ))])
+                .await
+                .into_iter()
+                .next()
+                .expect("one result")
+                .expect_err("the publish path refuses the same state");
         assert_eq!(published.code(), read.code());
     }
 
@@ -1570,7 +1557,8 @@ mod tests {
             BlockingStore::new(store, wal_objects(), OperationSelector::Get),
             wal_objects(),
         );
-        let anchor = load_read_anchor(&store, &namespace_id, crate::test_support::observed_now())
+        let anchor = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_read_anchor(crate::test_support::observed_now())
             .await
             .expect("read anchor");
         let basis = anchor.basis();
@@ -1593,7 +1581,8 @@ mod tests {
         };
 
         store.reset();
-        load_metadata_view(&store, &namespace_id, context(&alone))
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .load_metadata_view(context(&alone))
             .await
             .expect("a load on its own");
         let one_replay = store.counts().gets;
@@ -1601,8 +1590,10 @@ mod tests {
 
         store.reset();
         store.inner().arm();
-        let mut first = pin!(load_metadata_view(&store, &namespace_id, context(&shared)));
-        let mut second = pin!(load_metadata_view(&store, &namespace_id, context(&shared)));
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let mut first = pin!(namespace.load_metadata_view(context(&shared)));
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let mut second = pin!(namespace.load_metadata_view(context(&shared)));
         assert!(poll!(first.as_mut()).is_pending());
         assert!(poll!(pin!(store.inner().wait_until_blocked())).is_ready());
         assert!(poll!(second.as_mut()).is_pending());
@@ -1618,7 +1609,9 @@ mod tests {
     #[tokio::test]
     async fn an_entry_build_projects_grouped_attributes_or_none() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let view = load_current_metadata_view(&store, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
             .await
             .expect("load view");
 
@@ -1678,7 +1671,9 @@ mod tests {
     #[tokio::test]
     async fn a_listing_reads_attributes_only_when_it_projects_them() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let view = load_current_metadata_view(&store, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
             .await
             .expect("load view");
         let directory = AbsolutePath::parse("/docs").expect("path");
@@ -1719,7 +1714,9 @@ mod tests {
     #[tokio::test]
     async fn a_projected_listing_reads_its_attributes_in_one_wave() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let view = load_current_metadata_view(&store, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
             .await
             .expect("load view");
 

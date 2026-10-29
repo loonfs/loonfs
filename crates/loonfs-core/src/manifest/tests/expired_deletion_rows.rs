@@ -35,30 +35,31 @@ async fn bootstrap_restricted_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) {
-    crate::namespace::bootstrap::bootstrap_namespace(
-        store,
-        namespace_id,
-        context,
-        &loonfs_test_support::test_actor(),
-        &crate::options::CreateNamespaceOptions {
-            access: NamespaceAccess::Acl {
-                principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE).expect("principal scope"),
-                root_grants: AccessGrants::new(BTreeMap::from([(
-                    PrincipalId::parse("prn_root").expect("principal id"),
-                    AccessRights::ADMIN,
-                )]))
-                .expect("root grants"),
+    crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+        .engine()
+        .bootstrap_namespace(
+            &loonfs_test_support::test_actor(),
+            &crate::options::CreateNamespaceOptions {
+                access: NamespaceAccess::Acl {
+                    principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE)
+                        .expect("principal scope"),
+                    root_grants: AccessGrants::new(BTreeMap::from([(
+                        PrincipalId::parse("prn_root").expect("principal id"),
+                        AccessRights::ADMIN,
+                    )]))
+                    .expect("root grants"),
+                },
+                ..Default::default()
             },
-            ..Default::default()
-        },
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("bootstrap a restricted namespace");
-    acquire_writer_epoch(store, namespace_id, context)
+        )
+        .await
+        .expect("bootstrap a restricted namespace");
+    crate::test_support::namespace_store(store, namespace_id)
+        .acquire_writer_epoch(context)
         .await
         .expect("acquire the writer");
-    fold::fold_wal(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .fold_wal()
         .await
         .expect("publish the first manifest");
 }
@@ -83,20 +84,16 @@ async fn commit<S: ObjectStore + ?Sized>(
     } else {
         CommitCandidate::prepared(intent, prepared)
     };
-    NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        Arc::new(crate::test_support::content_writes()),
-    )
-    .publish_batch(
-        store,
-        vec![candidate],
-        context,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .pop()
-    .expect("one result")
+    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
+        .publish_batch(
+            vec![candidate],
+            context,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
 }
 
 /// Writes `bytes` at `path` as the administrator, replacing any file there.
@@ -107,11 +104,13 @@ async fn put<S: ObjectStore>(
     bytes: &[u8],
     context: &MutationContext,
 ) {
-    let stored = store_bytes_as_content(store, namespace_id, bytes)
+    let stored = crate::test_support::namespace_store(store, namespace_id)
+        .store_bytes_as_content(bytes)
         .await
         .expect("store content");
     let content_ref = stored.content_ref().clone();
-    let catalog = load_namespace_catalog_entry(store, namespace_id)
+    let catalog = crate::test_support::namespace_store(store, namespace_id)
+        .load_catalog_entry()
         .await
         .expect("load namespace catalog");
     let operation = FilesystemOperation::PutFile {
@@ -248,7 +247,8 @@ async fn expire_docs_beside_recoverable_trash<S: ObjectStore>(
     }
     let deletion_seq = delete_recursively(store, namespace_id, "/docs", context).await;
     delete_recursively(store, namespace_id, "/trash", context).await;
-    fold::fold_wal(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .fold_wal()
         .await
         .expect("fold the deletions");
     // The floor stops at the deletion, so the views that the compaction has
@@ -276,7 +276,8 @@ async fn family_rows<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     family: ApiMetadataRowFamily,
 ) -> Vec<MetadataRow> {
-    let current = load_current_manifest(store, namespace_id)
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest");
     crate::manifest::metadata_basis_from_manifest(store, None, &current)
@@ -547,7 +548,8 @@ async fn read_as<S: ObjectStore + ?Sized>(
         PrincipalId::parse(principal).expect("principal id")
     ]))
     .expect("principals");
-    load_current_metadata_view(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_metadata_view()
         .await
         .expect("load the current view")
         .read_file_revision_bytes_by_inode(
@@ -609,7 +611,8 @@ async fn delete_nested<S: ObjectStore>(
     }
     let inner_seq = delete_recursively(store, namespace_id, "/outer/inner/deep", context).await;
     let outer_seq = delete_recursively(store, namespace_id, "/outer", context).await;
-    fold::fold_wal(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .fold_wal()
         .await
         .expect("fold the deletions");
     NestedDeletions {
@@ -730,7 +733,8 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
     // A later write gives the inode families delta runs, so the next
     // compactions rewrite their bases.
     put(&store, &namespace_id, "/later.txt", b"later", &context).await;
-    fold::fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold the later write");
     drain_compaction(&store, &namespace_id, every_group_compacts()).await;
@@ -783,18 +787,26 @@ async fn expire_old<S: ObjectStore>(
         .await
         .expect("bootstrap");
     write_test_file(store, namespace_id, "/old/a.txt", "c_old_a", context).await;
-    fold::fold_wal(store, namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(store, namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     write_test_file(store, namespace_id, "/old/b.txt", "c_old_b", context).await;
     let keep = (0..8)
         .map(|index| format!("/keep-{index}.txt"))
         .collect::<Vec<_>>();
-    write_files_bytes(store, namespace_id, &keep, b"keep", context)
+    crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+        .write_files_bytes(&keep, b"keep")
         .await
         .expect("write visible files");
-    fold::fold_wal(store, namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(store, namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     let old = inode_id_of(store, namespace_id, "/old").await;
     let a = inode_id_of(store, namespace_id, "/old/a.txt").await;
-    let deletion_seq = delete_path(store, namespace_id, "/old", context, None)
+    let deletion_seq = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+        .delete_path("/old", None)
         .await
         .expect("delete /old")
         .committed_seq;
@@ -818,7 +830,8 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
 
     for group in [MetadataFamilyGroup::Inodes, MetadataFamilyGroup::Bindings] {
-        let current = load_current_manifest(&store, &namespace_id)
+        let current = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("load the current manifest");
         let window = delta_window(&current.state.envelope, group);
@@ -921,7 +934,8 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
         1,
         "the basis has the hidden revision"
     );
-    let current = load_current_manifest(&store, &namespace_id)
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest");
     let policy = MetadataRunPolicy::default();
@@ -954,7 +968,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
         store.reset();
         let merged = run_metadata_compaction(
             &basis,
-            None,
+            &crate::cache::MetadataSegmentCache::unshared(0),
             &namespace_id,
             &spec,
             policy,
@@ -999,7 +1013,8 @@ async fn compact_with_seed<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     seed: RunNo,
 ) {
-    let current = load_current_manifest(store, namespace_id)
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest");
     let mut basis = crate::manifest::metadata_basis_from_manifest(store, None, &current).segments;
@@ -1008,7 +1023,7 @@ async fn compact_with_seed<S: ObjectStore + ?Sized>(
     let cancellation = MetadataCompactionCancellation::default();
     let merged = run_metadata_compaction(
         &basis,
-        None,
+        &crate::cache::MetadataSegmentCache::unshared(0),
         namespace_id,
         spec,
         MetadataRunPolicy::default(),
@@ -1019,22 +1034,21 @@ async fn compact_with_seed<S: ObjectStore + ?Sized>(
     .expect("not cancelled");
     drop(basis);
     let timer = crate::test_support::std_timer();
-    let outcome = finalize_metadata_compaction(
-        store,
-        namespace_id,
-        None,
-        spec,
-        &input_keys,
-        merged,
-        &cancellation,
-        &CompactionPublication {
-            compactor_epoch: loonfs_types::CompactorEpoch(0),
-            compaction: Deadline::start(Arc::clone(&timer)),
-            publication: Deadline::start(timer),
-        },
-    )
-    .await
-    .expect("publish the merge");
+    let outcome = crate::test_support::namespace_store(store, namespace_id)
+        .finalize_metadata_compaction(
+            None,
+            spec,
+            &input_keys,
+            merged,
+            &cancellation,
+            &CompactionPublication {
+                compactor_epoch: loonfs_types::CompactorEpoch(0),
+                compaction: Deadline::start(Arc::clone(&timer)),
+                publication: Deadline::start(timer),
+            },
+        )
+        .await
+        .expect("publish the merge");
     assert_matches!(outcome, CompactionUnitOutcome::Published { .. });
 }
 
@@ -1058,7 +1072,8 @@ async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     seed: RunNo,
 ) -> KeptInodeFilter {
-    let current = load_current_manifest(store, namespace_id)
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest");
     let mut basis = crate::manifest::metadata_basis_from_manifest(store, None, &current).segments;
@@ -1066,10 +1081,15 @@ async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
     load_kept_inode_filter(
         &basis,
         namespace_id,
-        MetadataFamilyGroup::Inodes,
-        MergePlacement::Base {
-            output_seq: current.state.envelope.payload().head_seq,
-        },
+        &MetadataCompactionSpec::new(
+            MetadataFamilyGroup::Inodes,
+            vec![RunNo(0)],
+            0,
+            MergePlacement::Base {
+                output_seq: current.state.envelope.payload().head_seq,
+            },
+            ChangeSeq(0),
+        ),
         &MetadataCompactionCancellation::default(),
     )
     .await
@@ -1098,7 +1118,8 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         seed = RunNo(seed.0 + 1);
     }
 
-    let current = load_current_manifest(&store, &namespace_id)
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest");
     let payload = current.state.envelope.payload();
@@ -1119,7 +1140,8 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
     );
 
     // The next compaction's filter is seeded by the run number it writes.
-    let current = load_current_manifest(&store, &namespace_id)
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest");
     let payload = current.state.envelope.payload();
@@ -1158,7 +1180,8 @@ async fn kept_inode_filter_and_walk_reads(
     store: &RecordingStore<LocalFsStore>,
     namespace_id: &NamespaceId,
 ) -> (KeptInodeFilter, usize) {
-    let current = load_current_manifest(store, namespace_id)
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest");
     let basis = crate::manifest::metadata_basis_from_manifest(store, None, &current).segments;
@@ -1167,10 +1190,15 @@ async fn kept_inode_filter_and_walk_reads(
     let filter = load_kept_inode_filter(
         &basis,
         namespace_id,
-        MetadataFamilyGroup::Revisions,
-        MergePlacement::Base {
-            output_seq: current.state.envelope.payload().head_seq,
-        },
+        &MetadataCompactionSpec::new(
+            MetadataFamilyGroup::Revisions,
+            vec![RunNo(0)],
+            0,
+            MergePlacement::Base {
+                output_seq: current.state.envelope.payload().head_seq,
+            },
+            ChangeSeq(0),
+        ),
         &MetadataCompactionCancellation::default(),
     )
     .await
@@ -1186,7 +1214,8 @@ async fn compact_group<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     group: MetadataFamilyGroup,
 ) {
-    let current = load_current_manifest(store, namespace_id)
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest");
     let payload = current.state.envelope.payload();

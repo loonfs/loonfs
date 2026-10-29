@@ -2,18 +2,17 @@
 use super::deletes::DeletedCounter;
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
-use super::pins::{sweep_pin, GraceAge, PinSweep};
+use super::pins::{GraceAge, PinSweep};
 use super::session_cache::CompletedUploadSessionCache;
 use super::uploads::{
-    load_swept_session, sweep_completed_session, sweep_upload_session, ListedUpload,
-    ListedUploadKind, OutcomeListing, UploadSessionSweep,
+    sweep_completed_session, ListedUpload, ListedUploadKind, OutcomeListing, UploadSessionSweep,
 };
 use crate::context::MutationContext;
 use crate::error::Result;
 use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
-use crate::manifest::MetadataSegmentCache;
+use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::{ListedObject, ObjectStore};
-use loonfs_types::{NamespaceId, RetainedReason, UploadId};
+use loonfs_types::{RetainedReason, UploadId};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) enum Decision {
@@ -28,7 +27,6 @@ pub(super) enum Decision {
     /// Deletes an ended upload session's records, in the order that
     /// [`crate::upload_records::delete_upload_session_records`] requires.
     DeleteUploadSession {
-        namespace_id: NamespaceId,
         upload_id: UploadId,
     },
     Gone,
@@ -41,10 +39,8 @@ pub(super) enum ContentReference {
     Unreferenced,
 }
 
-pub(super) struct Sweep<'a, S: ObjectStore + ?Sized> {
-    pub(super) store: &'a S,
-    pub(super) segment_cache: Option<&'a MetadataSegmentCache>,
-    pub(super) namespace_id: &'a NamespaceId,
+pub(super) struct Sweep<'a, S: ObjectStore> {
+    pub(super) namespace: &'a NamespaceStore<S>,
     pub(super) grace_window_ms: u64,
     pub(super) mutation: &'a MutationContext,
     pub(super) live: &'a LiveSet,
@@ -54,7 +50,7 @@ pub(super) struct Sweep<'a, S: ObjectStore + ?Sized> {
     pub(super) listed_bytes: AtomicU64,
 }
 
-impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
+impl<S: ObjectStore> Sweep<'_, S> {
     pub(super) async fn candidate(
         &self,
         family: CandidateFamily,
@@ -112,14 +108,10 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         self.sweep_aged(entry, min_age_ms, deleted)
     }
     async fn process_pin(&self, key: String) -> Result<Decision> {
-        let decision = sweep_pin(
-            self.store,
-            &key,
-            self.grace_window_ms,
-            self.live,
-            self.mutation,
-        )
-        .await?;
+        let decision = self
+            .namespace
+            .sweep_pin(&key, self.grace_window_ms, self.live, self.mutation)
+            .await?;
         let counter: DeletedCounter = match decision {
             PinSweep::DeleteFork => |report| &mut report.deleted_checkpoints_by_owner.fork,
             PinSweep::DeleteUser => |report| &mut report.deleted_checkpoints_by_owner.user,
@@ -189,30 +181,23 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
             // session's cleanup needs its session record, so the sweep reads
             // these records again.
             None => {
-                let Some(state) =
-                    load_swept_session(self.store, self.namespace_id, &upload_id, outcome_listing)
-                        .await?
+                let Some(state) = self
+                    .namespace
+                    .load_swept_session(&upload_id, outcome_listing)
+                    .await?
                 else {
                     return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
                 };
-                sweep_upload_session(
-                    self.store,
-                    self.grace_window_ms,
-                    self.live,
-                    self.mutation,
-                    &state,
-                )
-                .await?
+                self.namespace
+                    .sweep_upload_session(self.grace_window_ms, self.live, self.mutation, &state)
+                    .await?
             }
         };
         if let (Some(cache), UploadSessionSweep::Delete) = (self.session_cache, sweep) {
             cache.invalidate(&upload_id);
         }
         Ok(match sweep {
-            UploadSessionSweep::Delete => Decision::DeleteUploadSession {
-                namespace_id: self.namespace_id.clone(),
-                upload_id,
-            },
+            UploadSessionSweep::Delete => Decision::DeleteUploadSession { upload_id },
             UploadSessionSweep::Retain { reclaimable_at_ms } => self.retain(
                 match reclaimable_at_ms {
                     Some(_) => RetainedReason::UploadSessionWindow,

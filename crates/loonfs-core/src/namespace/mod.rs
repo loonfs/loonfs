@@ -13,6 +13,7 @@ pub(crate) mod fork;
 pub(crate) mod read_anchor;
 pub(crate) mod state;
 pub(crate) mod status;
+pub(crate) mod store;
 pub(crate) mod writer_epoch;
 
 pub use basis::{MetadataBasis, PublicationBasis};

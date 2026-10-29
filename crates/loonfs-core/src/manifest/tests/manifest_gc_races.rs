@@ -1,7 +1,6 @@
 //! Manifest discovery while a lagging hint advances and old manifests are swept.
 
 use super::*;
-use crate::namespace::control::{load_current_manifest_with_hint, raise_namespace_hint};
 use loonfs_test_support::stores::MetadataMapStore;
 use std::assert_matches;
 
@@ -19,25 +18,30 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
         KeyPredicate::manifest(&namespace_id),
     );
     let context = test_context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     if start == ManifestNo(2) {
-        acquire_writer_epoch(&store, &namespace_id, &context)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .acquire_writer_epoch(&context)
             .await
             .expect("publish manifest 2");
-        raise_namespace_hint(&store, &namespace_id, start, None)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .raise_hint(start, None)
             .await
             .expect("advance initial hint");
     }
     // A publication doesn't raise the hint, so the hint lags at `start` until
     // the reader below has read it.
     for _ in start.0..4 {
-        acquire_writer_epoch(&store, &namespace_id, &context)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .acquire_writer_epoch(&context)
             .await
             .expect("publish without a hint raise");
     }
-    let (expected, initial_hint) = load_current_manifest_with_hint(&store, &namespace_id)
+    let (expected, initial_hint) = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest_with_hint()
         .await
         .expect("current manifest");
     assert_eq!(expected.state.manifest().manifest_no, ManifestNo(4));
@@ -54,43 +58,34 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
         },
     );
     blocked.block_next();
-    let (discovered, ()) = tokio::join!(
-        load_current_manifest_with_hint(&blocked, &namespace_id),
-        async {
-            blocked.wait_until_blocked().await;
-            raise_namespace_hint(
-                blocked.inner(),
-                &namespace_id,
-                expected.state.manifest().manifest_no,
-                None,
-            )
+    let namespace = crate::test_support::namespace_store(&blocked, &namespace_id);
+    let (discovered, ()) = tokio::join!(namespace.load_current_manifest_with_hint(), async {
+        blocked.wait_until_blocked().await;
+        crate::test_support::namespace_store(blocked.inner(), &namespace_id)
+            .raise_hint(expected.state.manifest().manifest_no, None)
             .await
             .expect("raise discovery hint");
-            let options = crate::gc::GcOptions::default();
-            let report = crate::gc::gc_namespace(
-                blocked.inner(),
+        let options = crate::gc::GcOptions::default();
+        let report = crate::test_support::namespace_store(blocked.inner(), &namespace_id)
+            .gc(
                 None,
-                None,
-                &namespace_id,
                 &options,
                 &MutationContext {
                     now_ms: options.grace_window_ms + 1,
                     ..context.clone()
                 },
-                crate::test_support::std_timer(),
             )
             .await
             .expect("collect old manifests");
-            assert_eq!(report.deleted.manifests, 3);
-            assert!(blocked
-                .inner()
-                .head(&blocked_key)
-                .await
-                .expect("collected manifest")
-                .is_none());
-            blocked.release();
-        }
-    );
+        assert_eq!(report.deleted.manifests, 3);
+        assert!(blocked
+            .inner()
+            .head(&blocked_key)
+            .await
+            .expect("collected manifest")
+            .is_none());
+        blocked.release();
+    });
     let (discovered, hint) = discovered.expect("reload the advanced hint after collection");
     assert_eq!(discovered.state, expected.state);
     assert_eq!(hint.state.manifest_no, ManifestNo(4));
@@ -121,8 +116,11 @@ async fn discovery_still_rejects_a_missing_manifest_when_the_hint_has_not_advanc
         .await
         .expect("bootstrap");
     // The runtime that published the bootstrap's manifests raises the hint.
-    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
-    let selected = load_current_manifest(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
+    let selected = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest");
     assert!(selected.state.manifest().manifest_no > ManifestNo(1));
@@ -130,7 +128,8 @@ async fn discovery_still_rejects_a_missing_manifest_when_the_hint_has_not_advanc
         .delete(&selected.object_key)
         .await
         .expect("remove hinted manifest");
-    let error = load_current_manifest(&store, &namespace_id)
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect_err("an unchanged hint cannot explain a missing manifest");
     assert_matches!(
@@ -148,10 +147,12 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         KeyPredicate::manifest(&namespace_id),
     ));
     let context = test_context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("create");
-    let current = load_current_manifest(&store, &namespace_id)
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current");
     let mut payload = current.state.envelope.payload().clone();
@@ -187,20 +188,22 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
                 .await
                 .expect("publish manifest three");
             // The runtime that published the manifests raises the hint.
-            crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
+            crate::test_support::namespace_store(&store, &namespace_id)
+                .raise_hint_to_current_manifest()
+                .await;
             let options = crate::gc::GcOptions::default();
             timer.advance_ms(options.grace_window_ms + 1);
-            let report = crate::gc::gc_namespace(
-                &store,
+            let report = crate::NamespaceStore {
+                timer: timer.clone(),
+                ..crate::test_support::namespace_store(&store, &namespace_id)
+            }
+            .gc(
                 None,
-                None,
-                &namespace_id,
                 &options,
                 &MutationContext {
                     now_ms: timer.now_ms(),
                     ..context.clone()
                 },
-                timer.clone(),
             )
             .await
             .expect("collect old manifests");
@@ -232,7 +235,8 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             .expect("recreated manifest"),
         Some(Bytes::from(manifest.into_bytes()))
     );
-    let (current, hint) = load_current_manifest_with_hint(&store, &namespace_id)
+    let (current, hint) = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest_with_hint()
         .await
         .expect("current manifest");
     assert_eq!(current.state.manifest().manifest_no, ManifestNo(3));
@@ -256,15 +260,18 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
         KeyPredicate::manifest(&namespace_id),
     );
     let context = test_context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("create");
-    acquire_writer_epoch(&store, &namespace_id, &context)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer_epoch(&context)
         .await
         .expect("publish manifest 2");
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let basis = crate::namespace::PublicationBasis {
-        manifest: load_current_manifest(&store, &namespace_id)
+        manifest: crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("manifest 2"),
         checked: crate::time::Observation::now(clock.clone()),
@@ -273,27 +280,27 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
     // garbage collection pass one grace later deletes every manifest below
     // the hint.
     for _ in 3..=5 {
-        acquire_writer_epoch(&store, &namespace_id, &context)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .acquire_writer_epoch(&context)
             .await
             .expect("another process publishes");
     }
-    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
     let options = crate::gc::GcOptions::default();
     clock.advance_ms(options.grace_window_ms + 1);
-    let report = crate::gc::gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &options,
-        &MutationContext {
-            now_ms: options.grace_window_ms + 1,
-            ..context.clone()
-        },
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect old manifests");
+    let report = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(
+            None,
+            &options,
+            &MutationContext {
+                now_ms: options.grace_window_ms + 1,
+                ..context.clone()
+            },
+        )
+        .await
+        .expect("collect old manifests");
     assert_eq!(report.deleted.manifests, 4);
     let successor = metadata_manifest_object(&namespace_id, &ManifestNo(3));
     assert!(store
@@ -302,21 +309,20 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
         .expect("the basis's successor")
         .is_none());
 
-    let ((), published, hint) = crate::manifest::publish::update_manifest(
-        &store,
-        &namespace_id,
-        Some(basis),
-        &Deadline::start(clock),
-        crate::limits::MAX_CONTENTION_ATTEMPTS,
-        |current: crate::namespace::control::LoadedManifest| async move {
-            Ok(crate::manifest::publish::ManifestChange::Next(
-                Box::new(current.state.envelope.payload().clone()),
-                (),
-            ))
-        },
-    )
-    .await
-    .expect("publish");
+    let ((), published, hint) = crate::test_support::namespace_store(&store, &namespace_id)
+        .update_manifest(
+            Some(basis),
+            &Deadline::start(clock),
+            crate::limits::MAX_CONTENTION_ATTEMPTS,
+            |current: crate::namespace::control::LoadedManifest| async move {
+                Ok(crate::manifest::publish::ManifestChange::Next(
+                    Box::new(current.state.envelope.payload().clone()),
+                    (),
+                ))
+            },
+        )
+        .await
+        .expect("publish");
     assert_eq!(published.state.manifest().manifest_no, ManifestNo(6));
     assert_eq!(hint.expect("discovery").state.manifest_no, ManifestNo(5));
     assert!(

@@ -446,15 +446,15 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("bootstrap");
-    append_wal_objects(
+    loonfs_core::test_support::NamespaceFixture::new(
         store.as_ref(),
         &namespace_id,
-        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
     let namespace = writer

@@ -4,7 +4,9 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 
 async fn assert_leaf_reads_every_owner(store: &LocalFsStore, namespaces: &[NamespaceId; 3]) {
-    let view = load_current_metadata_view(store, &namespaces[2])
+    let namespace = crate::test_support::namespace_store(store, &namespaces[2]);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("fresh leaf view");
     for (index, owner) in namespaces.iter().enumerate() {
@@ -30,41 +32,27 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     let mut keys = Vec::new();
     for (index, namespace_id) in namespaces.iter().enumerate() {
         if index == 0 {
-            create(&store, namespace_id, &setup)
+            crate::test_support::NamespaceFixture::new(&store, namespace_id, &setup)
+                .create()
                 .await
                 .expect("bootstrap root");
         } else {
-            fork_namespace(
-                &store,
-                &namespaces[index - 1],
-                namespace_id,
-                &loonfs_test_support::test_actor(),
-                None,
-                &setup,
-                Arc::new(StdMonotonicTimer::default()),
-                Default::default(),
-                None,
-                &crate::test_support::content_writes(),
-            )
-            .await
-            .expect("fork");
+            crate::test_support::NamespaceFixture::new(&store, &namespaces[index - 1], &setup)
+                .engine()
+                .fork_namespace(namespace_id, &loonfs_test_support::test_actor(), None)
+                .await
+                .expect("fork");
         }
         keys.push(publish_inline(&store, namespace_id, index, &setup).await);
     }
     let middle_pin = read_fork_record(&store, &namespaces[0]).await;
     let leaf_pin = read_fork_record(&store, &namespaces[1]).await;
     for namespace_id in &namespaces[..2] {
-        delete_namespace(
-            &store,
-            namespace_id,
-            Default::default(),
-            &setup,
-            crate::manifest::MetadataRunPolicy::default(),
-            std::sync::Arc::new(crate::test_support::content_writes()),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("delete ancestor");
+        crate::test_support::NamespaceFixture::new(&store, namespace_id, &setup)
+            .engine()
+            .delete_namespace(Default::default())
+            .await
+            .expect("delete ancestor");
     }
     let mut aged_now = 0;
     for namespace_id in &namespaces {
@@ -79,17 +67,10 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     }
     let aged = context(aged_now);
     for index in [0, 1, 1, 0] {
-        let report = gc_namespace(
-            &store,
-            None,
-            None,
-            &namespaces[index],
-            &options(),
-            &aged,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("collect ancestor while grandchild lives");
+        let report = crate::test_support::namespace_store(&store, &namespaces[index])
+            .gc(None, &options(), &aged)
+            .await
+            .expect("collect ancestor while grandchild lives");
         assert_eq!(report.deleted.retired_content_objects, 0);
         assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
         assert!(pin_exists(&store, &namespaces[0], &middle_pin.pin_id).await);
@@ -97,44 +78,24 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         assert_leaf_reads_every_owner(&store, &namespaces).await;
     }
 
-    delete_namespace(
-        &store,
-        &namespaces[2],
-        Default::default(),
-        &setup,
-        crate::manifest::MetadataRunPolicy::default(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("delete leaf");
+    crate::test_support::NamespaceFixture::new(&store, &namespaces[2], &setup)
+        .engine()
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete leaf");
     // Deletion alone must not release either link in the protection chain.
     for index in [0, 1] {
-        let report = gc_namespace(
-            &store,
-            None,
-            None,
-            &namespaces[index],
-            &options(),
-            &aged,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("ancestors still pinned by unretired descendants");
+        let report = crate::test_support::namespace_store(&store, &namespaces[index])
+            .gc(None, &options(), &aged)
+            .await
+            .expect("ancestors still pinned by unretired descendants");
         assert_eq!(report.deleted.retired_content_objects, 0);
     }
     for index in [2, 1, 0] {
-        gc_namespace(
-            &store,
-            None,
-            None,
-            &namespaces[index],
-            &options(),
-            &aged,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("retire from leaf to root");
+        crate::test_support::namespace_store(&store, &namespaces[index])
+            .gc(None, &options(), &aged)
+            .await
+            .expect("retire from leaf to root");
         assert!(store
             .head(&keys[index])
             .await

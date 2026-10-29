@@ -5,19 +5,20 @@
 use crate::authorize::CommitAuthority;
 use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
+use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::{MetadataRunPolicy, MetadataSegmentCache, PublishedManifest};
+use crate::manifest::PublishedManifest;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
-use crate::namespace::writer_epoch::acquire_writer;
+use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
-use crate::protocol::{load_publish_metadata_view, PublishTailPosition, PublishViewEffect};
+use crate::protocol::{PublishTailPosition, PublishViewEffect};
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
-use crate::time::{Deadline, MonotonicTimer, Observation, StdMonotonicTimer};
+use crate::time::{Deadline, Observation};
 use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
@@ -685,10 +686,21 @@ pub enum WriterSessionStatus {
 /// Shared handle to one namespace's [`WriterSessionStatus`].
 pub type SharedWriterSessionStatus = Arc<Mutex<WriterSessionStatus>>;
 
+/// A writer session for one namespace: it publishes batches of candidates
+/// through numbered WAL puts, and keeps the position each batch leaves.
 #[derive(Debug)]
-pub struct NamespaceCommitEngine {
-    content_writes: Arc<crate::PermitPool>,
-    namespace_id: NamespaceId,
+pub struct NamespaceCommitEngine<S> {
+    /// The namespace's components, which never change. A publication unit's
+    /// view borrows the store and the segment cache from here while the unit
+    /// moves `position`.
+    namespace: NamespaceStore<S>,
+    position: PositionState,
+}
+
+/// The position that each publication unit moves, with the writer session
+/// that the units publish under.
+#[derive(Debug)]
+struct PositionState {
     publish_tail: Option<PublishTailPosition>,
     projection_observed: Option<Observation>,
     acquired_anchor: Option<NamespaceReadAnchor>,
@@ -698,56 +710,33 @@ pub struct NamespaceCommitEngine {
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionStatus`].
     session: SharedWriterSessionStatus,
-    /// Local monotonic source for the self-enforced publish budget.
-    timer: Arc<dyn MonotonicTimer>,
-    /// Shared cache of decoded blocks used by publish-view reads. Blocks are
-    /// keyed by segment digest. Successor probes verify that the view is current.
-    segment_cache: Option<Arc<MetadataSegmentCache>>,
     /// The newest manifest that this engine published itself (the claim of
     /// the session's writer epoch, or a tombstone) and that
-    /// [`Self::take_published_manifest_no`] hasn't returned yet.
+    /// [`NamespaceCommitEngine::take_published_manifest_no`] hasn't returned yet.
     published_manifest_no: Option<ManifestNo>,
 }
 
-impl NamespaceCommitEngine {
-    pub fn new(namespace_id: NamespaceId, content_writes: Arc<crate::PermitPool>) -> Self {
+impl<S: ObjectStore> NamespaceCommitEngine<S> {
+    /// Returns a commit engine over `namespace` whose writer session no
+    /// other engine shares.
+    pub fn new(namespace: NamespaceStore<S>) -> Self {
         Self {
-            namespace_id,
-            content_writes,
-            publish_tail: None,
-            projection_observed: None,
-            acquired_anchor: None,
-            basis_checked: None,
-            session: SharedWriterSessionStatus::default(),
-            timer: Arc::new(StdMonotonicTimer::default()),
-            segment_cache: None,
-            published_manifest_no: None,
+            namespace,
+            position: PositionState {
+                publish_tail: None,
+                projection_observed: None,
+                acquired_anchor: None,
+                basis_checked: None,
+                session: SharedWriterSessionStatus::default(),
+                published_manifest_no: None,
+            },
         }
     }
 
     /// Uses runtime-managed session state so the writer epoch and fenced status
     /// persist across engine instances.
     pub fn writer_session(mut self, session: SharedWriterSessionStatus) -> Self {
-        self.session = session;
-        self
-    }
-
-    fn lock_session(&self) -> std::sync::MutexGuard<'_, WriterSessionStatus> {
-        // Treat a poisoned lock as fatal because another thread panicked while
-        // updating the session state.
-        self.session
-            .lock()
-            .expect("writer session state lock should not be poisoned")
-    }
-
-    /// Uses the runtime clock for publication budgets.
-    pub fn monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
-        self.timer = timer;
-        self
-    }
-
-    pub fn segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
-        self.segment_cache = Some(segment_cache);
+        self.position.session = session;
         self
     }
 
@@ -755,28 +744,14 @@ impl NamespaceCommitEngine {
     /// the store. Writer epoch and fencing remain in session state and are
     /// not reset.
     pub fn invalidate_projection(&mut self) {
-        self.publish_tail = None;
-        self.acquired_anchor = None;
-        self.projection_observed = None;
-        self.basis_checked = None;
-    }
-
-    /// The basis manifest that needs a successor check, either because its
-    /// last confirmation expired or because the tip observation expired, so
-    /// that the check also confirms the tip.
-    fn unconfirmed_basis(&self, attempt: &Observation, tip_expired: bool) -> Option<ManifestNo> {
-        let projection = self.publish_tail.as_ref()?;
-        let confirmed_recently = !tip_expired
-            && self.basis_checked.as_ref().is_some_and(|checked| {
-                checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS
-            });
-        (!confirmed_recently).then(|| projection.basis().manifest_no())
+        self.position.invalidate_projection();
     }
 
     /// Checks the position's WAL tail for the commit's receipt, without
     /// store reads or writer acquisition.
     pub fn retains_commit_receipt(&self, commit_id: &CommitId) -> bool {
-        self.publish_tail
+        self.position
+            .publish_tail
             .as_ref()
             .is_some_and(|position| position.tail.find_commit_receipt(commit_id).is_some())
     }
@@ -784,7 +759,8 @@ impl NamespaceCommitEngine {
     /// Unfolded WAL objects as of the last publication unit, or `None` when
     /// the engine has no position.
     pub fn wal_tail_objects(&self) -> Option<u64> {
-        self.publish_tail
+        self.position
+            .publish_tail
             .as_ref()
             .map(|position| position.head.unfolded_wal_objects())
     }
@@ -792,7 +768,8 @@ impl NamespaceCommitEngine {
     /// Inline content bytes in the unfolded WAL tail as of the last
     /// publication unit, or `None` when the engine has no position.
     pub fn wal_tail_inline_bytes(&self) -> Option<usize> {
-        self.publish_tail
+        self.position
+            .publish_tail
             .as_ref()
             .map(PublishTailPosition::wal_tail_inline_bytes)
     }
@@ -800,20 +777,10 @@ impl NamespaceCommitEngine {
     /// The position's tail as a fold input, or `None` when the engine has no
     /// position.
     pub fn wal_fold_input(&self) -> Option<WalFoldInput> {
-        self.position().as_ref().map(ReadPosition::wal_fold_input)
-    }
-
-    /// Returns the position and its last check, whether or not the session
-    /// is fenced, or `None` when the engine has no position or no record of
-    /// the position's last check.
-    fn position(&self) -> Option<ReadPosition> {
-        let position = self.publish_tail.as_ref()?;
-        Some(ReadPosition {
-            head: position.head.clone(),
-            basis: position.basis().clone(),
-            tail: Arc::clone(&position.tail),
-            basis_checked: self.basis_checked.clone()?,
-        })
+        self.position
+            .read_position()
+            .as_ref()
+            .map(ReadPosition::wal_fold_input)
     }
 
     /// Moves the position onto `manifest`, a manifest that this runtime
@@ -835,23 +802,24 @@ impl NamespaceCommitEngine {
     /// of the manifest too, because no manifest followed it then, so the
     /// position keeps the younger of the two checks.
     pub fn record_manifest_published(&mut self, manifest: PublishedManifest) {
-        let Some(position) = self.publish_tail.as_mut() else {
+        let state = &mut self.position;
+        let Some(position) = state.publish_tail.as_mut() else {
             return;
         };
         if !position.move_to(&manifest) {
-            self.invalidate_projection();
+            state.invalidate_projection();
             return;
         }
         let Some(started) = manifest.started else {
             return;
         };
         if position.basis().manifest() == &manifest.manifest
-            && self
+            && state
                 .basis_checked
                 .as_ref()
                 .is_none_or(|checked| started.age_ms() < checked.age_ms())
         {
-            self.basis_checked = Some(started);
+            state.basis_checked = Some(started);
         }
     }
 
@@ -861,10 +829,13 @@ impl NamespaceCommitEngine {
     /// A fenced session publishes nothing more, so its position would stay
     /// on a head that the new writer has moved past.
     pub fn read_position(&self) -> Option<ReadPosition> {
-        if matches!(*self.lock_session(), WriterSessionStatus::Fenced(_)) {
+        if matches!(
+            *self.position.lock_session(),
+            WriterSessionStatus::Fenced(_)
+        ) {
             return None;
         }
-        self.position()
+        self.position.read_position()
     }
 
     /// Returns the number of the newest manifest that this engine published
@@ -874,7 +845,154 @@ impl NamespaceCommitEngine {
     /// The engine publishes a manifest when it acquires the session's writer
     /// epoch and when it deletes the namespace.
     pub fn take_published_manifest_no(&mut self) -> Option<ManifestNo> {
-        self.published_manifest_no.take()
+        self.position.published_manifest_no.take()
+    }
+
+    /// Deletes the namespace using this writer session (format spec,
+    /// "Deleting a namespace").
+    ///
+    /// Deletion publishes a new manifest with the same writer-session checks as
+    /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
+    /// and a takeover detected during manifest publication permanently fences the
+    /// session. A deletion first folds the WAL tail under the namespace's run
+    /// policy. Both publications build on the position's manifest while the
+    /// position's last check is within the revalidation bound.
+    pub async fn delete_namespace(
+        &mut self,
+        options: DeleteNamespaceOptions,
+        context: &MutationContext,
+    ) -> Result<DeleteNamespaceResponse> {
+        let deadline = Deadline::start(Arc::clone(&self.namespace.timer));
+        let acquired_writer = self
+            .position
+            .session_writer_epoch(&self.namespace, context)
+            .await?;
+        let deleted = self
+            .namespace
+            .delete_namespace(
+                options,
+                acquired_writer,
+                self.wal_fold_input(),
+                context,
+                &deadline,
+            )
+            .await;
+        self.position.invalidate_projection();
+        match deleted {
+            Ok(report) => {
+                if let Some(tombstone) = report.published {
+                    self.position
+                        .record_published_manifest_no(tombstone.manifest.manifest_no);
+                }
+                Ok(report.response)
+            }
+            Err(error) => {
+                if let CoreError::WriterFenced(fence) = &error {
+                    *self.position.lock_session() = WriterSessionStatus::Fenced(fence.clone());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Retries share `batch` so content evidence continues aging.
+    pub async fn publish_batch(
+        &mut self,
+        candidates: impl AsRef<[CommitCandidate]>,
+        context: &MutationContext,
+        batch: &Deadline,
+    ) -> NamespaceCommitEnginePublishResult {
+        let candidates = candidates.as_ref();
+        if candidates.is_empty() {
+            return NamespaceCommitEnginePublishResult {
+                results: Vec::new(),
+                wal_tail: None,
+            };
+        }
+        let Self {
+            namespace,
+            position,
+        } = self;
+        match position.load_publish_view(namespace, context, batch).await {
+            Ok(loaded) => {
+                position
+                    .publish_against(namespace, loaded, candidates, context, batch)
+                    .await
+            }
+            Err(error) => failed_publication(candidates.len(), error),
+        }
+    }
+
+    /// Publishes `candidates` as one batch, and publishes again each
+    /// candidate whose attempt the store settled as retryable, until every
+    /// candidate settles or the attempts run out. The attempts share one
+    /// deadline and keep this engine's position.
+    pub async fn publish_batch_until_settled(
+        &mut self,
+        candidates: Vec<CommitCandidate>,
+        context: &MutationContext,
+    ) -> Vec<Result<Commit>> {
+        let batch = Deadline::start(Arc::clone(&self.namespace.timer));
+        let mut results = vec![None; candidates.len()];
+        let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
+        for _ in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
+            let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
+            let observed = self
+                .publish_batch(&attempted, context, &batch)
+                .await
+                .results;
+            pending =
+                settle_publish_attempt(&mut results, indices.into_iter().zip(attempted), observed);
+            if pending.is_empty() {
+                break;
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| result.expect("each candidate should receive a publication result"))
+            .collect()
+    }
+}
+
+impl PositionState {
+    fn lock_session(&self) -> std::sync::MutexGuard<'_, WriterSessionStatus> {
+        // Treat a poisoned lock as fatal because another thread panicked while
+        // updating the session state.
+        self.session
+            .lock()
+            .expect("writer session state lock should not be poisoned")
+    }
+
+    fn invalidate_projection(&mut self) {
+        self.publish_tail = None;
+        self.acquired_anchor = None;
+        self.projection_observed = None;
+        self.basis_checked = None;
+    }
+
+    /// The basis manifest that needs a successor check, either because its
+    /// last confirmation expired or because the tip observation expired, so
+    /// that the check also confirms the tip.
+    fn unconfirmed_basis(&self, attempt: &Observation, tip_expired: bool) -> Option<ManifestNo> {
+        let projection = self.publish_tail.as_ref()?;
+        let confirmed_recently = !tip_expired
+            && self.basis_checked.as_ref().is_some_and(|checked| {
+                checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS
+            });
+        (!confirmed_recently).then(|| projection.basis().manifest_no())
+    }
+
+    /// Returns the position and its last check, whether or not the session
+    /// is fenced, or `None` when the engine has no position or no record of
+    /// the position's last check.
+    fn read_position(&self) -> Option<ReadPosition> {
+        let position = self.publish_tail.as_ref()?;
+        Some(ReadPosition {
+            head: position.head.clone(),
+            basis: position.basis().clone(),
+            tail: Arc::clone(&position.tail),
+            basis_checked: self.basis_checked.clone()?,
+        })
     }
 
     fn record_published_manifest_no(&mut self, manifest_no: ManifestNo) {
@@ -887,9 +1005,9 @@ impl NamespaceCommitEngine {
     /// Returns the session's writer epoch, acquiring it on first use. A fenced
     /// session fails immediately without accessing the store or acquiring a new
     /// epoch.
-    async fn session_writer_epoch<S: ObjectStore + ?Sized>(
+    async fn session_writer_epoch<S: ObjectStore>(
         &mut self,
-        store: &S,
+        namespace: &NamespaceStore<S>,
         context: &MutationContext,
     ) -> Result<AcquiredWriter> {
         let already_acquired = match &*self.lock_session() {
@@ -902,8 +1020,7 @@ impl NamespaceCommitEngine {
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
         }
-        let acquisition =
-            acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
+        let acquisition = namespace.acquire_writer(context).await?;
         let acquired_writer = acquisition.writer;
         self.record_published_manifest_no(acquisition.claim.manifest.manifest_no);
         self.acquired_anchor = Some(acquisition.anchor);
@@ -917,97 +1034,20 @@ impl NamespaceCommitEngine {
         Ok(acquired_writer)
     }
 
-    /// Deletes the namespace using this writer session (format spec,
-    /// "Deleting a namespace").
-    ///
-    /// Deletion publishes a new manifest with the same writer-session checks as
-    /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
-    /// and a takeover detected during manifest publication permanently fences the
-    /// session. A deletion first folds the WAL tail with `fold_policy`. Both
-    /// publications build on the position's manifest while the position's last
-    /// check is within the revalidation bound.
-    pub async fn delete_namespace<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        options: DeleteNamespaceOptions,
-        context: &MutationContext,
-        fold_policy: MetadataRunPolicy,
-    ) -> Result<DeleteNamespaceResponse> {
-        let deadline = Deadline::start(Arc::clone(&self.timer));
-        let acquired_writer = self.session_writer_epoch(store, context).await?;
-        let deleted = crate::namespace::delete::delete_namespace(
-            store,
-            &self.namespace_id,
-            options,
-            acquired_writer,
-            self.wal_fold_input(),
-            context,
-            &deadline,
-            fold_policy,
-            self.segment_cache.as_deref(),
-            &self.content_writes,
-        )
-        .await;
-        self.invalidate_projection();
-        match deleted {
-            Ok(report) => {
-                if let Some(tombstone) = report.published {
-                    self.record_published_manifest_no(tombstone.manifest.manifest_no);
-                }
-                Ok(report.response)
-            }
-            Err(error) => {
-                if let CoreError::WriterFenced(fence) = &error {
-                    *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
-                }
-                Err(error)
-            }
-        }
-    }
-
-    /// Retries share `batch` so content evidence continues aging.
-    pub async fn publish_batch<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        candidates: impl AsRef<[CommitCandidate]>,
-        context: &MutationContext,
-        batch: &Deadline,
-    ) -> NamespaceCommitEnginePublishResult {
-        let candidates = candidates.as_ref();
-        if candidates.is_empty() {
-            return NamespaceCommitEnginePublishResult {
-                results: Vec::new(),
-                wal_tail: None,
-            };
-        }
-        let segment_cache = self.segment_cache.clone();
-        match self
-            .load_publish_view(store, segment_cache.as_deref(), context, batch)
-            .await
-        {
-            Ok(loaded) => {
-                self.publish_against(store, loaded, candidates, context, batch)
-                    .await
-            }
-            Err(error) => failed_publication(candidates.len(), error),
-        }
-    }
-
     /// Loads the view that one publication unit plans against: the
     /// position, once the store shows that it's still current, or the
     /// namespace's current manifest and WAL tail.
     ///
-    /// The view borrows `segment_cache` rather than the engine, so the
-    /// caller can read the view and then publish against it.
-    async fn load_publish_view<'a, S: ObjectStore + ?Sized>(
+    /// The view borrows `namespace` rather than this state, so the caller
+    /// can read the view and then publish against it.
+    async fn load_publish_view<'a, S: ObjectStore>(
         &mut self,
-        store: &'a S,
-        segment_cache: Option<&'a MetadataSegmentCache>,
+        namespace: &'a NamespaceStore<S>,
         context: &MutationContext,
         batch: &Deadline,
     ) -> Result<LoadedPublishView<'a, S>> {
         let attempt = batch.observe();
-        let acquired_writer = self.session_writer_epoch(store, context).await?;
+        let acquired_writer = self.session_writer_epoch(namespace, context).await?;
 
         let tip_expired = self.projection_observed.as_ref().is_some_and(|observed| {
             observed.age_at(&attempt) > crate::limits::WAL_PUBLISH_BUDGET_MS
@@ -1032,12 +1072,7 @@ impl NamespaceCommitEngine {
         // collected successor can't look absent. A probe that finds a manifest
         // or fails reloads the view.
         if let Some(manifest_no) = self.unconfirmed_basis(&attempt, tip_expired) {
-            let successor = crate::namespace::read_anchor::manifest_has_successor(
-                store,
-                &self.namespace_id,
-                manifest_no,
-            )
-            .await;
+            let successor = namespace.manifest_has_successor(manifest_no).await;
             if matches!(successor, Ok(false))
                 && self
                     .basis_checked
@@ -1060,16 +1095,9 @@ impl NamespaceCommitEngine {
             }
             None => self.publish_tail.take(),
         };
-        let loaded = load_publish_metadata_view(
-            store,
-            segment_cache,
-            &self.namespace_id,
-            acquired_writer,
-            cached_position,
-            acquired_anchor,
-            Arc::clone(&self.timer),
-        )
-        .await;
+        let loaded = namespace
+            .load_publish_metadata_view(acquired_writer, cached_position, acquired_anchor)
+            .await;
         let view = match loaded {
             Ok(value) => value,
             Err(error) => {
@@ -1099,9 +1127,9 @@ impl NamespaceCommitEngine {
 
     /// Publishes `candidates` against `loaded` as one batch, and keeps the
     /// position that the batch leaves.
-    async fn publish_against<S: ObjectStore + ?Sized>(
+    async fn publish_against<S: ObjectStore>(
         &mut self,
-        store: &S,
+        namespace: &NamespaceStore<S>,
         loaded: LoadedPublishView<'_, S>,
         candidates: &[CommitCandidate],
         context: &MutationContext,
@@ -1114,8 +1142,7 @@ impl NamespaceCommitEngine {
         } = loaded;
         let wal_tail_discovered = publish_view.tail_discovered;
         let published = crate::protocol::publish_namespace_commits_batch_against_publish_view(
-            store,
-            &self.namespace_id,
+            &namespace.store,
             candidates,
             context,
             &publish_view,
@@ -1124,12 +1151,16 @@ impl NamespaceCommitEngine {
                 attempt: attempt.clone(),
                 tip: projection_observed.clone(),
             },
-            &self.content_writes,
+            &namespace.content_writes,
         )
         .await;
         let position = publish_view.into_position();
         self.projection_observed = Some(projection_observed);
-        let update = self.update_publish_tail_projection(position, published.effect);
+        let update = self.update_publish_tail_projection(
+            &namespace.namespace_id,
+            position,
+            published.effect,
+        );
         // A put that landed is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
         if update.landed && self.publish_tail.is_some() {
@@ -1154,6 +1185,7 @@ impl NamespaceCommitEngine {
     /// maintenance on.
     fn update_publish_tail_projection(
         &mut self,
+        namespace_id: &NamespaceId,
         mut position: PublishTailPosition,
         effect: PublishViewEffect,
     ) -> TailProjectionUpdate {
@@ -1171,12 +1203,12 @@ impl NamespaceCommitEngine {
             PublishViewEffect::Advanced { records, head } => {
                 position.reanchor(head);
                 if let Err(error) =
-                    Arc::make_mut(&mut position.tail).push_object(&self.namespace_id, &records)
+                    Arc::make_mut(&mut position.tail).push_object(namespace_id, &records)
                 {
                     // The WAL is already durable. Discard the position;
                     // replay and folding will report the accounting error.
                     tracing::warn!(
-                        namespace_id = %self.namespace_id,
+                        namespace_id = %namespace_id,
                         error = %error,
                         "could not update the committed WAL projection"
                     );
@@ -1230,54 +1262,30 @@ fn failed_publication(count: usize, error: CoreError) -> NamespaceCommitEnginePu
     }
 }
 
-/// Publishes one batch through a fresh commit engine, which keeps its
-/// position across the batch's retries.
-pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    candidates: Vec<CommitCandidate>,
-    context: &MutationContext,
-    content_writes: Arc<crate::PermitPool>,
-    timer: Arc<dyn MonotonicTimer>,
-) -> Vec<Result<Commit>> {
-    let mut engine =
-        NamespaceCommitEngine::new(namespace_id.clone(), content_writes).monotonic_timer(timer);
-    let batch = Deadline::start(Arc::clone(&engine.timer));
-    let mut results = vec![None; candidates.len()];
-    let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
-    for _ in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
-        let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
-        let observed = engine
-            .publish_batch(store, &attempted, context, &batch)
-            .await
-            .results;
-        pending =
-            settle_publish_attempt(&mut results, indices.into_iter().zip(attempted), observed);
-        if pending.is_empty() {
-            break;
-        }
+impl<S: ObjectStore + Clone> NamespaceEngine<S, Writable> {
+    /// Publishes already-classified mutation candidates as one batch: one WAL
+    /// object, one numbered WAL put, one result per candidate in order.
+    pub async fn publish_namespace_commits_batch(
+        &self,
+        candidates: Vec<CommitCandidate>,
+    ) -> Result<Vec<Result<Commit>>> {
+        let context = self.mutation_context();
+        Ok(self
+            .commit_engine()
+            .publish_batch_until_settled(candidates, &context)
+            .await)
     }
-    results
-        .into_iter()
-        .map(|result| result.expect("each candidate should receive a publication result"))
-        .collect()
-}
 
-/// Deletes a namespace through a fresh commit engine: a one-shot session
-/// that acquires its own epoch, exactly like a one-shot publish.
-pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    options: DeleteNamespaceOptions,
-    context: &MutationContext,
-    fold_policy: MetadataRunPolicy,
-    content_writes: Arc<crate::PermitPool>,
-    timer: Arc<dyn MonotonicTimer>,
-) -> Result<DeleteNamespaceResponse> {
-    NamespaceCommitEngine::new(namespace_id.clone(), content_writes)
-        .monotonic_timer(timer)
-        .delete_namespace(store, options, context, fold_policy)
-        .await
+    /// Deletes the current namespace by publishing a tombstone manifest.
+    /// Earlier committed changes remain durable. Later operations return `namespace_deleted`.
+    pub async fn delete_namespace(
+        &self,
+        options: DeleteNamespaceOptions,
+    ) -> Result<DeleteNamespaceResponse> {
+        self.commit_engine()
+            .delete_namespace(options, &self.mutation_context())
+            .await
+    }
 }
 
 #[cfg(test)]

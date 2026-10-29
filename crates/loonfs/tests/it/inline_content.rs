@@ -48,12 +48,11 @@ async fn publish_inline(
         },
     );
     request.subject = subject;
-    NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    )
-    .publish_batch(
+    NamespaceCommitEngine::new(loonfs_core::test_support::namespace_store(
         store,
+        namespace_id,
+    ))
+    .publish_batch(
         [CommitCandidate::with_inline_content(
             request,
             Vec::new(),
@@ -201,10 +200,8 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
     for folded in [false, true] {
         if folded {
             NamespaceEngine::writer(
-                store.clone(),
-                source.clone(),
+                loonfs_core::test_support::namespace_store(store.clone(), &source),
                 WriterId::parse("fold").expect("writer"),
-                std::sync::Arc::new(loonfs_core::test_support::content_writes()),
             )
             .fold_wal()
             .await

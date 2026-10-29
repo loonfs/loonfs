@@ -11,25 +11,17 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
     let target = NamespaceId::parse("target").expect("target");
     let sibling = NamespaceId::parse("sibling").expect("sibling");
     let setup = context(1_000);
-    create(&inner, &source, &setup)
+    crate::test_support::NamespaceFixture::new(&inner, &source, &setup)
+        .create()
         .await
         .expect("bootstrap source");
     let source_keys = publish_owned_content(&inner, &source, 2).await;
     for fork in [&target, &sibling] {
-        fork_namespace(
-            &inner,
-            &source,
-            fork,
-            &loonfs_test_support::test_actor(),
-            None,
-            &setup,
-            Arc::new(StdMonotonicTimer::default()),
-            Default::default(),
-            None,
-            &crate::test_support::content_writes(),
-        )
-        .await
-        .expect("fork");
+        crate::test_support::NamespaceFixture::new(&inner, &source, &setup)
+            .engine()
+            .fork_namespace(fork, &loonfs_test_support::test_actor(), None)
+            .await
+            .expect("fork");
     }
     for number in 0..3 {
         write_test_file(
@@ -51,7 +43,8 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .await
         .expect("read owned bytes")
         .expect("content");
-    let target_manifest = crate::namespace::control::load_current_manifest(&inner, &target)
+    let target_manifest = crate::test_support::namespace_store(&inner, &target)
+        .load_current_manifest()
         .await
         .expect("target");
     let target_pin = target_manifest
@@ -63,7 +56,8 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .expect("target basis")
         .source_pin_id
         .clone();
-    let sibling_manifest = crate::namespace::control::load_current_manifest(&inner, &sibling)
+    let sibling_manifest = crate::test_support::namespace_store(&inner, &sibling)
+        .load_current_manifest()
         .await
         .expect("sibling");
     let sibling_pin = sibling_manifest
@@ -76,17 +70,11 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .source_pin_id
         .clone();
     for namespace in [&source, &target] {
-        delete_namespace(
-            &inner,
-            namespace,
-            Default::default(),
-            &setup,
-            crate::manifest::MetadataRunPolicy::default(),
-            std::sync::Arc::new(crate::test_support::content_writes()),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("delete");
+        crate::test_support::NamespaceFixture::new(&inner, namespace, &setup)
+            .engine()
+            .delete_namespace(Default::default())
+            .await
+            .expect("delete");
     }
     let deadline = context(setup.now_ms + retirement_ms());
     let gc_options = options();
@@ -102,90 +90,59 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         OperationSelector::Delete,
     );
     store.block_next();
-    let (delayed, ()) = tokio::join!(
-        gc_namespace(
-            &store,
-            None,
-            None,
-            &target,
-            &gc_options,
-            &deadline,
-            crate::test_support::std_timer()
-        ),
-        async {
-            store.wait_until_blocked().await;
-            store.inner().fail_next(1);
-            gc_namespace(
-                store.inner(),
-                None,
-                None,
-                &target,
-                &gc_options,
-                &deadline,
-                crate::test_support::std_timer(),
-            )
+    let namespace = crate::test_support::namespace_store(&store, &target);
+    let (delayed, ()) = tokio::join!(namespace.gc(None, &gc_options, &deadline), async {
+        store.wait_until_blocked().await;
+        store.inner().fail_next(1);
+        crate::test_support::namespace_store(store.inner(), &target)
+            .gc(None, &gc_options, &deadline)
             .await
             .expect_err("a delete landed but its acknowledgement was lost");
-            assert!(store
-                .inner()
-                .head(&target_keys[0])
-                .await
-                .expect("landed delete")
-                .is_none());
-            assert!(
-                pin_exists(store.inner(), &source, &target_pin).await,
-                "failed sweep does not release its source pin"
-            );
-            store.inner().clear();
-            gc_namespace(
-                store.inner(),
-                None,
-                None,
-                &source,
-                &gc_options,
-                &deadline,
-                crate::test_support::std_timer(),
-            )
+        assert!(store
+            .inner()
+            .head(&target_keys[0])
+            .await
+            .expect("landed delete")
+            .is_none());
+        assert!(
+            pin_exists(store.inner(), &source, &target_pin).await,
+            "failed sweep does not release its source pin"
+        );
+        store.inner().clear();
+        crate::test_support::namespace_store(store.inner(), &source)
+            .gc(None, &gc_options, &deadline)
             .await
             .expect("source stays pinned");
-            for key in &source_keys {
-                assert!(store
-                    .inner()
-                    .head(key)
-                    .await
-                    .expect("inherited content")
-                    .is_some());
-            }
-
-            gc_namespace(
-                store.inner(),
-                None,
-                None,
-                &target,
-                &gc_options,
-                &deadline,
-                crate::test_support::std_timer(),
-            )
-            .await
-            .expect("second collector retries from the beginning");
-            assert!(!pin_exists(store.inner(), &source, &target_pin).await);
-            assert!(pin_exists(store.inner(), &source, &sibling_pin).await);
+        for key in &source_keys {
             assert!(store
                 .inner()
-                .list_prefix(&target_content_prefix)
+                .head(key)
                 .await
-                .expect("target content")
-                .is_empty());
-            // Recreate an immutable object after one sweep finishes, while the
-            // first collector still has its original delete in flight.
-            store
-                .inner()
-                .put_if_absent(&target_keys[0], late_bytes.clone())
-                .await
-                .expect("late materialization");
-            store.release();
+                .expect("inherited content")
+                .is_some());
         }
-    );
+
+        crate::test_support::namespace_store(store.inner(), &target)
+            .gc(None, &gc_options, &deadline)
+            .await
+            .expect("second collector retries from the beginning");
+        assert!(!pin_exists(store.inner(), &source, &target_pin).await);
+        assert!(pin_exists(store.inner(), &source, &sibling_pin).await);
+        assert!(store
+            .inner()
+            .list_prefix(&target_content_prefix)
+            .await
+            .expect("target content")
+            .is_empty());
+        // Recreate an immutable object after one sweep finishes, while the
+        // first collector still has its original delete in flight.
+        store
+            .inner()
+            .put_if_absent(&target_keys[0], late_bytes.clone())
+            .await
+            .expect("late materialization");
+        store.release();
+    });
     delayed.expect("the older collector tolerates already-deleted objects and pin");
     assert!(store
         .list_prefix(&target_content_prefix)
@@ -203,7 +160,9 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             Some(Bytes::from_static(b"content"))
         );
     }
-    let view = load_current_metadata_view(&store, &sibling)
+    let namespace = crate::test_support::namespace_store(&store, &sibling);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("fresh sibling view");
     for number in 0..2 {
@@ -215,28 +174,14 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .await
         .expect("inherited file stays visible");
     }
-    gc_namespace(
-        &store,
-        None,
-        None,
-        &target,
-        &gc_options,
-        &deadline,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("repeated target retirement");
-    gc_namespace(
-        &store,
-        None,
-        None,
-        &source,
-        &gc_options,
-        &deadline,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("sibling continues to retain source");
+    crate::test_support::namespace_store(&store, &target)
+        .gc(None, &gc_options, &deadline)
+        .await
+        .expect("repeated target retirement");
+    crate::test_support::namespace_store(&store, &source)
+        .gc(None, &gc_options, &deadline)
+        .await
+        .expect("sibling continues to retain source");
     for key in source_keys {
         assert!(store.head(&key).await.expect("source content").is_some());
     }

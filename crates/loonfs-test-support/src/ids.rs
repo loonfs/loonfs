@@ -1,8 +1,8 @@
 //! Small validated-value constructors used throughout tests.
 
 use loonfs_types::{
-    sha256_hex, ActorId, AttributeKey, AttributeValue, CommitFingerprint, ContentId, ContentRef,
-    EffectiveLimit, NamespaceId, PageRequest, WriterId, DEFAULT_PAGE_LIMIT,
+    sha256_hex, ActorId, AttributeKey, AttributeValue, CommitFingerprint, CommitId, ContentId,
+    ContentRef, EffectiveLimit, NamespaceId, PageRequest, WriterId, DEFAULT_PAGE_LIMIT,
 };
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -14,6 +14,11 @@ pub fn namespace_id(value: &str) -> NamespaceId {
 /// Parses a writer id that is expected to be valid test data.
 pub fn writer_id(value: &str) -> WriterId {
     WriterId::parse(value).expect("valid writer id")
+}
+
+/// Parses a commit id that is expected to be valid test data.
+pub fn commit_id(value: &str) -> CommitId {
+    CommitId::parse(value).expect("valid commit id")
 }
 
 /// Returns the actor shared by mutation tests.

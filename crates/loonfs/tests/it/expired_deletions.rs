@@ -28,12 +28,13 @@ async fn advance_floor_through(
     let clock = Arc::new(ManualClock::at_system_time());
     clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
     let maintenance = loonfs_core::NamespaceWriterEngine::writer(
-        store.clone(),
-        namespace_id.clone(),
+        loonfs_core::test_support::namespace_store_with_wall_clock(
+            store.clone(),
+            namespace_id,
+            clock,
+        ),
         writer_id("maintainer"),
-        Arc::new(loonfs_core::test_support::content_writes()),
-    )
-    .with_wall_clock(clock);
+    );
     maintenance.fold_wal().await.expect("fold the deletion");
     let advanced = maintenance
         .advance_retention_floor(loonfs_core::RetentionTarget::Seq(deletion_seq))

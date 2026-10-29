@@ -146,16 +146,10 @@ async fn seed_merged_base_with_a_delta_run(store: &LocalFsStore, namespace_id: &
     bootstrap_namespace(store, namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        store,
-        namespace_id,
-        "/docs/first.txt",
-        b"first\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write the seed file");
+    crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
+        .write_file_bytes("/docs/first.txt", b"first\n", None)
+        .await
+        .expect("write the seed file");
     create_checkpoint(store, namespace_id, &context)
         .await
         .expect("checkpoint the seed");
@@ -168,16 +162,10 @@ async fn seed_merged_base_with_a_delta_run(store: &LocalFsStore, namespace_id: &
         },
     )
     .await;
-    write_file_bytes(
-        store,
-        namespace_id,
-        "/docs/second.txt",
-        b"second\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write a file above the base");
+    crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
+        .write_file_bytes("/docs/second.txt", b"second\n", None)
+        .await
+        .expect("write a file above the base");
     create_checkpoint(store, namespace_id, &context)
         .await
         .expect("checkpoint a delta run above the base");
@@ -212,24 +200,28 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         ("/docs/a.txt", &b"alpha two\n"[..]),
         ("/docs/tmp.txt", &b"scratch\n"[..]),
     ] {
-        write_file_bytes(&store, &namespace_id, path, body, &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, body, None)
             .await
             .expect("write");
     }
-    delete_path(&store, &namespace_id, "/docs/tmp.txt", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/docs/tmp.txt", None)
         .await
         .expect("delete tmp");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let advanced = advance_retention_floor(
+    let advanced = crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance floor")
     .response;
@@ -241,16 +233,10 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     );
 
     for round in 0..9u32 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&format!("/docs/file-{round}.txt"), b"body\n", None)
+            .await
+            .expect("write");
         create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("create checkpoint");
@@ -346,27 +332,15 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         .iter()
         .all(|binding| binding.is_bound()));
 
-    let error = restore_file_revision(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        RevisionNo(1),
-        &context,
-        None,
-    )
-    .await
-    .expect_err("a dropped revision cannot be restored");
+    let error = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .restore_file_revision("/docs/a.txt", RevisionNo(1), None)
+        .await
+        .expect_err("a dropped revision cannot be restored");
     assert_eq!(error.code(), ErrorCode::RevisionNotFound);
-    let restored = restore_file_revision(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        RevisionNo(2),
-        &context,
-        None,
-    )
-    .await
-    .expect("restoring the newest revision at the floor succeeds");
+    let restored = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .restore_file_revision("/docs/a.txt", RevisionNo(2), None)
+        .await
+        .expect("restoring the newest revision at the floor succeeds");
     assert!(restored.committed_seq > floor);
 }
 #[test]
@@ -498,16 +472,10 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -554,16 +522,10 @@ async fn manifest_load_rejects_unequal_commit_and_receipt_counts() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -610,16 +572,10 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
 
     let compacted_manifest_no = checkpoint_then_compact(
         &store,
@@ -674,16 +630,10 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint");
@@ -771,16 +721,10 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
 
     let manifest_no = checkpoint_then_compact(
         &store,
@@ -828,26 +772,14 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/other.txt",
-        b"other\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write other");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/other.txt", b"other\n", None)
+        .await
+        .expect("write other");
 
     let manifest_no = checkpoint_then_compact(
         &store,
@@ -913,16 +845,10 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         .await
         .expect("bootstrap");
     for index in 1..=6 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{index}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write file");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&format!("/docs/file-{index}.txt"), b"body\n", None)
+            .await
+            .expect("write file");
     }
     // Merge the delta runs so every inode row lands in one base segment.
     let manifest_no = checkpoint_then_compact(
@@ -1022,20 +948,15 @@ async fn manifest_validation_rejects_unsupported_segment_encoding() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/hello.txt",
-        b"hello",
-        &context,
-        None,
-    )
-    .await
-    .expect("write file");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/hello.txt", b"hello", None)
+        .await
+        .expect("write file");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint");
-    let manifest = load_current_manifest(&store, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("valid manifest");
     let mut payload = manifest.state.envelope.payload().clone();
@@ -1077,16 +998,10 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");

@@ -9,10 +9,7 @@ mod retention;
 mod retry_gc;
 
 use super::*;
-use crate::manifest::{fold_wal, fold_wal_tail, FoldWalOutcome};
-use crate::path::read::load_current_metadata_view;
-use crate::storage::content::store_bytes_as_content;
-use crate::test_support::ops::create;
+use crate::manifest::FoldWalOutcome;
 use bytes::Bytes;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -25,10 +22,13 @@ use loonfs_types::{
 };
 use std::assert_matches;
 
+/// A commit engine over the recording store that [`setup`] returns.
+type RecordingEngine = NamespaceCommitEngine<Arc<RecordingStore<LocalFsStore>>>;
+
 async fn setup() -> (
     tempfile::TempDir,
     Arc<RecordingStore<LocalFsStore>>,
-    NamespaceCommitEngine,
+    RecordingEngine,
     MutationContext,
 ) {
     let directory = tempfile::tempdir().expect("directory");
@@ -41,15 +41,17 @@ async fn setup() -> (
         writer_id: WriterId::parse("writer").expect("writer"),
         now_ms: 1_000,
     };
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id,
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+    let mut engine = NamespaceCommitEngine::new(crate::test_support::namespace_store(
+        Arc::clone(&store),
+        &namespace_id,
+    ));
     engine
-        .session_writer_epoch(&store, &context)
+        .position
+        .session_writer_epoch(&engine.namespace, &context)
         .await
         .expect("acquire writer");
     store.reset();
@@ -94,15 +96,13 @@ fn candidate(commit_id: &str, values: Vec<InlineContent>) -> CommitCandidate {
     )
 }
 
-async fn publish(
-    engine: &mut NamespaceCommitEngine,
-    store: &RecordingStore<LocalFsStore>,
+async fn publish<S: ObjectStore>(
+    engine: &mut NamespaceCommitEngine<S>,
     context: &MutationContext,
     candidate: CommitCandidate,
 ) -> Result<Commit> {
     engine
         .publish_batch(
-            store,
             [candidate],
             context,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -116,21 +116,23 @@ async fn publish(
 /// Publishes `bytes` inline at `/file-0` and folds it into its object.
 async fn folded_file(
     store: &RecordingStore<LocalFsStore>,
-    engine: &mut NamespaceCommitEngine,
+    engine: &mut RecordingEngine,
     context: &MutationContext,
     bytes: &[u8],
 ) -> (InodeId, ContentRef) {
-    let value = inline(&engine.namespace_id, Bytes::copy_from_slice(bytes));
-    publish(
-        engine,
-        store,
-        context,
-        candidate("file", vec![value.clone()]),
-    )
-    .await
-    .expect("publish");
-    fold_wal(store, &engine.namespace_id).await.expect("fold");
-    let inode_id = load_current_metadata_view(store, &engine.namespace_id)
+    let value = inline(
+        &engine.namespace.namespace_id,
+        Bytes::copy_from_slice(bytes),
+    );
+    publish(engine, context, candidate("file", vec![value.clone()]))
+        .await
+        .expect("publish");
+    crate::test_support::namespace_store(store, &engine.namespace.namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
+    let inode_id = crate::test_support::namespace_store(store, &engine.namespace.namespace_id)
+        .load_current_metadata_view()
         .await
         .expect("view")
         .resolve_path(
@@ -156,7 +158,9 @@ async fn commit_piece(
     layout: Option<loonfs_types::ContentLayout>,
 ) -> ContentRef {
     let layout = if offset > 0 && layout.is_none() {
-        let view = load_current_metadata_view(store, namespace_id)
+        let namespace = crate::test_support::namespace_store(store, namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
             .await
             .expect("base view");
         let base = ContentRef::blob_v1(
@@ -186,25 +190,24 @@ async fn commit_piece(
         whole,
         store.checksum_algorithm(),
     );
-    crate::test_support::ops::append_wal_commit(
-        store,
-        namespace_id,
-        vec![WalDelta::AppendFileRevision {
-            delta_index: 0,
-            inode_id: file.0,
-            revision_no: file.1,
-            content_ref: content_ref.clone(),
-            layout,
-            append_offset: None,
-        }],
-        vec![WalInlineContent {
-            content_id: content_id.clone(),
-            offset: offset as u64,
-            bytes: whole[offset..].to_vec(),
-        }],
-    )
-    .await
-    .expect("commit piece");
+    crate::test_support::namespace_store(store, namespace_id)
+        .append_wal_commit(
+            vec![WalDelta::AppendFileRevision {
+                delta_index: 0,
+                inode_id: file.0,
+                revision_no: file.1,
+                content_ref: content_ref.clone(),
+                layout,
+                append_offset: None,
+            }],
+            vec![WalInlineContent {
+                content_id: content_id.clone(),
+                offset: offset as u64,
+                bytes: whole[offset..].to_vec(),
+            }],
+        )
+        .await
+        .expect("commit piece");
     content_ref
 }
 
@@ -213,7 +216,8 @@ async fn read_file(
     namespace_id: &NamespaceId,
     revision_no: RevisionNo,
 ) -> Vec<u8> {
-    load_current_metadata_view(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_metadata_view()
         .await
         .expect("view")
         .read_file_revision_bytes(
@@ -238,13 +242,16 @@ fn assert_no_writes(store: &RecordingStore<LocalFsStore>) {
 async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order() {
     let (_directory, store, mut engine, context) = setup().await;
     let values = vec![
-        inline(&engine.namespace_id, Bytes::from_static(b"first")),
-        inline(&engine.namespace_id, Bytes::from_static(b"second")),
-        inline(&engine.namespace_id, Bytes::new()),
+        inline(&engine.namespace.namespace_id, Bytes::from_static(b"first")),
+        inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"second"),
+        ),
+        inline(&engine.namespace.namespace_id, Bytes::new()),
     ];
     let mut candidate = candidate("publish", values.clone());
     candidate.inline_content.reverse();
-    publish(&mut engine, &store, &context, candidate.clone())
+    publish(&mut engine, &context, candidate.clone())
         .await
         .expect("publish");
     assert_eq!(store.counts().puts, 1);
@@ -258,7 +265,7 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
             _ => None,
         })
         .expect("WAL put");
-    assert!(key.starts_with(&wal_prefix(&engine.namespace_id)));
+    assert!(key.starts_with(&wal_prefix(&engine.namespace.namespace_id)));
     let bytes = store
         .get(&key, None)
         .await
@@ -280,7 +287,9 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
             )
         }));
     }
-    let reader = load_current_metadata_view(&store, &engine.namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id);
+    let reader = namespace
+        .load_current_metadata_view()
         .await
         .expect("fresh reader");
     for (index, value) in values.iter().enumerate() {
@@ -302,14 +311,17 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
 #[tokio::test]
 async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
     let (_directory, store, mut engine, context) = setup().await;
-    let original = inline(&engine.namespace_id, Bytes::from_static(b"hello"));
+    let original = inline(&engine.namespace.namespace_id, Bytes::from_static(b"hello"));
     let first = candidate("retry", vec![original.clone()]);
-    let committed = publish(&mut engine, &store, &context, first.clone())
+    let committed = publish(&mut engine, &context, first.clone())
         .await
         .expect("publish");
     let retry = candidate(
         "retry",
-        vec![inline(&engine.namespace_id, Bytes::from_static(b"hello"))],
+        vec![inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"hello"),
+        )],
     );
     assert_ne!(
         first.inline_content[0].content_ref().content_id,
@@ -317,7 +329,7 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
     );
     store.reset();
     assert_eq!(
-        publish(&mut engine, &store, &context, retry.clone())
+        publish(&mut engine, &context, retry.clone())
             .await
             .expect("replay"),
         committed
@@ -327,27 +339,31 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         .inline_content
         .push(invalid_retry.inline_content[0].clone());
     assert_eq!(
-        publish(&mut engine, &store, &context, invalid_retry)
+        publish(&mut engine, &context, invalid_retry)
             .await
             .expect("receipt precedes content validation"),
         committed
     );
     let changed = candidate(
         "retry",
-        vec![inline(&engine.namespace_id, Bytes::from_static(b"other"))],
+        vec![inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"other"),
+        )],
     );
     assert_matches!(
-        publish(&mut engine, &store, &context, changed).await,
+        publish(&mut engine, &context, changed).await,
         Err(CoreError::CommitIdReuseConflict { .. })
     );
     assert_no_writes(&store);
 
-    let staged = store_bytes_as_content(&store, &engine.namespace_id, b"hello")
+    let staged = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .store_bytes_as_content(b"hello")
         .await
         .expect("stage");
     let proof = PreparedContent::for_durable_content_write(staged.content_ref().clone());
     let inline = InlineContent::new(
-        engine.namespace_id.clone(),
+        engine.namespace.namespace_id.clone(),
         staged.content_ref().content_id.clone(),
         Bytes::from_static(b"hello"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -355,12 +371,12 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
     let inline_candidate = candidate("forms", vec![inline]);
     let staged_candidate =
         CommitCandidate::prepared(inline_candidate.intent().clone(), vec![proof]);
-    publish(&mut engine, &store, &context, inline_candidate)
+    publish(&mut engine, &context, inline_candidate)
         .await
         .expect("inline publish");
     store.reset();
     assert_matches!(
-        publish(&mut engine, &store, &context, staged_candidate).await,
+        publish(&mut engine, &context, staged_candidate).await,
         Err(CoreError::CommitIdReuseConflict { .. })
     );
     assert_no_writes(&store);
@@ -369,11 +385,12 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
 #[tokio::test]
 async fn invalid_inline_candidates_write_nothing() {
     let (_directory, store, mut engine, context) = setup().await;
-    let value = inline(&engine.namespace_id, Bytes::from_static(b"value"));
+    let value = inline(&engine.namespace.namespace_id, Bytes::from_static(b"value"));
     let mut unreferenced = candidate("unreferenced", vec![value.clone()]);
-    unreferenced
-        .inline_content
-        .push(inline(&engine.namespace_id, Bytes::from_static(b"extra")));
+    unreferenced.inline_content.push(inline(
+        &engine.namespace.namespace_id,
+        Bytes::from_static(b"extra"),
+    ));
     let duplicate = candidate("duplicate", vec![value.clone(), value]);
     let foreign = candidate(
         "foreign",
@@ -385,7 +402,7 @@ async fn invalid_inline_candidates_write_nothing() {
     let oversized = candidate(
         "oversized",
         vec![inline(
-            &engine.namespace_id,
+            &engine.namespace.namespace_id,
             Bytes::from(vec![0; MAX_WAL_INLINE_CONTENT_BYTES + 1]),
         )],
     );
@@ -394,17 +411,18 @@ async fn invalid_inline_candidates_write_nothing() {
         (0..=MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES)
             .map(|_| {
                 inline(
-                    &engine.namespace_id,
+                    &engine.namespace.namespace_id,
                     Bytes::from(vec![0; MAX_WAL_INLINE_CONTENT_BYTES]),
                 )
             })
             .collect(),
     );
-    let staged = store_bytes_as_content(&store, &engine.namespace_id, b"staged")
+    let staged = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .store_bytes_as_content(b"staged")
         .await
         .expect("stage");
     let different = InlineContent::new(
-        engine.namespace_id.clone(),
+        engine.namespace.namespace_id.clone(),
         staged.content_ref().content_id.clone(),
         Bytes::from_static(b"inline bytes"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -437,7 +455,7 @@ async fn invalid_inline_candidates_write_nothing() {
     ] {
         store.reset();
         assert_matches!(
-            publish(&mut engine, &store, &context, candidate).await,
+            publish(&mut engine, &context, candidate).await,
             Err(CoreError::InvalidCommitRequest(_))
         );
         assert_no_writes(&store);
@@ -456,11 +474,12 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             parents: false,
         },
     ));
-    publish(&mut engine, &store, &context, directory)
+    publish(&mut engine, &context, directory)
         .await
         .expect("directory");
     assert_eq!(
-        fold_wal(&store, &engine.namespace_id)
+        crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .fold_wal()
             .await
             .expect("non-inline fold")
             .outcome,
@@ -474,10 +493,10 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         ("second", Bytes::from_static(b"second")),
         ("empty", Bytes::new()),
     ] {
-        let value = inline(&engine.namespace_id, bytes);
+        let value = inline(&engine.namespace.namespace_id, bytes);
         values.push(value.clone());
         let candidate = candidate(name, vec![value]);
-        publish(&mut engine, &store, &context, candidate.clone())
+        publish(&mut engine, &context, candidate.clone())
             .await
             .expect("publish");
         last = Some(candidate);
@@ -485,12 +504,12 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
     let advanced = engine.wal_fold_input().expect("projection");
     assert_eq!(advanced.tail_state.inline_bytes(), 11);
     let wal_before = store
-        .list_prefix(&wal_prefix(&engine.namespace_id))
+        .list_prefix(&wal_prefix(&engine.namespace.namespace_id))
         .await
         .expect("list WAL");
     engine.invalidate_projection();
     store.reset();
-    publish(&mut engine, &store, &context, last.expect("last candidate"))
+    publish(&mut engine, &context, last.expect("last candidate"))
         .await
         .expect("replay after reload");
     let reloaded = engine.wal_fold_input().expect("reloaded projection");
@@ -503,17 +522,13 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
     {
         let input_held = input.is_some();
         store.reset();
-        let folded = fold_wal_tail(
-            &store,
-            None,
-            &engine.namespace_id,
-            input,
-            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            crate::manifest::MetadataRunPolicy::default(),
-            &crate::test_support::content_writes(),
-        )
-        .await
-        .expect("fold inline content");
+        let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .fold_wal_tail(
+                input,
+                &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
+            .await
+            .expect("fold inline content");
         if index == 0 {
             assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
             fold::assert_content_before_metadata(&store, values.len());
@@ -540,10 +555,10 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                 assert_no_writes(&store);
             }
         }
-        let manifest =
-            crate::namespace::control::load_current_manifest(&store, &engine.namespace_id)
-                .await
-                .expect("manifest");
+        let manifest = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("manifest");
         assert_eq!(
             manifest.state.envelope.payload().folded_wal_no,
             folded_wal_no
@@ -555,7 +570,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         );
         assert_eq!(
             store
-                .list_prefix(&wal_prefix(&engine.namespace_id))
+                .list_prefix(&wal_prefix(&engine.namespace.namespace_id))
                 .await
                 .expect("WAL remains"),
             wal_before

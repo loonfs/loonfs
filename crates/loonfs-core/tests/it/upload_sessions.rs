@@ -1,12 +1,13 @@
 //! Upload session begin, content, direct-put, and completion guards.
 
-use crate::common::commit_split_support::*;
-use crate::common::namespace_engine;
+use crate::common::*;
 use bytes::Bytes;
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::{CoreError, DirectPutUploadTarget, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::{upload_outcome, upload_session};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
+use loonfs_test_support::ids::commit_id;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
@@ -61,7 +62,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .begin_upload(None)
+        .begin_upload()
         .await
 }
 
@@ -71,7 +72,7 @@ async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<DirectPutUploadTarget, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .begin_direct_put_upload_target(None)
+        .begin_direct_put_upload_target()
         .await
 }
 
@@ -83,7 +84,7 @@ async fn upload_content<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .upload_content(upload_id, None, bytes)
+        .upload_content(upload_id, bytes)
         .await
 }
 
@@ -93,14 +94,11 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     context: &MutationContext,
 ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id).await?;
+    let catalog = namespace_store(store, namespace_id)
+        .load_catalog_entry()
+        .await?;
     namespace_engine(store, namespace_id, context)
-        .complete_upload(
-            &catalog,
-            upload_id,
-            None,
-            CompleteUploadBody::ServiceProxied {},
-        )
+        .complete_upload(&catalog, upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .map(|completed| completed.response)
 }
@@ -123,12 +121,13 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let namespace_id = NamespaceId::parse("checksums").expect("namespace");
         let context = mutation_context();
-        bootstrap_namespace(&store, &namespace_id, &context)
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("namespace");
         for streamed in [false, true] {
             let engine = namespace_engine(&store, &namespace_id, &context);
-            let begin = engine.begin_upload(None).await.expect("begin");
+            let begin = engine.begin_upload().await.expect("begin");
             assert_matches!(
                 begin.status,
                 loonfs_types::api::v0::UploadSessionStatus::Open {
@@ -143,12 +142,12 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
                 ])
                 .boxed();
                 engine
-                    .upload_content_stream(&begin.upload_id, None, body)
+                    .upload_content_stream(&begin.upload_id, body)
                     .await
                     .expect("stream");
             } else {
                 engine
-                    .upload_content(&begin.upload_id, None, b"hello")
+                    .upload_content(&begin.upload_id, b"hello")
                     .await
                     .expect("bytes");
             }
@@ -247,18 +246,18 @@ async fn begin_upload_rejects_missing_and_deleted_namespaces() {
         .expect_err("missing namespace");
     assert_eq!(missing_error.code(), ErrorCode::NamespaceNotFound);
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     begin_upload(&store, &namespace_id, &context)
         .await
         .expect("a live namespace admits uploads");
 
+    let fresh_store = LocalFsStore::new(temp_dir.path()).expect("store");
     loonfs_core::NamespaceWriterEngine::writer(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        namespace_id.clone(),
+        namespace_store(&fresh_store, &namespace_id),
         loonfs_types::WriterId::parse("writer-a").expect("writer id"),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     )
     .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
     .await
@@ -276,7 +275,8 @@ async fn begin_direct_put_mints_the_target_object_up_front() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     let first = begin_direct_put_upload_target(&store, &namespace_id, &context)
@@ -304,34 +304,31 @@ async fn begin_upload_reads_manifest_authority_without_replaying_wal() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&setup_store, &namespace_id, &context)
+    NamespaceFixture::new(&setup_store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    put_file(
-        &setup_store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("upload-guard-create"),
-    )
-    .await
-    .expect("create file");
+    NamespaceFixture::new(&setup_store, &namespace_id, &context)
+        .put_file(
+            "/docs/hello.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("upload-guard-create")),
+        )
+        .await
+        .expect("create file");
     create_checkpoint(&setup_store, &namespace_id, &context)
         .await
         .expect("checkpoint");
-    put_file(
-        &setup_store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"updated",
-        DestinationBehavior::Replace,
-        &context,
-        Some("upload-guard-replace"),
-    )
-    .await
-    .expect("replace file");
+    NamespaceFixture::new(&setup_store, &namespace_id, &context)
+        .put_file(
+            "/docs/hello.txt",
+            b"updated",
+            DestinationBehavior::Replace,
+            Some(&commit_id("upload-guard-replace")),
+        )
+        .await
+        .expect("replace file");
 
     let guarded_store = replay_read_guard_store(temp_dir.path(), namespace_id.as_str());
     let begin = begin_upload(&guarded_store, &namespace_id, &context)
@@ -348,7 +345,8 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     let begin = begin_upload(&store, &namespace_id, &context)
@@ -397,7 +395,8 @@ mod streamed_content {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("slow-upload").expect("namespace");
-        bootstrap_namespace(&store, &namespace_id, &context)
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
         let begin = begin_upload(&store, &namespace_id, &context)
@@ -427,13 +426,10 @@ mod streamed_content {
         })
         .boxed();
         let engine = namespace_engine(&store, &namespace_id, &context);
-        let uploading = engine.upload_content_stream(&begin.upload_id, None, stream);
+        let uploading = engine.upload_content_stream(&begin.upload_id, stream);
         let collecting = async {
             started_rx.await.expect("upload waiting for its body");
-            let aborted = engine
-                .abort_upload(&begin.upload_id, None)
-                .await
-                .expect("abort");
+            let aborted = engine.abort_upload(&begin.upload_id).await.expect("abort");
             let UploadSessionStatus::Aborted { aborted_at_ms } = aborted.status else {
                 panic!("expected aborted");
             };
@@ -445,17 +441,10 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                loonfs_core::gc_namespace(
-                    &store,
-                    None,
-                    None,
-                    &namespace_id,
-                    &options,
-                    &aged,
-                    loonfs_core::test_support::std_timer(),
-                )
-                .await
-                .expect("collect aborted session");
+                namespace_store(&store, &namespace_id)
+                    .gc(None, &options, &aged)
+                    .await
+                    .expect("collect aborted session");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
             }
             assert!(store.get(&content_key, None).await.expect("get").is_none());
@@ -467,17 +456,10 @@ mod streamed_content {
             result.expect_err("aborted session cannot stage").code(),
             ErrorCode::UploadNotFound
         );
-        loonfs_core::gc_namespace(
-            &store,
-            None,
-            None,
-            &namespace_id,
-            &loonfs_core::GcOptions::default(),
-            &aged,
-            loonfs_core::test_support::std_timer(),
-        )
-        .await
-        .expect("repeat GC after late content write");
+        namespace_store(&store, &namespace_id)
+            .gc(None, &loonfs_core::GcOptions::default(), &aged)
+            .await
+            .expect("repeat GC after late content write");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
@@ -502,10 +484,12 @@ mod streamed_content {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("slow-owned-stream").expect("namespace");
-        bootstrap_namespace(&store, &namespace_id, &context)
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
-        let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        let catalog = namespace_store(&store, &namespace_id)
+            .load_catalog_entry()
             .await
             .expect("catalog");
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -546,17 +530,10 @@ mod streamed_content {
                 now_ms: expires_at_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
-            loonfs_core::gc_namespace(
-                &store,
-                None,
-                None,
-                &namespace_id,
-                &options,
-                &expired,
-                loonfs_core::test_support::std_timer(),
-            )
-            .await
-            .expect("GC aborts expired implicit session");
+            namespace_store(&store, &namespace_id)
+                .gc(None, &options, &expired)
+                .await
+                .expect("GC aborts expired implicit session");
             let (_, aborted) = read_upload_records(&store, &namespace_id, &session.upload_id).await;
             assert_eq!(
                 aborted,
@@ -570,17 +547,10 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                loonfs_core::gc_namespace(
-                    &store,
-                    None,
-                    None,
-                    &namespace_id,
-                    &options,
-                    &aged,
-                    loonfs_core::test_support::std_timer(),
-                )
-                .await
-                .expect("forget expired implicit owner");
+                namespace_store(&store, &namespace_id)
+                    .gc(None, &options, &aged)
+                    .await
+                    .expect("forget expired implicit owner");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
             }
             assert!(store.get(&content_key, None).await.expect("get").is_none());
@@ -592,17 +562,10 @@ mod streamed_content {
             result.expect_err("expired owner cannot complete").code(),
             ErrorCode::UploadNotFound
         );
-        loonfs_core::gc_namespace(
-            &store,
-            None,
-            None,
-            &namespace_id,
-            &loonfs_core::GcOptions::default(),
-            &aged,
-            loonfs_core::test_support::std_timer(),
-        )
-        .await
-        .expect("GC after failed late completion");
+        namespace_store(&store, &namespace_id)
+            .gc(None, &loonfs_core::GcOptions::default(), &aged)
+            .await
+            .expect("GC after failed late completion");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
@@ -631,7 +594,7 @@ mod streamed_content {
         context: &MutationContext,
     ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
         namespace_engine(store, namespace_id, context)
-            .upload_content_stream(upload_id, None, body(bytes))
+            .upload_content_stream(upload_id, body(bytes))
             .await
     }
 
@@ -641,7 +604,8 @@ mod streamed_content {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(&store, &namespace_id, &context)
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
         let bytes = payload();
@@ -680,7 +644,8 @@ mod streamed_content {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(&store, &namespace_id, &context)
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
         let bytes = payload();
@@ -737,7 +702,8 @@ mod streamed_content {
         ));
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(blocking.as_ref(), &namespace_id, &context)
+        NamespaceFixture::new(blocking.as_ref(), &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
         let begin = begin_upload(blocking.as_ref(), &namespace_id, &context)
@@ -848,7 +814,7 @@ mod streamed_content {
 /// providers' actual multipart behaviour.
 mod direct_multipart {
     use super::*;
-    use loonfs_core::{gc_namespace, GcOptions};
+    use loonfs_core::GcOptions;
     use loonfs_objectstore::keys::content_blob;
     use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
     use loonfs_types::api::v0::{CompletedUploadPart, UploadContentClaim};
@@ -876,12 +842,13 @@ mod direct_multipart {
         context: &MutationContext,
     ) -> Session {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(store, &namespace_id, context)
+        NamespaceFixture::new(store, &namespace_id, context)
+            .create()
             .await
             .expect("bootstrap");
         let payload = PART.repeat(3);
         let begin = namespace_engine(store, &namespace_id, context)
-            .begin_direct_multipart_upload_target(None, DirectMultipartUploadOptions::default())
+            .begin_direct_multipart_upload_target(DirectMultipartUploadOptions::default())
             .await
             .expect("begin direct multipart");
         let state = session_state(store, &namespace_id, &begin.session.upload_id).await;
@@ -966,10 +933,11 @@ mod direct_multipart {
         request: &CompleteUploadBody,
         context: &MutationContext,
     ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
-        let catalog =
-            loonfs_core::control::load_namespace_catalog_entry(store, namespace_id).await?;
+        let catalog = namespace_store(store, namespace_id)
+            .load_catalog_entry()
+            .await?;
         namespace_engine(store, namespace_id, context)
-            .complete_upload(&catalog, upload_id, None, request.clone())
+            .complete_upload(&catalog, upload_id, request.clone())
             .await
             .map(|completed| completed.response)
     }
@@ -1438,17 +1406,10 @@ mod direct_multipart {
             writer_id: context.writer_id.clone(),
             now_ms: expires_at_ms + options.grace_window_ms + 1,
         };
-        gc_namespace(
-            &store,
-            None,
-            None,
-            &session.namespace_id,
-            &options,
-            &expired,
-            loonfs_core::test_support::std_timer(),
-        )
-        .await
-        .expect("garbage collection");
+        namespace_store(&store, &session.namespace_id)
+            .gc(None, &options, &expired)
+            .await
+            .expect("garbage collection");
 
         assert_matches!(
             session_outcome(&store, &session.namespace_id, &session.upload_id).await,
@@ -1473,29 +1434,24 @@ mod direct_multipart {
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(&store, &namespace_id, &context)
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
 
         let chosen = namespace_engine(&store, &namespace_id, &context)
-            .begin_direct_multipart_upload_target(
-                None,
-                DirectMultipartUploadOptions {
-                    part_size_bytes: Some(16 * 1024 * 1024),
-                },
-            )
+            .begin_direct_multipart_upload_target(DirectMultipartUploadOptions {
+                part_size_bytes: Some(16 * 1024 * 1024),
+            })
             .await
             .expect("a part size inside the bounds is honoured");
         assert_eq!(chosen.part_size_bytes, 16 * 1024 * 1024);
 
         for out_of_bounds in [5 * 1024 * 1024 - 1, 5 * 1024 * 1024 * 1024 + 1] {
             let error = namespace_engine(&store, &namespace_id, &context)
-                .begin_direct_multipart_upload_target(
-                    None,
-                    DirectMultipartUploadOptions {
-                        part_size_bytes: Some(out_of_bounds),
-                    },
-                )
+                .begin_direct_multipart_upload_target(DirectMultipartUploadOptions {
+                    part_size_bytes: Some(out_of_bounds),
+                })
                 .await
                 .expect_err("a part size no provider accepts is refused");
             assert_eq!(error.code(), ErrorCode::InvalidRequest);

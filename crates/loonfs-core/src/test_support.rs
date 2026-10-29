@@ -107,28 +107,6 @@ pub(crate) fn grace_elapsed_after(committed_at_ms: u64) -> u64 {
     committed_at_ms + crate::limits::GC_DEFAULT_GRACE_WINDOW_MS
 }
 
-/// Raises the namespace's hint to its current manifest, as the runtime that
-/// published that manifest does after the publication.
-///
-/// A publication in core leaves the hint where it was, and a runtime skips a
-/// raise less than `HINT_RAISE_INTERVAL_MS` after its last one, so a test
-/// that needs garbage collection or discovery to see a current hint calls
-/// this.
-pub async fn raise_hint_to_current_manifest<S: loonfs_objectstore::ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &loonfs_types::NamespaceId,
-) {
-    let current = crate::namespace::control::load_current_manifest(store, namespace_id)
-        .await
-        .expect("load the current manifest")
-        .state
-        .manifest()
-        .manifest_no;
-    crate::namespace::control::raise_namespace_hint(store, namespace_id, current, None)
-        .await
-        .expect("raise the hint");
-}
-
 /// Builds the context a test mutation runs under: `writer_id` at `now_ms`.
 pub fn mutation_context(writer_id: &str, now_ms: u64) -> crate::MutationContext {
     crate::MutationContext {
@@ -152,58 +130,90 @@ pub fn content_head(
         .expect("a view without manifest segments should not fail")
 }
 
-// These path-mutation helpers use dev-dependencies and are only needed by
-// in-crate checkpoint and planner tests.
-#[cfg(test)]
 mod content_write;
-#[cfg(test)]
-pub(crate) mod ops;
+pub mod ops;
 
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::engine::NamespaceWriterEngine;
+use crate::manifest::{MetadataRunPolicy, MetadataSegmentCache};
+use crate::namespace::store::NamespaceStore;
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{NamespaceId, WallClock, WriterId};
 use std::sync::Arc;
 
-/// Appends one small commit per WAL object without folding the tail.
-#[cfg(any(test, feature = "test-support"))]
-pub async fn append_wal_objects<S: loonfs_objectstore::ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &loonfs_types::NamespaceId,
-    count: u64,
-    context: &crate::MutationContext,
-) -> crate::error::Result<()> {
-    let mut engine = crate::publish::NamespaceCommitEngine::new(
+/// Returns `namespace_id`'s components over `store`, for a test whose caches,
+/// clocks, write permits, and run policy don't matter.
+///
+/// The components are a segment cache that keeps no blocks, the system
+/// clocks, 32 content write permits, and the default run policy.
+pub fn namespace_store<S>(store: S, namespace_id: &NamespaceId) -> NamespaceStore<S> {
+    NamespaceStore::new(
+        store,
         namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
-    for _ in 0..count {
-        let commit_id = loonfs_types::CommitId::generate();
-        let path = loonfs_types::AbsolutePath::parse(format!("/wal-tail-{commit_id}"))
-            .expect("a generated WAL-tail test path should parse");
-        let request = crate::publish::CommitIntent::single(
-            commit_id,
-            loonfs_types::ActorId::loonfs(),
-            None,
-            crate::publish::FilesystemOperation::CreateDirectory {
-                path,
-                parents: false,
-            },
-        );
-        let mut results = engine
-            .publish_batch(
-                store,
-                vec![crate::publish::CommitCandidate::new(request)],
-                context,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            )
-            .await
-            .results;
-        assert_eq!(
-            results.len(),
-            1,
-            "a single-candidate test publish should return one result"
-        );
-        results
-            .pop()
-            .expect("a single-candidate test publish should hold one result")?;
+        Arc::new(MetadataSegmentCache::unshared(0)),
+        Arc::new(crate::time::SystemWallClock),
+        std_timer(),
+        Arc::new(content_writes()),
+        MetadataRunPolicy::default(),
+    )
+}
+
+/// Returns the components of [`namespace_store`] with `wall_clock` as their
+/// wall clock, for a test that sets the time its operations record.
+pub fn namespace_store_with_wall_clock<S>(
+    store: S,
+    namespace_id: &NamespaceId,
+    wall_clock: Arc<dyn WallClock>,
+) -> NamespaceStore<S> {
+    NamespaceStore {
+        wall_clock,
+        ..namespace_store(store, namespace_id)
     }
-    Ok(())
+}
+
+/// A wall clock that always reads the same time.
+#[derive(Debug)]
+struct FixedWallClock(u64);
+
+impl WallClock for FixedWallClock {
+    fn now_ms(&self) -> u64 {
+        self.0
+    }
+}
+
+/// One namespace that a test writes to: its components, whose wall clock
+/// reads one fixed time, and the writer ID that its commits record.
+#[derive(Debug, Clone)]
+pub struct NamespaceFixture<S> {
+    pub namespace: NamespaceStore<S>,
+    pub writer_id: WriterId,
+}
+
+impl<S: ObjectStore + Clone> NamespaceFixture<S> {
+    /// Returns a fixture over `store` whose clock reads `context.now_ms` and
+    /// whose writer is `context.writer_id`, with the other components of
+    /// [`namespace_store`].
+    pub fn new(store: S, namespace_id: &NamespaceId, context: &crate::MutationContext) -> Self {
+        Self {
+            namespace: namespace_store_with_wall_clock(
+                store,
+                namespace_id,
+                Arc::new(FixedWallClock(context.now_ms)),
+            ),
+            writer_id: context.writer_id.clone(),
+        }
+    }
+
+    /// Returns a writable engine over the fixture's namespace, which commits
+    /// as the fixture's writer at the fixture's time.
+    pub fn engine(&self) -> NamespaceWriterEngine<S> {
+        NamespaceWriterEngine::writer(self.namespace.clone(), self.writer_id.clone())
+    }
+
+    /// Returns the context the fixture's commits run under.
+    pub fn context(&self) -> crate::MutationContext {
+        crate::MutationContext {
+            writer_id: self.writer_id.clone(),
+            now_ms: self.namespace.wall_clock.now_ms(),
+        }
+    }
 }

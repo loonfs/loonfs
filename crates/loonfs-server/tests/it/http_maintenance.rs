@@ -667,7 +667,8 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     })
     .expect("construct store")
     .into_shared();
-    let root = loonfs::control::load_namespace_current_manifest(&store, &namespace)
+    let root = loonfs_core::test_support::namespace_store(&store, &namespace)
+        .load_current_manifest()
         .await
         .expect("metadata root");
     replace_object(

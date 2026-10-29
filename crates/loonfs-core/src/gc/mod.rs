@@ -15,7 +15,6 @@ mod sweep;
 mod tests;
 mod uploads;
 
-pub use collect::gc_namespace;
 pub use options::GcOptions;
 pub use pins::{grace_age, GraceAge};
 pub(crate) use session_cache::CompletedUploadSession;

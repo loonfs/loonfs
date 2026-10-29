@@ -5,7 +5,6 @@ use super::*;
 use crate::metadata::{
     AccessRevisionRecord, AttributesRevisionRecord, MetadataView, RevisionRecord,
 };
-use crate::test_support::ops::append_wal_commit;
 use loonfs_test_support::stores::ConcurrencyWatchStore;
 use loonfs_types::format::segment_blocks::key_range_may_intersect;
 use loonfs_types::format::wal::WalDelta;
@@ -83,7 +82,8 @@ impl ManyRunFixture {
 }
 
 async fn head_seq<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> ChangeSeq {
-    load_namespace_read_state(store, namespace_id, crate::test_support::std_timer())
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_read_state()
         .await
         .expect("read the head")
         .seq
@@ -142,7 +142,8 @@ async fn append_whole_state_revisions<S: ObjectStore + ?Sized>(
             grants: grants.clone(),
         });
     }
-    append_wal_commit(store, namespace_id, deltas, Vec::new())
+    crate::test_support::namespace_store(store, namespace_id)
+        .append_wal_commit(deltas, Vec::new())
         .await
         .expect("commit attribute and access revisions");
 }
@@ -180,15 +181,10 @@ async fn many_run_fixture() -> ManyRunFixture {
         "/docs".to_owned(),
         "/trash".to_owned(),
     ]);
-    write_files_bytes(
-        &store,
-        &namespace_id,
-        &base_paths[..base_paths.len() - 2],
-        b"base\n",
-        &context,
-    )
-    .await
-    .expect("write the base files");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_files_bytes(&base_paths[..base_paths.len() - 2], b"base\n")
+        .await
+        .expect("write the base files");
     let mut inodes = inodes_at(&store, &namespace_id, &base_paths).await;
     append_whole_state_revisions(&store, &namespace_id, &inodes[..3], 1).await;
     checkpoint_then_compact(
@@ -201,11 +197,13 @@ async fn many_run_fixture() -> ManyRunFixture {
     let mut run_heads = vec![head_seq(&store, &namespace_id).await];
 
     let middle_paths = docs_paths(&["middle", "newest", "aaa-middle", "zzz-middle"]);
-    write_files_bytes(&store, &namespace_id, &middle_paths, b"middle\n", &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_files_bytes(&middle_paths, b"middle\n")
         .await
         .expect("write the middle files");
     for path in docs_paths(&["removed", "reused"]) {
-        delete_path(&store, &namespace_id, &path, &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .delete_path(&path, None)
             .await
             .expect("delete a base file");
     }
@@ -216,10 +214,12 @@ async fn many_run_fixture() -> ManyRunFixture {
     run_heads.push(head_seq(&store, &namespace_id).await);
 
     let newest_paths = docs_paths(&["newest", "reused", "aaa-newest", "zzz-newest"]);
-    write_files_bytes(&store, &namespace_id, &newest_paths, b"newest\n", &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_files_bytes(&newest_paths, b"newest\n")
         .await
         .expect("write the newest files");
-    delete_path(&store, &namespace_id, "/trash", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/trash", None)
         .await
         .expect("delete the trash directory");
     append_whole_state_revisions(&store, &namespace_id, &inodes[2..3], 3).await;
@@ -605,7 +605,8 @@ async fn hot_key_fixture<S: ObjectStore + ?Sized>(
         .await
         .expect("bootstrap");
     let paths = docs_paths(&["hot", "flip", "aaa", "zzz"]);
-    write_files_bytes(store, namespace_id, &paths, b"base\n", &context)
+    crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
+        .write_files_bytes(&paths, b"base\n")
         .await
         .expect("write the base files");
     let inodes = inodes_at(store, namespace_id, &["/docs".to_owned(), paths[0].clone()]).await;
@@ -616,22 +617,18 @@ async fn hot_key_fixture<S: ObjectStore + ?Sized>(
         // Names at both ends of the directory keep each run's binding range
         // across the slot, so only the filters can rule a run out.
         let paths = docs_paths(&["hot", &format!("aaa-{run}"), &format!("zzz-{run}")]);
-        write_files_bytes(store, namespace_id, &paths, b"delta\n", &context)
+        crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
+            .write_files_bytes(&paths, b"delta\n")
             .await
             .expect("write the delta files");
-        delete_path(store, namespace_id, "/docs/flip.txt", &context, None)
+        crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
+            .delete_path("/docs/flip.txt", None)
             .await
             .expect("unbind the slot");
-        write_file_bytes(
-            store,
-            namespace_id,
-            "/docs/flip.txt",
-            b"flip\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("bind the slot to a new inode");
+        crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
+            .write_file_bytes("/docs/flip.txt", b"flip\n", None)
+            .await
+            .expect("bind the slot to a new inode");
         append_whole_state_revisions(store, namespace_id, &[hot], run).await;
         create_checkpoint(store, namespace_id, &context)
             .await

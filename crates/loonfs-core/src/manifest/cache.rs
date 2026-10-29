@@ -275,7 +275,6 @@ impl MetadataSegmentCache {
     /// Returns a view over blocks that no other view reads, with a budget of
     /// `max_decoded_bytes` for blocks, a second budget of the same size for
     /// manifests, and the default block memo budget and read-ahead window.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
             Arc::new(SharedSegmentBlocks::new(

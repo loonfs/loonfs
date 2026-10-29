@@ -41,7 +41,8 @@ async fn family_keys(
     namespace_id: &NamespaceId,
     family: MetadataRowFamily,
 ) -> (usize, BTreeSet<String>) {
-    let manifest = loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
+    let manifest = loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load manifest");
     let runs = &manifest.state.envelope.payload().runs;

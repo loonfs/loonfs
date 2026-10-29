@@ -1,16 +1,12 @@
 //! Publication deadlines for completed content.
 
 use super::*;
-use crate::gc::{gc_namespace, GcOptions};
+use crate::gc::GcOptions;
 use crate::limits::{
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_WINDOW_MS,
     GC_MIN_GRACE_WINDOW_MS,
 };
-use crate::namespace::control::load_namespace_read_state;
-use crate::protocol::{
-    begin_service_proxied_upload, complete_upload, upload_content, CompletedUpload,
-};
-use crate::test_support::ops::create;
+use crate::protocol::CompletedUpload;
 use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -40,29 +36,32 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> CompletedUpload {
-    let upload = begin_service_proxied_upload(store, namespace_id, None, context)
+    let upload = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+        .engine()
+        .begin_upload()
         .await
         .expect("begin upload");
-    upload_content(
+    crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &upload.upload_id,
-        None,
-        b"completed content",
-        context.now_ms,
+        &crate::test_support::mutation_context("test-writer", context.now_ms),
     )
+    .engine()
+    .upload_content(&upload.upload_id, b"completed content")
     .await
     .expect("stage upload");
-    let completed = complete_upload(
-        store,
-        namespace_id,
-        &upload.upload_id,
-        None,
-        CompleteUploadBody::ServiceProxied {},
-        context,
-    )
-    .await
-    .expect("complete upload");
+    let completed = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+        .engine()
+        .complete_upload(
+            &crate::test_support::namespace_store(store, namespace_id)
+                .load_catalog_entry()
+                .await
+                .expect("load the catalog"),
+            &upload.upload_id,
+            CompleteUploadBody::ServiceProxied {},
+        )
+        .await
+        .expect("complete upload");
     completed
 }
 
@@ -99,7 +98,6 @@ fn directory_request(commit_id: &str, name: &str) -> CommitIntent {
 #[tokio::test]
 async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     use crate::content::{mint_content_token, verify_content_token};
-    use crate::namespace::catalog::load_namespace_catalog_entry;
     use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::RecordingStore;
 
@@ -111,11 +109,13 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     );
     let clock = Arc::new(ManualClock::new(1_000));
     let setup = context(clock.now_ms());
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
-    let catalog = load_namespace_catalog_entry(&store, &namespace_id)
+    let catalog = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_catalog_entry()
         .await
         .expect("catalog");
     let token = mint_content_token(
@@ -125,30 +125,22 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     )
     .expect("mint token");
     clock.advance_ms(1);
-    delete_namespace(
-        &store,
-        &namespace_id,
-        Default::default(),
-        &context(clock.now_ms()),
-        MetadataRunPolicy::default(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("delete");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(clock.now_ms()))
+        .engine()
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete");
     let prepared = verify_content_token("secret", &catalog, &token, clock.now_ms())
         .expect("token remains valid");
     let candidate =
         CommitCandidate::prepared(put_candidate(&completed).intent().clone(), vec![prepared]);
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id,
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .monotonic_timer(clock.clone());
+    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
+        timer: clock.clone(),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    });
     store.reset();
     let result = engine
         .publish_batch(
-            &store,
             vec![candidate],
             &context(clock.now_ms()),
             &Deadline::start(clock.clone()),
@@ -171,7 +163,8 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         OperationSelector::Read,
     );
     let setup = context(1_000);
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
@@ -179,28 +172,23 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1);
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
+        timer: timer.clone(),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    });
     engine
-        .session_writer_epoch(&store, &setup)
+        .position
+        .session_writer_epoch(&engine.namespace, &setup)
         .await
         .expect("acquire writer");
     engine.invalidate_projection();
-    let head_before =
-        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
-            .await
-            .expect("head");
+    let head_before = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
     store.block_next();
     let batch = Deadline::start(timer.clone());
-    let publish = engine.publish_batch(
-        &store,
-        vec![put_candidate(&completed)],
-        &publication,
-        &batch,
-    );
+    let publish = engine.publish_batch(vec![put_candidate(&completed)], &publication, &batch);
     let collect = async {
         store.wait_until_blocked().await;
         timer
@@ -211,28 +199,14 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
             grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
             ..Default::default()
         };
-        gc_namespace(
-            &aged,
-            None,
-            None,
-            &namespace_id,
-            &options,
-            &reclaimed,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("gc removes the session record");
-        let report = gc_namespace(
-            &aged,
-            None,
-            None,
-            &namespace_id,
-            &options,
-            &reclaimed,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("gc reclaims the content");
+        crate::test_support::namespace_store(&aged, &namespace_id)
+            .gc(None, &options, &reclaimed)
+            .await
+            .expect("gc removes the session record");
+        let report = crate::test_support::namespace_store(&aged, &namespace_id)
+            .gc(None, &options, &reclaimed)
+            .await
+            .expect("gc reclaims the content");
         assert_eq!(report.deleted.content_objects, 1);
         assert!(store
             .head(&content_key)
@@ -249,10 +223,10 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
             .code(),
         loonfs_types::ErrorCode::ContentNotPrepared
     );
-    let head_after =
-        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
-            .await
-            .expect("head");
+    let head_after = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
     assert_eq!(head_after.seq, head_before.seq);
     assert_eq!(head_after.wal_no, head_before.wal_no);
     assert_eq!(
@@ -284,20 +258,19 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         OperationSelector::Read,
     );
     let setup = context(1_000);
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
+        timer: timer.clone(),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    });
     let replay = CommitCandidate::new(directory_request("original", "original"));
     let original = engine
         .publish_batch(
-            &store,
             vec![replay.clone()],
             &setup,
             &Deadline::start(timer.clone()),
@@ -306,10 +279,10 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         .results
         .remove(0)
         .expect("original commit");
-    let head_before =
-        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
-            .await
-            .expect("head");
+    let head_before = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
     engine.invalidate_projection();
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
@@ -320,7 +293,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let batch = Deadline::start(timer.clone());
     let publish = async {
         let mut result = engine
-            .publish_batch(&store, &candidates, &publication, &batch)
+            .publish_batch(&candidates, &publication, &batch)
             .await;
         // The first attempt finds the proof expired after loading its view
         // and aborts; the retry owner tries again from the same origin.
@@ -333,7 +306,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
             )
         }) {
             result = engine
-                .publish_batch(&store, &candidates, &publication, &batch)
+                .publish_batch(&candidates, &publication, &batch)
                 .await;
         }
         result
@@ -367,10 +340,10 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         publication.now_ms
     );
     assert_eq!(result.results[3].as_ref().expect("replay"), &original);
-    let head_after =
-        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
-            .await
-            .expect("head");
+    let head_after = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
     assert_eq!(head_after.seq, ChangeSeq(2));
     assert_eq!(
         head_after.wal_no,
@@ -385,7 +358,9 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         3
     );
     drop(engine);
-    let reopened = crate::path::read::load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let reopened = namespace
+        .load_current_metadata_view()
         .await
         .expect("reopen");
     let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
@@ -413,20 +388,19 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         OperationSelector::Put,
     );
     let setup = context(1_000);
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
+        timer: timer.clone(),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    });
     let replay = CommitCandidate::new(directory_request("original", "original"));
     let original = engine
         .publish_batch(
-            &store,
             vec![replay.clone()],
             &setup,
             &Deadline::start(timer.clone()),
@@ -435,22 +409,17 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .results
         .remove(0)
         .expect("original commit");
-    let head_before =
-        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
-            .await
-            .expect("head");
+    let head_before = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
     let alias = CommitCandidate::new(primary.intent().clone());
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.block_next();
     let batch = Deadline::start(timer.clone());
-    let publish = engine.publish_batch(
-        &store,
-        vec![primary, alias, later, replay],
-        &publication,
-        &batch,
-    );
+    let publish = engine.publish_batch(vec![primary, alias, later, replay], &publication, &batch);
     let advance = async {
         store.wait_until_blocked().await;
         let elapsed_ms = 2;
@@ -475,10 +444,10 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         result.results[3].as_ref().expect("independent replay"),
         &original
     );
-    let head_after =
-        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
-            .await
-            .expect("head");
+    let head_after = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
     assert_eq!(head_after.seq, ChangeSeq(3));
     assert_eq!(
         head_after.wal_no,
@@ -493,7 +462,9 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         3
     );
     drop(engine);
-    let reopened = crate::path::read::load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let reopened = namespace
+        .load_current_metadata_view()
         .await
         .expect("reopen namespace");
     for path in ["/content", "/later"] {
@@ -520,7 +491,6 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
 async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_without_content_io() {
     use crate::content::{mint_content_token, verify_content_token};
     use crate::manifest::{CompactionUnitOutcome, MetadataCompactionPolicy, MetadataRunPolicy};
-    use crate::namespace::catalog::load_namespace_catalog_entry;
     use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
     use std::num::NonZeroUsize;
 
@@ -531,12 +501,14 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         KeyPredicate::any(),
     );
     let setup = context(1_000);
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let unused = completed_upload(&store, &namespace_id, &setup).await;
-    let catalog = load_namespace_catalog_entry(&store, &namespace_id)
+    let catalog = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_catalog_entry()
         .await
         .expect("catalog");
     let mut proofs = vec![completed.prepared.clone()];
@@ -559,15 +531,13 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     );
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
+        timer: timer.clone(),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    });
     store.reset();
     let result = engine
         .publish_batch(
-            &store,
             vec![candidate.clone(), metadata],
             &publication,
             &Deadline::start(timer.clone()),
@@ -594,24 +564,30 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         "{:?}",
         store.snapshot()
     );
-    crate::manifest::fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold commits");
     loop {
-        let outcome = crate::manifest::compact_unit(
-            &store,
-            None,
-            &namespace_id,
-            None,
-            loonfs_types::CompactorEpoch(0),
-            MetadataRunPolicy {
+        let outcome = {
+            let mut fixture = crate::test_support::NamespaceFixture::new(
+                &store,
+                &namespace_id,
+                &crate::test_support::mutation_context("test-writer", 0),
+            );
+            fixture.namespace.run_policy = MetadataRunPolicy {
                 max_delta_runs: NonZeroUsize::MIN,
                 ..MetadataRunPolicy::default()
-            },
+            };
+            fixture
+        }
+        .engine()
+        .compact_metadata_unit(
+            None,
             MetadataCompactionPolicy::default(),
             crate::manifest::CompactionAdmission::AnySize,
+            loonfs_types::CompactorEpoch(0),
             &crate::manifest::MetadataCompactionCancellation::default(),
-            crate::test_support::std_timer(),
         )
         .await
         .expect("compact metadata");
@@ -630,7 +606,6 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     store.reset();
     let replay = engine
         .publish_batch(
-            &store,
             vec![candidate, later],
             &expired,
             &Deadline::start(timer.clone()),
@@ -673,7 +648,8 @@ async fn retained_evidence_minting_stops_at_the_upload_issuance_deadline() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let setup = context(1_000);
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;

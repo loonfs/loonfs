@@ -4,8 +4,7 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::LeafRevisionPreload;
-use crate::namespace::read_anchor::load_read_anchor;
-use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
+use crate::path::read::{LoadedMetadataView, ReadLoadContext};
 use loonfs_test_support::stores::ConcurrencyWatchStore;
 use loonfs_types::options::ListOptions;
 use loonfs_types::{AttributeInclusion, InodeKind, ListPageCursor, PageRequest};
@@ -20,16 +19,10 @@ async fn a_cold_path_walk_reads_no_inode() {
     bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &inner,
-        &namespace_id,
-        "/docs/reports/summary.txt",
-        b"summary",
-        &context,
-        None,
-    )
-    .await
-    .expect("create depth-three path");
+    crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context)
+        .write_file_bytes("/docs/reports/summary.txt", b"summary", None)
+        .await
+        .expect("create depth-three path");
     checkpoint_then_compact(
         &inner,
         &namespace_id,
@@ -40,7 +33,8 @@ async fn a_cold_path_walk_reads_no_inode() {
         },
     )
     .await;
-    let manifest = load_current_manifest(&inner, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&inner, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("manifest");
     let inode_segments = manifest
@@ -62,7 +56,9 @@ async fn a_cold_path_walk_reads_no_inode() {
     assert_eq!(inode_segments.len(), 4);
     let store = RecordingStore::metadata_segments(inner);
     for preload in [LeafRevisionPreload::Skip, LeafRevisionPreload::Preload] {
-        let view = load_current_metadata_view(&store, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
             .await
             .expect("cold view");
         store.reset();
@@ -100,16 +96,10 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
         .expect("bootstrap");
     let files = 4 * STORE_READS_IN_FLIGHT;
     for file in 0..files {
-        write_file_bytes(
-            &inner,
-            &namespace_id,
-            &format!("/file-{file:03}"),
-            b"file",
-            &context,
-            None,
-        )
-        .await
-        .expect("create file");
+        crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context)
+            .write_file_bytes(&format!("/file-{file:03}"), b"file", None)
+            .await
+            .expect("create file");
     }
     checkpoint_then_compact(
         &inner,
@@ -124,7 +114,8 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
     let checkpoint = create_checkpoint(&inner, &namespace_id, &context)
         .await
         .expect("pin the compacted manifest");
-    let binding_segments: BTreeSet<_> = load_current_manifest(&inner, &namespace_id)
+    let binding_segments: BTreeSet<_> = crate::test_support::namespace_store(&inner, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("manifest")
         .state
@@ -141,23 +132,19 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
         inner,
         KeyPredicate::new(move |key| binding_segments.contains(key)),
     );
-    let page = crate::pin::list_checkpoint_files_page(
-        &store,
-        None,
-        &load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
-            .await
-            .expect("head"),
-        &checkpoint.checkpoint_id,
-        PageRequest {
-            cursor: None,
-            limit: EffectiveLimit::new(NonZeroU32::new(1000).expect("nonzero limit")),
-        },
-        crate::pin::ListCheckpointFilesOptions::default(),
-        // The pin has no expiry, so the read clock doesn't matter.
-        0,
-    )
-    .await
-    .expect("checkpoint files page");
+    let page = crate::test_support::namespace_store(&store, &namespace_id)
+        .list_checkpoint_files_page(
+            &checkpoint.checkpoint_id,
+            PageRequest {
+                cursor: None,
+                limit: EffectiveLimit::new(NonZeroU32::new(1000).expect("nonzero limit")),
+            },
+            crate::pin::ListCheckpointFilesOptions::default(),
+            // The pin has no expiry, so the read clock doesn't matter.
+            0,
+        )
+        .await
+        .expect("checkpoint files page");
     assert_eq!(page.files.len(), files);
     let concurrency = store.reads();
     assert!(concurrency.peak_in_flight > 1, "{concurrency:?}");
@@ -214,16 +201,20 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(&store, &namespace_id, "/a", b"first", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/a", b"first", None)
         .await
         .expect("bind a");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("pin first binding");
-    let original = load_read_anchor(&store, &namespace_id, crate::test_support::observed_now())
+    let original = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("first anchor");
-    let first = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let first = namespace
+        .load_current_metadata_view()
         .await
         .expect("first view");
     let inode_id = first
@@ -249,44 +240,43 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
             },
         })
         .collect();
-    crate::commit_engine::publish_namespace_commits_batch(
-        &store,
-        &namespace_id,
-        vec![CommitCandidate::new(CommitIntent {
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .publish_candidates(vec![CommitCandidate::new(CommitIntent {
             commit_id: CommitId::parse("repeat-move").expect("commit id"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
             message: None,
             operations,
             preconditions: Vec::new(),
-        })],
-        &context,
-        std::sync::Arc::new(crate::test_support::content_writes()),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .into_iter()
-    .next()
-    .expect("one result")
-    .expect("three moves in one commit");
-    let moved_tail = load_current_metadata_view(&store, &namespace_id)
+        })])
+        .await
+        .into_iter()
+        .next()
+        .expect("one result")
+        .expect("three moves in one commit");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let moved_tail = namespace
+        .load_current_metadata_view()
         .await
         .expect("moved tail");
     assert_names(&moved_tail, &[("/b", inode_id)]).await;
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("pin moved binding");
-    let moved = load_read_anchor(&store, &namespace_id, crate::test_support::observed_now())
+    let moved = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("moved anchor");
-    advance_retention_floor(
+    crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("floor at move");
     let (manifest_no, _) = drain_compaction(
@@ -317,10 +307,13 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
             && binding.delta_index == 5
     );
 
-    write_file_bytes(&store, &namespace_id, "/a", b"replacement", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/a", b"replacement", None)
         .await
         .expect("reuse a");
-    let current = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let current = namespace
+        .load_current_metadata_view()
         .await
         .expect("reused tail");
     let replacement = current
@@ -337,19 +330,26 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("fold reuse");
-    let current = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let current = namespace
+        .load_current_metadata_view()
         .await
         .expect("reused manifest");
     assert_names(&current, &[("/a", replacement), ("/b", inode_id)]).await;
     for (anchor, path) in [(&original, "/a"), (&moved, "/b")] {
         let basis = anchor.basis();
-        let pinned = load_metadata_view(
-            &store,
-            &namespace_id,
-            ReadLoadContext::pinned_head(&anchor.read_state, &basis, None, None, None, None),
-        )
-        .await
-        .expect("pinned manifest");
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let pinned = namespace
+            .load_metadata_view(ReadLoadContext::pinned_head(
+                &anchor.read_state,
+                &basis,
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("pinned manifest");
         assert_names(&pinned, &[(path, inode_id)]).await;
     }
 }
@@ -364,14 +364,17 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
         .await
         .expect("bootstrap");
     for path in ["/b", "/c"] {
-        write_file_bytes(&store, &namespace_id, path, b"body", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, b"body", None)
             .await
             .expect("create");
     }
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("fold the creates");
-    let created = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let created = namespace
+        .load_current_metadata_view()
         .await
         .expect("created view");
     let access = ReadAccess::live(Authorizer::Unrestricted);
@@ -389,23 +392,27 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
         "the moved child must sort before the slot's earlier child"
     );
 
-    delete_path(&store, &namespace_id, "/c", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/c", None)
         .await
         .expect("delete c");
-    move_path(&store, &namespace_id, "/b", "/c", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .move_path("/b", "/c", None)
         .await
         .expect("move b to c");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("fold the move");
-    advance_retention_floor(
+    crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("floor at the move");
     let (manifest_no, _) = drain_compaction(
@@ -435,7 +442,9 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
             && binding.name_key.as_str() == "c"
             && binding.child_inode_id == moved
     );
-    let compacted = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let compacted = namespace
+        .load_current_metadata_view()
         .await
         .expect("compacted view");
     assert_names(&compacted, &[("/c", moved)]).await;
@@ -450,10 +459,8 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    crate::commit_engine::publish_namespace_commits_batch(
-        &store,
-        &namespace_id,
-        vec![CommitCandidate::new(CommitIntent {
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .publish_candidates(vec![CommitCandidate::new(CommitIntent {
             commit_id: CommitId::parse("parents").expect("commit id"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -466,23 +473,22 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
                 })
                 .collect(),
             preconditions: Vec::new(),
-        })],
-        &context,
-        std::sync::Arc::new(crate::test_support::content_writes()),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .into_iter()
-    .next()
-    .expect("one result")
-    .expect("create the parents");
-    write_file_bytes(&store, &namespace_id, "/c/report", b"body", &context, None)
+        })])
+        .await
+        .into_iter()
+        .next()
+        .expect("one result")
+        .expect("create the parents");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/c/report", b"body", None)
         .await
         .expect("create the child");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("fold the creates");
-    let created = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let created = namespace
+        .load_current_metadata_view()
         .await
         .expect("created view");
     let access = ReadAccess::live(Authorizer::Unrestricted);
@@ -501,14 +507,17 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
     );
 
     for (source, destination) in [("/c/report", "/b/report"), ("/b/report", "/a/report")] {
-        move_path(&store, &namespace_id, source, destination, &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .move_path(source, destination, None)
             .await
             .expect("move the child");
     }
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("fold the moves");
-    let moved = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let moved = namespace
+        .load_current_metadata_view()
         .await
         .expect("moved view");
     let parent = moved
@@ -518,14 +527,16 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         .expect("parent lookup")
         .expect("the child is bound");
     assert_eq!(parent.parent_inode_id, last_parent);
-    advance_retention_floor(
+    crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("floor at the last move");
     let (manifest_no, _) = drain_compaction(
@@ -558,7 +569,9 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
             && binding.parent_inode_id == last_parent
             && binding.name_key.as_str() == "report"
     );
-    let compacted = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let compacted = namespace
+        .load_current_metadata_view()
         .await
         .expect("compacted view");
     let parent = compacted
@@ -593,16 +606,19 @@ async fn a_listing_reads_only_the_slot_binding_family() {
     bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(&inner, &namespace_id, "/a", b"first", &context, None)
+    crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context)
+        .write_file_bytes("/a", b"first", None)
         .await
         .expect("bind");
-    move_path(&inner, &namespace_id, "/a", "/b", &context, None)
+    crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context)
+        .move_path("/a", "/b", None)
         .await
         .expect("unbind and bind");
     create_checkpoint(&inner, &namespace_id, &context)
         .await
         .expect("fold");
-    let manifest = load_current_manifest(&inner, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&inner, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("manifest");
     let families = manifest
@@ -615,9 +631,8 @@ async fn a_listing_reads_only_the_slot_binding_family() {
         .map(|descriptor| (metadata_segment_object_key(descriptor), descriptor.family))
         .collect::<BTreeMap<_, _>>();
     let store = RecordingStore::metadata_segments(inner);
-    let view = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     store.reset();
     let children = view
         .metadata_view()
@@ -678,16 +693,10 @@ async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_curre
             delta_index: 0,
         });
     }
-    let segments = build_manifest_segments(
-        &store,
-        None,
-        &namespace_id,
-        &builder.build(),
-        &HashMap::new(),
-        MetadataRunPolicy::default(),
-    )
-    .await
-    .expect("build segments");
+    let segments = crate::test_support::namespace_store(&store, &namespace_id)
+        .build_manifest_segments(&builder.build(), &HashMap::new())
+        .await
+        .expect("build segments");
     let manifest = publish_manifest_with_segments(
         &store,
         &namespace_id,

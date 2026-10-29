@@ -40,7 +40,7 @@ form_urlencoded.workspace = true
 http-body-util.workspace = true
 loonfs = { workspace = true, features = ["test-support"] }
 loonfs-client.workspace = true
-loonfs-core.workspace = true
+loonfs-core = { workspace = true, features = ["test-support"] }
 loonfs-test-support.workspace = true
 rcgen.workspace = true
 serde_json.workspace = true

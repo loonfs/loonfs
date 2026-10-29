@@ -66,9 +66,7 @@ pub use self::compaction_step::{
     CompactionAdmission, CompactionUnitOutcome, MetadataCompactionPolicy,
 };
 pub use self::error::ManifestLoadError;
-pub use self::fold::{
-    fold_wal_tail, next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
-};
+pub use self::fold::{next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail};
 pub use self::index_block_load::decode_stored_block;
 pub use self::load::load_position_basis;
 pub(crate) use self::published::same_head;
@@ -78,21 +76,14 @@ pub use self::runs::{MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy
 pub use self::segment_block_cache::{
     LoadedSegmentBlock, MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad,
 };
-pub use self::statistics::{
-    load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,
-};
+pub use self::statistics::NamespaceStatistics;
 pub use self::streaming_compaction::MetadataCompactionCancellation;
 
-pub(crate) use self::compaction_step::compact_unit;
 pub use self::compaction_step::metadata_compaction_due;
-pub(crate) use self::compactor::claim_compactor;
-#[cfg(test)]
-pub(crate) use self::fold::fold_wal;
 pub(crate) use self::load::{
     ensure_manifest_reference_matches, head_from_manifest, load_basis_metadata_segments,
     load_manifest_segments, load_namespace_manifest_envelope,
     load_namespace_manifest_envelope_if_present, metadata_basis_from_manifest, LoadedMetadataBasis,
 };
-pub(crate) use self::retention::{advance_retention_floor, set_retention_window};
 pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
 pub(crate) use self::scan_load::{visit_segment_rows, ScanDescriptor};

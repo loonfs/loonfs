@@ -81,7 +81,8 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .fold_wal(&namespace_id)
         .await
         .expect("publish first manifest");
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+    let catalog = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_catalog_entry()
         .await
         .expect("load namespace catalog");
 
@@ -97,13 +98,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         let mut candidates = Vec::new();
         for index in (0..FILES).filter(|index| index % RUNS == run) {
             let bytes = format!("body {index}");
-            let stored = loonfs_core::content::store_bytes_as_content(
-                &store,
-                &namespace_id,
-                bytes.as_bytes(),
-            )
-            .await
-            .expect("stage content");
+            let stored = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+                .store_bytes_as_content(bytes.as_bytes())
+                .await
+                .expect("stage content");
             let prepared = loonfs_core::content::prepare_existing_content_ref(
                 &store,
                 &catalog,
@@ -150,7 +148,8 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
 
     // Confirm the manifest really carries several straddling delta direntry
     // runs with inline filters — the premise of the assertions below.
-    let root = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+    let root = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("load metadata root");
     let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest().manifest_no);

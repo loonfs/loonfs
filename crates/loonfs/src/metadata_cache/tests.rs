@@ -78,14 +78,11 @@ async fn pin_fold_reads(
             .expect("delete directory");
     }
     assert!(
-        loonfs_core::cache::load_namespace_diagnostics(
-            store.as_ref(),
-            &demo(),
-            loonfs_core::test_support::std_timer()
-        )
-        .await
-        .expect("diagnostics before creation")
-        .wal_tail_objects
+        loonfs_core::test_support::namespace_store(store.as_ref(), &demo())
+            .load_diagnostics()
+            .await
+            .expect("diagnostics before creation")
+            .wal_tail_objects
             > 0
     );
     store.reset();
@@ -138,14 +135,11 @@ async fn pin_fold_reads(
     );
     let reads = store.count(OperationSelector::Read);
     assert_eq!(
-        loonfs_core::cache::load_namespace_diagnostics(
-            store.as_ref(),
-            &demo(),
-            loonfs_core::test_support::std_timer()
-        )
-        .await
-        .expect("diagnostics after creation")
-        .wal_tail_objects,
+        loonfs_core::test_support::namespace_store(store.as_ref(), &demo())
+            .load_diagnostics()
+            .await
+            .expect("diagnostics after creation")
+            .wal_tail_objects,
         0
     );
     runtime.shutdown().await.expect("shut down writer");

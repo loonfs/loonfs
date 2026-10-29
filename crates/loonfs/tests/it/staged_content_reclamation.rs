@@ -7,7 +7,7 @@
 //! consequence: every blob one of these puts writes is eventually either
 //! referenced by metadata or reclaimed, and none of them is immortal.
 //!
-//! Garbage collection is driven through `loonfs_core::gc_namespace` rather
+//! Garbage collection is driven through `NamespaceStore::gc` rather
 //! than `Maintenance::gc`, because the maintenance handle stamps its pass
 //! from the wall clock and these deadlines are days out. The store is the
 //! same one the runtime wrote through, so the pass sees exactly what the
@@ -50,20 +50,17 @@ fn gc_options() -> GcOptions {
 /// Runs one pass at a fabricated clock. The runtime stamped its sessions
 /// from the real clock, so every deadline here is measured from that.
 async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: u64) -> GcResponse {
-    loonfs_core::gc_namespace(
-        store.as_ref(),
-        None,
-        None,
-        namespace_id,
-        &gc_options(),
-        &MutationContext {
-            writer_id: loonfs_types::WriterId::parse("reclamation-test").expect("writer id"),
-            now_ms,
-        },
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("garbage collection")
+    loonfs_core::test_support::namespace_store(store.as_ref(), namespace_id)
+        .gc(
+            None,
+            &gc_options(),
+            &MutationContext {
+                writer_id: loonfs_types::WriterId::parse("reclamation-test").expect("writer id"),
+                now_ms,
+            },
+        )
+        .await
+        .expect("garbage collection")
 }
 
 fn content_key(content_ref: &ContentRef) -> String {

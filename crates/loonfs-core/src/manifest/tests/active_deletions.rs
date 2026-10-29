@@ -9,7 +9,6 @@ use super::*;
 use crate::metadata::{
     hiding_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneRecord, TombstoneRowAction,
 };
-use crate::path::read::load_current_metadata_view;
 use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::format::manifest::{
@@ -251,29 +250,25 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
     operation: FilesystemOperation,
     context: &MutationContext,
 ) -> loonfs_types::Commit {
-    NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .publish_batch(
-        store,
-        vec![CommitCandidate::prepared(
-            CommitIntent::single(
-                CommitId::parse(commit_id).expect("commit id"),
-                loonfs_test_support::test_actor(),
-                None,
-                operation,
-            ),
-            Vec::new(),
-        )],
-        context,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .pop()
-    .expect("one result")
-    .expect("commit accepted")
+    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
+        .publish_batch(
+            vec![CommitCandidate::prepared(
+                CommitIntent::single(
+                    CommitId::parse(commit_id).expect("commit id"),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    operation,
+                ),
+                Vec::new(),
+            )],
+            context,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("commit accepted")
 }
 
 async fn undelete<S: ObjectStore + ?Sized>(
@@ -310,30 +305,26 @@ async fn refused_undelete<S: ObjectStore + ?Sized>(
     deletion_seq: ChangeSeq,
     context: &MutationContext,
 ) -> CoreError {
-    NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .publish_batch(
-        store,
-        vec![CommitCandidate::new(CommitIntent::single(
-            CommitId::generate(),
-            loonfs_test_support::test_actor(),
-            None,
-            FilesystemOperation::undelete(
-                inode_id,
-                deletion_seq,
-                &loonfs_types::options::UndeleteDestination::Recorded,
-            ),
-        ))],
-        context,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .pop()
-    .expect("one result")
-    .expect_err("the undelete is refused")
+    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
+        .publish_batch(
+            vec![CommitCandidate::new(CommitIntent::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::undelete(
+                    inode_id,
+                    deletion_seq,
+                    &loonfs_types::options::UndeleteDestination::Recorded,
+                ),
+            ))],
+            context,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect_err("the undelete is refused")
 }
 
 async fn trash_page<S: ObjectStore + ?Sized>(
@@ -342,7 +333,9 @@ async fn trash_page<S: ObjectStore + ?Sized>(
     limit: u32,
     cursor: Option<TrashPageCursor>,
 ) -> Page<TrashEntry, TrashPageCursor> {
-    let view = load_current_metadata_view(store, namespace_id)
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("load read view");
     view.list_trash_page(
@@ -362,7 +355,8 @@ pub(super) async fn inode_id_of<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> InodeId {
-    load_current_metadata_view(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_metadata_view()
         .await
         .expect("load read view")
         .resolve_path(
@@ -542,9 +536,11 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
             }
             HistoryStep::Delete(path) => {
                 let deleted_inode_id = inode_id_of(&store, &namespace_id, path).await;
-                let response = delete_path(&store, &namespace_id, path, &context, None)
-                    .await
-                    .expect("delete path");
+                let response =
+                    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                        .delete_path(path, None)
+                        .await
+                        .expect("delete path");
                 deletions.insert(path.to_owned(), (deleted_inode_id, response.committed_seq));
             }
             HistoryStep::Undelete(deleted_path, restored_path) => {
@@ -634,7 +630,8 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
     // Delete newest-inode first so root-inode order and deletion order
     // disagree.
     for name in ["/c.txt", "/a.txt", "/b.txt", "/docs"] {
-        delete_path(&store, &namespace_id, name, &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .delete_path(name, None)
             .await
             .expect("delete path");
     }
@@ -697,15 +694,10 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
             &context,
         )
         .await;
-        delete_path(
-            &store,
-            &namespace_id,
-            &format!("/file-{index}.txt"),
-            &context,
-            None,
-        )
-        .await
-        .expect("delete path");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .delete_path(&format!("/file-{index}.txt"), None)
+            .await
+            .expect("delete path");
     }
     create_checkpoint(&store, &namespace_id, &context)
         .await
@@ -771,7 +763,8 @@ async fn stored_active_deletions<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<(ChangeSeq, &'static str)> {
-    let current = load_current_manifest(store, namespace_id)
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest");
     crate::manifest::metadata_basis_from_manifest(store, None, &current)
@@ -809,7 +802,8 @@ async fn delete_below_the_floor<S: ObjectStore>(
     )
     .await;
     let deleted_inode_id = inode_id_of(store, namespace_id, "/old.txt").await;
-    let deleted = delete_path(store, namespace_id, "/old.txt", context, None)
+    let deleted = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+        .delete_path("/old.txt", None)
         .await
         .expect("delete path");
     for index in 0..6u32 {
@@ -825,14 +819,16 @@ async fn delete_below_the_floor<S: ObjectStore>(
     create_checkpoint(store, namespace_id, context)
         .await
         .expect("create checkpoint");
-    advance_retention_floor(
+    crate::test_support::NamespaceFixture::new(
         store,
-        None,
         namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(context.now_ms),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(context.now_ms),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance retention floor");
     (deleted_inode_id, deleted)
@@ -899,7 +895,8 @@ async fn a_deletion_below_the_floor_leaves_the_trash_before_its_row_is_removed()
         &context,
     )
     .await;
-    let later = delete_path(&store, &namespace_id, "/later.txt", &context, None)
+    let later = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/later.txt", None)
         .await
         .expect("delete path")
         .committed_seq;
@@ -947,7 +944,8 @@ async fn a_trash_cursor_resumes_above_a_floor_that_passed_it() {
         )
         .await;
         deletion_seqs.push(
-            delete_path(&store, &namespace_id, &path, &context, None)
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                .delete_path(&path, None)
                 .await
                 .expect("delete path")
                 .committed_seq,
@@ -1003,7 +1001,8 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
                 &context,
             )
             .await;
-            delete_path(&store, &namespace_id, &path, &context, None)
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                .delete_path(&path, None)
                 .await
                 .expect("delete path");
         }
@@ -1062,13 +1061,16 @@ async fn nested_deletions_each_keep_their_own_entry() {
     .await;
 
     let child_inode_id = inode_id_of(&store, &namespace_id, "/dir/inner.txt").await;
-    delete_path(&store, &namespace_id, "/dir/inner.txt", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/dir/inner.txt", None)
         .await
         .expect("delete the child");
     let parent_inode_id = inode_id_of(&store, &namespace_id, "/dir").await;
-    let parent_deleted = delete_path(&store, &namespace_id, "/dir", &context, None)
-        .await
-        .expect("delete the parent");
+    let parent_deleted =
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .delete_path("/dir", None)
+            .await
+            .expect("delete the parent");
 
     let nested = trash_entries(&store, &namespace_id, 10).await;
     assert_eq!(
@@ -1115,7 +1117,8 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
         &context,
     )
     .await;
-    delete_path(&store, &namespace_id, "/durable.txt", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/durable.txt", None)
         .await
         .expect("delete path");
     create_checkpoint(&store, &namespace_id, &context)
@@ -1131,7 +1134,8 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
         &context,
     )
     .await;
-    let fresh = delete_path(&store, &namespace_id, "/fresh.txt", &context, None)
+    let fresh = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/fresh.txt", None)
         .await
         .expect("delete path");
 
@@ -1168,13 +1172,10 @@ async fn fresh_read_context<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> RuntimeReadContext {
-    let loaded = crate::namespace::read_anchor::load_read_anchor(
-        store,
-        namespace_id,
-        crate::test_support::observed_now(),
-    )
-    .await
-    .expect("load read basis");
+    let loaded = crate::test_support::namespace_store(store, namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
+        .await
+        .expect("load read basis");
     RuntimeReadContext {
         basis: loaded.basis(),
         head: loaded.read_state,
@@ -1223,11 +1224,8 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
         )
         .await;
         let read_context = fresh_read_context(&store, &namespace_id).await;
-        let engine = NamespaceEngine::reader(
-            &store,
-            namespace_id,
-            std::sync::Arc::new(crate::test_support::content_writes()),
-        );
+        let engine =
+            NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
 
         store.reset();
         let page = engine
@@ -1277,7 +1275,8 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
         )
         .await;
     }
-    fold::fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold commits");
     for index in 6..=8u32 {
@@ -1291,11 +1290,8 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
         .await;
     }
     let read_context = fresh_read_context(&store, &namespace_id).await;
-    let engine = NamespaceEngine::reader(
-        &store,
-        namespace_id,
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+    let engine =
+        NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
     let limit = EffectiveLimit::new(NonZeroU32::new(4).expect("nonzero"));
 
     let first = engine
@@ -1350,11 +1346,13 @@ async fn expire_docs<S: ObjectStore>(
     write_test_file(store, namespace_id, "/keep.txt", "c_keep", context).await;
     let docs = inode_id_of(store, namespace_id, "/docs").await;
     let notes = inode_id_of(store, namespace_id, "/docs/notes.txt").await;
-    let deletion_seq = delete_path(store, namespace_id, "/docs", context, None)
+    let deletion_seq = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+        .delete_path("/docs", None)
         .await
         .expect("delete the directory")
         .committed_seq;
-    let keep_seq = delete_path(store, namespace_id, "/keep.txt", context, None)
+    let keep_seq = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+        .delete_path("/keep.txt", None)
         .await
         .expect("delete the file")
         .committed_seq;
@@ -1401,7 +1399,9 @@ async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidd
             vec![expired.keep_seq],
             "compacted {compacted}: only the deletion above the floor stays in the trash"
         );
-        let view = load_current_metadata_view(&store, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
             .await
             .expect("load read view");
         let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
@@ -1449,7 +1449,9 @@ async fn an_expiry_commits_nothing_and_the_change_feed_reports_no_event() {
     let context = mutation_context("writer-1", 5_000);
     let expired = expire_docs(&store, &namespace_id, &context).await;
 
-    let view = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("load read view");
     assert_eq!(view.head().seq, expired.keep_seq);

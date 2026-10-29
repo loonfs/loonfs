@@ -1,47 +1,51 @@
 //! Creates namespaces.
 
-use super::control::ensure_namespace_absent;
-use crate::context::MutationContext;
+use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::manifest::publish::create_manifest;
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::options::CreateNamespaceOptions;
-use crate::time::{Deadline, MonotonicTimer};
+use crate::time::Deadline;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_types::{
-    AccessRevisionNo, ActorId, ChangeSeq, InodeKind, NamespaceId, NamespaceMetadata, ROOT_INODE_ID,
+    AccessRevisionNo, ActorId, ChangeSeq, InodeKind, NamespaceMetadata, ROOT_INODE_ID,
 };
 use std::sync::Arc;
 
-pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-    actor_id: &loonfs_types::ActorId,
-    options: &CreateNamespaceOptions,
-    timer: Arc<dyn MonotonicTimer>,
-) -> Result<NamespaceMetadata> {
-    let deadline = Deadline::start(Arc::clone(&timer));
-    let start = NamespaceManifestPayload {
-        retention_window_ms: options.retention_window_ms,
-        ..NamespaceManifestPayload::initial(
-            namespace_id.clone(),
-            context.now_ms,
-            actor_id.clone(),
-            options.access.clone(),
-        )
-    };
-    let created = async {
-        ensure_namespace_absent(store, namespace_id).await?;
-        create_manifest(store, start.clone(), &deadline).await
-    };
-    match created.await {
-        Ok(()) => Ok(super::status::created_namespace(&start)),
-        Err(CoreError::NamespaceExists { .. }) if options.allow_existing => {
-            super::status::load_namespace(store, namespace_id, timer).await
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
+    /// Creates the namespace if it does not already exist.
+    ///
+    /// Use this before normal reads and writes for a new namespace. Returns
+    /// the namespace's status after manifest 1 is installed.
+    pub async fn bootstrap_namespace(
+        &self,
+        actor_id: &loonfs_types::ActorId,
+        options: &CreateNamespaceOptions,
+    ) -> Result<NamespaceMetadata> {
+        let context = self.mutation_context();
+        let deadline = Deadline::start(Arc::clone(&self.namespace.timer));
+        let start = NamespaceManifestPayload {
+            retention_window_ms: options.retention_window_ms,
+            ..NamespaceManifestPayload::initial(
+                self.namespace.namespace_id.clone(),
+                context.now_ms,
+                actor_id.clone(),
+                options.access.clone(),
+            )
+        };
+        let created = async {
+            self.namespace.ensure_absent().await?;
+            self.namespace
+                .create_manifest(start.clone(), &deadline)
+                .await
+        };
+        match created.await {
+            Ok(()) => Ok(super::status::created_namespace(&start)),
+            Err(CoreError::NamespaceExists { .. }) if options.allow_existing => {
+                self.namespace.load_metadata().await
+            }
+            Err(error) => Err(error),
         }
-        Err(error) => Err(error),
     }
 }
 

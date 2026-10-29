@@ -5,7 +5,6 @@ use super::active_deletions::tombstone_set;
 use super::*;
 use crate::authorize::{Absence, Authorizer, ReadAccess};
 use crate::metadata::{DirentryBindingRecord, RevisionRecord};
-use crate::path::read::load_current_metadata_view;
 use loonfs_types::format::manifest::{AccessRevisionRecord, DirentryBindingState, InodeRecord};
 use loonfs_types::{
     AccessGrants, AccessRevisionNo, AccessRight, ActorId, ContentId, ContentRef, DisplayName,
@@ -156,7 +155,9 @@ async fn a_read_by_inode_whose_ancestry_was_compacted_away_is_refused_for_every_
     write_namespace_manifest(&store, manifest.into_payload())
         .await
         .expect("publish manifest");
-    let view = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("load read view");
     let page = || PageRequest {

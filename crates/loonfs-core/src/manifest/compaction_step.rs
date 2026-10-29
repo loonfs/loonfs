@@ -7,7 +7,6 @@
 //! retention, and a delta merge drops only superseded layouts.
 //! [`MetadataCompactionPolicy`] decides which runs a group merges, and when.
 
-use super::cache::MetadataSegmentCache;
 use super::fold::{next_manifest_no_after, next_run_no_after};
 use super::index_block_load::segment_object_bytes;
 use super::load::metadata_basis_from_manifest;
@@ -17,15 +16,16 @@ use super::runs::{
     MetadataRunPolicy,
 };
 use super::streaming_compaction::{
-    finalize_metadata_compaction, input_segment_keys, run_metadata_compaction,
-    CompactionPublication, MetadataCompactionCancellation, MetadataCompactionSpec,
+    input_segment_keys, run_metadata_compaction, CompactionPublication,
+    MetadataCompactionCancellation, MetadataCompactionSpec,
 };
+use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_COMPACTION_INPUT_RUNS;
-use crate::namespace::control::{ensure_namespace_live, load_current_manifest, CurrentManifest};
+use crate::namespace::control::{ensure_namespace_live, CurrentManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::PublicationBasis;
-use crate::time::{Deadline, MonotonicTimer};
+use crate::time::Deadline;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
@@ -98,119 +98,125 @@ pub enum CompactionUnitOutcome {
     Fenced,
 }
 
-/// Runs one compaction unit against the current manifest.
-///
-/// The unit plans from `basis`, or from the current manifest that it loads
-/// when `basis` is `None`, and reads its input runs without the cache. The
-/// merge checks `cancellation` between blocks. The unit publishes through
-/// [`finalize_metadata_compaction`], starting from the manifest it planned
-/// from, and finalization retries a lost put over the manifest that won
-/// while the unit's input segments are unchanged. The unit's time bound
-/// starts at the start of the call, before any load (see
-/// `METADATA_COMPACTION_BUDGET_MS`). A call without a basis reloads durable
-/// state, so callers may repeat it safely across process restarts.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one unit's inputs, listed instead of grouped into a second struct"
-)]
-#[tracing::instrument(
-    level = "debug",
-    name = "loonfs.phase",
-    err(level = "warn"),
-    skip_all,
-    fields(phase = "metadata_compaction_step", key_class = "manifest")
-)]
-pub(crate) async fn compact_unit<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: Option<&MetadataSegmentCache>,
-    namespace_id: &NamespaceId,
-    basis: Option<PublicationBasis>,
-    compactor_epoch: CompactorEpoch,
-    policy: MetadataRunPolicy,
-    compaction_policy: MetadataCompactionPolicy,
-    admission: CompactionAdmission,
-    cancellation: &MetadataCompactionCancellation,
-    timer: Arc<dyn MonotonicTimer>,
-) -> Result<CompactionUnitOutcome> {
-    let compaction = Deadline::start(Arc::clone(&timer));
-    let basis = match basis {
-        Some(basis) => basis,
-        None => {
-            let checked = compaction.observe();
-            PublicationBasis {
-                manifest: load_current_manifest(store, namespace_id)
-                    .await
-                    .map_err(CoreError::ControlObjectLoad)?,
-                checked,
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
+    /// Runs one metadata compaction unit under the claimed compactor epoch.
+    ///
+    /// The unit plans from `basis`, a manifest that the caller already has,
+    /// or from the current manifest that it loads when `basis` is `None`, and
+    /// reads its input runs without the cache. `admission` decides whether
+    /// the unit may merge a window over the run policy's row budget, and the
+    /// merge checks `cancellation` between blocks. The unit publishes through
+    /// `finalize_metadata_compaction`, starting from the
+    /// manifest it planned from, and finalization retries a lost put over the
+    /// manifest that won while the unit's input segments are unchanged. The
+    /// unit's time bound starts at the start of the call, before any load (see
+    /// `METADATA_COMPACTION_BUDGET_MS`). A call without a basis reloads durable
+    /// state, so callers may repeat it safely across process restarts.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.phase",
+        err(level = "warn"),
+        skip_all,
+        fields(phase = "metadata_compaction_step", key_class = "manifest")
+    )]
+    pub async fn compact_metadata_unit(
+        &self,
+        basis: Option<PublicationBasis>,
+        compaction_policy: MetadataCompactionPolicy,
+        admission: CompactionAdmission,
+        compactor_epoch: CompactorEpoch,
+        cancellation: &MetadataCompactionCancellation,
+    ) -> Result<CompactionUnitOutcome> {
+        let compaction = Deadline::start(Arc::clone(&self.namespace.timer));
+        let basis = match basis {
+            Some(basis) => basis,
+            None => {
+                let checked = compaction.observe();
+                PublicationBasis {
+                    manifest: self
+                        .namespace
+                        .load_current_manifest()
+                        .await
+                        .map_err(CoreError::ControlObjectLoad)?,
+                    checked,
+                }
             }
+        };
+        let current = &basis.manifest;
+        let payload = current.state.envelope.payload();
+        if payload.compactor_epoch != compactor_epoch {
+            return Ok(CompactionUnitOutcome::Fenced);
         }
-    };
-    let current = &basis.manifest;
-    let payload = current.state.envelope.payload();
-    if payload.compactor_epoch != compactor_epoch {
-        return Ok(CompactionUnitOutcome::Fenced);
-    }
-    ensure_namespace_live(&NamespaceReadState::from(payload))?;
-    // The unit reads its input runs without the cache, and the merge inserts
-    // its output into the cache.
-    let segments = metadata_basis_from_manifest(store, None, current).segments;
-    let Some(spec) = plan_compaction(payload, &segments.scan_runs, policy, compaction_policy)
-    else {
-        return Ok(CompactionUnitOutcome::NotNeeded);
-    };
-    if admission == CompactionAdmission::WithinRowBudget
-        && spec.input_rows() > policy.max_decoded_input_rows_per_step.get() as u64
-    {
-        return Ok(CompactionUnitOutcome::TooLarge {
-            group: spec.group(),
-        });
-    }
-    // What the unit is about to read, recorded before it reads anything.
-    // Finalization compares the manifest against this, so the run it
-    // publishes stands in for exactly the segments it merged.
-    let input_keys = input_segment_keys(&segments.scan_runs, &spec)
-        .expect("a plan should list runs of the manifest it was made from");
-    tracing::debug!(
-        namespace_id = namespace_id.as_str(),
-        job_id = spec.job_id().as_str(),
-        families = ?spec.families(),
-        input_runs = spec.input_runs(),
-        input_rows = spec.input_rows(),
-        frozen_floor_seq = spec.frozen_floor_seq().0,
-        "metadata compaction unit started"
-    );
-    let outcome = match run_metadata_compaction(
-        &segments,
-        segment_cache,
-        namespace_id,
-        &spec,
-        policy,
-        cancellation,
-    )
-    .await?
-    {
-        Ok(merged) => {
-            drop(segments);
-            finalize_metadata_compaction(
-                store,
-                namespace_id,
-                Some(basis),
-                &spec,
-                &input_keys,
-                merged,
-                cancellation,
-                &CompactionPublication {
-                    compactor_epoch,
-                    compaction,
-                    publication: Deadline::start(timer),
-                },
-            )
-            .await?
+        ensure_namespace_live(&NamespaceReadState::from(payload))?;
+        // The unit reads its input runs without the cache, and the merge inserts
+        // its output into the cache.
+        let segments = metadata_basis_from_manifest(&self.namespace.store, None, current).segments;
+        let Some(spec) = plan_compaction(
+            payload,
+            &segments.scan_runs,
+            self.namespace.run_policy,
+            compaction_policy,
+        ) else {
+            return Ok(CompactionUnitOutcome::NotNeeded);
+        };
+        if admission == CompactionAdmission::WithinRowBudget
+            && spec.input_rows()
+                > self
+                    .namespace
+                    .run_policy
+                    .max_decoded_input_rows_per_step
+                    .get() as u64
+        {
+            return Ok(CompactionUnitOutcome::TooLarge {
+                group: spec.group(),
+            });
         }
-        Err(stopped) => stopped,
-    };
-    log_unit_outcome(namespace_id, &spec, &outcome);
-    Ok(outcome)
+        // What the unit is about to read, recorded before it reads anything.
+        // Finalization compares the manifest against this, so the run it
+        // publishes stands in for exactly the segments it merged.
+        let input_keys = input_segment_keys(&segments.scan_runs, &spec)
+            .expect("a plan should list runs of the manifest it was made from");
+        tracing::debug!(
+            namespace_id = self.namespace.namespace_id.as_str(),
+            job_id = spec.job_id().as_str(),
+            families = ?spec.families(),
+            input_runs = spec.input_runs(),
+            input_rows = spec.input_rows(),
+            frozen_floor_seq = spec.frozen_floor_seq().0,
+            "metadata compaction unit started"
+        );
+        let outcome = match run_metadata_compaction(
+            &segments,
+            &self.namespace.segment_cache,
+            &self.namespace.namespace_id,
+            &spec,
+            self.namespace.run_policy,
+            cancellation,
+        )
+        .await?
+        {
+            Ok(merged) => {
+                drop(segments);
+                self.namespace
+                    .finalize_metadata_compaction(
+                        Some(basis),
+                        &spec,
+                        &input_keys,
+                        merged,
+                        cancellation,
+                        &CompactionPublication {
+                            compactor_epoch,
+                            compaction,
+                            publication: Deadline::start(Arc::clone(&self.namespace.timer)),
+                        },
+                    )
+                    .await?
+            }
+            Err(stopped) => stopped,
+        };
+        log_unit_outcome(&self.namespace.namespace_id, &spec, &outcome);
+        Ok(outcome)
+    }
 }
 
 fn log_unit_outcome(
@@ -272,11 +278,11 @@ fn log_unit_outcome(
 pub(super) fn plan_compaction(
     payload: &NamespaceManifestPayload,
     runs: &[MetadataRunManifest],
-    policy: MetadataRunPolicy,
+    run_policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> Option<MetadataCompactionSpec> {
-    let group = select_family_group(runs, payload, compaction_policy, policy)?;
-    plan_group(payload, runs, group, policy, compaction_policy)
+    let group = select_family_group(runs, payload, compaction_policy, run_policy)?;
+    plan_group(payload, runs, group, run_policy, compaction_policy)
 }
 
 /// Plans a unit over `group`'s window, if the group has one to merge.
@@ -284,11 +290,11 @@ pub(super) fn plan_group(
     payload: &NamespaceManifestPayload,
     runs: &[MetadataRunManifest],
     group: MetadataFamilyGroup,
-    policy: MetadataRunPolicy,
+    run_policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> Option<MetadataCompactionSpec> {
     let candidates = group_candidates(runs, group);
-    let range = select_merge_window(&candidates, group, policy, compaction_policy)?;
+    let range = select_merge_window(&candidates, group, run_policy, compaction_policy)?;
     let bottom_anchored = range.start == 0;
     let selected = candidates[range]
         .iter()
@@ -397,8 +403,8 @@ fn group_candidates(
 
 /// Returns the run fan-in one unit may merge: the policy's knob, capped by
 /// the ceiling.
-fn effective_max_input_runs(policy: MetadataRunPolicy) -> usize {
-    policy
+fn effective_max_input_runs(run_policy: MetadataRunPolicy) -> usize {
+    run_policy
         .max_input_runs_per_step
         .get()
         .min(MAX_COMPACTION_INPUT_RUNS)
@@ -407,8 +413,8 @@ fn effective_max_input_runs(policy: MetadataRunPolicy) -> usize {
 /// Returns the runs a size tier needs before it merges. A merge above the
 /// group's oldest run needs at least two runs (format spec, "Compaction
 /// windows"), so a minimum of one acts as two.
-fn effective_min_compaction_runs(policy: MetadataRunPolicy) -> usize {
-    policy.min_compaction_runs.get().max(2)
+fn effective_min_compaction_runs(run_policy: MetadataRunPolicy) -> usize {
+    run_policy.min_compaction_runs.get().max(2)
 }
 
 /// Selects the contiguous window of `candidates`, which are in merge order,
@@ -418,10 +424,10 @@ fn effective_min_compaction_runs(policy: MetadataRunPolicy) -> usize {
 fn select_merge_window(
     candidates: &[&MetadataRunManifest],
     group: MetadataFamilyGroup,
-    policy: MetadataRunPolicy,
+    run_policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> Option<std::ops::Range<usize>> {
-    let max_runs = effective_max_input_runs(policy);
+    let max_runs = effective_max_input_runs(run_policy);
     let stored_bytes = candidates
         .iter()
         .map(|run| {
@@ -435,9 +441,14 @@ fn select_merge_window(
             Some(immediate_window(&stored_bytes, max_runs))
         }
         MetadataCompactionPolicy::SizeTiered => {
-            let min_runs = effective_min_compaction_runs(policy);
+            let min_runs = effective_min_compaction_runs(run_policy);
             tiered_window(&stored_bytes, min_runs, max_runs).or_else(|| {
-                capped_window(candidates, policy.max_delta_runs.get(), min_runs, max_runs)
+                capped_window(
+                    candidates,
+                    run_policy.max_delta_runs.get(),
+                    min_runs,
+                    max_runs,
+                )
             })
         }
     }?;
@@ -536,13 +547,13 @@ pub(super) fn select_family_group(
     runs: &[MetadataRunManifest],
     payload: &NamespaceManifestPayload,
     compaction_policy: MetadataCompactionPolicy,
-    policy: MetadataRunPolicy,
+    run_policy: MetadataRunPolicy,
 ) -> Option<MetadataFamilyGroup> {
     ranked_family_groups(payload).into_iter().find(|group| {
         select_merge_window(
             &group_candidates(runs, *group),
             *group,
-            policy,
+            run_policy,
             compaction_policy,
         )
         .is_some()

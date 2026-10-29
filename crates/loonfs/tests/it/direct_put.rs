@@ -426,10 +426,10 @@ fn concurrent_puts_coalesce_into_one_wal_object() {
         // Stage every file's content first: a put publishes only after its
         // bytes are durable, so racing already-staged publishes is what
         // reaches the publication queue together deterministically.
-        let catalog =
-            loonfs_core::control::load_namespace_catalog_entry(&object_store, &namespace_id)
-                .await
-                .expect("load namespace catalog");
+        let catalog = loonfs_core::test_support::namespace_store(&object_store, &namespace_id)
+            .load_catalog_entry()
+            .await
+            .expect("load namespace catalog");
         let mut prepared_contents = Vec::new();
         for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
             let begin = namespace_writer

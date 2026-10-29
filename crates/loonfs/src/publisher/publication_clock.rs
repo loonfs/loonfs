@@ -34,22 +34,22 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
     });
     let mut runtime = test_runtime(store.clone());
     create_namespace(&runtime, &namespace_id).await;
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+    let catalog = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_catalog_entry()
         .await
         .expect("catalog");
     let engine = runtime
         .core
         .writer_engine(&runtime.bits.identity, &namespace_id);
-    let upload = engine.begin_upload(None).await.expect("begin upload");
+    let upload = engine.begin_upload().await.expect("begin upload");
     engine
-        .upload_content(&upload.upload_id, None, b"content")
+        .upload_content(&upload.upload_id, b"content")
         .await
         .expect("upload bytes");
     let completed = engine
         .complete_upload(
             &catalog,
             &upload.upload_id,
-            None,
             loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
         )
         .await

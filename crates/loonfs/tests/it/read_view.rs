@@ -245,7 +245,6 @@ async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
 #[tokio::test]
 async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt_after_manifest_advance(
 ) {
-    use loonfs_core::control::load_namespace_current_manifest;
     use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
     use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
     use loonfs_types::format::manifest::MetadataRowFamily;
@@ -304,7 +303,8 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         .read_view_at_snapshot(&unexpiring.snapshot_id)
         .await
         .expect("view of the snapshot without an expiry");
-    let captured = load_namespace_current_manifest(store.as_ref(), &namespace_id)
+    let captured = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_current_manifest()
         .await
         .expect("captured manifest");
     let segment = captured
@@ -321,15 +321,14 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         .await
         .expect("delete pinned segment");
     loonfs_core::NamespaceEngine::writer(
-        store.clone(),
-        namespace_id.clone(),
+        loonfs_core::test_support::namespace_store(store.clone(), &namespace_id),
         loonfs_types::WriterId::parse("manifest-advance").expect("writer id"),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
     )
     .claim_compactor()
     .await
     .expect("advance current manifest");
-    let current = load_namespace_current_manifest(store.as_ref(), &namespace_id)
+    let current = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest");
     assert!(current.state.manifest().manifest_no > captured.state.manifest().manifest_no);
@@ -346,7 +345,6 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
 #[tokio::test]
 async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_pin_when_a_segment_is_missing(
 ) {
-    use loonfs_core::control::load_namespace_current_manifest;
     use loonfs_objectstore::{keys, ObjectStore};
     use loonfs_types::format::manifest::MetadataRowFamily;
 
@@ -406,7 +404,8 @@ async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_pin_when
         .delete_snapshot(&unexpiring.snapshot_id)
         .await
         .expect("delete the snapshot without an expiry");
-    let manifest = load_namespace_current_manifest(store.as_ref(), &namespace_id)
+    let manifest = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_current_manifest()
         .await
         .expect("manifest");
     let segment = manifest
@@ -1008,7 +1007,9 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
     // of the same hint, so the test raises the hint to the fold's manifest
     // before it counts the reader's hint reads.
     runtime.writer.drain().await.expect("drain");
-    loonfs_core::test_support::raise_hint_to_current_manifest(store.as_ref(), &namespace_id).await;
+    loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
     let reader = loonfs::LoonFs::builder_with_store(store.clone())
         .read_only()
         .build()

@@ -2,8 +2,7 @@
 
 use super::*;
 use crate::limits::{MANIFEST_PROBE_WINDOW, MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
-use crate::manifest::claim_compactor;
-use crate::manifest::publish::{update_manifest, ManifestChange};
+use crate::manifest::publish::ManifestChange;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::PublicationBasis;
 use crate::time::Observation;
@@ -25,14 +24,18 @@ async fn claimed_namespace(
         KeyPredicate::any(),
     );
     let context = test_context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("create");
-    acquire_writer_epoch(&store, &namespace_id, &context)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer_epoch(&context)
         .await
         .expect("claim manifest 2");
     if !hint_lags {
-        crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .raise_hint_to_current_manifest()
+            .await;
     }
     store.reset();
     (store, namespace_id)
@@ -45,7 +48,8 @@ async fn basis_checked_at<S: ObjectStore + ?Sized>(
     checked: Observation,
 ) -> PublicationBasis {
     PublicationBasis {
-        manifest: load_current_manifest(store, namespace_id)
+        manifest: crate::test_support::namespace_store(store, namespace_id)
+            .load_current_manifest()
             .await
             .expect("current manifest"),
         checked,
@@ -60,21 +64,20 @@ async fn republish<S: ObjectStore + ?Sized>(
     basis: Option<PublicationBasis>,
     deadline: &Deadline,
 ) -> LoadedManifest {
-    let ((), published, _) = update_manifest(
-        store,
-        namespace_id,
-        basis,
-        deadline,
-        MAX_CONTENTION_ATTEMPTS,
-        |current: LoadedManifest| async move {
-            Ok(ManifestChange::Next(
-                Box::new(current.state.envelope.payload().clone()),
-                (),
-            ))
-        },
-    )
-    .await
-    .expect("publish");
+    let ((), published, _) = crate::test_support::namespace_store(store, namespace_id)
+        .update_manifest(
+            basis,
+            deadline,
+            MAX_CONTENTION_ATTEMPTS,
+            |current: LoadedManifest| async move {
+                Ok(ManifestChange::Next(
+                    Box::new(current.state.envelope.payload().clone()),
+                    (),
+                ))
+            },
+        )
+        .await
+        .expect("publish");
     published
 }
 
@@ -186,9 +189,15 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
         async {
             gate.wait_until_blocked().await;
             for _ in 0..2 {
-                claim_compactor(&other, &namespace_id, crate::test_support::std_timer())
-                    .await
-                    .expect("another process claims the compactor");
+                crate::test_support::NamespaceFixture::new(
+                    &other,
+                    &namespace_id,
+                    &crate::test_support::mutation_context("test-writer", 0),
+                )
+                .engine()
+                .claim_compactor()
+                .await
+                .expect("another process claims the compactor");
             }
             gate.release();
         }

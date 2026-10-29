@@ -3,7 +3,6 @@
 //! window that a scan decodes, and the stored bytes that a visit keeps.
 
 use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
-use super::super::build::write_manifest_segment;
 use super::super::data_block_load::read_ahead_window_len;
 use super::bounded_pages::rows;
 use super::*;
@@ -32,12 +31,11 @@ async fn segment_with_block_target(
             )
             .expect("encode fixture row");
     }
-    let descriptor = write_manifest_segment(
+    let descriptor = crate::test_support::namespace_store(
         store,
         &NamespaceId::parse("read-ahead").expect("namespace"),
-        FAMILY,
-        builder.build().expect("finish segment"),
     )
+    .write_manifest_segment(FAMILY, builder.build().expect("finish segment"))
     .await
     .expect("write fixture segment");
     let index = index_block_load::load_segment_index(
