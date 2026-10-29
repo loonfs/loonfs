@@ -45,7 +45,7 @@ use loonfs_types::{
     DeleteSnapshotResponse, FileRevision, FileRevisionsPageCursor, InodeId, ListPageCursor,
     NamespaceAccess, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId,
     RevisionNo, SetRetentionWindowResponse, Snapshot, Subject, TrashEntry, TrashPageCursor,
-    UploadId, WriterId, ROOT_INODE_ID,
+    UploadId, WriterEpoch, WriterId, ROOT_INODE_ID,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -1323,6 +1323,29 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn claim_compactor(&self) -> Result<PublicationReport<CompactorEpoch>> {
         crate::manifest::claim_compactor(&self.store, &self.namespace_id, Arc::clone(&self.timer))
             .await
+    }
+
+    /// Acquires the namespace's writer epoch without a writer session, and
+    /// commits nothing under it (format spec, "Writer ownership").
+    ///
+    /// The acquisition publishes a claim manifest with the next epoch and
+    /// this engine's writer ID, then writes a fence at the next WAL number.
+    /// The fence records the retention floor of the manifest that the
+    /// acquisition discovered, so a fold of the fence acknowledges that
+    /// floor. A writer session with an older epoch returns `writer_fenced`
+    /// to its next publication. The report includes the claim manifest.
+    pub async fn acquire_writer_epoch(&self) -> Result<PublicationReport<WriterEpoch>> {
+        let acquisition = crate::namespace::writer_epoch::acquire_writer(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context(),
+            Arc::clone(&self.timer),
+        )
+        .await?;
+        Ok(PublicationReport {
+            response: acquisition.writer.writer_epoch,
+            published: Some(acquisition.claim),
+        })
     }
 
     /// Runs one metadata compaction unit under the claimed compactor epoch.

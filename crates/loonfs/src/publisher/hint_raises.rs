@@ -278,6 +278,9 @@ enum Publication {
     /// The session's own fold, which a commit over the fold trigger starts.
     TriggerFold,
     RetentionAdvance,
+    /// A maintainer's claim, fence, and fold, which acknowledge a retention
+    /// floor that the writer committed nothing against.
+    FloorAcknowledgment,
     Snapshot,
     Fork,
     Deletion,
@@ -310,6 +313,7 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
         Publication::ExplicitFold,
         Publication::TriggerFold,
         Publication::RetentionAdvance,
+        Publication::FloorAcknowledgment,
         Publication::Snapshot,
         Publication::Fork,
         Publication::Deletion,
@@ -331,9 +335,18 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
         if !matches!(publication, Publication::WriterClaim) {
             commit().await.expect("commit");
         }
-        if matches!(publication, Publication::RetentionAdvance) {
+        if matches!(
+            publication,
+            Publication::RetentionAdvance | Publication::FloorAcknowledgment
+        ) {
             maintenance.fold_wal(&namespace_id).await.expect("fold");
             clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+        }
+        if matches!(publication, Publication::FloorAcknowledgment) {
+            maintenance
+                .advance_retention_floor(&namespace_id)
+                .await
+                .expect("advance the floor");
         }
         writer.drain().await.expect("drain");
         let before = current_manifest_no(store.as_ref(), &namespace_id).await;
@@ -358,6 +371,16 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
                     .advance_retention_floor(&namespace_id)
                     .await
                     .expect("advance the floor");
+            }
+            Publication::FloorAcknowledgment => {
+                let acknowledged = maintenance
+                    .acknowledge_retention_floor(&namespace_id)
+                    .await
+                    .expect("acknowledge the floor");
+                assert_eq!(
+                    acknowledged.outcome,
+                    crate::AcknowledgeRetentionFloorOutcome::Fenced
+                );
             }
             Publication::Snapshot => {
                 namespace

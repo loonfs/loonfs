@@ -29,6 +29,7 @@ mod derived_paths;
 mod direct_put;
 mod directory_page_reads;
 mod expired_deletions;
+mod floor_acknowledgment;
 mod handles;
 mod handoff;
 mod immutable_view_inputs;

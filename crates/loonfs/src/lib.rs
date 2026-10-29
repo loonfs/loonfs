@@ -210,8 +210,9 @@ pub use execution_budget::{
     DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS, DEFAULT_MAX_READ_WORKING_BYTES,
 };
 pub use fs::{
-    ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
-    PathEntriesPager, ReadView, SnapshotsPager, TrashPager,
+    AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorResponse, ChangesPager,
+    CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
+    PathEntriesPager, ReadView, RetentionFloors, SnapshotsPager, TrashPager,
 };
 pub use handle::{
     LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Mode, Namespace, ReadOnly,

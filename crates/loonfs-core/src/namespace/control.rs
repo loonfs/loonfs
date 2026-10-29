@@ -30,6 +30,10 @@ impl CurrentManifest {
         self.envelope.payload().retention_floor_seq
     }
 
+    pub fn acknowledged_floor_seq(&self) -> loonfs_types::ChangeSeq {
+        self.envelope.payload().acknowledged_floor_seq
+    }
+
     pub fn folded_wal_no(&self) -> loonfs_types::WalNo {
         self.envelope.payload().folded_wal_no
     }
