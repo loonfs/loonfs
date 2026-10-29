@@ -246,7 +246,7 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
             .map_err(|err| ManifestLoadError::ReadManifest {
                 object_key: manifest_key.clone(),
                 message: err.public_message().into_owned(),
-                kind: loonfs_objectstore::ObjectStoreErrorKind::of(&err),
+                kind: err.kind(),
             })?
         else {
             return Err(ManifestLoadError::MissingManifest {
@@ -316,7 +316,7 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
         .map_err(|err| ManifestLoadError::ReadManifest {
             object_key: manifest_key.to_owned(),
             message: err.public_message().into_owned(),
-            kind: loonfs_objectstore::ObjectStoreErrorKind::of(&err),
+            kind: err.kind(),
         })?
     else {
         return Ok(None);

@@ -347,7 +347,7 @@ pub(crate) async fn manifest_exists<S: ObjectStore + ?Sized>(
         .map_err(|error| ControlObjectLoadError::Store {
             object_key: object_key.clone(),
             message: error.public_message().into_owned(),
-            kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
+            kind: error.kind(),
         })?
         .is_some())
 }

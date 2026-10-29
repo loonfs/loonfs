@@ -234,7 +234,7 @@ pub fn required_etag(object_key: &str, etag: Option<String>) -> Result<String> {
 }
 
 /// A provider-independent category for an object-store error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectStoreErrorKind {
     /// A required object was absent.
     NotFound,
@@ -259,11 +259,6 @@ pub enum ObjectStoreErrorKind {
 }
 
 impl ObjectStoreErrorKind {
-    /// Returns the category for an object-store error.
-    pub fn of(error: &ObjectStoreError) -> Self {
-        error.kind()
-    }
-
     /// Returns a safe message for users.
     pub fn public_message(self) -> Cow<'static, str> {
         Cow::Borrowed(match self {
@@ -379,34 +374,9 @@ impl ObjectStoreError {
             Self::InvalidContentRef(_) | Self::Unsupported(_) | Self::Configuration(_) => None,
         }
     }
-
-    /// Returns the failure text without the object key, for wrappers that record
-    /// the key as their own structured field.
-    pub fn message(&self) -> String {
-        match self {
-            Self::NotFound { .. } => "object not found".to_owned(),
-            Self::InvalidKey { message, .. } => format!("invalid object key: {message}"),
-            Self::InvalidContentRef(message) => format!("invalid content ref: {message}"),
-            Self::InvalidRange { .. } => "invalid byte range".to_owned(),
-            Self::PreconditionFailed { .. } => "precondition failed".to_owned(),
-            Self::PermissionDenied { message, .. } => {
-                format!("permission denied: {message}")
-            }
-            Self::StoredChecksumMissing { .. } => "stored full-object checksum missing".to_owned(),
-            Self::ChecksumMismatch { .. } => "full-object checksum mismatch".to_owned(),
-            Self::DifferentObject { .. } => {
-                "immutable object already exists with different bytes".to_owned()
-            }
-            Self::Unsupported(capability) => format!("unsupported capability: {capability}"),
-            Self::Configuration(message) => {
-                format!("invalid object store configuration: {message}")
-            }
-            Self::Transport { message, .. } => message.clone(),
-        }
-    }
 }
 
-/// Facade alias: signatures inside this crate use `Result<T>`.
+/// The result type of every fallible function in this crate.
 pub type Result<T> = std::result::Result<T, ObjectStoreError>;
 
 /// The capability a store names when it cannot run a client-driven

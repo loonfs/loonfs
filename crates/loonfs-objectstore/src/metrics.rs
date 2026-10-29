@@ -2,6 +2,7 @@
 //! samples classified by object family.
 
 use crate::attempts::counting_attempts;
+use crate::clock::monotonic_instant;
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::ListedObject;
@@ -19,7 +20,8 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// One object-store call sample delivered to an object-store metrics recorder.
 ///
@@ -50,9 +52,9 @@ pub struct ObjectStoreMetricSample {
     /// Keys yielded by a listing before completion or drop; otherwise `None`.
     pub item_count: Option<u64>,
     /// Durable-family grouping derived without retaining the raw key.
-    pub key_class: KeyClass,
+    pub key_class: ObjectKeyKind,
     /// Read-range or listing shape when applicable; otherwise `None`.
-    pub range_class: Option<RangeClass>,
+    pub range_class: Option<RangeKind>,
     /// Requested conditional-write class for a put; otherwise `None`.
     pub put_mode: Option<PutModeKind>,
     /// Deployment-supplied provider label, or `None` when the wrapper was left unlabeled.
@@ -209,7 +211,7 @@ impl From<ObjectStoreErrorKind> for ObjectStoreResultKind {
 /// Groups durable keys into low-cardinality operational families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum KeyClass {
+pub enum ObjectKeyKind {
     /// Groups immutable whole-file byte objects.
     Content,
     /// Groups small control records not assigned a more specific class.
@@ -226,7 +228,7 @@ pub enum KeyClass {
     Unknown,
 }
 
-impl KeyClass {
+impl ObjectKeyKind {
     /// Returns the label an aggregating recorder groups by.
     ///
     /// Identical to the serde name: one class has one spelling wherever it is
@@ -247,7 +249,7 @@ impl KeyClass {
 /// Classifies the shape of bytes requested by a get or listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RangeClass {
+pub enum RangeKind {
     /// Indicates a get without explicit range bounds.
     FullObject,
     /// Indicates bytes starting at zero or a prefix-listing operation.
@@ -393,13 +395,6 @@ impl<S> InstrumentedObjectStore<S> {
     }
 }
 
-#[allow(clippy::disallowed_methods)]
-fn sample_clock() -> Instant {
-    // Durations only: sampling reads the monotonic clock at this recorder
-    // boundary, so no wall-clock reading reaches protocol code from here.
-    Instant::now()
-}
-
 #[async_trait]
 impl<S> ObjectStore for InstrumentedObjectStore<S>
 where
@@ -414,7 +409,7 @@ where
     }
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts) = counting_attempts(self.inner.head(key)).await;
         self.record_head_like(
             ObjectStoreOperation::Head,
@@ -427,7 +422,7 @@ where
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts) = counting_attempts(self.inner.create_multipart_upload(key)).await;
         // The multipart control calls move no payload of their own: the
         // parts travel from the client straight to the provider. Timing them
@@ -449,7 +444,7 @@ where
         parts: &[MultipartPart],
         checksum: &Checksum,
     ) -> Result<()> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts) = counting_attempts(self.inner.complete_multipart_upload(
             key,
             provider_upload_id,
@@ -468,7 +463,7 @@ where
     }
 
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts) =
             counting_attempts(self.inner.abort_multipart_upload(key, provider_upload_id)).await;
         self.record_unit(
@@ -482,21 +477,21 @@ where
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts) = counting_attempts(self.inner.get(key, range.clone())).await;
         self.record_get(key, range.as_ref(), start.elapsed(), attempts, &result);
         result
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts) = counting_attempts(self.inner.get_with_metadata(key)).await;
         self.record_get_with_metadata(key, start.elapsed(), attempts, &result);
         result
     }
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let bytes_in = bytes.len() as u64;
         let (result, attempts) = counting_attempts(self.inner.put(key, bytes, mode.clone())).await;
         self.record_put(key, bytes_in, &mode, start.elapsed(), attempts, &result);
@@ -508,7 +503,7 @@ where
     /// and a deployment reading these samples needs to see which write path
     /// its content is taking.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts) =
             counting_attempts(self.inner.put_streamed(key, body, mode.clone())).await;
         let mut sample = ObjectStoreMetricSample::new(
@@ -529,7 +524,7 @@ where
     /// provider sends a large body through the conditional multipart create.
     /// One `put` sample covers the whole write, retries included.
     async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let bytes_in = bytes.len() as u64;
         let (result, attempts) =
             counting_attempts(self.inner.put_immutable_verified(key, bytes)).await;
@@ -554,7 +549,7 @@ where
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let bytes_in = tail.iter().map(|piece| piece.len() as u64).sum();
         let (result, attempts) =
             counting_attempts(self.inner.assemble(key, sources, tail, expected)).await;
@@ -573,7 +568,7 @@ where
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts) = counting_attempts(self.inner.delete(key)).await;
         self.record_unit(
             ObjectStoreOperation::Delete,
@@ -599,14 +594,14 @@ where
             recorder: Arc::clone(&self.recorder),
             store_kind: self.store_kind.clone(),
             prefix: prefix.to_owned(),
-            started: sample_clock(),
+            started: monotonic_instant(),
             items: 0,
             first_error: None,
         })
     }
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts): (Result<Vec<_>>, u32) = counting_attempts(async {
             self.inner
                 .list_prefix_stream(prefix)
@@ -633,7 +628,7 @@ where
         start_after: Option<&str>,
         limit: EffectiveLimit,
     ) -> Result<Page<String, String>> {
-        let start = sample_clock();
+        let start = monotonic_instant();
         let (result, attempts) =
             counting_attempts(self.inner.list_child_prefixes(prefix, start_after, limit)).await;
         self.record_list(
@@ -708,7 +703,7 @@ impl<S> InstrumentedObjectStore<S> {
             .as_ref()
             .ok()
             .and_then(|body| body.as_ref().map(|body| body.bytes.len() as u64));
-        sample.range_class = Some(RangeClass::FullObject);
+        sample.range_class = Some(RangeKind::FullObject);
         self.record(sample);
     }
 
@@ -772,7 +767,7 @@ impl<S> InstrumentedObjectStore<S> {
             self.store_kind.clone(),
         );
         sample.item_count = listed.ok().map(|items| items as u64);
-        sample.range_class = Some(RangeClass::Prefix);
+        sample.range_class = Some(RangeKind::Prefix);
         self.record(sample);
     }
 
@@ -828,23 +823,23 @@ impl Drop for RecordedListStream {
     }
 }
 
-fn classify_key(key: &str) -> KeyClass {
+fn classify_key(key: &str) -> ObjectKeyKind {
     let Some(parsed) = parse_object_key(key) else {
-        return KeyClass::Unknown;
+        return ObjectKeyKind::Unknown;
     };
 
     match parsed.family() {
         DurableObjectFamily::ContentBlob | DurableObjectFamily::TemporaryObject => {
-            KeyClass::Content
+            ObjectKeyKind::Content
         }
-        DurableObjectFamily::WalObject => KeyClass::WalObject,
+        DurableObjectFamily::WalObject => ObjectKeyKind::WalObject,
         DurableObjectFamily::MetadataManifest | DurableObjectFamily::Hint => {
-            KeyClass::NamespaceManifest
+            ObjectKeyKind::NamespaceManifest
         }
-        DurableObjectFamily::MetadataSegment => KeyClass::MetadataSegment,
-        DurableObjectFamily::Pin => KeyClass::GcControl,
+        DurableObjectFamily::MetadataSegment => ObjectKeyKind::MetadataSegment,
+        DurableObjectFamily::Pin => ObjectKeyKind::GcControl,
         DurableObjectFamily::UploadSession | DurableObjectFamily::UploadOutcome => {
-            KeyClass::Metadata
+            ObjectKeyKind::Metadata
         }
     }
 }
@@ -864,18 +859,18 @@ fn classify_result<T>(result: &Result<T>) -> ObjectStoreResultKind {
     }
 }
 
-fn classify_range(range: Option<&ByteRange>) -> RangeClass {
+fn classify_range(range: Option<&ByteRange>) -> RangeKind {
     let Some(range) = range else {
-        return RangeClass::FullObject;
+        return RangeKind::FullObject;
     };
     if range.start_inclusive == range.end_exclusive {
-        RangeClass::Empty
+        RangeKind::Empty
     } else if range.start_inclusive == 0 {
-        RangeClass::Prefix
+        RangeKind::Prefix
     } else if range.end_exclusive == u64::MAX {
-        RangeClass::Suffix
+        RangeKind::Suffix
     } else {
-        RangeClass::Bounded
+        RangeKind::Bounded
     }
 }
 
@@ -888,7 +883,7 @@ fn classify_put_mode(mode: &PutMode) -> PutModeKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyClass, ObjectStoreOperation, ObjectStoreResultKind};
+    use super::{ObjectKeyKind, ObjectStoreOperation, ObjectStoreResultKind};
     use serde::de::DeserializeOwned;
     use serde::Serialize;
     use std::fmt::Debug;
@@ -944,13 +939,13 @@ mod tests {
             assert_spelling(result, result.as_str());
         }
         for class in [
-            KeyClass::Content,
-            KeyClass::Metadata,
-            KeyClass::WalObject,
-            KeyClass::NamespaceManifest,
-            KeyClass::MetadataSegment,
-            KeyClass::GcControl,
-            KeyClass::Unknown,
+            ObjectKeyKind::Content,
+            ObjectKeyKind::Metadata,
+            ObjectKeyKind::WalObject,
+            ObjectKeyKind::NamespaceManifest,
+            ObjectKeyKind::MetadataSegment,
+            ObjectKeyKind::GcControl,
+            ObjectKeyKind::Unknown,
         ] {
             assert_spelling(class, class.as_str());
         }

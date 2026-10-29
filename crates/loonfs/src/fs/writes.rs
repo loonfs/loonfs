@@ -228,7 +228,7 @@ impl Namespace<Writable> {
                 let mut chunk = chunk.map_err(|error| crate::CoreError::Store {
                     object_key: "upload body".to_owned(),
                     message: error.public_message().into_owned(),
-                    kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
+                    kind: error.kind(),
                 })?;
                 let take = chunk.len().min(threshold + 1 - buffered.len());
                 buffered.extend_from_slice(&chunk.split_to(take));

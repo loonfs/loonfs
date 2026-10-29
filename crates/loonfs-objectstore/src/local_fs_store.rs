@@ -23,7 +23,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, EffectiveLimit, Page};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -612,7 +612,7 @@ impl ObjectStore for LocalFsStore {
         if !complete {
             return created;
         }
-        crate::immutable_write::decide_created(self, key, expected, created).await
+        crate::immutable_write::verify_created(self, key, expected, created).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
@@ -995,14 +995,12 @@ fn is_scratch_name(name: &str) -> bool {
     name == STORE_LOCK_FILE_NAME || (name.starts_with('.') && name.contains(".tmp-"))
 }
 
-// Local atomic writes need a unique sibling name. This timestamp is not durable state.
-#[allow(clippy::disallowed_methods)]
 fn temp_path(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("object");
-    let stamp = SystemTime::now()
+    let stamp = crate::clock::wall_now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();

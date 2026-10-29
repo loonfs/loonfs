@@ -2,10 +2,10 @@
 
 use super::{assembled_crc64nvme, S3RequestSigner, MULTIPART_CONTROL_TTL};
 use crate::assembly::{plan_parts, source_range, verify_expected, PartSizing, READ_BYTES};
+use crate::clock::wall_now;
 use crate::provider_object_store::{
     StoredChecksumReader, PROVIDER_MAX_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
-use crate::signed_request::signing_time;
 use crate::{
     AssemblySource, ByteRange, ConfiguredObjectStoreKind, ObjectMetadata, ObjectStoreError, Result,
 };
@@ -111,7 +111,7 @@ impl S3RequestSigner {
             verify_expected(key, expected, &crc)?;
         }
         let etag = self
-            .finish_upload(key, &upload_id, &parts, Some(expected))
+            .complete_started_upload(key, &upload_id, &parts, Some(expected))
             .await?;
         abort_on_drop.disarm();
         if self.kind == ConfiguredObjectStoreKind::CloudflareR2 {
@@ -160,7 +160,7 @@ impl S3RequestSigner {
     ) -> Result<ObjectMetadata> {
         let signed = self
             .request_signer
-            .presign_create_checked(key, expected, MULTIPART_CONTROL_TTL, signing_time())
+            .presign_create_checked(key, expected, MULTIPART_CONTROL_TTL, wall_now())
             .await?;
         let size_bytes = bytes.len() as u64;
         let response = self.send_checked(key, signed, bytes.into()).await?;

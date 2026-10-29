@@ -1,7 +1,12 @@
 //! The durable key grammar: object families, key classification, and the
 //! namespace listing built on it.
 
-use crate::keys::namespace_prefix;
+use crate::keys::{
+    namespace_prefix, CONTENT_DIRECTORY, HINT_NAME, MANIFEST_DIRECTORY, MANIFEST_SUFFIX,
+    NAMESPACES_DIRECTORY, PIN_DIRECTORY, PIN_SUFFIX, SEGMENT_DIRECTORY, SEGMENT_SUFFIX,
+    TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX,
+    WAL_DIRECTORY, WAL_SUFFIX,
+};
 use crate::{ObjectStore, Result};
 use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, UploadId};
 use std::num::NonZeroU32;
@@ -69,14 +74,16 @@ impl<'a> ParsedObjectKey<'a> {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        ["namespaces", owner_namespace_id, "content", content_id] if content_id.len() == 36 => {
+        [NAMESPACES_DIRECTORY, owner_namespace_id, CONTENT_DIRECTORY, content_id]
+            if content_id.len() == 36 =>
+        {
             Some(parsed(
                 DurableObjectFamily::ContentBlob,
                 owner_namespace_id,
                 Some(content_id),
             ))
         }
-        ["namespaces", owner_namespace_id, "content", object]
+        [NAMESPACES_DIRECTORY, owner_namespace_id, CONTENT_DIRECTORY, object]
             if object.len() == 78
                 && object.is_ascii()
                 && object.as_bytes()[36] == b'-'
@@ -90,15 +97,15 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 Some(&object[..36]),
             ))
         }
-        ["namespaces", namespace, "wal", object] => object
-            .strip_suffix(".wal.zst")
+        [NAMESPACES_DIRECTORY, namespace, WAL_DIRECTORY, object] => object
+            .strip_suffix(WAL_SUFFIX)
             .filter(|identifier| parse_wal_no(identifier).is_some())
             .map(|identifier| parsed(DurableObjectFamily::WalObject, namespace, Some(identifier))),
-        ["namespaces", namespace, "hint.json"] => {
+        [NAMESPACES_DIRECTORY, namespace, HINT_NAME] => {
             Some(parsed(DurableObjectFamily::Hint, namespace, None))
         }
-        ["namespaces", namespace, "manifests", manifest] => {
-            manifest.strip_suffix(".json.zst").map(|identifier| {
+        [NAMESPACES_DIRECTORY, namespace, MANIFEST_DIRECTORY, manifest] => {
+            manifest.strip_suffix(MANIFEST_SUFFIX).map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataManifest,
                     namespace,
@@ -106,8 +113,8 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 )
             })
         }
-        ["namespaces", namespace, "segments", segment] => {
-            segment.strip_suffix(".sst.zst").map(|identifier| {
+        [NAMESPACES_DIRECTORY, namespace, SEGMENT_DIRECTORY, segment] => {
+            segment.strip_suffix(SEGMENT_SUFFIX).map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataSegment,
                     namespace,
@@ -115,26 +122,28 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 )
             })
         }
-        ["namespaces", namespace, "pins", pin] => pin
-            .strip_suffix(".json")
+        [NAMESPACES_DIRECTORY, namespace, PIN_DIRECTORY, pin] => pin
+            .strip_suffix(PIN_SUFFIX)
             .map(|identifier| parsed(DurableObjectFamily::Pin, namespace, Some(identifier))),
-        ["namespaces", namespace, "uploads", upload] => {
-            match upload.strip_suffix(".outcome.json") {
+        [NAMESPACES_DIRECTORY, namespace, UPLOAD_DIRECTORY, upload] => {
+            match upload.strip_suffix(UPLOAD_OUTCOME_SUFFIX) {
                 Some(identifier) => Some(parsed(
                     DurableObjectFamily::UploadOutcome,
                     namespace,
                     Some(identifier),
                 )),
-                None => upload.strip_suffix(".json").map(|identifier| {
-                    parsed(
-                        DurableObjectFamily::UploadSession,
-                        namespace,
-                        Some(identifier),
-                    )
-                }),
+                None => upload
+                    .strip_suffix(UPLOAD_SESSION_SUFFIX)
+                    .map(|identifier| {
+                        parsed(
+                            DurableObjectFamily::UploadSession,
+                            namespace,
+                            Some(identifier),
+                        )
+                    }),
             }
         }
-        ["namespaces", namespace, "temporary", temporary] => Some(parsed(
+        [NAMESPACES_DIRECTORY, namespace, TEMPORARY_DIRECTORY, temporary] => Some(parsed(
             DurableObjectFamily::TemporaryObject,
             namespace,
             Some(temporary),
@@ -153,11 +162,16 @@ pub fn wal_no_of(key: &str) -> Option<loonfs_types::WalNo> {
 }
 
 fn parse_wal_no(number: &str) -> Option<loonfs_types::WalNo> {
-    if number.len() != 20 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+    let number = loonfs_types::WalNo::parse(parse_fixed_width_no(number)?).ok()?;
+    (number.0 > 0).then_some(number)
+}
+
+/// Parses the twenty-digit decimal number that WAL and manifest keys carry.
+fn parse_fixed_width_no(text: &str) -> Option<u64> {
+    if text.len() != 20 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let number = loonfs_types::WalNo::parse(number.parse().ok()?).ok()?;
-    (number.0 > 0).then_some(number)
+    text.parse().ok()
 }
 
 /// Extracts a manifest number from its twenty-digit durable name.
@@ -166,11 +180,7 @@ pub fn manifest_no_of(key: &str) -> Option<ManifestNo> {
     if parsed.family() != DurableObjectFamily::MetadataManifest {
         return None;
     }
-    let number = parsed.identifier()?;
-    if number.len() != 20 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    ManifestNo::parse(number.parse().ok()?).ok()
+    ManifestNo::parse(parse_fixed_width_no(parsed.identifier()?)?).ok()
 }
 
 /// Extracts and validates an upload identity from the key of its session

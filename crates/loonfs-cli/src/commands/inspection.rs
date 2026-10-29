@@ -602,8 +602,8 @@ fn doctor_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_objectstore::keys::PROBE_RUN_PREFIX;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::probe::PROBE_RUN_PREFIX;
     use loonfs_objectstore::ObjectStoreError;
     use loonfs_test_support::stores::{
         FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,

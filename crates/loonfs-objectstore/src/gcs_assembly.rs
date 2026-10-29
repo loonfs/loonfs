@@ -282,7 +282,11 @@ impl GcsRequestSigner {
         self.put_if_absent(key, bytes.into(), rest, 1).await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a compose names its target, its sources and their resolved ranges, its tail, \
+                  its checksum, and the temporary objects it creates"
+    )]
     async fn compose_assembly(
         &self,
         key: &str,

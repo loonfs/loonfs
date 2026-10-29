@@ -102,7 +102,7 @@ impl GrepError {
             error => Self::StoreUnavailable {
                 object_key: object_key.into(),
                 message: error.public_message().into_owned(),
-                kind: ObjectStoreErrorKind::of(error),
+                kind: error.kind(),
             },
         }
     }

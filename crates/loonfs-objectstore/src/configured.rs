@@ -86,10 +86,10 @@ impl ConfiguredObjectStore {
         let credentials = aws_credentials_source(&config.credentials, &config.region)?;
         let direct_transfers_enabled =
             endpoint_is_proven(config.endpoint_url.as_deref(), AWS_S3_PROVEN_DOMAINS);
-        let (store, issuers) = aws_s3_with_credentials(config, credentials)?;
-        let direct_transfers = direct_transfers_enabled.then_some(issuers);
+        let provider = aws_s3_with_credentials(config, credentials)?;
+        let direct_transfers = direct_transfers_enabled.then_some(provider.direct_transfers);
         Ok(Self {
-            inner: Arc::new(store),
+            inner: Arc::new(provider.store),
             direct_transfers,
         })
     }
@@ -106,10 +106,10 @@ impl ConfiguredObjectStore {
             Some(config.endpoint_url.as_str()),
             CLOUDFLARE_R2_PROVEN_DOMAINS,
         );
-        let (store, issuers) = cloudflare_r2_with_credentials(config, credentials)?;
-        let direct_transfers = direct_transfers_enabled.then_some(issuers);
+        let provider = cloudflare_r2_with_credentials(config, credentials)?;
+        let direct_transfers = direct_transfers_enabled.then_some(provider.direct_transfers);
         Ok(Self {
-            inner: Arc::new(store),
+            inner: Arc::new(provider.store),
             direct_transfers,
         })
     }
@@ -124,10 +124,10 @@ impl ConfiguredObjectStore {
     ///
     /// Construction fails when the key file, provider, runtime, or key prefix is invalid.
     pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self> {
-        let (store, issuers) = gcp_gcs_with_issuers(config)?;
+        let provider = gcp_gcs_with_issuers(config)?;
         Ok(Self {
-            inner: Arc::new(store),
-            direct_transfers: Some(issuers),
+            inner: Arc::new(provider.store),
+            direct_transfers: Some(provider.direct_transfers),
         })
     }
 

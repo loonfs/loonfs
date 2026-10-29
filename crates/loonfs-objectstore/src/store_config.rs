@@ -498,10 +498,10 @@ kind = "ambient"
         let StoreConfig::CloudflareR2(config) = &r2 else {
             panic!("expected cloudflare-r2")
         };
-        let (access_key_id, secret_access_key) =
+        let credentials =
             resolve_r2_credentials(&config.credentials, environment).expect("resolve ambient r2");
-        assert_eq!(access_key_id.expose(), "env-access");
-        assert_eq!(secret_access_key.expose(), "env-secret");
+        assert_eq!(credentials.access_key_id.expose(), "env-access");
+        assert_eq!(credentials.secret_access_key.expose(), "env-secret");
     }
 
     #[test]

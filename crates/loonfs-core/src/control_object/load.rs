@@ -1,7 +1,6 @@
 //! Loading and classification shared by mutable control-object families.
 
 use super::ControlObjectLoadError;
-use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{decode_control_object, ControlObjectKind};
 use loonfs_types::format::envelope::EnvelopeCodecError;
@@ -56,7 +55,7 @@ where
             ControlObjectLoadError::Store {
                 object_key: object_key.clone(),
                 message: error.to_string(),
-                kind: ObjectStoreErrorKind::of(&error),
+                kind: error.kind(),
             }
         })?;
     let envelope = decode_control_object(&body.bytes, kind)
@@ -135,7 +134,7 @@ fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadE
         ControlLoadFailure::Store(error) => ControlObjectLoadError::Store {
             object_key: object_key.to_owned(),
             message: error.public_message().into_owned(),
-            kind: ObjectStoreErrorKind::of(&error),
+            kind: error.kind(),
         },
     }
 }

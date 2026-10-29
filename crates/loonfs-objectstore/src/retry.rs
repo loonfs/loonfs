@@ -197,14 +197,8 @@ where
         ) else {
             return Err(error.exhausted());
         };
-        transport_retry_pause(backoff).await;
+        crate::clock::pause(backoff).await;
     }
-}
-
-// This retry delay is local scheduling, so it cannot affect replayed state.
-#[allow(clippy::disallowed_methods)]
-pub(crate) async fn transport_retry_pause(backoff: Duration) {
-    tokio::time::sleep(backoff).await;
 }
 
 #[cfg(test)]

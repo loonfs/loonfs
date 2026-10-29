@@ -10,7 +10,8 @@
 //! Stalls are reported as [`HttpErrorKind::Timeout`] so the provider client
 //! can apply its normal retry policy.
 
-use crate::provider_object_store::{request_phase_bound, PROVIDER_ATTEMPT_TIMEOUT};
+use crate::clock::{monotonic_instant, pause};
+use crate::provider_object_store::{request_phase_timeout_for, PROVIDER_RESPONSE_IDLE_TIMEOUT};
 use async_trait::async_trait;
 use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
@@ -33,20 +34,20 @@ pub(crate) enum TransferTimeoutError {
     #[error(
         "request phase exceeded its transfer bound of {}s \
          (request body {request_body_bytes} bytes)",
-        .bound.as_secs_f64()
+        .timeout.as_secs_f64()
     )]
     RequestPhase {
         request_body_bytes: u64,
-        bound: Duration,
+        timeout: Duration,
     },
     #[error(
         "response body stalled for {}s after {received_bytes} received bytes; \
          aborting the transfer",
-        .idle_bound.as_secs_f64()
+        .idle_timeout.as_secs_f64()
     )]
     ResponseBodyIdle {
         received_bytes: u64,
-        idle_bound: Duration,
+        idle_timeout: Duration,
     },
 }
 
@@ -92,21 +93,21 @@ struct TransferTimeoutService {
 impl HttpService for TransferTimeoutService {
     async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         let request_body_bytes = req.body().content_length() as u64;
-        let bound = request_phase_bound(request_body_bytes);
-        let response = request_phase_timeout(bound, self.inner.execute(req))
+        let timeout = request_phase_timeout_for(request_body_bytes);
+        let response = request_phase_timeout(timeout, self.inner.execute(req))
             .await
             .unwrap_or_else(|| {
                 Err(HttpError::new(
                     HttpErrorKind::Timeout,
                     TransferTimeoutError::RequestPhase {
                         request_body_bytes,
-                        bound,
+                        timeout,
                     },
                 ))
             })?;
 
         let (parts, body) = response.into_parts();
-        let body = IdleDeadlineBody::new(body, PROVIDER_ATTEMPT_TIMEOUT);
+        let body = IdleTimeoutBody::new(body, PROVIDER_RESPONSE_IDLE_TIMEOUT);
         Ok(HttpResponse::from_parts(parts, HttpResponseBody::new(body)))
     }
 }
@@ -115,46 +116,45 @@ impl HttpService for TransferTimeoutService {
     clippy::disallowed_methods,
     reason = "the provider request-phase timer, so time only fails one transport attempt that the retry policy already handles"
 )]
-async fn request_phase_timeout<T>(bound: Duration, request: impl Future<Output = T>) -> Option<T> {
+async fn request_phase_timeout<T>(
+    timeout: Duration,
+    request: impl Future<Output = T>,
+) -> Option<T> {
     // Dropping the timed-out future aborts the spawned provider request; the
     // caller's retry layers own what happens next.
-    tokio::time::timeout(bound, request).await.ok()
+    tokio::time::timeout(timeout, request).await.ok()
 }
 
 /// Response body with an idle timeout between frames.
 ///
 /// Each received frame resets the timer. There is no total download timeout,
 /// so a large response remains valid while data continues to arrive.
-struct IdleDeadlineBody {
+struct IdleTimeoutBody {
     inner: HttpResponseBody,
-    idle_bound: Duration,
+    idle_timeout: Duration,
     idle_sleep: Pin<Box<tokio::time::Sleep>>,
     received_bytes: u64,
     timed_out: bool,
 }
 
-impl IdleDeadlineBody {
-    #[allow(clippy::disallowed_methods)]
-    fn new(inner: HttpResponseBody, idle_bound: Duration) -> Self {
-        // The idle clock intentionally uses an isolated async timer; it is
-        // armed here and re-armed on every frame, so it only ever measures
-        // the gap since the last observed progress.
+impl IdleTimeoutBody {
+    fn new(inner: HttpResponseBody, idle_timeout: Duration) -> Self {
+        // The timer is armed here and re-armed on every frame, so it only
+        // ever measures the gap since the last observed progress.
         Self {
             inner,
-            idle_bound,
-            idle_sleep: Box::pin(tokio::time::sleep(idle_bound)),
+            idle_timeout,
+            idle_sleep: Box::pin(pause(idle_timeout)),
             received_bytes: 0,
             timed_out: false,
         }
     }
 }
 
-impl Body for IdleDeadlineBody {
+impl Body for IdleTimeoutBody {
     type Data = Bytes;
     type Error = HttpError;
 
-    #[allow(clippy::disallowed_methods)]
-    // Monotonic time is used only to enforce the response-body idle timeout.
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -168,8 +168,9 @@ impl Body for IdleDeadlineBody {
                 if let Some(data) = frame.data_ref() {
                     this.received_bytes += data.len() as u64;
                 }
-                let deadline = tokio::time::Instant::now() + this.idle_bound;
-                this.idle_sleep.as_mut().reset(deadline);
+                this.idle_sleep
+                    .as_mut()
+                    .reset(monotonic_instant() + this.idle_timeout);
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(other) => Poll::Ready(other),
@@ -180,7 +181,7 @@ impl Body for IdleDeadlineBody {
                         HttpErrorKind::Timeout,
                         TransferTimeoutError::ResponseBodyIdle {
                             received_bytes: this.received_bytes,
-                            idle_bound: this.idle_bound,
+                            idle_timeout: this.idle_timeout,
                         },
                     ))));
                 }
@@ -202,7 +203,8 @@ impl Body for IdleDeadlineBody {
 mod tests {
     use super::*;
     use crate::provider_object_store::{
-        PROVIDER_MIN_TRANSFER_BODY_BYTES, PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
+        PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_MIN_TRANSFER_BODY_BYTES,
+        PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
     };
     use http::Response;
     use std::collections::VecDeque;
@@ -441,10 +443,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn response_body_survives_on_progress_without_a_total_clock() {
-        // Five frames each arriving just inside the idle bound: total body
+        // Five frames each arriving just inside the idle timeout: total body
         // time far exceeds the base attempt timeout, and the transfer still
         // completes because progress keeps resetting the idle clock.
-        let frame_gap = PROVIDER_ATTEMPT_TIMEOUT - Duration::from_secs(1);
+        let frame_gap = PROVIDER_RESPONSE_IDLE_TIMEOUT - Duration::from_secs(1);
         let frames = (0..5)
             .map(|_| (frame_gap, Bytes::from_static(b"chunk")))
             .collect();
@@ -467,7 +469,7 @@ mod tests {
         let frames = vec![
             (Duration::ZERO, Bytes::from_static(b"chunk")),
             (
-                PROVIDER_ATTEMPT_TIMEOUT + Duration::from_secs(1),
+                PROVIDER_RESPONSE_IDLE_TIMEOUT + Duration::from_secs(1),
                 Bytes::from_static(b"late"),
             ),
         ];

@@ -18,6 +18,7 @@ mod attempts;
 mod aws_credentials;
 pub mod buffered;
 mod checksum_header;
+mod clock;
 mod configured;
 pub mod crypto;
 mod endpoint;
