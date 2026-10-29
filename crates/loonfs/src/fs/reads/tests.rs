@@ -107,7 +107,17 @@ async fn create_compacted_directory(
                 access: match subject {
                     Some(subject) => NamespaceAccess::Acl {
                         principal_scope: subject.principal_scope.clone(),
-                        root_grants: grants.clone(),
+                        root_grants: AccessGrants::new(
+                            grants
+                                .iter()
+                                .map(|(principal, rights)| (principal.clone(), rights))
+                                .chain([(
+                                    PrincipalId::parse("prn_administrator").expect("principal"),
+                                    AccessRights::ADMIN,
+                                )])
+                                .collect(),
+                        )
+                        .expect("root grants"),
                     },
                     None => NamespaceAccess::unrestricted(),
                 },

@@ -3,19 +3,21 @@
 //!
 //! These tests live in the crate because the operation types are internal.
 
-use super::super::{CommitOperation, ResolvedBinding, ValidatedCommitPlan};
-use super::checks::{validate_operations, CommitNumbering};
+use super::super::{CommitOperation, ResolvedBinding};
 use super::error::CommitOperand;
-use super::session::PublishValidationSession;
-use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator};
+use super::session::CommitValidationSession;
+use crate::commit::{CandidateAllocation, CommitFingerprint, CommitPlan, CommitValidationError};
 use crate::error::{CoreError, ErrorCode, Result};
-use crate::metadata::{InMemoryMetadataView, MetadataState};
+use crate::manifest::VerifiedMetadataSegments;
+use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
+use loonfs_test_support::stores::MemoryStore;
 use loonfs_types::format::control::{NamespaceStatus, WriterBlock};
 use loonfs_types::format::{
     manifest::{DeletedBinding, DeltaPosition},
     wal::{WalCommitDelta, WalDelta},
 };
+use loonfs_types::ChecksumAlgorithm;
 use loonfs_types::{
     next_public_ordinal, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq,
     CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
@@ -240,20 +242,19 @@ async fn validate_planned_ops(
 ) -> Result<Vec<WalCommitDelta>> {
     let accepted_rows = MetadataState::default();
     let base = crate::wal::ProjectedWalTail::from_rows(context.metadata_state.clone());
-    let mut metadata_state = PublishValidationSession::new(
-        InMemoryMetadataView::in_memory(&base, None, context.head.seq),
+    let commit_id = validated_commit_id();
+    let actor_id = loonfs_test_support::test_actor();
+    let store = MemoryStore::new(ChecksumAlgorithm::Crc64nvme);
+    let manifest = VerifiedMetadataSegments::initial(&store);
+    CommitValidationSession::new(
+        MetadataView::in_memory(&manifest, &base, None, context.head.seq),
         &accepted_rows,
         committed_seq(context),
-    );
-    validate_operations(
-        ops,
-        &mut metadata_state,
-        &mut CommitNumbering::default(),
-        &validated_commit_id(),
-        &loonfs_test_support::test_actor(),
+        &commit_id,
+        &actor_id,
         committed_at_ms,
-        |_| None,
     )
+    .validate(ops, |_| None)
     .await
 }
 
@@ -262,8 +263,7 @@ async fn build_commit_plan(
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
 ) -> std::result::Result<CommitPlan, CommitValidationError> {
-    let mut allocator = InodeAllocator::new(context.head.next_inode_id);
-    let mut allocation = allocator.begin_candidate();
+    let mut allocation = CandidateAllocation::new(context.head.next_inode_id);
     for op in ops {
         let assigned = match op {
             CommitOperation::CreateDirectory { child_inode_id, .. }
@@ -284,8 +284,7 @@ async fn build_commit_plan(
             CoreError::CommitValidation(error) => error,
             error => panic!("unexpected validation dependency error: {error}"),
         })?;
-    let resulting_next_inode_id = allocator.commit_candidate(allocation);
-    Ok(ValidatedCommitPlan {
+    Ok(CommitPlan {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: validated_commit_id(),
         actor_id: loonfs_test_support::test_actor(),
@@ -294,10 +293,12 @@ async fn build_commit_plan(
         semantic_identity: test_fingerprint(),
         apply_after_seq: context.head.seq,
         assigned_seq: committed_seq(context),
+        committed_at_ms,
         deltas,
         appended: Vec::new(),
-    }
-    .finish(resulting_next_inode_id))
+        inline_content: Vec::new(),
+        resulting_next_inode_id: allocation.resulting_next_inode_id(),
+    })
 }
 
 #[tokio::test]
@@ -323,7 +324,6 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondi
             inode_id: InodeId(2),
             expected: AttributesRevisionNo(1),
             actual: Some(AttributesRevisionNo(2)),
-            precondition_index: None,
         }
     );
     assert_eq!(
@@ -418,7 +418,6 @@ async fn stale_revision_precondition_is_rejected() {
             inode_id: InodeId(3),
             expected: RevisionNo(1),
             actual: Some(RevisionNo(2)),
-            precondition_index: None,
         }
     );
 }
@@ -692,7 +691,6 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             inode_id: InodeId(3),
             expected: RevisionNo(1),
             actual: Some(RevisionNo(2)),
-            precondition_index: None,
         }
     );
     assert_eq!(

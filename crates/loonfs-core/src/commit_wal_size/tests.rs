@@ -1,13 +1,14 @@
 //! WAL size estimates checked against planned requests at the API limits.
 
 use super::*;
-use crate::commit::PreparedCommit;
 use crate::commit_engine::CommitCandidate;
 use crate::limits::{MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS};
-use crate::metadata::{InMemoryMetadataView, MetadataState};
+use crate::manifest::VerifiedMetadataSegments;
+use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::storage::inline_content::InlineContent;
+use crate::storage::tail_content::ContentWrites;
 use crate::wal::prepare_wal_object;
 use loonfs_test_support::ids::{attribute_key, attribute_text};
 use loonfs_types::format::wal::{
@@ -240,32 +241,30 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         let tail = crate::wal::ProjectedWalTail::default();
         let base = crate::wal::ProjectedWalTail::from_rows(state.clone());
         let content_writes = crate::test_support::content_writes();
-        let mut session = PublishPlanningSession::new(&head, &tail, &store, &content_writes);
-        let mut allocation = session.begin_candidate();
+        let manifest = VerifiedMetadataSegments::initial(&store);
+        let session = PublishPlanningSession::new(
+            &head,
+            &tail,
+            MetadataView::in_memory(&manifest, &base, None, head.seq),
+            ContentWrites::new(&store, &content_writes),
+            u64::MAX,
+        );
         let plan = session
             .prepare_commit(
                 &candidate,
+                crate::authorize::Authorizer::Unrestricted,
                 candidate.semantic_identity(&namespace_id),
-                InMemoryMetadataView::in_memory(&base, None, head.seq),
-                u64::MAX,
-                &mut allocation,
             )
             .await
             .expect("plan");
         let estimate = candidate.planned_wal_record_bytes(&plan.deltas, &plan.appended)
             + WAL_OBJECT_OVERHEAD_BYTES;
-        let next_inode_id = session.commit_candidate(allocation);
-        let prepared = PreparedCommit {
-            commit: plan.finish(next_inode_id),
-            committed_at_ms: u64::MAX,
-            inline_content: candidate.inline_content().to_vec(),
-        };
         let encoded = prepare_wal_object(
             namespace_id.clone(),
             head.writer_epoch,
             &head,
             head.basis_floor_seq,
-            &[prepared],
+            &[plan],
         )
         .expect("encode");
         assert!(

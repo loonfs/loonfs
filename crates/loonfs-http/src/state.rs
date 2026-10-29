@@ -231,7 +231,7 @@ impl BindingState {
             .namespaces
             .open(namespace_id)
             .await
-            .map_err(ApiResponseError::for_namespace(namespace_id))?;
+            .map_err(ApiResponseError::runtime)?;
         Ok(match subject {
             Some(subject) => namespace.with_subject(subject),
             None => namespace,

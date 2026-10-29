@@ -346,7 +346,7 @@ async fn manifests_and_blocks_are_charged_to_budgets_of_their_own() {
                 max_manifest_bytes,
             )),
             ObjectStoreScope::new(0),
-            Arc::default(),
+            crate::manifest::cache::unshared_read_working_memory(),
             crate::limits::READAHEAD_WINDOW_BYTES,
         )
     };
@@ -1232,7 +1232,7 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
         blocks.clone(),
         Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
         ObjectStoreScope::new(0),
-        Arc::default(),
+        crate::manifest::cache::unshared_read_working_memory(),
         crate::limits::READAHEAD_WINDOW_BYTES,
     );
 
@@ -1355,7 +1355,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             crate::limits::READAHEAD_WINDOW_BYTES,
         )
     };
-    let probe_pool = Arc::new(ReadWorkingMemory::default());
+    let probe_pool = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
     let probe_cache = cache(Arc::clone(&probe_pool));
     let probe = load_manifest_segments_for_inspection(
         &store,

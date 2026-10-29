@@ -1,12 +1,18 @@
-//! Shared path-planning checks and visible-ancestor walks.
+//! [`PlanningView`]: the read-only part of planning one operation, with
+//! the target and destination resolution and the authorization checks that
+//! the planners share.
 
+use super::preconditions::ensure_expected_inode;
 use crate::authorize::{Absence, Authorizer, Replacement};
 use crate::binding_version;
-use crate::commit::{AppendedContent, CandidateAllocation, CommitOperation, ResolvedBinding};
+use crate::commit::{AppendedContent, CommitOperation, ResolvedBinding};
 use crate::error::{CoreError, Result};
 use crate::metadata::access::{access_chain, effective_rights, is_administrator};
 use crate::metadata::MetadataVisibilityReads;
-use crate::metadata::{AccessRevisionRecord, MetadataView, ResolvedVisiblePath, VisiblePathError};
+use crate::metadata::{
+    AccessRevisionRecord, MetadataView, ResolvedVisiblePath, RevisionRecord, VisiblePathError,
+};
+use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use crate::path::read;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
@@ -20,24 +26,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 pub(super) fn is_missing_visible_path(error: &CoreError) -> bool {
-    matches!(
-        error,
-        CoreError::PathNotFound(_) | CoreError::VisiblePath(VisiblePathError::PathNotFound { .. })
-    )
-}
-
-pub(super) async fn ensure_vacant_path<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    path: &AbsolutePath,
-) -> Result<()> {
-    match view.view.resolve_visible_path(path).await {
-        Ok(existing) => Err(CoreError::DestinationExists {
-            path: path.as_str().to_owned(),
-            existing_display_name: Some(existing.display_name),
-        }),
-        Err(error) if is_missing_visible_path(&error) => Ok(()),
-        Err(error) => Err(error),
-    }
+    matches!(error, CoreError::PathNotFound(_))
 }
 
 /// One filesystem operation compiled into the commit operations it needs,
@@ -56,15 +45,156 @@ impl CompiledFilesystemOperation {
     }
 }
 
-pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?Sized> {
+/// What one operation plans against: the namespace, its access mode, the
+/// request's authorizer, and the metadata that the operation resolves
+/// against, which includes the commit's earlier operations.
+pub(super) struct PlanningView<'a, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: &'a NamespaceId,
     pub(super) access: &'a NamespaceAccess,
-    pub(super) authorizer: &'a Authorizer<'a>,
-    pub(super) view: &'a MetadataView<'view, 'store, S>,
-    /// The store that planning writes content objects to.
-    pub(super) store: &'a S,
-    /// Where each content write that planning sends takes its permit.
-    pub(super) content_writes: &'a crate::PermitPool,
+    pub(super) authorizer: Authorizer<'a>,
+    pub(super) metadata: MetadataView<'a, 'a, S>,
+}
+
+/// The inode an operation changes, as the request names it.
+#[derive(Clone, Copy)]
+pub(super) enum Target<'a> {
+    /// A path, with the inode the request expects to find there.
+    Path {
+        path: &'a AbsolutePath,
+        expected_inode_id: Option<InodeId>,
+    },
+    Inode(InodeId),
+}
+
+impl<'a> Target<'a> {
+    pub(super) fn path(path: &'a AbsolutePath, expected_inode_id: Option<InodeId>) -> Self {
+        Self::Path {
+            path,
+            expected_inode_id,
+        }
+    }
+
+    /// Returns how an inode the subject can't see is reported: as the
+    /// request's path, or as the inode ID it named.
+    pub(super) fn absence(&self) -> Absence<'a> {
+        match self {
+            Self::Path { path, .. } => Absence::Path(path.as_str()),
+            Self::Inode(_) => Absence::Inode,
+        }
+    }
+}
+
+/// A target resolved to its visible inode.
+pub(super) struct ResolvedTarget<'a> {
+    pub(super) resolved: ResolvedVisiblePath,
+    pub(super) target: Target<'a>,
+}
+
+impl<'a> ResolvedTarget<'a> {
+    pub(super) fn inode_id(&self) -> InodeId {
+        self.resolved.inode_id
+    }
+
+    pub(super) fn absence(&self) -> Absence<'a> {
+        self.target.absence()
+    }
+
+    /// Returns the target as error messages name it: the request's path, or
+    /// the path that the inode resolved to.
+    pub(super) fn label(&self) -> String {
+        match self.target {
+            Target::Path { path, .. } => path.as_str().to_owned(),
+            Target::Inode(_) => self.resolved.absolute_path.to_string(),
+        }
+    }
+
+    pub(super) fn not_found(&self) -> CoreError {
+        self.absence().not_found(self.resolved.inode_id)
+    }
+
+    pub(super) fn parent_inode_id(&self) -> Result<InodeId> {
+        self.resolved
+            .parent_inode_id
+            .ok_or(CoreError::RootMutationForbidden)
+    }
+
+    pub(super) fn ensure_file(&self) -> Result<()> {
+        if self.resolved.inode_kind != InodeKind::File {
+            return Err(CoreError::ExpectedFile {
+                target: self.label(),
+                kind: self.resolved.inode_kind,
+            });
+        }
+        Ok(())
+    }
+
+    /// Requires the inode that the request expects at a path target.
+    pub(super) fn ensure_expected_inode(&self) -> Result<()> {
+        let Target::Path {
+            path,
+            expected_inode_id,
+        } = self.target
+        else {
+            return Ok(());
+        };
+        if !path.is_root() {
+            return ensure_expected_inode(
+                &self.resolved,
+                expected_inode_id,
+                &final_component(path)?,
+            );
+        }
+        // The root has no name under a parent, so its mismatch names the path.
+        match expected_inode_id {
+            Some(expected) if expected != self.resolved.inode_id => Err(
+                crate::commit::CommitValidationError::BindingPreconditionMismatch {
+                    target: format!("path `{path}`"),
+                    expected_inode_id: Some(expected),
+                    actual_inode_id: Some(self.resolved.inode_id),
+                }
+                .into(),
+            ),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Where a create, move, copy, or undelete binds its inode.
+#[derive(Clone, Copy)]
+pub(super) enum Destination<'a> {
+    Path(&'a AbsolutePath),
+    Name {
+        parent_inode_id: InodeId,
+        display_name: &'a DisplayName,
+    },
+}
+
+impl<'a> Destination<'a> {
+    pub(super) fn name(parent_inode_id: InodeId, display_name: &'a DisplayName) -> Self {
+        Self::Name {
+            parent_inode_id,
+            display_name,
+        }
+    }
+
+    /// Rejects a destination path at the root, which no operation binds.
+    pub(super) fn ensure_mutation(&self) -> Result<()> {
+        match self {
+            Self::Path(path) => ensure_mutation_path(path),
+            Self::Name { .. } => Ok(()),
+        }
+    }
+}
+
+/// A destination resolved to its parent directory and its current occupant.
+pub(super) struct ResolvedDestination<'a> {
+    pub(super) parent_inode_id: InodeId,
+    pub(super) name: DisplayName,
+    /// The destination as error messages name it: the request's path, or
+    /// the parent's path joined with the name.
+    pub(super) path: String,
+    pub(super) occupant: Option<ResolvedVisiblePath>,
+    pub(super) absence: Absence<'a>,
 }
 
 /// Rejects the root, which only an access update may name as its target.
@@ -75,127 +205,297 @@ pub(super) fn ensure_mutation_inode(inode_id: InodeId) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    inode_id: InodeId,
-) -> Result<ResolvedVisiblePath> {
-    let mut session = view.view.session();
-    let mut ancestor_paths = HashMap::new();
-    read::resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
-        .await?
-        .ok_or(CoreError::InodeNotFound(inode_id))
-}
+impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
+    /// Resolves `target` to its visible inode, after rejecting the root.
+    ///
+    /// A path whose middle component is not a directory is reported only
+    /// after `rights` is authorized on that component.
+    pub(super) async fn resolve_target<'t>(
+        &self,
+        target: Target<'t>,
+        rights: AccessRights,
+    ) -> Result<ResolvedTarget<'t>> {
+        let resolved = match target {
+            Target::Path { path, .. } => {
+                ensure_mutation_path(path)?;
+                self.resolve_visible_path_for_authorization(
+                    path,
+                    rights,
+                    Absence::Path(path.as_str()),
+                )
+                .await?
+            }
+            Target::Inode(inode_id) => {
+                ensure_mutation_inode(inode_id)?;
+                self.resolve_visible_inode(inode_id).await?
+            }
+        };
+        Ok(ResolvedTarget { resolved, target })
+    }
 
-pub(super) async fn resolve_visible_path_for_authorization<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    absolute_path: &AbsolutePath,
-    rights: AccessRights,
-    absence: Absence<'_>,
-) -> Result<ResolvedVisiblePath> {
-    match view.view.resolve_visible_path(absolute_path).await {
-        Err(
-            error @ CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory {
-                inode_id,
-                ..
+    /// Resolves `target`, requires `rights` on it, and then requires the
+    /// inode that the request expects.
+    pub(super) async fn resolve_authorized_target<'t>(
+        &self,
+        target: Target<'t>,
+        rights: AccessRights,
+    ) -> Result<ResolvedTarget<'t>> {
+        let target = self.resolve_target(target, rights).await?;
+        self.authorize(target.inode_id(), rights, target.absence())
+            .await?;
+        target.ensure_expected_inode()?;
+        Ok(target)
+    }
+
+    /// Returns the latest revision of a resolved file target.
+    pub(super) async fn latest_file_revision(
+        &self,
+        target: &ResolvedTarget<'_>,
+    ) -> Result<RevisionRecord> {
+        self.metadata
+            .latest_revision_head(target.inode_id())
+            .await?
+            .ok_or_else(|| target.not_found())
+    }
+
+    /// Resolves `destination` to its parent directory, its name, and the
+    /// entry that occupies it now.
+    ///
+    /// A parent that is not a directory is reported only after `create` is
+    /// authorized on it.
+    pub(super) async fn resolve_destination<'d>(
+        &self,
+        destination: Destination<'d>,
+    ) -> Result<ResolvedDestination<'d>> {
+        match destination {
+            Destination::Path(path) => {
+                let absence = Absence::Path(path.as_str());
+                let parent_inode_id = self.resolve_parent_directory(path, absence).await?;
+                let name = final_component(path)?;
+                let occupant = match self.metadata.resolve_visible_path(path).await {
+                    Ok(existing) => Some(existing),
+                    Err(error) if is_missing_visible_path(&error) => None,
+                    Err(error) => return Err(error),
+                };
+                Ok(ResolvedDestination {
+                    parent_inode_id,
+                    name,
+                    path: path.as_str().to_owned(),
+                    occupant,
+                    absence,
+                })
+            }
+            Destination::Name {
+                parent_inode_id,
+                display_name,
+            } => {
+                let parent = self.resolve_visible_inode(parent_inode_id).await?;
+                if parent.inode_kind != InodeKind::Directory {
+                    self.authorize(parent_inode_id, AccessRight::Create.into(), Absence::Inode)
+                        .await?;
+                    return Err(CoreError::ExpectedDirectory {
+                        target: parent.absolute_path.to_string(),
+                        kind: parent.inode_kind,
+                    });
+                }
+                let occupant = self
+                    .resolve_visible_child(parent_inode_id, display_name)
+                    .await?;
+                Ok(ResolvedDestination {
+                    parent_inode_id,
+                    name: display_name.clone(),
+                    path: parent.absolute_path.join(display_name).to_string(),
+                    occupant,
+                    absence: Absence::Inode,
+                })
+            }
+        }
+    }
+
+    /// Authorizes `create` on the destination's parent and then requires the
+    /// destination to be vacant.
+    pub(super) async fn ensure_vacant_destination(
+        &self,
+        destination: &ResolvedDestination<'_>,
+    ) -> Result<()> {
+        self.authorize(
+            destination.parent_inode_id,
+            AccessRight::Create.into(),
+            destination.absence,
+        )
+        .await?;
+        match &destination.occupant {
+            Some(existing) => Err(CoreError::DestinationExists {
+                path: destination.path.clone(),
+                existing_display_name: Some(existing.display_name.clone()),
             }),
-        ) => {
-            view.authorize(inode_id, rights, absence).await?;
-            Err(error)
+            None => Ok(()),
         }
-        result => result,
     }
-}
 
-pub(super) async fn resolve_visible_child<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    parent_inode_id: InodeId,
-    display_name: &DisplayName,
-) -> Result<Option<ResolvedVisiblePath>> {
-    let name_key = NameKey::for_display_name(display_name);
-    let Some(binding) = view.view.visible_child(parent_inode_id, &name_key).await? else {
-        return Ok(None);
-    };
-    resolve_visible_inode(view, binding.child_inode_id)
-        .await
-        .map(Some)
-}
-
-/// Requires the binding version supplied by the caller to still be current.
-pub(super) fn ensure_binding_version<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    resolved: &ResolvedVisiblePath,
-    expected_binding_version: &BindingVersionToken,
-) -> Result<()> {
-    let expected = decode_expected_binding_version(view, expected_binding_version)?;
-    let Some(current) = resolved.binding_version else {
-        return Err(CoreError::RootMutationForbidden);
-    };
-    if current != expected {
-        return Err(CoreError::BindingVersionMismatch {
-            inode_id: resolved.inode_id,
-            expected_binding_version: expected_binding_version.clone(),
-            actual_binding_version: Some(binding_version::encode(current, view.namespace_id)),
-            precondition_index: None,
-        });
-    }
-    Ok(())
-}
-
-/// The error for a binding version expected of an inode that is not visible.
-pub(super) fn hidden_inode_binding_error<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    inode_id: InodeId,
-    expected_binding_version: &BindingVersionToken,
-) -> CoreError {
-    match decode_expected_binding_version(view, expected_binding_version) {
-        Ok(_) => CoreError::BindingVersionMismatch {
-            inode_id,
-            expected_binding_version: expected_binding_version.clone(),
-            actual_binding_version: None,
-            precondition_index: None,
-        },
-        Err(error) => error,
-    }
-}
-
-fn decode_expected_binding_version<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    expected_binding_version: &BindingVersionToken,
-) -> Result<DeltaPosition> {
-    binding_version::decode(expected_binding_version, view.namespace_id).map_err(|error| {
-        CoreError::InvalidCommitField {
-            field: "expected_binding_version",
-            message: format!("invalid expected binding version: {error}"),
-            precondition_index: None,
+    pub(super) async fn ensure_vacant_path(&self, path: &AbsolutePath) -> Result<()> {
+        match self.metadata.resolve_visible_path(path).await {
+            Ok(existing) => Err(CoreError::DestinationExists {
+                path: path.as_str().to_owned(),
+                existing_display_name: Some(existing.display_name),
+            }),
+            Err(error) if is_missing_visible_path(&error) => Ok(()),
+            Err(error) => Err(error),
         }
-    })
-}
-
-pub(super) async fn source_binding<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    resolved: &ResolvedVisiblePath,
-) -> Result<ResolvedBinding> {
-    let parent_inode_id = resolved
-        .parent_inode_id
-        .ok_or(CoreError::RootMutationForbidden)?;
-    let binding = view
-        .view
-        .current_parent_binding_for_child(resolved.inode_id)
-        .await?
-        .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.to_string()))?;
-    if binding.parent_inode_id != parent_inode_id {
-        return Err(CoreError::PathNotFound(resolved.absolute_path.to_string()));
     }
-    Ok(ResolvedBinding {
-        parent_inode_id,
-        name_key: binding.name_key.clone(),
-        display_name: binding
-            .display_name()
-            .expect("visible binding should be bound")
-            .clone(),
-        child_inode_id: binding.child_inode_id,
-        position: binding.position(),
-    })
+
+    pub(super) async fn resolve_visible_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<ResolvedVisiblePath> {
+        let mut session = self.metadata.session();
+        let mut ancestor_paths = HashMap::new();
+        read::resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
+            .await?
+            .ok_or(CoreError::InodeNotFound(inode_id))
+    }
+
+    pub(super) async fn resolve_visible_path_for_authorization(
+        &self,
+        absolute_path: &AbsolutePath,
+        rights: AccessRights,
+        absence: Absence<'_>,
+    ) -> Result<ResolvedVisiblePath> {
+        match self.metadata.resolve_visible_path(absolute_path).await {
+            Err(
+                error @ CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory {
+                    inode_id,
+                    ..
+                }),
+            ) => {
+                self.authorize(inode_id, rights, absence).await?;
+                Err(error)
+            }
+            result => result,
+        }
+    }
+
+    pub(super) async fn resolve_visible_child(
+        &self,
+        parent_inode_id: InodeId,
+        display_name: &DisplayName,
+    ) -> Result<Option<ResolvedVisiblePath>> {
+        let name_key = NameKey::for_display_name(display_name);
+        let Some(binding) = self
+            .metadata
+            .visible_child(parent_inode_id, &name_key)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.resolve_visible_inode(binding.child_inode_id)
+            .await
+            .map(Some)
+    }
+
+    /// Requires the binding version supplied by the caller to still be current.
+    pub(super) fn ensure_binding_version(
+        &self,
+        resolved: &ResolvedVisiblePath,
+        expected_binding_version: &BindingVersionToken,
+    ) -> Result<()> {
+        let expected = self.decode_expected_binding_version(expected_binding_version)?;
+        let Some(current) = resolved.binding_version else {
+            return Err(CoreError::RootMutationForbidden);
+        };
+        if current != expected {
+            return Err(CoreError::BindingVersionMismatch {
+                inode_id: resolved.inode_id,
+                expected_binding_version: expected_binding_version.clone(),
+                actual_binding_version: Some(binding_version::encode(current, self.namespace_id)),
+            });
+        }
+        Ok(())
+    }
+
+    /// The error for a binding version expected of an inode that is not visible.
+    pub(super) fn hidden_inode_binding_error(
+        &self,
+        inode_id: InodeId,
+        expected_binding_version: &BindingVersionToken,
+    ) -> CoreError {
+        match self.decode_expected_binding_version(expected_binding_version) {
+            Ok(_) => CoreError::BindingVersionMismatch {
+                inode_id,
+                expected_binding_version: expected_binding_version.clone(),
+                actual_binding_version: None,
+            },
+            Err(error) => error,
+        }
+    }
+
+    fn decode_expected_binding_version(
+        &self,
+        expected_binding_version: &BindingVersionToken,
+    ) -> Result<DeltaPosition> {
+        binding_version::decode(expected_binding_version, self.namespace_id).map_err(|error| {
+            CoreError::InvalidCommitField {
+                field: "expected_binding_version",
+                message: format!("invalid expected binding version: {error}"),
+            }
+        })
+    }
+
+    pub(super) async fn source_binding(
+        &self,
+        resolved: &ResolvedVisiblePath,
+    ) -> Result<ResolvedBinding> {
+        let parent_inode_id = resolved
+            .parent_inode_id
+            .ok_or(CoreError::RootMutationForbidden)?;
+        let binding = self
+            .metadata
+            .current_parent_binding_for_child(resolved.inode_id)
+            .await?
+            .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.to_string()))?;
+        if binding.parent_inode_id != parent_inode_id {
+            return Err(CoreError::PathNotFound(resolved.absolute_path.to_string()));
+        }
+        Ok(ResolvedBinding {
+            parent_inode_id,
+            name_key: binding.name_key.clone(),
+            display_name: binding
+                .display_name()
+                .expect("visible binding should be bound")
+                .clone(),
+            child_inode_id: binding.child_inode_id,
+            position: binding.position(),
+        })
+    }
+
+    pub(super) async fn resolve_parent_directory(
+        &self,
+        absolute_path: &AbsolutePath,
+        absence: Absence<'_>,
+    ) -> Result<InodeId> {
+        let Some(parent_path) = absolute_path.parent() else {
+            return Ok(ROOT_INODE_ID);
+        };
+        if parent_path.is_root() {
+            return Ok(ROOT_INODE_ID);
+        }
+        let resolved = self
+            .resolve_visible_path_for_authorization(
+                &parent_path,
+                AccessRight::Create.into(),
+                absence,
+            )
+            .await?;
+        if resolved.inode_kind != InodeKind::Directory {
+            self.authorize(resolved.inode_id, AccessRight::Create.into(), absence)
+                .await?;
+            return Err(CoreError::ExpectedDirectory {
+                target: parent_path.as_str().to_owned(),
+                kind: resolved.inode_kind,
+            });
+        }
+        Ok(resolved.inode_id)
+    }
 }
 
 /// How the shared move/copy destination rule resolved.
@@ -237,101 +537,7 @@ pub(super) fn classify_replace_destination(
     })
 }
 
-pub(super) struct ResolvedParents {
-    /// The directory the new entry is bound under, possibly allocated here.
-    pub(super) parent_inode_id: InodeId,
-    /// The deepest directory that already existed, whose `create` right
-    /// covers every directory allocated below it.
-    pub(super) deepest_existing: InodeId,
-}
-
-pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
-    absolute_path: &AbsolutePath,
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    ops: &mut Vec<CommitOperation>,
-    allocation: &mut CandidateAllocation,
-) -> Result<ResolvedParents> {
-    let components = absolute_path.components();
-    if components.len() <= 1 {
-        return Ok(ResolvedParents {
-            parent_inode_id: ROOT_INODE_ID,
-            deepest_existing: ROOT_INODE_ID,
-        });
-    }
-
-    let mut current_inode = ROOT_INODE_ID;
-    let mut creating_missing_ancestors = false;
-    let mut deepest_existing = current_inode;
-    for component in &components[..components.len() - 1] {
-        let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(&display_name);
-        if !creating_missing_ancestors {
-            if let Some(child) = view.view.visible_child(current_inode, &name_key).await? {
-                if child.child_kind != InodeKind::Directory {
-                    view.authorize(
-                        child.child_inode_id,
-                        AccessRight::Create.into(),
-                        Absence::Path(absolute_path.as_str()),
-                    )
-                    .await?;
-                    return Err(CoreError::NonDirectoryPathComponent(
-                        component.as_str().to_owned(),
-                    ));
-                }
-                current_inode = child.child_inode_id;
-                continue;
-            }
-            deepest_existing = current_inode;
-            creating_missing_ancestors = true;
-        }
-
-        let child_inode_id = allocation.allocate()?;
-        ops.push(CommitOperation::CreateDirectory {
-            child_inode_id,
-            parent_inode_id: current_inode,
-            display_name,
-        });
-        current_inode = child_inode_id;
-    }
-    if !creating_missing_ancestors {
-        deepest_existing = current_inode;
-    }
-    Ok(ResolvedParents {
-        parent_inode_id: current_inode,
-        deepest_existing,
-    })
-}
-
-pub(super) async fn resolve_parent_directory<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    absolute_path: &AbsolutePath,
-    absence: Absence<'_>,
-) -> Result<InodeId> {
-    let Some(parent_path) = absolute_path.parent() else {
-        return Ok(ROOT_INODE_ID);
-    };
-    if parent_path.is_root() {
-        return Ok(ROOT_INODE_ID);
-    }
-    let resolved = resolve_visible_path_for_authorization(
-        view,
-        &parent_path,
-        AccessRight::Create.into(),
-        absence,
-    )
-    .await?;
-    if resolved.inode_kind != InodeKind::Directory {
-        view.authorize(resolved.inode_id, AccessRight::Create.into(), absence)
-            .await?;
-        return Err(CoreError::ExpectedDirectory {
-            target: parent_path.as_str().to_owned(),
-            kind: resolved.inode_kind,
-        });
-    }
-    Ok(resolved.inode_id)
-}
-
-impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
+impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
     /// Requires `rights` on `inode_id`.
     pub(super) async fn authorize(
         &self,
@@ -340,8 +546,8 @@ impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
         absence: Absence<'_>,
     ) -> Result<()> {
         crate::authorize::require(
-            self.authorizer,
-            &mut self.view.reads(),
+            &self.authorizer,
+            &mut self.metadata.reads(),
             inode_id,
             rights,
             absence,
@@ -349,35 +555,36 @@ impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
         .await
     }
 
-    /// Authorizes the entry right an occupied or vacant destination needs,
-    /// before the conflict rule can reveal whether the name exists.
+    /// Authorizes the entry right an occupied or vacant destination of a move
+    /// or copy needs, before the conflict rule can reveal whether the name
+    /// exists.
     pub(super) async fn authorize_destination(
         &self,
-        occupant: Option<&ResolvedVisiblePath>,
+        destination: &ResolvedDestination<'_>,
         behavior: DestinationBehavior,
-        source_inode_id: Option<InodeId>,
-        destination_parent: InodeId,
+        source_inode_id: InodeId,
         replacement: Replacement,
-        absence: Absence<'_>,
     ) -> Result<()> {
         if matches!(self.authorizer, Authorizer::Unrestricted) {
             return Ok(());
         }
-        let (inode_id, rights) = match occupant {
-            None => (destination_parent, AccessRight::Create.into()),
-            Some(existing) if Some(existing.inode_id) == source_inode_id => {
-                (destination_parent, AccessRight::Create.into())
+        let parent = destination.parent_inode_id;
+        let (inode_id, rights) = match &destination.occupant {
+            Some(existing)
+                if existing.inode_id != source_inode_id
+                    && behavior == DestinationBehavior::Replace =>
+            {
+                match replacement {
+                    Replacement::RemovesEntry => (
+                        parent,
+                        AccessRights::from_iter([AccessRight::Create, AccessRight::Remove]),
+                    ),
+                    Replacement::WritesFile => (existing.inode_id, AccessRight::Write.into()),
+                }
             }
-            Some(existing) if behavior == DestinationBehavior::Replace => match replacement {
-                Replacement::RemovesEntry => (
-                    destination_parent,
-                    AccessRights::from_iter([AccessRight::Create, AccessRight::Remove]),
-                ),
-                Replacement::WritesFile => (existing.inode_id, AccessRight::Write.into()),
-            },
-            Some(_) => (destination_parent, AccessRight::Create.into()),
+            _ => (parent, AccessRight::Create.into()),
         };
-        self.authorize(inode_id, rights, absence).await
+        self.authorize(inode_id, rights, destination.absence).await
     }
 
     /// Authorizes moving `moved` from `source_parent` to `destination_parent`
@@ -394,7 +601,7 @@ impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
         if source_parent == destination_parent {
             return Ok(());
         }
-        let mut reads = self.view.reads();
+        let mut reads = self.metadata.reads();
         let own = reads.find_access_row(moved).await?;
         if own.as_ref().is_some_and(|row| row.boundary) {
             return Ok(());
@@ -452,7 +659,7 @@ impl<S: ObjectStore + ?Sized> PublishPathPlanningView<'_, '_, '_, S> {
         let Authorizer::Subject { principals } = self.authorizer else {
             return Ok(());
         };
-        let mut reads = self.view.reads();
+        let mut reads = self.metadata.reads();
         let effective = effective_rights(&mut reads, principals, target).await?;
         if effective.is_empty() {
             return Err(absence.not_found(target));

@@ -3,8 +3,11 @@
 
 use super::*;
 use crate::error::CoreError;
+use crate::manifest::VerifiedMetadataSegments;
+use loonfs_test_support::stores::MemoryStore;
 use loonfs_types::format::manifest::DeletedBinding;
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::ChecksumAlgorithm;
 use loonfs_types::ContentId;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
@@ -700,6 +703,8 @@ fn attribute_deltas_replay_in_delta_order_and_a_clear_keeps_its_row() {
 
 #[tokio::test]
 async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
+    let store = MemoryStore::new(ChecksumAlgorithm::Crc64nvme);
+    let manifest = VerifiedMetadataSegments::initial(&store);
     let mut state = MetadataState::default();
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(2),
@@ -733,7 +738,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
         (2, 1, Some("ada")),
         (1, 0, None),
     ] {
-        let view = InMemoryMetadataView::in_memory(&base, None, ChangeSeq(visible_seq));
+        let view = MetadataView::in_memory(&manifest, &base, None, ChangeSeq(visible_seq));
         let projection = view.attributes(InodeId(7)).await.expect("read attributes");
         assert_eq!(
             projection.attributes_revision_no,
@@ -750,7 +755,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     }
 
     // An inode that never had attributes is at the concrete empty state.
-    let view = InMemoryMetadataView::in_memory(&base, None, ChangeSeq(5));
+    let view = MetadataView::in_memory(&manifest, &base, None, ChangeSeq(5));
     let projection = view.attributes(InodeId(8)).await.expect("read attributes");
     assert_eq!(
         (projection.attributes_revision_no, projection.attributes),
@@ -1030,6 +1035,8 @@ fn queries_above_indexed_seq_match_at_head_results() {
 /// rows at every sequence.
 #[tokio::test]
 async fn view_binding_lookups_match_a_row_scan_at_every_seq() {
+    let store = MemoryStore::new(ChecksumAlgorithm::Crc64nvme);
+    let manifest = VerifiedMetadataSegments::initial(&store);
     let tail = churned_binding_state();
     let mut overlay = MetadataState::default();
     overlay.apply_committed_wal_deltas_mut(
@@ -1063,7 +1070,7 @@ async fn view_binding_lookups_match_a_row_scan_at_every_seq() {
     let base = crate::wal::ProjectedWalTail::from_rows(tail);
 
     for seq in (0..=4).map(ChangeSeq) {
-        let view = InMemoryMetadataView::in_memory(&base, Some(&overlay), seq);
+        let view = MetadataView::in_memory(&manifest, &base, Some(&overlay), seq);
         for name in ["contested", "renamed-away", "deleted", "never-bound"] {
             assert_eq!(
                 view.bound_child(InodeId(1), &name_key(name))
@@ -1087,6 +1094,8 @@ async fn view_binding_lookups_match_a_row_scan_at_every_seq() {
 
 #[test]
 fn has_visible_children_sees_through_unbinds() {
+    let store = MemoryStore::new(ChecksumAlgorithm::Crc64nvme);
+    let manifest = VerifiedMetadataSegments::initial(&store);
     let dir = InodeId(1);
     let state = MetadataState::from_rows(
         vec![
@@ -1130,7 +1139,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
     );
     let base = crate::wal::ProjectedWalTail::from_rows(state.clone());
-    let view = InMemoryMetadataView::in_memory(&base, None, ChangeSeq(2));
+    let view = MetadataView::in_memory(&manifest, &base, None, ChangeSeq(2));
     assert!(
         visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe bound child")
@@ -1167,7 +1176,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
     );
     let emptied = crate::wal::ProjectedWalTail::from_rows(emptied);
-    let view = InMemoryMetadataView::in_memory(&emptied, None, ChangeSeq(3));
+    let view = MetadataView::in_memory(&manifest, &emptied, None, ChangeSeq(3));
     assert!(
         !visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe emptied directory")

@@ -4,11 +4,11 @@
 
 use super::candidates::{
     prepare_candidate_request, validate_candidate_content_references, BatchDedup,
-    CandidateAdmission, CandidateTime,
+    CandidateAdmission,
 };
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
-use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
+use crate::commit::wal_payload_from_commit_plan;
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
@@ -97,17 +97,16 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let namespace_id = &view.head().namespace_id;
-    let committed_at_ms = clock.batch.request_at_ms();
     let admission_now_ms = clock.batch.observed_at_ms(&clock.attempt);
     let mut slots = Vec::with_capacity(candidates.len());
     let mut session = PublishPlanningSession::new(
         view.head(),
         view.wal_tail(),
-        view.store(),
+        view.metadata_view(),
         view.content_writes(),
+        clock.batch.request_at_ms(),
     );
     let mut accepted_payloads = Vec::new();
-    let mut next_inode_id = view.head().next_inode_id;
     let mut wal_bytes = WAL_OBJECT_OVERHEAD_BYTES;
     let mut wal_inline_bytes = 0_usize;
     let mut dedup = BatchDedup::default();
@@ -124,29 +123,24 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 &session,
                 candidate,
                 index,
-                CandidateTime {
-                    committed_at_ms,
-                    admission_now_ms,
-                },
+                admission_now_ms,
                 &mut dedup,
             )
             .instrument(crate::phase_span!(Phase::PrepareCommit))
             .await;
-            let candidate_request = match admission {
-                CandidateAdmission::Prepared(candidate_request) => candidate_request,
+            let plan = match admission {
+                CandidateAdmission::Prepared(plan) => plan,
                 CandidateAdmission::Settled(slot) => {
                     slots.push(settle_admission(slot, !accepted_payloads.is_empty()));
                     continue;
                 }
             };
-            let validated = candidate_request.validated;
-            let record_bytes =
-                candidate.planned_wal_record_bytes(&validated.deltas, &validated.appended);
+            let record_bytes = candidate.planned_wal_record_bytes(&plan.deltas, &plan.appended);
             let inline_bytes = candidate
                 .inline_content()
                 .iter()
                 .map(|value| value.bytes().len())
-                .chain(validated.appended.iter().map(|piece| piece.bytes.len()))
+                .chain(plan.appended.iter().map(|piece| piece.bytes.len()))
                 .fold(wal_inline_bytes, usize::saturating_add);
             let estimated_bytes = wal_bytes.saturating_add(record_bytes);
             let exceeded = if inline_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES {
@@ -169,33 +163,21 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 ));
                 continue;
             }
-            let allocation = candidate_request.allocation;
-            let resulting_next_inode_id = session.commit_candidate(allocation);
-            let plan = {
-                let _span = crate::phase_span!(Phase::FinishCommitPlan).entered();
-                validated.finish(resulting_next_inode_id)
-            };
             assert_eq!(
                 plan.namespace_id, *namespace_id,
                 "every record in a WAL object should belong to namespace `{namespace_id}`"
             );
-            let prepared = PreparedCommit {
-                commit: plan,
-                committed_at_ms,
-                inline_content: candidate.inline_content().to_vec(),
-            };
             let preview = {
                 let _span = crate::phase_span!(Phase::BuildWalPayload).entered();
-                wal_payload_from_prepared_commit(&prepared)
+                wal_payload_from_commit_plan(&plan)
             };
             {
                 let _span = crate::phase_span!(Phase::ApplyCommittedWalRecord).entered();
-                session.apply_accepted_commit(&preview, &prepared.commit);
+                session.apply_accepted_commit(&preview, &plan);
             }
             slots.push(BatchOutcomeSlot::Accepted);
             wal_bytes = estimated_bytes;
             wal_inline_bytes = inline_bytes;
-            next_inode_id = resulting_next_inode_id;
             accepted_payloads.push(preview);
         }
     }
@@ -215,7 +197,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         view.acquired_writer.writer_epoch,
         view.head(),
         view.retention_floor_seq(),
-        next_inode_id,
+        session.next_inode_id(),
         accepted_payloads,
     ) {
         Ok(wal) => wal,

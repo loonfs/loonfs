@@ -130,11 +130,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         snapshot_id: &PinId,
         clock: &OperationClock,
     ) -> Result<PinPayload> {
-        let source_head = self
-            .load_read_anchor(clock.observe())
-            .await
-            .map_err(CoreError::ControlObjectLoad)?
-            .read_state;
+        let source_head = self.load_read_anchor(clock.observe()).await?.read_state;
         crate::namespace::control::ensure_namespace_live(
             &source_head.namespace_id,
             source_head.status,

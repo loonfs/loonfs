@@ -73,6 +73,23 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         segment_cache: &'a MetadataSegmentCache,
         scan_runs: Vec<MetadataRunManifest>,
     ) -> Self {
+        Self::with_initial_manifest(store, Some(segment_cache), scan_runs)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
+    /// Returns the segments of a namespace's first manifest, which lists no
+    /// runs, for a view whose rows a test builds in memory.
+    pub(crate) fn initial(store: &'a S) -> Self {
+        Self::with_initial_manifest(store, None, Vec::new())
+    }
+
+    fn with_initial_manifest(
+        store: &'a S,
+        segment_cache: Option<&'a MetadataSegmentCache>,
+        scan_runs: Vec<MetadataRunManifest>,
+    ) -> Self {
         let payload = loonfs_types::format::manifest::NamespaceManifestPayload::initial(
             loonfs_types::NamespaceId::parse("runs").expect("a static namespace id should parse"),
             0,
@@ -84,7 +101,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             .into_envelope();
         Self::new(
             store,
-            Some(segment_cache),
+            segment_cache,
             String::new(),
             Arc::new(manifest),
             0,

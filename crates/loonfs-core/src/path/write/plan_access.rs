@@ -1,116 +1,77 @@
 //! The publish plan for one access update.
 
-use super::preconditions::ensure_expected_inode;
+use super::planner::OperationPlanningSession;
 use super::publish_path_planning::{
-    resolve_visible_inode, AccessStateRef, CompiledFilesystemOperation, PublishPathPlanningView,
+    AccessStateRef, CompiledFilesystemOperation, ResolvedTarget, Target,
 };
-use crate::authorize::Absence;
-use crate::commit::{CommitOperation, CommitValidationError};
+use crate::commit::CommitOperation;
 use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, ResolvedVisiblePath, VisiblePathError};
-use crate::path::mutation_path::final_component;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, InodeId, InodeKind, ROOT_INODE_ID,
+    AccessGrants, AccessRevisionNo, AccessRight, InodeId, InodeKind, ROOT_INODE_ID,
 };
 
-pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
-    absolute_path: &AbsolutePath,
-    boundary: bool,
-    grants: &AccessGrants,
-    expected_inode_id: Option<InodeId>,
-    expected_access_revision_no: Option<AccessRevisionNo>,
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<CompiledFilesystemOperation> {
-    super::preconditions::validate_access_precondition(
-        expected_inode_id,
-        expected_access_revision_no,
-    )?;
-    if view.access.is_unrestricted() {
-        return Err(CoreError::NamespaceUnrestricted {
-            namespace_id: view.namespace_id.clone(),
-        });
-    }
-
-    // A file in the middle of the path is authorized like a target, so the
-    // error that names it reaches only a subject allowed to learn of it.
-    let (authorized_inode_id, resolved) = match view.view.resolve_visible_path(absolute_path).await
-    {
-        Ok(target) => (target.inode_id, Ok(target)),
-        Err(
-            error @ CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory {
-                inode_id,
-                ..
-            }),
-        ) => (inode_id, Err(error)),
-        Err(error) => return Err(error),
-    };
-    let current = view
-        .view
-        .latest_access_revision(authorized_inode_id)
-        .await?;
-    view.authorize_access_update(
-        authorized_inode_id,
-        AccessStateRef::from_row(current.as_ref()),
-        AccessStateRef { boundary, grants },
-        Absence::Path(absolute_path.as_str()),
-    )
-    .await?;
-    let target = resolved?;
-    validate_access_target(&target, boundary, grants)?;
-    if absolute_path.is_root() {
-        if let Some(expected) = expected_inode_id {
-            if target.inode_id != expected {
-                return Err(CommitValidationError::BindingPreconditionMismatch {
-                    target: format!("path `{absolute_path}`"),
-                    expected_inode_id: Some(expected),
-                    actual_inode_id: Some(target.inode_id),
-                    precondition_index: None,
-                }
-                .into());
-            }
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+    pub(super) async fn plan_update_access(
+        &self,
+        target: Target<'_>,
+        boundary: bool,
+        grants: &AccessGrants,
+        expected_access_revision_no: Option<AccessRevisionNo>,
+    ) -> Result<CompiledFilesystemOperation> {
+        if self.view.access.is_unrestricted() {
+            return Err(CoreError::NamespaceUnrestricted {
+                namespace_id: self.view.namespace_id.clone(),
+            });
         }
-    } else {
-        ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
+        let (authorized_inode_id, resolved) = match target {
+            // A file in the middle of the path is authorized like a target,
+            // so the error that names it reaches only a subject allowed to
+            // learn of it.
+            Target::Path { path, .. } => {
+                match self.view.metadata.resolve_visible_path(path).await {
+                    Ok(resolved) => (resolved.inode_id, Ok(resolved)),
+                    Err(
+                        error @ CoreError::VisiblePath(
+                            VisiblePathError::PathComponentNotDirectory { inode_id, .. },
+                        ),
+                    ) => (inode_id, Err(error)),
+                    Err(error) => return Err(error),
+                }
+            }
+            Target::Inode(inode_id) => (
+                inode_id,
+                Ok(self.view.resolve_visible_inode(inode_id).await?),
+            ),
+        };
+        let current = self
+            .view
+            .metadata
+            .latest_access_revision(authorized_inode_id)
+            .await?;
+        self.view
+            .authorize_access_update(
+                authorized_inode_id,
+                AccessStateRef::from_row(current.as_ref()),
+                AccessStateRef { boundary, grants },
+                target.absence(),
+            )
+            .await?;
+        let target = ResolvedTarget {
+            resolved: resolved?,
+            target,
+        };
+        validate_access_target(&target.resolved, boundary, grants)?;
+        target.ensure_expected_inode()?;
+        Ok(update_access(
+            target.inode_id(),
+            current,
+            boundary,
+            grants,
+            expected_access_revision_no,
+        ))
     }
-    Ok(update_access(
-        target.inode_id,
-        current,
-        boundary,
-        grants,
-        expected_access_revision_no,
-    ))
-}
-
-pub(super) async fn plan_update_access_by_inode<S: ObjectStore + ?Sized>(
-    inode_id: InodeId,
-    boundary: bool,
-    grants: &AccessGrants,
-    expected_access_revision_no: Option<AccessRevisionNo>,
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<CompiledFilesystemOperation> {
-    if view.access.is_unrestricted() {
-        return Err(CoreError::NamespaceUnrestricted {
-            namespace_id: view.namespace_id.clone(),
-        });
-    }
-    let target = resolve_visible_inode(view, inode_id).await?;
-    let current = view.view.latest_access_revision(inode_id).await?;
-    view.authorize_access_update(
-        inode_id,
-        AccessStateRef::from_row(current.as_ref()),
-        AccessStateRef { boundary, grants },
-        Absence::Inode,
-    )
-    .await?;
-    validate_access_target(&target, boundary, grants)?;
-    Ok(update_access(
-        inode_id,
-        current,
-        boundary,
-        grants,
-        expected_access_revision_no,
-    ))
 }
 
 fn validate_access_target(

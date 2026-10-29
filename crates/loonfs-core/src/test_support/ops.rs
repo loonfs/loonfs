@@ -291,10 +291,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         deltas: Vec<WalDelta>,
         inline_content: Vec<WalInlineContent>,
     ) -> Result<ChangeSeq> {
-        let head = self
-            .load_read_state()
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
+        let head = self.load_read_state().await?;
         let committed_seq = ChangeSeq(head.seq.0 + 1);
         let wal_no = loonfs_types::WalNo(head.wal_no.0 + 1);
         let payload = WalObjectPayload {

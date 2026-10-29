@@ -1,38 +1,25 @@
-//! Commit fingerprinting and sequential resolution of a request's
-//! operations into one commit's operations.
+//! Commit fingerprinting and the planning of one filesystem operation into
+//! the commit operations it needs.
 
 use super::intent::{CommitIntent, FilesystemOperation};
-use super::plan_access::{plan_update_access, plan_update_access_by_inode};
-use super::plan_append::{plan_append_file, plan_append_file_by_inode};
-use super::plan_attributes::{plan_update_attributes, plan_update_attributes_by_inode};
-use super::plan_by_inode::{
-    plan_create_by_inode, plan_delete_by_inode, plan_move_by_inode, plan_put_file_revision_by_inode,
-};
-use super::plan_create::{
-    plan_create_directory, plan_put_file_content_ref, plan_undelete, undelete_destination,
-};
-use super::plan_delete::plan_delete_path;
-use super::plan_restore::{plan_restore_revision, plan_restore_revision_by_inode};
-use super::plan_transfer::{plan_copy_by_inode, plan_copy_file_path, plan_move_path};
+use super::plan_create::undelete_destination;
 use super::planned_pieces::CommitPieces;
-use super::preconditions::{validate_expected_file_state, PreconditionFields};
-use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
-use super::session::PublishPlanningSession;
-use crate::authorize::Authorizer;
-use crate::commit::{
-    validate_operations, AppendedContent, CandidateAllocation, CommitFingerprint, CommitNumbering,
-    NewChild, PublishValidationSession, ValidatedCommitPlan,
+use super::preconditions::{
+    validate_access_precondition, validate_attributes_precondition, validate_expected_file_state,
+    PreconditionFields,
 };
-use crate::commit_engine::CommitCandidate;
+use super::publish_path_planning::{
+    CompiledFilesystemOperation, Destination, PlanningView, Target,
+};
+use crate::commit::{CandidateAllocation, CommitFingerprint, NewChild};
 use crate::error::{CoreError, Result};
-use crate::metadata::MetadataView;
+use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
-    next_public_ordinal, ChangeSeq, CommitFingerprintInput, ContentId, FileContent,
-    InlineContentIdentity, NamespaceId,
+    CommitFingerprintInput, ContentId, DestinationBehavior, FileContent, InlineContentIdentity,
+    NamespaceId,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Computes the semantic fingerprint of a mutation request.
 ///
@@ -55,481 +42,235 @@ pub(crate) fn commit_fingerprint(
     .fingerprint()
 }
 
-/// Compiles and validates a mutation request into one commit in a single
-/// pass.
-///
-/// Each semantic operation is planned against the view and its compiled
-/// operations are immediately validated, with accepted effects applied to the
-/// shared view so later operations observe earlier ones. The first failure
-/// aborts the request and attaches the failing operation's index.
-///
-/// The commit's identity moves into the returned [`ValidatedCommitPlan`]:
-/// the head is the validated source of the namespace and writer epoch
-/// (`load_publish_metadata_view` fences on epoch equality, and the batch
-/// rejects namespace mismatches before admission).
-pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
-    candidate: &CommitCandidate,
-    semantic_identity: CommitFingerprint,
-    session: &PublishPlanningSession<'_, S>,
-    base_view: MetadataView<'_, '_, S>,
-    committed_at_ms: u64,
-    allocation: &mut CandidateAllocation,
-) -> Result<ValidatedCommitPlan> {
-    let head = session.head();
-    let request = candidate.intent();
-    let committed_seq = next_public_ordinal(head.seq.0)
-        .map(ChangeSeq)
-        .ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "the namespace head is at sequence {}, the largest sequence number, so no \
-                 commit can follow it",
-                head.seq
-            ))
-        })?;
+/// The planning of one operation: the planning view, the commit's pieces,
+/// where content writes go, and the candidate's inode allocation.
+pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
+    pub(super) view: PlanningView<'p, S>,
+    pub(super) pieces: &'p CommitPieces<'p, S>,
+    pub(super) content_writes: ContentWrites<'p, S>,
+    pub(super) allocation: &'p mut CandidateAllocation,
+}
 
-    let authorizer =
-        Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
-    let mut resolved =
-        PublishValidationSession::new(base_view, session.accepted_rows(), committed_seq);
-    let mut numbering = CommitNumbering::default();
-    let mut deltas = Vec::new();
-    let mut appended: Vec<AppendedContent> = Vec::new();
-    let mut pieces = CommitPieces::new(session);
-    for value in candidate.inline_content() {
-        pieces.insert_piece(
-            value.content_ref(),
-            &WalInlineContent {
-                content_id: value.content_ref().content_id.clone(),
-                offset: 0,
-                bytes: value.bytes().to_vec(),
-            },
-            committed_seq,
-        );
-    }
-    for (index, operation) in request.operations.iter().enumerate() {
-        let unit = {
-            let resolution_view = resolved.view();
-            let view = PublishPathPlanningView {
-                namespace_id: &head.namespace_id,
-                access: &head.access,
-                authorizer: &authorizer,
-                view: &resolution_view,
-                store: session.store(),
-                content_writes: session.content_writes(),
-            };
-            plan_operation(operation, &view, &pieces, allocation)
-                .await
-                .map_err(|error| error.at_operation(index))?
-        };
-        if let Some(value) = &unit.appended {
-            for piece in &value.pieces {
-                pieces.insert_piece(&value.content_ref, piece, committed_seq);
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+    /// Plans `operation`, mapping its path or inode address onto the one
+    /// planner for its kind.
+    pub(super) async fn plan(
+        &mut self,
+        operation: &FilesystemOperation,
+    ) -> Result<CompiledFilesystemOperation> {
+        use FilesystemOperation as Op;
+        match operation {
+            Op::CreateDirectory { path, parents } => {
+                self.plan_create_directory(path, *parents).await
             }
-        }
-        appended.extend(unit.appended);
-        let unit_deltas = validate_operations(
-            &unit.ops,
-            &mut resolved,
-            &mut numbering,
-            &request.commit_id,
-            &request.actor_id,
-            committed_at_ms,
-            |content_ref| {
-                if let Some(value) = appended
-                    .iter()
-                    .find(|value| value.content_ref == *content_ref)
-                {
-                    return value.layout.clone();
-                }
-                candidate.revision_layout(content_ref)
-            },
-        )
-        .await
-        .map_err(|error| error.at_operation(index))?;
-        deltas.extend(unit_deltas);
-    }
-
-    let mut plan = ValidatedCommitPlan {
-        namespace_id: head.namespace_id.clone(),
-        commit_id: request.commit_id.clone(),
-        actor_id: request.actor_id.clone(),
-        writer_epoch: head.writer_epoch,
-        message: request.message.clone(),
-        semantic_identity,
-        apply_after_seq: head.seq,
-        assigned_seq: committed_seq,
-        deltas,
-        appended: appended
-            .into_iter()
-            .flat_map(|value| value.pieces)
-            .collect(),
-    };
-    carry_revision_layouts(
-        session,
-        &resolved.view(),
-        &base_view.with_overlay(None, session.accepted_rows(), head.seq),
-        &pieces,
-        candidate,
-        &mut plan,
-    )
-    .await?;
-    Ok(plan)
-}
-
-async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
-    session: &PublishPlanningSession<'_, S>,
-    view: &MetadataView<'_, '_, S>,
-    before: &MetadataView<'_, '_, S>,
-    pieces: &CommitPieces<'_, S>,
-    candidate: &CommitCandidate,
-    plan: &mut ValidatedCommitPlan,
-) -> Result<()> {
-    let mut revision_content_ids = BTreeSet::new();
-    for delta in &mut plan.deltas {
-        let loonfs_types::format::wal::WalDelta::AppendFileRevision {
-            content_ref,
-            layout,
-            ..
-        } = &mut delta.delta
-        else {
-            continue;
-        };
-        let earlier_revision = !revision_content_ids.insert(content_ref.content_id.clone());
-        let first_offset = candidate
-            .inline_content()
-            .iter()
-            .filter(|value| value.content_ref().content_id == content_ref.content_id)
-            .map(|_| 0)
-            .chain(
-                plan.appended
-                    .iter()
-                    .filter(|piece| piece.content_id == content_ref.content_id)
-                    .map(|piece| piece.offset),
-            )
-            .min();
-        if first_offset == Some(0) {
-            *layout = None;
-            continue;
-        }
-        if first_offset.is_some()
-            && (earlier_revision || before.content_published(&content_ref.content_id).await?)
-        {
-            *layout = None;
-            continue;
-        }
-        let mut prefix = content_ref.clone();
-        prefix.size_bytes = first_offset.unwrap_or(content_ref.size_bytes);
-        if let Some(layout) = layout
-            .as_mut()
-            .filter(|layout| layout.size_bytes() >= prefix.size_bytes)
-        {
-            crate::storage::tail_content::cut_layout(layout, prefix.size_bytes);
-        } else {
-            assert!(
-                first_offset.is_none(),
-                "append planning should give fresh content `{}` a layout covering {} bytes",
-                content_ref.content_id,
-                prefix.size_bytes
-            );
-            let content = pieces.content(&prefix);
-            *layout = Some(
-                crate::storage::tail_content::materialize_content_layout(
-                    session.store(),
-                    view,
-                    content.as_ref(),
-                    &prefix,
-                    session.content_writes(),
-                )
-                .await
-                .map_err(|error| error.at_operation(delta.semantic_operation_index as usize))?,
-            );
-        }
-    }
-
-    Ok(())
-}
-
-async fn plan_operation<S: ObjectStore + ?Sized>(
-    operation: &FilesystemOperation,
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    pieces: &CommitPieces<'_, S>,
-    allocation: &mut CandidateAllocation,
-) -> Result<CompiledFilesystemOperation> {
-    match operation {
-        FilesystemOperation::CreateDirectory { path, parents } => {
-            plan_create_directory(path, *parents, view, allocation).await
-        }
-        FilesystemOperation::PutFile {
-            path,
-            content,
-            behavior,
-            expected_inode_id,
-            expected_revision_no,
-        } => {
-            plan_put_file_content_ref(
+            Op::CreateDirectoryByInode {
+                parent_inode_id,
+                display_name,
+            } => {
+                let destination = Destination::name(*parent_inode_id, display_name);
+                self.plan_create(destination, NewChild::Directory).await
+            }
+            Op::CreateFileByInode {
+                parent_inode_id,
+                display_name,
+                content,
+            } => {
+                let child = NewChild::File(prepared_reference(content)?.clone());
+                let destination = Destination::name(*parent_inode_id, display_name);
+                self.plan_create(destination, child).await
+            }
+            Op::PutFile {
                 path,
-                prepared_reference(content)?.clone(),
-                *behavior,
-                validate_expected_file_state(
+                content,
+                behavior,
+                expected_inode_id,
+                expected_revision_no,
+            } => {
+                let expected = validate_expected_file_state(
                     *behavior,
                     *expected_inode_id,
                     *expected_revision_no,
                     PreconditionFields::Put,
-                )?,
-                view,
-                allocation,
-            )
-            .await
-        }
-        FilesystemOperation::CreateDirectoryByInode {
-            parent_inode_id,
-            display_name,
-        } => {
-            plan_create_by_inode(
-                *parent_inode_id,
-                display_name,
-                NewChild::Directory,
-                view,
-                allocation,
-            )
-            .await
-        }
-        FilesystemOperation::CreateFileByInode {
-            parent_inode_id,
-            display_name,
-            content,
-        } => {
-            plan_create_by_inode(
-                *parent_inode_id,
-                display_name,
-                NewChild::File(prepared_reference(content)?.clone()),
-                view,
-                allocation,
-            )
-            .await
-        }
-        FilesystemOperation::PutFileRevisionByInode {
-            inode_id,
-            content,
-            expected_revision_no,
-        } => {
-            plan_put_file_revision_by_inode(
-                *inode_id,
-                prepared_reference(content)?.clone(),
-                *expected_revision_no,
-                view,
-            )
-            .await
-        }
-        FilesystemOperation::AppendFile {
-            path,
-            inline_content,
-            expected_inode_id,
-            expected_revision_no,
-        } => {
-            plan_append_file(
+                )?;
+                let content_ref = prepared_reference(content)?.clone();
+                self.plan_put_file_content_ref(path, content_ref, *behavior, expected)
+                    .await
+            }
+            Op::PutFileRevisionByInode {
+                inode_id,
+                content,
+                expected_revision_no,
+            } => {
+                let content_ref = prepared_reference(content)?.clone();
+                self.plan_put_file_revision_by_inode(*inode_id, content_ref, *expected_revision_no)
+                    .await
+            }
+            Op::AppendFile {
                 path,
                 inline_content,
-                *expected_inode_id,
-                *expected_revision_no,
-                view,
-                pieces,
-            )
-            .await
-        }
-        FilesystemOperation::AppendFileByInode {
-            inode_id,
-            inline_content,
-            expected_revision_no,
-        } => {
-            plan_append_file_by_inode(
-                *inode_id,
+                expected_inode_id,
+                expected_revision_no,
+            } => {
+                let expected = validate_expected_file_state(
+                    DestinationBehavior::Replace,
+                    *expected_inode_id,
+                    *expected_revision_no,
+                    PreconditionFields::Put,
+                )?;
+                let target = Target::path(path, expected.map(|expected| expected.inode_id));
+                let expected_revision_no = expected.and_then(|expected| expected.revision_no);
+                self.plan_append(target, expected_revision_no, inline_content)
+                    .await
+            }
+            Op::AppendFileByInode {
+                inode_id,
                 inline_content,
-                *expected_revision_no,
-                view,
-                pieces,
-            )
-            .await
-        }
-        FilesystemOperation::DeletePath {
-            path,
-            behavior,
-            expected_inode_id,
-        } => plan_delete_path(path, *behavior, *expected_inode_id, view).await,
-        FilesystemOperation::DeleteByInode {
-            inode_id,
-            expected_binding_version,
-            behavior,
-        } => plan_delete_by_inode(*inode_id, expected_binding_version, *behavior, view).await,
-        FilesystemOperation::MoveByInode {
-            inode_id,
-            expected_binding_version,
-            destination_parent_inode_id,
-            destination_display_name,
-            precondition,
-        } => {
-            plan_move_by_inode(
-                *inode_id,
+                expected_revision_no,
+            } => {
+                let target = Target::Inode(*inode_id);
+                self.plan_append(target, *expected_revision_no, inline_content)
+                    .await
+            }
+            Op::DeletePath {
+                path,
+                behavior,
+                expected_inode_id,
+            } => {
+                let target = Target::path(path, *expected_inode_id);
+                self.plan_delete(target, None, *behavior).await
+            }
+            Op::DeleteByInode {
+                inode_id,
                 expected_binding_version,
-                *destination_parent_inode_id,
-                destination_display_name,
-                precondition.behavior,
-                validate_expected_file_state(
-                    precondition.behavior,
-                    precondition.expected_inode_id,
-                    precondition.expected_revision_no,
-                    PreconditionFields::Destination,
-                )?,
-                view,
-            )
-            .await
-        }
-        FilesystemOperation::MovePath {
-            source_path,
-            destination_path,
-            precondition,
-        } => {
-            plan_move_path(
+                behavior,
+            } => {
+                let target = Target::Inode(*inode_id);
+                self.plan_delete(target, Some(expected_binding_version), *behavior)
+                    .await
+            }
+            Op::MovePath {
                 source_path,
                 destination_path,
-                precondition.behavior,
-                validate_expected_file_state(
-                    precondition.behavior,
-                    precondition.expected_inode_id,
-                    precondition.expected_revision_no,
-                    PreconditionFields::Destination,
-                )?,
-                view,
-            )
-            .await
-        }
-        FilesystemOperation::CopyPath {
-            source_path,
-            destination_path,
-            precondition,
-        } => {
-            plan_copy_file_path(
+                precondition,
+            } => {
+                let source = Target::path(source_path, None);
+                let destination = Destination::Path(destination_path);
+                self.plan_move(source, None, destination, precondition)
+                    .await
+            }
+            Op::MoveByInode {
+                inode_id,
+                expected_binding_version,
+                destination_parent_inode_id,
+                destination_display_name,
+                precondition,
+            } => {
+                let source = Target::Inode(*inode_id);
+                let destination =
+                    Destination::name(*destination_parent_inode_id, destination_display_name);
+                self.plan_move(
+                    source,
+                    Some(expected_binding_version),
+                    destination,
+                    precondition,
+                )
+                .await
+            }
+            Op::CopyPath {
                 source_path,
                 destination_path,
-                precondition.behavior,
-                validate_expected_file_state(
-                    precondition.behavior,
-                    precondition.expected_inode_id,
-                    precondition.expected_revision_no,
-                    PreconditionFields::Destination,
-                )?,
-                view,
-                allocation,
-            )
-            .await
-        }
-        FilesystemOperation::CopyByInode {
-            inode_id,
-            destination_parent_inode_id,
-            destination_display_name,
-            precondition,
-        } => {
-            plan_copy_by_inode(
-                *inode_id,
-                *destination_parent_inode_id,
+                precondition,
+            } => {
+                let source = Target::path(source_path, None);
+                let destination = Destination::Path(destination_path);
+                self.plan_copy(source, destination, precondition).await
+            }
+            Op::CopyByInode {
+                inode_id,
+                destination_parent_inode_id,
                 destination_display_name,
-                precondition.behavior,
-                validate_expected_file_state(
-                    precondition.behavior,
-                    precondition.expected_inode_id,
-                    precondition.expected_revision_no,
-                    PreconditionFields::Destination,
-                )?,
-                view,
-                allocation,
-            )
-            .await
-        }
-        FilesystemOperation::RestoreRevision {
-            path,
-            source_revision_no,
-        } => plan_restore_revision(path, *source_revision_no, view).await,
-        FilesystemOperation::RestoreRevisionByInode {
-            inode_id,
-            source_revision_no,
-        } => plan_restore_revision_by_inode(*inode_id, *source_revision_no, view).await,
-        FilesystemOperation::Undelete {
-            inode_id,
-            deletion_seq,
-            destination_path,
-            destination_parent_inode_id,
-            destination_display_name,
-        } => {
-            let destination = undelete_destination(
-                destination_path.as_ref(),
-                *destination_parent_inode_id,
-                destination_display_name.as_ref(),
-            )?;
-            plan_undelete(*inode_id, *deletion_seq, destination, view).await
-        }
-        FilesystemOperation::UpdateAttributes {
-            path,
-            set,
-            remove,
-            expected_inode_id,
-            expected_attributes_revision_no,
-        } => {
-            plan_update_attributes(
+                precondition,
+            } => {
+                let source = Target::Inode(*inode_id);
+                let destination =
+                    Destination::name(*destination_parent_inode_id, destination_display_name);
+                self.plan_copy(source, destination, precondition).await
+            }
+            Op::RestoreRevision {
+                path,
+                source_revision_no,
+            } => {
+                let target = Target::path(path, None);
+                self.plan_restore_revision(target, *source_revision_no)
+                    .await
+            }
+            Op::RestoreRevisionByInode {
+                inode_id,
+                source_revision_no,
+            } => {
+                let target = Target::Inode(*inode_id);
+                self.plan_restore_revision(target, *source_revision_no)
+                    .await
+            }
+            Op::Undelete {
+                inode_id,
+                deletion_seq,
+                destination_path,
+                destination_parent_inode_id,
+                destination_display_name,
+            } => {
+                let destination = undelete_destination(
+                    destination_path.as_ref(),
+                    *destination_parent_inode_id,
+                    destination_display_name.as_ref(),
+                )?;
+                self.plan_undelete(*inode_id, *deletion_seq, destination)
+                    .await
+            }
+            Op::UpdateAttributes {
                 path,
                 set,
                 remove,
-                *expected_inode_id,
-                *expected_attributes_revision_no,
-                view,
-            )
-            .await
-        }
-        FilesystemOperation::UpdateAttributesByInode {
-            inode_id,
-            set,
-            remove,
-            expected_attributes_revision_no,
-        } => {
-            plan_update_attributes_by_inode(
-                *inode_id,
+                expected_inode_id,
+                expected_attributes_revision_no: expected,
+            } => {
+                validate_attributes_precondition(*expected_inode_id, *expected)?;
+                let target = Target::path(path, *expected_inode_id);
+                self.plan_update_attributes(target, set, remove, *expected)
+                    .await
+            }
+            Op::UpdateAttributesByInode {
+                inode_id,
                 set,
                 remove,
-                *expected_attributes_revision_no,
-                view,
-            )
-            .await
-        }
-        FilesystemOperation::UpdateAccess {
-            path,
-            boundary,
-            grants,
-            expected_inode_id,
-            expected_access_revision_no,
-        } => {
-            plan_update_access(
+                expected_attributes_revision_no: expected,
+            } => {
+                let target = Target::Inode(*inode_id);
+                self.plan_update_attributes(target, set, remove, *expected)
+                    .await
+            }
+            Op::UpdateAccess {
                 path,
-                *boundary,
+                boundary,
                 grants,
-                *expected_inode_id,
-                *expected_access_revision_no,
-                view,
-            )
-            .await
-        }
-        FilesystemOperation::UpdateAccessByInode {
-            inode_id,
-            boundary,
-            grants,
-            expected_access_revision_no,
-        } => {
-            plan_update_access_by_inode(
-                *inode_id,
-                *boundary,
+                expected_inode_id,
+                expected_access_revision_no: expected,
+            } => {
+                validate_access_precondition(*expected_inode_id, *expected)?;
+                let target = Target::path(path, *expected_inode_id);
+                self.plan_update_access(target, *boundary, grants, *expected)
+                    .await
+            }
+            Op::UpdateAccessByInode {
+                inode_id,
+                boundary,
                 grants,
-                *expected_access_revision_no,
-                view,
-            )
-            .await
+                expected_access_revision_no: expected,
+            } => {
+                let target = Target::Inode(*inode_id);
+                self.plan_update_access(target, *boundary, grants, *expected)
+                    .await
+            }
         }
     }
 }
@@ -546,7 +287,10 @@ fn prepared_reference(content: &FileContent) -> Result<&loonfs_types::ContentRef
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CandidateAllocation;
+    use crate::authorize::Authorizer;
+    use crate::commit::CommitPlan;
+    use crate::commit_engine::CommitCandidate;
+    use crate::path::write::PublishPlanningSession;
     use crate::test_support::WriterAt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::api::v0::FilesystemChange;
@@ -558,14 +302,8 @@ mod tests {
         PrincipalSet, RevisionNo, Subject, SubjectId,
     };
     use std::assert_matches;
+    use std::collections::BTreeSet;
     use tempfile::tempdir;
-
-    #[derive(Debug)]
-    struct TestPreparedCommit {
-        assigned_seq: ChangeSeq,
-        deltas: Vec<WalCommitDelta>,
-        allocation: CandidateAllocation,
-    }
 
     fn test_context() -> WriterAt {
         crate::test_support::writer_at("writer", 1)
@@ -646,16 +384,20 @@ mod tests {
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         request: &CommitIntent,
-    ) -> Result<TestPreparedCommit> {
+    ) -> Result<CommitPlan> {
         let namespace = crate::test_support::namespace_store(store, namespace_id);
         let view = namespace
             .load_current_metadata_view()
             .await
             .expect("metadata view");
         let content_writes = crate::test_support::content_writes();
-        let session =
-            PublishPlanningSession::new(view.head(), view.wal_tail(), &store, &content_writes);
-        let mut allocation = session.begin_candidate();
+        let session = PublishPlanningSession::new(
+            view.head(),
+            view.wal_tail(),
+            view.projected_metadata_view(),
+            ContentWrites::new(&namespace.store, &content_writes),
+            1,
+        );
         let content = request
             .operations
             .iter()
@@ -663,27 +405,23 @@ mod tests {
             .cloned()
             .map(crate::storage::content_admission::PreparedContent::for_durable_content_write)
             .collect();
-        let validated = prepare_commit_against_publish_view(
-            &CommitCandidate::prepared(request.clone(), content),
-            loonfs_test_support::ids::commit_fingerprint("test"),
-            &session,
-            view.projected_metadata_view(),
-            1,
-            &mut allocation,
-        )
-        .await?;
-        Ok(TestPreparedCommit {
-            assigned_seq: validated.assigned_seq,
-            deltas: validated.deltas,
-            allocation,
-        })
+        let candidate = CommitCandidate::prepared(request.clone(), content);
+        let authorizer =
+            Authorizer::for_request(namespace_id, &view.head().access, candidate.authority())?;
+        session
+            .prepare_commit(
+                &candidate,
+                authorizer,
+                loonfs_test_support::ids::commit_fingerprint("test"),
+            )
+            .await
     }
 
     async fn plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         request: &CommitIntent,
-    ) -> TestPreparedCommit {
+    ) -> CommitPlan {
         try_plan_against_current_state(store, namespace_id, request)
             .await
             .expect("plan")
@@ -858,7 +596,7 @@ mod tests {
                 },
             ] if display_name.as_str() == "a.txt"
         );
-        assert_eq!(planned.allocation.resulting_next_inode_id(), InodeId(4));
+        assert_eq!(planned.resulting_next_inode_id, InodeId(4));
     }
 
     #[tokio::test]

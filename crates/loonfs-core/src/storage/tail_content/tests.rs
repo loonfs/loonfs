@@ -128,11 +128,10 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     store.reset();
     let pool = PermitPool::new(std::num::NonZeroUsize::MIN, None);
     let written = write_tail_content(
-        &store,
+        ContentWrites::new(&store, &pool),
         &layout,
         &content,
         assemble_tail_content(&content).expect("pieces"),
-        &pool,
     )
     .await
     .expect("assembly");
@@ -169,11 +168,10 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     assert_eq!(metadata.checksum, Some(reference.checksum.clone()));
     local.reset();
     let retried = write_tail_content(
-        &store,
+        ContentWrites::new(&store, &pool),
         &layout,
         &content,
         assemble_tail_content(&content).expect("pieces"),
-        &pool,
     )
     .await
     .expect("retry");
@@ -194,11 +192,10 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
     let content = tail.content(&reference).expect("content");
     store.reset();
     let written = write_tail_content(
-        &store,
+        ContentWrites::new(&store, &PermitPool::new(std::num::NonZeroUsize::MIN, None)),
         &layout,
         &content,
         assemble_tail_content(&content).expect("pieces"),
-        &PermitPool::new(std::num::NonZeroUsize::MIN, None),
     )
     .await
     .expect("bounded layout");
@@ -275,7 +272,7 @@ async fn local_large_tail_assembles_without_sources() {
         assert_eq!(actual.as_ptr(), resident.bytes.as_ptr());
     }
     let pool = PermitPool::new(std::num::NonZeroUsize::MIN, None);
-    let written = write_tail_content(&store, &layout, &content, pieces, &pool)
+    let written = write_tail_content(ContentWrites::new(&store, &pool), &layout, &content, pieces)
         .await
         .expect("streamed tail");
     assert_matches!(
@@ -322,11 +319,10 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         store.reset();
         let content = tail.content(&reference).expect("tail");
         let written = write_tail_content(
-            &store,
+            ContentWrites::new(&store, &PermitPool::new(std::num::NonZeroUsize::MIN, None)),
             &layout,
             &content,
             assemble_tail_content(&content).expect("pieces"),
-            &PermitPool::new(std::num::NonZeroUsize::MIN, None),
         )
         .await
         .expect("write");
@@ -354,7 +350,12 @@ async fn validation_materialization_holds_a_write_permit() {
     let pool = PermitPool::new(std::num::NonZeroUsize::MIN, None);
     store.arm();
     let content = tail.content(&reference);
-    let write = materialize_content_layout(&store, &layout, content.as_ref(), &reference, &pool);
+    let write = materialize_content_layout(
+        ContentWrites::new(&store, &pool),
+        &layout,
+        content.as_ref(),
+        &reference,
+    );
     let check = async {
         store.wait_until_blocked().await;
         assert_eq!(pool.counts().running, 1);

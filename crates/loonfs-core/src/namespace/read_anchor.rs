@@ -56,7 +56,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub async fn load_read_anchor(
         &self,
         observed: crate::time::Observation,
-    ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
+    ) -> CoreResult<NamespaceReadAnchor> {
         let (manifest, hint) = self.load_current_manifest_with_hint().await?;
         self.load_read_anchor_from_manifest(manifest, hint, observed)
             .await
@@ -80,7 +80,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         mut manifest: LoadedManifest,
         mut hint: LoadedHint,
         mut observed: crate::time::Observation,
-    ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
+    ) -> CoreResult<NamespaceReadAnchor> {
         for _attempt in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
             match discover_tail(&self.store, &manifest).await {
                 Ok(DiscoveredTail { head: state, tail }) => {
@@ -106,17 +106,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     observed = observed.renew();
                     let (current, current_hint) = self.load_current_manifest_with_hint().await?;
                     if current.manifest().manifest_no == manifest.manifest().manifest_no {
-                        return Err(error);
+                        return Err(error.into());
                     }
                     manifest = current;
                     hint = current_hint;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
         }
         Err(ControlObjectLoadError::StoreContention {
             object_key: manifest.object_key,
-        })
+        }
+        .into())
     }
 
     pub async fn manifest_has_successor(

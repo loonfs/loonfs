@@ -1,6 +1,5 @@
 //! Verified namespace identity and access mode.
 
-use crate::control_object::ControlObjectLoadError;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::ObjectStore;
@@ -30,9 +29,7 @@ impl VerifiedNamespaceCatalogEntry {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    pub async fn load_catalog_entry(
-        &self,
-    ) -> Result<VerifiedNamespaceCatalogEntry, ControlObjectLoadError> {
+    pub async fn load_catalog_entry(&self) -> crate::error::Result<VerifiedNamespaceCatalogEntry> {
         let manifest = self.load_current_manifest().await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(
             &NamespaceReadState::from(manifest.payload()),

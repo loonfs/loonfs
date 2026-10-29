@@ -20,7 +20,7 @@ use super::streaming_compaction::{
     MetadataCompactionCancellation, MetadataCompactionSpec,
 };
 use crate::engine::{NamespaceEngine, Writable};
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::limits::MAX_COMPACTION_INPUT_RUNS;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::PublicationBasis;
@@ -131,11 +131,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             None => {
                 let checked = compaction.observe();
                 PublicationBasis {
-                    manifest: self
-                        .namespace
-                        .load_current_manifest()
-                        .await
-                        .map_err(CoreError::ControlObjectLoad)?,
+                    manifest: self.namespace.load_current_manifest().await?,
                     checked,
                 }
             }

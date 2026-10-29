@@ -3,7 +3,7 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::storage::content::DurableContentValidationError;
-use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
+use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
 use crate::test_support::WriterAt;
 use crate::GrantedRange;
 use loonfs_objectstore::keys::{content_blob, content_span};
@@ -312,11 +312,10 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
     .expect("tail");
     let content = tail.content(&reference).expect("pieces");
     let first = write_tail_content(
-        &store,
+        ContentWrites::new(&store, &crate::test_support::content_writes()),
         &view.projected_metadata_view(),
         &content,
         assemble_tail_content(&content).expect("pieces"),
-        &crate::test_support::content_writes(),
     )
     .await
     .expect("first write");
@@ -356,11 +355,10 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     let view = namespace.load_current_metadata_view().await.expect("view");
     let content = tail.content(original.content_ref()).expect("content");
     write_tail_content(
-        &store,
+        ContentWrites::new(&store, &crate::test_support::content_writes()),
         &view.projected_metadata_view(),
         &content,
         assemble_tail_content(&content).expect("pieces"),
-        &crate::test_support::content_writes(),
     )
     .await
     .expect("whole before manifest");
@@ -1182,16 +1180,15 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     let session = PublishPlanningSession::new(
         view.head(),
         view.wal_tail(),
-        &namespace.store,
-        &content_writes,
+        view.projected_metadata_view(),
+        ContentWrites::new(&namespace.store, &content_writes),
+        context.now_ms,
     );
     let plan = session
         .prepare_commit(
             &candidate,
+            crate::authorize::Authorizer::Unrestricted,
             candidate.semantic_identity(&namespace_id),
-            view.projected_metadata_view(),
-            context.now_ms,
-            &mut session.begin_candidate(),
         )
         .await
         .expect("copy plan");
@@ -1382,16 +1379,15 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         let session = PublishPlanningSession::new(
             view.head(),
             view.wal_tail(),
-            &namespace.store,
-            &content_writes,
+            view.projected_metadata_view(),
+            ContentWrites::new(&namespace.store, &content_writes),
+            context.now_ms,
         );
         let mut plan = session
             .prepare_commit(
                 &candidate,
+                crate::authorize::Authorizer::Unrestricted,
                 candidate.semantic_identity(&namespace_id),
-                view.projected_metadata_view(),
-                context.now_ms,
-                &mut session.begin_candidate(),
             )
             .await
             .expect("reference plan");

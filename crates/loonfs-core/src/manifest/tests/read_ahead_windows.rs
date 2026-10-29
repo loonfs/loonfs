@@ -325,7 +325,7 @@ async fn a_visit_keeps_only_the_stored_bytes_of_its_window_while_it_visits_rows(
     let upper = index[index.len() / 2].last_row_key.clone();
     let in_range = index_blocks_for_key_range(&index, "", Some(&upper));
     let filter_offset = descriptor.filter_block.offset;
-    let pool = Arc::new(ReadWorkingMemory::default());
+    let pool = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
     let cache = MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
         ObjectStoreScope::new(0),

@@ -55,10 +55,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// including an expired snapshot that garbage collection hasn't deleted.
     /// A missing id, or the id of a fork pin, returns `snapshot_not_found`.
     pub async fn get_snapshot(&self, snapshot_id: &PinId) -> Result<Snapshot> {
-        self.namespace
-            .load_current_manifest()
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
+        self.namespace.load_current_manifest().await?;
         let loaded = self.namespace.load_user_pin(snapshot_id).await?;
         Ok(super::snapshot_summary(loaded.state))
     }

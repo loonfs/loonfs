@@ -90,10 +90,7 @@ pub(super) async fn create_download(
         }
         None => namespace.create_download_with_options(path, &options).await,
     }
-    .map_err(|error| {
-        ApiResponseError::runtime_for_namespace(&namespace_id, error)
-            .with_body_field_param("start_offset")
-    })?;
+    .map_err(|error| ApiResponseError::runtime(error).with_body_field_param("start_offset"))?;
     let ranges = presigned_ranges(issuer, &download.ranges, download.start_offset).await?;
 
     Ok((
@@ -163,10 +160,7 @@ pub(super) async fn create_download_by_inode(
         .namespace(&namespace_id)
         .create_download_by_inode_with_options(inode_id, &options)
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_body_field_param("start_offset")
-        })?;
+        .map_err(|error| ApiResponseError::runtime(error).with_body_field_param("start_offset"))?;
     inode_download_response(issuer, namespace_id, download).await
 }
 
@@ -223,10 +217,7 @@ pub(super) async fn create_revision_download_by_inode(
         .namespace(&namespace_id)
         .create_revision_download_by_inode_with_options(inode_id, revision_no, &options)
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_body_field_param("start_offset")
-        })?;
+        .map_err(|error| ApiResponseError::runtime(error).with_body_field_param("start_offset"))?;
     inode_download_response(issuer, namespace_id, target).await
 }
 

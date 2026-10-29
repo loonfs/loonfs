@@ -3,6 +3,7 @@
 
 pub(crate) use super::content_location::ContentLocation;
 use crate::error::{CoreError, Result};
+use crate::limits::CONTENT_READ_CHUNK_BYTES;
 #[cfg(any(test, feature = "test-support"))]
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
@@ -265,9 +266,6 @@ pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
         }
     }
 }
-
-/// Bytes fetched by each ranged content read.
-pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The bytes of a file that a [`FileContentStream`] returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

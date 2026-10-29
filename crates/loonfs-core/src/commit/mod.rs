@@ -10,12 +10,10 @@ mod plan;
 mod validate;
 mod wal_payload;
 
-pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation, InodeAllocator};
+pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation};
 pub(crate) use self::ops::{CommitOperation, NewChild};
-pub(crate) use self::plan::{
-    AppendedContent, CommitPlan, PreparedCommit, ResolvedBinding, ValidatedCommitPlan,
-};
-pub(crate) use self::validate::{validate_operations, CommitNumbering, PublishValidationSession};
+pub(crate) use self::plan::{AppendedContent, CommitPlan, ResolvedBinding};
+pub(crate) use self::validate::CommitValidationSession;
 pub use self::validate::{CommitOperand, CommitValidationError};
-pub(crate) use self::wal_payload::wal_payload_from_prepared_commit;
+pub(crate) use self::wal_payload::wal_payload_from_commit_plan;
 pub use loonfs_types::CommitFingerprint;

@@ -342,6 +342,27 @@ pub const CONTENT_RECLAMATION_GRACE_WINDOW_MS: u64 =
 /// Bounds a chain's own extents while keeping shared base extents separate.
 pub(crate) const MAX_LAYOUT_EXTENTS: usize = 32;
 
+/// The fewest binding rows that one directory scan reads per manifest round
+/// trip.
+///
+/// A directory page, a tree listing, and the kept inode walk of a base
+/// compaction each hold at most this many manifest rows of a scan at once, or
+/// the page's limit when that is larger.
+pub(crate) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
+
+/// Most inode IDs that one batch resolution of current files accepts.
+///
+/// One item costs about what one row of a listing page costs, so the batch
+/// has the bound of a page.
+pub const MAX_CURRENT_FILES_PER_STAT: usize = 1_000;
+
+const _: () = assert!(MAX_CURRENT_FILES_PER_STAT as u64 == loonfs_types::MAX_PAGE_LIMIT as u64);
+
+/// Bytes fetched by each ranged content read.
+///
+/// A content stream holds at most one chunk of a file's bytes at a time.
+pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -169,11 +169,13 @@ async fn commit_piece(
         let content = view.wal_tail().content(&base);
         Some(
             crate::storage::tail_content::materialize_content_layout(
-                store,
+                crate::storage::tail_content::ContentWrites::new(
+                    store,
+                    &crate::test_support::content_writes(),
+                ),
                 &view.projected_metadata_view(),
                 content.as_ref(),
                 &base,
-                &crate::test_support::content_writes(),
             )
             .await
             .expect("base layout"),

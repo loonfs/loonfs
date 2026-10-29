@@ -260,7 +260,7 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         .await
         .expect_err("second pin still requires the missing basis");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    assert!(error.message().contains(ids[1].as_str()));
+    assert!(error.to_string().contains(ids[1].as_str()));
     store.fail_all();
     let error = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(None, &options, &aged.clock())

@@ -191,38 +191,95 @@ pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
     Ok(Some(direntry))
 }
 
+/// A walk up the current parent bindings from one inode, which reports a
+/// revisited inode as a parent-binding cycle.
+///
+/// Stored bindings form a tree, so a walk that revisits an inode found
+/// corrupt stored metadata. The visited set bounds the walk by the
+/// namespace's inode count.
+pub(crate) struct AncestorWalk {
+    next: Option<NextAncestor>,
+    visited: BTreeSet<InodeId>,
+    followed: Option<DirentryBindingRecord>,
+}
+
+enum NextAncestor {
+    Inode(InodeId),
+    ParentOf(InodeId),
+}
+
+impl AncestorWalk {
+    /// Starts a walk whose first inode is `inode_id`.
+    pub(crate) fn new(inode_id: InodeId) -> Self {
+        Self {
+            next: Some(NextAncestor::Inode(inode_id)),
+            visited: BTreeSet::new(),
+            followed: None,
+        }
+    }
+
+    /// Returns the walk's next inode: the start inode first, then the parent
+    /// of the inode returned last, or `None` when that inode has no current
+    /// parent binding.
+    pub(crate) async fn next<R: MetadataVisibilityReads>(
+        &mut self,
+        reads: &mut R,
+    ) -> Result<Option<InodeId>, R::Error> {
+        let inode_id = match self.next.take() {
+            None => return Ok(None),
+            Some(NextAncestor::Inode(inode_id)) => {
+                self.followed = None;
+                inode_id
+            }
+            Some(NextAncestor::ParentOf(child_inode_id)) => {
+                let Some(binding) = reads
+                    .current_parent_binding_for_child(child_inode_id)
+                    .await?
+                else {
+                    self.followed = None;
+                    return Ok(None);
+                };
+                let parent_inode_id = binding.parent_inode_id;
+                self.followed = Some(binding);
+                parent_inode_id
+            }
+        };
+        if !self.visited.insert(inode_id) {
+            return Err(VisiblePathError::ParentBindingCycle { inode_id }.into());
+        }
+        self.next = Some(NextAncestor::ParentOf(inode_id));
+        Ok(Some(inode_id))
+    }
+
+    /// Continues the walk at `inode_id` after it ended, for a parent that a
+    /// deleted inode records instead of a current binding.
+    pub(crate) fn continue_at(&mut self, inode_id: InodeId) {
+        self.next = Some(NextAncestor::Inode(inode_id));
+    }
+
+    /// Takes the binding that the walk followed to the inode it returned
+    /// last, which is `None` for the start inode and for an inode the walk
+    /// continued at.
+    pub(crate) fn take_followed_binding(&mut self) -> Option<DirentryBindingRecord> {
+        self.followed.take()
+    }
+}
+
 /// The first hiding subtree tombstone rooted at `inode_id` or at any of its
 /// current ancestors (following current parent bindings upward). A
 /// recoverable deletion and an expired one both hide their subtree, so the
-/// rule doesn't read the retention floor. A walk that revisits an inode
-/// found a parent-binding cycle, which is corrupt stored metadata: answering
-/// "not covered" could show a deleted subtree.
+/// rule doesn't read the retention floor. A parent-binding cycle is corrupt
+/// stored metadata: answering "not covered" could show a deleted subtree.
 pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
 ) -> Result<Option<SubtreeTombstoneRecord>, R::Error> {
-    let mut current = Some(inode_id);
-    let mut visited = BTreeSet::new();
-
-    while let Some(candidate_inode_id) = current {
-        if !visited.insert(candidate_inode_id.0) {
-            return Err(VisiblePathError::ParentBindingCycle {
-                inode_id: candidate_inode_id,
-            }
-            .into());
-        }
-        if let Some(tombstone) = reads
-            .find_hiding_subtree_tombstone(candidate_inode_id)
-            .await?
-        {
+    let mut walk = AncestorWalk::new(inode_id);
+    while let Some(ancestor) = walk.next(reads).await? {
+        if let Some(tombstone) = reads.find_hiding_subtree_tombstone(ancestor).await? {
             return Ok(Some(tombstone));
         }
-        current = reads
-            .current_parent_binding_for_child(candidate_inode_id)
-            .await?
-            .map(|direntry| direntry.parent_inode_id);
     }
-
     Ok(None)
 }
 
@@ -243,58 +300,37 @@ pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
 /// either belongs to nothing the namespace can show. And base compactions
 /// remove an expired subtree's rows a family group at a time, so the
 /// bindings that lead to the expired root can be gone while the revisions
-/// remain. A walk that revisits an inode found a parent-binding
-/// cycle, which is corrupt stored metadata.
+/// remain. A parent-binding cycle is corrupt stored metadata.
 pub(crate) async fn ancestry_allows_read<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
 ) -> Result<bool, R::Error> {
-    let mut current = inode_id;
-    let mut visited = BTreeSet::new();
-    while current != ROOT_INODE_ID {
-        if !visited.insert(current.0) {
-            return Err(VisiblePathError::ParentBindingCycle { inode_id: current }.into());
+    let mut walk = AncestorWalk::new(inode_id);
+    while let Some(ancestor) = walk.next(reads).await? {
+        if ancestor == ROOT_INODE_ID {
+            return Ok(true);
         }
-        if let Some(tombstone) = reads.find_hiding_subtree_tombstone(current).await? {
+        if let Some(tombstone) = reads.find_hiding_subtree_tombstone(ancestor).await? {
             return Ok(tombstone.committed_seq > reads.retention_floor_seq());
         }
-        match reads.current_parent_binding_for_child(current).await? {
-            Some(binding) => current = binding.parent_inode_id,
-            None => return Ok(false),
-        }
     }
-    Ok(true)
+    Ok(false)
 }
 
 /// Whether binding `inode_id` under `new_parent_inode_id` would make the
 /// directory graph cyclic: true iff `inode_id` is `new_parent_inode_id` or
-/// one of its current ancestors. Same ancestor walk (and cycle error) as
-/// [`covering_subtree_tombstone`], visiting for identity instead of
-/// tombstones.
+/// one of its current ancestors.
 pub(crate) async fn would_create_directory_cycle<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
     new_parent_inode_id: InodeId,
 ) -> Result<bool, R::Error> {
-    let mut current = Some(new_parent_inode_id);
-    let mut visited = BTreeSet::new();
-
-    while let Some(candidate_inode_id) = current {
-        if !visited.insert(candidate_inode_id.0) {
-            return Err(VisiblePathError::ParentBindingCycle {
-                inode_id: candidate_inode_id,
-            }
-            .into());
-        }
-        if candidate_inode_id == inode_id {
+    let mut walk = AncestorWalk::new(new_parent_inode_id);
+    while let Some(ancestor) = walk.next(reads).await? {
+        if ancestor == inode_id {
             return Ok(true);
         }
-        current = reads
-            .current_parent_binding_for_child(candidate_inode_id)
-            .await?
-            .map(|direntry| direntry.parent_inode_id);
     }
-
     Ok(false)
 }
 

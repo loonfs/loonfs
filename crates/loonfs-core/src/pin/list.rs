@@ -78,10 +78,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// returns it. An expired record stays readable until garbage collection
     /// deletes it. A missing pin returns `snapshot_not_found`.
     pub async fn get_checkpoint(&self, checkpoint_id: &PinId) -> Result<Checkpoint> {
-        self.namespace
-            .load_current_manifest()
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
+        self.namespace.load_current_manifest().await?;
         let loaded = self
             .namespace
             .load_pin(checkpoint_id)
@@ -130,10 +127,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         request: PageRequest<CheckpointPageCursor>,
         row: impl Fn(PinPayload) -> Option<T>,
     ) -> Result<Page<T, CheckpointPageCursor>> {
-        self.namespace
-            .load_current_manifest()
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
+        self.namespace.load_current_manifest().await?;
 
         if let Some(cursor) = &request.cursor {
             cursor.validate_for(&self.namespace.namespace_id)?;

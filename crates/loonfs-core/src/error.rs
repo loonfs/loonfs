@@ -42,19 +42,13 @@ pub enum CoreError {
     #[error(transparent)]
     MetadataView(#[from] MetadataViewError),
     #[error(transparent)]
-    VisiblePath(#[from] VisiblePathError),
+    VisiblePath(VisiblePathError),
     #[error(transparent)]
     DurableContent(#[from] DurableContentValidationError),
     #[error("commit validation failed: {0}")]
     CommitValidation(#[from] CommitValidationError),
     #[error("WAL publication failed: {0}")]
     WalPublish(#[from] WalPublishError),
-    #[error("failed to write WAL object `{object_key}`: {message}")]
-    WalWrite {
-        object_key: String,
-        message: String,
-        kind: ObjectStoreErrorKind,
-    },
     #[error("invalid absolute path `{0}`")]
     InvalidPath(String),
     #[error("invalid commit request: {0}")]
@@ -63,7 +57,6 @@ pub enum CoreError {
     InvalidCommitField {
         field: &'static str,
         message: String,
-        precondition_index: Option<u32>,
     },
     #[error("path not found `{0}`")]
     PathNotFound(String),
@@ -140,7 +133,6 @@ pub enum CoreError {
         expected_binding_version: BindingVersion,
         /// Absent when the inode is not visible.
         actual_binding_version: Option<BindingVersion>,
-        precondition_index: Option<u32>,
     },
     #[error("commit id conflict for `{commit_id}`")]
     CommitIdReuseConflict {
@@ -211,8 +203,6 @@ pub enum CoreError {
         after_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
-    #[error("path component `{0}` is not a directory")]
-    NonDirectoryPathComponent(String),
     #[error("namespace corrupt: {0}")]
     NamespaceCorrupt(String),
     /// This writer session's epoch was superseded. Terminal for the session:
@@ -241,12 +231,18 @@ pub enum CoreError {
     /// detail. A bug in this process's own computation panics instead.
     #[error("internal error: {0}")]
     Internal(String),
+    #[error("namespace `{namespace_id}` does not exist")]
+    NamespaceNotFound { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is unrestricted and holds no access rows")]
     NamespaceUnrestricted { namespace_id: NamespaceId },
+    /// An ACL namespace's creation named no principal with `admin` in its
+    /// root grants, so no principal could administer the namespace.
+    #[error("an ACL namespace needs at least one administrator in root_grants")]
+    RootGrantsWithoutAdministrator,
     #[error("namespace `{namespace_id}` requires a subject; send Loonfs-Principals")]
     SubjectRequired { namespace_id: NamespaceId },
     #[error(
@@ -267,12 +263,17 @@ pub enum CoreError {
     StaleHeadPrecondition {
         expected: ChangeSeq,
         actual: ChangeSeq,
-        precondition_index: Option<u32>,
     },
     // The message is the failed operation's own, and `details()` reports the index.
     #[error("{error}")]
     FailedOperation {
         operation_index: u32,
+        error: Box<CoreError>,
+    },
+    // The message is the failed precondition's own, and `details()` reports the index.
+    #[error("{error}")]
+    FailedPrecondition {
+        precondition_index: u32,
         error: Box<CoreError>,
     },
 }
@@ -334,6 +335,17 @@ impl MetadataProjectionLoadError {
 impl From<ManifestLoadError> for CoreError {
     fn from(error: ManifestLoadError) -> Self {
         Self::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    }
+}
+
+impl From<VisiblePathError> for CoreError {
+    /// Reports a missing path as [`CoreError::PathNotFound`], the one
+    /// spelling that every planner and read uses.
+    fn from(error: VisiblePathError) -> Self {
+        match error {
+            VisiblePathError::PathNotFound { absolute_path } => Self::PathNotFound(absolute_path),
+            error => Self::VisiblePath(error),
+        }
     }
 }
 
@@ -402,9 +414,7 @@ impl CoreError {
             CoreError::DurableContent(error) => error.code(),
             CoreError::CommitValidation(error) => error.code(),
             CoreError::Internal(_) => ErrorCode::ServerError,
-            CoreError::WalWrite { kind, .. } | CoreError::Store { kind, .. } => {
-                classify_store_failure(*kind)
-            }
+            CoreError::Store { kind, .. } => classify_store_failure(*kind),
             CoreError::WalPublish(error) => error.code(),
             CoreError::OutcomeUnknown { .. } => ErrorCode::OutcomeUnknown,
             CoreError::StoreContention { .. } => ErrorCode::StoreContention,
@@ -422,7 +432,7 @@ impl CoreError {
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::ResumedPrefix(_)
             | CoreError::PrefixForRangedRead
-            | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
+            | CoreError::RootGrantsWithoutAdministrator => ErrorCode::InvalidRequest,
             CoreError::RangeNotSatisfiable { .. } => ErrorCode::RangeNotSatisfiable,
             CoreError::SnapshotNotFound { .. } => ErrorCode::SnapshotNotFound,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
@@ -431,6 +441,7 @@ impl CoreError {
             CoreError::ContentTooLarge { .. }
             | CoreError::CommitTooLarge { .. }
             | CoreError::AppendTooLarge { .. } => ErrorCode::ContentTooLarge,
+            CoreError::NamespaceNotFound { .. } => ErrorCode::NamespaceNotFound,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespaceUnrestricted { .. } => ErrorCode::NamespaceUnrestricted,
@@ -466,9 +477,11 @@ impl CoreError {
             | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
             CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
-            // Naming which operation stopped a batch says nothing new about
-            // what went wrong, so the code stays the failure's own.
-            CoreError::FailedOperation { error, .. } => error.code(),
+            // Naming which operation or precondition stopped a commit says
+            // nothing new about what went wrong, so the code stays the
+            // failure's own.
+            CoreError::FailedOperation { error, .. }
+            | CoreError::FailedPrecondition { error, .. } => error.code(),
         }
     }
 
@@ -482,8 +495,14 @@ impl CoreError {
         }
     }
 
-    pub fn message(&self) -> String {
-        self.to_string()
+    pub(crate) fn at_precondition(self, precondition_index: usize) -> Self {
+        let Ok(precondition_index) = u32::try_from(precondition_index) else {
+            return self;
+        };
+        Self::FailedPrecondition {
+            precondition_index,
+            error: Box::new(self),
+        }
     }
 
     /// Returns a safe message when this error came from the object store.
@@ -497,10 +516,10 @@ impl CoreError {
             CoreError::WalPublish(WalPublishError::OutcomeUnknown(message)) => {
                 Some(std::borrow::Cow::Owned(message.clone()))
             }
-            CoreError::WalWrite { kind, .. } | CoreError::Store { kind, .. } => {
-                Some(kind.public_message())
-            }
-            CoreError::FailedOperation { error, .. } => error.object_store_public_message(),
+            CoreError::WalPublish(WalPublishError::Write { kind, .. })
+            | CoreError::Store { kind, .. } => Some(kind.public_message()),
+            CoreError::FailedOperation { error, .. }
+            | CoreError::FailedPrecondition { error, .. } => error.object_store_public_message(),
             CoreError::DurableContent(
                 DurableContentValidationError::MissingContentObject { .. }
                 | DurableContentValidationError::ContentLengthMismatch { .. }
@@ -551,16 +570,17 @@ impl CoreError {
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
             | CoreError::RebootstrapRequired { .. }
-            | CoreError::NonDirectoryPathComponent(_)
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
             | CoreError::OutcomeUnknown { .. }
             | CoreError::StoreContention { .. }
             | CoreError::Internal(_)
+            | CoreError::NamespaceNotFound { .. }
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
             | CoreError::Forbidden { .. }
             | CoreError::NamespaceUnrestricted { .. }
+            | CoreError::RootGrantsWithoutAdministrator
             | CoreError::LiveSetExceedsReadMemory { .. }
             | CoreError::ManifestTooLarge { .. }
             | CoreError::StaleHeadPrecondition { .. } => None,
@@ -607,12 +627,7 @@ impl CoreError {
                 retention_floor_seq: Some(*retention_floor_seq),
                 ..ErrorDetails::default()
             }),
-            CoreError::StaleHeadPrecondition {
-                expected,
-                actual,
-                precondition_index,
-            } => Some(ErrorDetails {
-                precondition_index: *precondition_index,
+            CoreError::StaleHeadPrecondition { expected, actual } => Some(ErrorDetails {
                 expected_head_seq: Some(*expected),
                 actual_head_seq: Some(*actual),
                 ..ErrorDetails::default()
@@ -621,19 +636,10 @@ impl CoreError {
                 inode_id,
                 expected_binding_version,
                 actual_binding_version,
-                precondition_index,
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 expected_binding_version: Some(expected_binding_version.clone()),
                 actual_binding_version: actual_binding_version.clone(),
-                precondition_index: *precondition_index,
-                ..ErrorDetails::default()
-            }),
-            CoreError::InvalidCommitField {
-                precondition_index: Some(precondition_index),
-                ..
-            } => Some(ErrorDetails {
-                precondition_index: Some(*precondition_index),
                 ..ErrorDetails::default()
             }),
             CoreError::CommitValidation(error) => error.details(),
@@ -642,6 +648,13 @@ impl CoreError {
                 error,
             } => Some(ErrorDetails {
                 operation_index: Some(*operation_index),
+                ..error.details().unwrap_or_default()
+            }),
+            CoreError::FailedPrecondition {
+                precondition_index,
+                error,
+            } => Some(ErrorDetails {
+                precondition_index: Some(*precondition_index),
                 ..error.details().unwrap_or_default()
             }),
             _ => None,
@@ -766,7 +779,7 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::AlreadyExists);
         assert_eq!(error.code(), ErrorCode::NamespaceExists);
         assert_eq!(error.code().as_str(), "namespace_exists");
-        assert!(error.message().contains("already exists"));
+        assert!(error.to_string().contains("already exists"));
 
         let content_id = loonfs_types::ContentId::generate();
         let error = CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
@@ -774,7 +787,7 @@ mod tests {
         });
         assert_eq!(error.kind(), ErrorKind::Conflict);
         assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
-        assert!(error.message().contains(content_id.as_str()));
+        assert!(error.to_string().contains(content_id.as_str()));
     }
 
     #[test]
@@ -788,8 +801,8 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
         // The caller has to know which token to mint again, so the ref it
         // was supplied for travels with the reason.
-        assert!(error.message().contains(content_id.as_str()));
-        assert!(error.message().contains("expired"));
+        assert!(error.to_string().contains(content_id.as_str()));
+        assert!(error.to_string().contains("expired"));
     }
 
     #[test]
@@ -863,7 +876,6 @@ mod tests {
             inode_id: InodeId(7),
             expected: RevisionNo(2),
             actual: Some(RevisionNo(5)),
-            precondition_index: None,
         });
         let details = stale.details().expect("stale-revision details");
         assert_eq!(details.inode_id, Some(InodeId(7)));
@@ -881,7 +893,6 @@ mod tests {
                 inode_id: InodeId(7),
                 expected: RevisionNo(2),
                 actual: None,
-                precondition_index: None,
             });
         let message = unversioned.to_string();
         assert!(message.contains("revision 2"), "{message}");
@@ -897,7 +908,6 @@ mod tests {
         // A refused `expected_head_seq` carries both sequences, so a caller
         // that still means to delete knows what to retry against.
         let precondition = CoreError::StaleHeadPrecondition {
-            precondition_index: None,
             expected: ChangeSeq(41),
             actual: ChangeSeq(45),
         };

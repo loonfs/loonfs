@@ -9,7 +9,7 @@ mod tree_listing;
 pub(crate) use current_files::{
     ensure_stat_batch_within_cap, resolve_visible_inode, stat_current_files_by_inode,
 };
-pub use current_files::{CurrentFile, CurrentFileState, MAX_CURRENT_FILES_PER_STAT};
+pub use current_files::{CurrentFile, CurrentFileState};
 pub(crate) use materialized_view::{
     ensure_within_read_limit, file_content_ref, LoadedMetadataView,
 };

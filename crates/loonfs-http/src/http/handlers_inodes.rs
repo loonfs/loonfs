@@ -148,7 +148,7 @@ pub(super) async fn get_inode(
         .namespace(&namespace_id)
         .stat_by_inode_with_options(inode_id, &options)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(entry))
 }
 
@@ -240,7 +240,7 @@ pub(super) async fn list_inode_children(
         .cursor(cursor)
         .page()
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(super::page_response::page_response(listing))
 }
 
@@ -289,7 +289,7 @@ pub(super) async fn list_file_revisions_by_inode(
         .cursor(checked_cursor::<FileRevisionsPageCursor>(query.cursor)?)
         .page()
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -343,7 +343,7 @@ pub(super) async fn get_file_content_by_inode(
         .namespace(&namespace_id)
         .read_file_stream_by_inode_with_options(inode_id, &options)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)
 }
 
@@ -400,6 +400,6 @@ pub(super) async fn get_file_revision_content_by_inode(
     let stream = namespace
         .read_file_revision_stream_by_inode_with_options(inode_id, revision_no, &options)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)
 }

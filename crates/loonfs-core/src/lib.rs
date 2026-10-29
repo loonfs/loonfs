@@ -216,7 +216,7 @@ pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
-    FileRevisionsPage, GrantedRange, MAX_CURRENT_FILES_PER_STAT,
+    FileRevisionsPage, GrantedRange,
 };
 pub use permit_pool::{BudgetPermit, PermitPool, PermitPoolObserver, PoolCounts};
 pub use phase::Phase;
@@ -230,4 +230,5 @@ pub use protocol::{
 };
 // The streaming read `loonfs`'s namespace handle returns, and the chunk size it
 // reads in.
-pub use storage::content::{FileContentStream, StreamRange, CONTENT_READ_CHUNK_BYTES};
+pub use limits::{CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT};
+pub use storage::content::{FileContentStream, StreamRange};

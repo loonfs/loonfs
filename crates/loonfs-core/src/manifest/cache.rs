@@ -114,10 +114,25 @@ pub type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
     ),
 >;
 
+/// Most bytes that the block memo of a read without a shared read working
+/// memory holds, in a pool of the read's own.
+const MAX_UNSHARED_READ_WORKING_BYTES: usize = 64 * 1024 * 1024;
+
+/// Returns a read working memory of [`MAX_UNSHARED_READ_WORKING_BYTES`] that
+/// no other read shares.
+pub(crate) fn unshared_read_working_memory() -> Arc<ReadWorkingMemory> {
+    Arc::new(ReadWorkingMemory::new(
+        MAX_UNSHARED_READ_WORKING_BYTES,
+        None,
+    ))
+}
+
 pub(crate) fn read_working_memory(
     segment_cache: Option<&MetadataSegmentCache>,
 ) -> Arc<ReadWorkingMemory> {
-    segment_cache.map_or_else(Arc::default, |cache| Arc::clone(&cache.read_working_memory))
+    segment_cache.map_or_else(unshared_read_working_memory, |cache| {
+        Arc::clone(&cache.read_working_memory)
+    })
 }
 
 /// Returns the stored bytes that a read through `segment_cache` fetches ahead
@@ -281,7 +296,7 @@ impl MetadataSegmentCache {
                 max_decoded_bytes,
             )),
             ObjectStoreScope::new(0),
-            Arc::default(),
+            unshared_read_working_memory(),
             READAHEAD_WINDOW_BYTES,
         )
     }
@@ -762,7 +777,7 @@ mod tests {
             MetadataSegmentCache::new(
                 Arc::clone(&shared),
                 ObjectStoreScope::new(scope),
-                Arc::default(),
+                super::unshared_read_working_memory(),
                 crate::limits::READAHEAD_WINDOW_BYTES,
             )
         };

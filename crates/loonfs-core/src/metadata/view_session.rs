@@ -5,20 +5,20 @@
 
 use super::durable_cache::ParentNameCacheKey;
 use super::manifest_index;
-use super::view::{
-    latest_visible_binding, DirentryBindingPageCandidate, DIRECTORY_PAGE_RAW_SCAN_LIMIT,
-};
+use super::manifest_tail_merge::{ManifestPage, ManifestTailMerge, TieOrder};
+use super::view::latest_visible_binding;
 use super::visibility::{self, MetadataVisibilityReads};
 use super::{
     AccessRevisionRecord, ActiveDeletionRange, DirentryBindingRecord, InodeRecord, MetadataView,
     RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::{CoreError, Result};
+use crate::limits::DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AbsolutePath, AttributesProjection, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::future::Future;
 
 /// Groups a view session splits a page's inode lookups into. The groups run
@@ -215,11 +215,14 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             return Ok(Vec::new());
         }
 
-        let mut stream = DirentryBindingNameGroupStream::new(
-            self.base
-                .tail_direntry_bind_page_candidates(parent_inode_id, start_after_name_key),
-            self.base.manifest_segments().is_none(),
-        );
+        let mut stream = DirentryBindingNameGroupStream {
+            merge: ManifestTailMerge::new(
+                self.base
+                    .tail_direntry_bind_page_candidates(parent_inode_id, start_after_name_key),
+                TieOrder::ManifestFirst,
+            ),
+            pushed_back: None,
+        };
         let mut children = Vec::with_capacity(limit);
         'pages: while children.len() < limit {
             let groups = self
@@ -266,84 +269,51 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         group_limit: usize,
     ) -> Result<Vec<DirentryBindingNameGroup>> {
         let mut groups: Vec<DirentryBindingNameGroup> = Vec::new();
-        loop {
-            if stream.manifest_candidates.is_empty()
-                && !matches!(stream.manifest_scan, ScanPosition::Exhausted)
-            {
-                self.counters.scan_range_page_calls =
-                    self.counters.scan_range_page_calls.saturating_add(1);
-                let page = if let Some(segments) = self.base.manifest_segments() {
-                    manifest_index::direntry_binds_for_parent_name_key_page(
-                        segments,
-                        parent_inode_id,
-                        start_after_name_key,
-                        stream.manifest_scan.after_row_key(),
-                        group_limit.max(DIRECTORY_PAGE_RAW_SCAN_LIMIT),
-                    )
-                    .await?
-                } else {
-                    Vec::new()
-                };
-                stream.manifest_scan = match page.last() {
-                    None => ScanPosition::Exhausted,
-                    Some(candidate) => ScanPosition::After(candidate.row_key.clone()),
-                };
-                if !page.is_empty() {
-                    stream
-                        .manifest_candidates
-                        .extend(
-                            page.into_iter()
-                                .map(|candidate| DirentryBindingPageCandidate {
-                                    row_key: candidate.row_key,
-                                    record: candidate.record,
-                                }),
-                        );
-                }
-                continue;
+        let segments = self.base.manifest_segments();
+        let counters = &mut self.counters;
+        // An empty page is the end of the range.
+        let mut refill = |after: Option<String>| {
+            counters.scan_range_page_calls = counters.scan_range_page_calls.saturating_add(1);
+            async move {
+                let rows = manifest_index::direntry_binds_for_parent_name_key_page(
+                    segments,
+                    parent_inode_id,
+                    start_after_name_key,
+                    after.as_deref(),
+                    group_limit.max(DIRECTORY_PAGE_RAW_SCAN_LIMIT),
+                )
+                .await?;
+                Ok(ManifestPage {
+                    more: !rows.is_empty(),
+                    rows: rows
+                        .into_iter()
+                        .map(|candidate| (candidate.row_key, candidate.record))
+                        .collect(),
+                })
             }
-
-            let candidate = if let Some(pushed_back) = stream.pushed_back.take() {
-                pushed_back
-            } else {
-                let next_manifest = stream.manifest_candidates.front();
-                let next_tail = stream.tail_candidates.get(stream.tail_index);
-                let take_tail = match (next_manifest, next_tail) {
-                    (Some(manifest), Some(tail)) => tail.row_key < manifest.row_key,
-                    (None, Some(_)) => true,
-                    (Some(_), None) => false,
-                    (None, None) => {
-                        if matches!(stream.manifest_scan, ScanPosition::Exhausted) {
-                            break;
-                        }
-                        continue;
-                    }
-                };
-                if take_tail {
-                    let candidate = stream.tail_candidates[stream.tail_index].clone();
-                    stream.tail_index += 1;
-                    candidate
-                } else {
-                    stream
-                        .manifest_candidates
-                        .pop_front()
-                        .expect("manifest candidate should exist")
-                }
+        };
+        loop {
+            let record = match stream.pushed_back.take() {
+                Some(record) => record,
+                None => match stream.merge.next(&mut refill).await? {
+                    Some((_, record)) => record,
+                    None => break,
+                },
             };
-
             match groups.last_mut() {
-                Some(group) if group.name_key == candidate.record.name_key => {
-                    group.rows.push(candidate.record);
+                Some(group) if group.name_key == record.name_key => {
+                    group.rows.push(record);
                 }
                 _ => {
                     // A full batch closes only at a name boundary, so the
                     // finished group is guaranteed complete.
                     if groups.len() == group_limit {
-                        stream.pushed_back = Some(candidate);
+                        stream.pushed_back = Some(record);
                         break;
                     }
                     groups.push(DirentryBindingNameGroup {
-                        name_key: candidate.record.name_key.clone(),
-                        rows: vec![candidate.record],
+                        name_key: record.name_key.clone(),
+                        rows: vec![record],
                     });
                 }
             }
@@ -864,50 +834,13 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
     }
 }
 
-/// Cursor state for the merged manifest+tail direntry-bind stream, grouped
-/// by name key across calls.
+/// The merged manifest and tail direntry-bind stream of one listing, read
+/// a group of name keys at a time.
 struct DirentryBindingNameGroupStream {
-    manifest_scan: ScanPosition,
-    manifest_candidates: VecDeque<DirentryBindingPageCandidate>,
-    tail_candidates: Vec<DirentryBindingPageCandidate>,
-    tail_index: usize,
-    pushed_back: Option<DirentryBindingPageCandidate>,
-}
-
-impl DirentryBindingNameGroupStream {
-    fn new(tail_candidates: Vec<DirentryBindingPageCandidate>, manifest_exhausted: bool) -> Self {
-        Self {
-            manifest_scan: if manifest_exhausted {
-                ScanPosition::Exhausted
-            } else {
-                ScanPosition::Start
-            },
-            manifest_candidates: VecDeque::new(),
-            tail_candidates,
-            tail_index: 0,
-            pushed_back: None,
-        }
-    }
-}
-
-/// Where a paged scan of manifest rows resumes.
-enum ScanPosition {
-    /// No page read yet.
-    Start,
-    /// Resumes after this row key.
-    After(String),
-    /// No rows remain.
-    Exhausted,
-}
-
-impl ScanPosition {
-    /// The row key the next page starts after, or `None` for the first page.
-    fn after_row_key(&self) -> Option<&str> {
-        match self {
-            Self::After(row_key) => Some(row_key),
-            Self::Start | Self::Exhausted => None,
-        }
-    }
+    merge: ManifestTailMerge<DirentryBindingRecord>,
+    /// The first row of the next group, which the last read took from the
+    /// merge to find the end of its last group.
+    pushed_back: Option<DirentryBindingRecord>,
 }
 
 /// Every bind row the stream carried for one name key, in row-key order.

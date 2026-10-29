@@ -17,9 +17,9 @@ use loonfs_types::ChangeSeq;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    AccessRight, CapabilityDocument, Checkpoint, CreateNamespaceRequest, CreateSnapshotRequest,
+    CapabilityDocument, Checkpoint, CreateNamespaceRequest, CreateSnapshotRequest,
     DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest, ForkNamespaceRequest,
-    ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess, PinId, RunMaintenanceRequest,
+    ListCheckpointsResponse, ListSnapshotsResponse, PinId, RunMaintenanceRequest,
     RunMaintenanceResponse, Snapshot, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
     API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
     FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
@@ -200,18 +200,6 @@ pub(super) async fn create_namespace(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
-    if let NamespaceAccess::Acl { root_grants, .. } = &request.access {
-        if !root_grants
-            .iter()
-            .any(|(_, rights)| rights.contains(AccessRight::Admin))
-        {
-            return Err(ApiResponseError::new(
-                ErrorCode::InvalidRequest,
-                "an ACL namespace needs at least one administrator in root_grants",
-            )
-            .with_param("/access/root_grants"));
-        }
-    }
     let namespace = state
         .runtime
         .create_namespace_with_options(
@@ -258,7 +246,7 @@ pub(super) async fn get_namespace(
     let response = namespace
         .metadata()
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -292,7 +280,7 @@ pub(super) async fn get_namespace_diagnostics(
         .maintenance
         .diagnostics(&namespace_id)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(diagnostics))
 }
 
@@ -384,7 +372,7 @@ pub(super) async fn fork_namespace(
             },
         )
         .await
-        .map_err(ApiResponseError::for_namespace(&source_namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(namespace))
 }
 
@@ -472,7 +460,7 @@ pub(super) async fn list_snapshots(
         .cursor(cursor)
         .page()
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -555,7 +543,7 @@ pub(super) async fn get_snapshot(
         .namespace(&namespace_id)
         .get_snapshot(&snapshot_id)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(snapshot))
 }
 
@@ -597,8 +585,8 @@ pub(super) async fn delete_snapshot(
         Err(error) if error.code() == ErrorCode::NamespaceDeleted => state
             .runtime
             .open_namespace(&namespace_id)
-            .map_err(ApiResponseError::for_namespace(&namespace_id))?,
-        opened => opened.map_err(ApiResponseError::for_namespace(&namespace_id))?,
+            .map_err(ApiResponseError::runtime)?,
+        opened => opened.map_err(ApiResponseError::runtime)?,
     };
     let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -649,7 +637,7 @@ pub(super) async fn list_checkpoints(
         .cursor(cursor)
         .page()
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -686,7 +674,7 @@ pub(super) async fn get_checkpoint(
         .maintenance
         .get_checkpoint(&namespace_id, &checkpoint_id)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(checkpoint))
 }
 
@@ -729,7 +717,7 @@ pub(super) async fn run_maintenance(
     let response = match request {
         RunMaintenanceRequest::Metadata(request) => {
             let options = MaintainMetadataOptions::from_request(request)
-                .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+                .map_err(ApiResponseError::runtime)?;
             maintenance
                 .maintain_metadata_while_due_with_options(
                     &namespace_id,
@@ -748,11 +736,11 @@ pub(super) async fn run_maintenance(
             )
             .await
             .map(|collected| Json(RunMaintenanceResponse::Gc(collected)))
-            .map_err(|error| map_grep_error(&namespace_id, error));
+            .map_err(map_grep_error);
         }
         RunMaintenanceRequest::Retention(request) => {
             let options = AdvanceRetentionFloorOptions::from_request(request)
-                .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+                .map_err(ApiResponseError::runtime)?;
             maintenance
                 .advance_retention_floor_with_options(&namespace_id, &options)
                 .await
@@ -775,7 +763,5 @@ pub(super) async fn run_maintenance(
                 ));
         }
     };
-    response
-        .map(Json)
-        .map_err(ApiResponseError::for_namespace(&namespace_id))
+    response.map(Json).map_err(ApiResponseError::runtime)
 }

@@ -385,7 +385,7 @@ async fn appends_name_an_existing_file() {
         (
             "root",
             by_inode(loonfs_types::ROOT_INODE_ID),
-            ErrorCode::PathConflict,
+            ErrorCode::InvalidRequest,
         ),
         (
             "missing-inode",

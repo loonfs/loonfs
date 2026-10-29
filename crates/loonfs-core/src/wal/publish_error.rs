@@ -1,6 +1,7 @@
 //! Failures while publishing a numbered WAL object, and how a retry treats them.
 
 use crate::error::{CoreError, Result};
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::api::v0::Commit;
 use loonfs_types::ErrorCode;
 use thiserror::Error;
@@ -14,6 +15,12 @@ pub enum WalPublishError {
     PublishBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error("WAL publication outcome unknown: {0}")]
     OutcomeUnknown(String),
+    #[error("failed to write WAL object `{object_key}`: {message}")]
+    Write {
+        object_key: String,
+        message: String,
+        kind: ObjectStoreErrorKind,
+    },
 }
 
 impl WalPublishError {
@@ -21,6 +28,7 @@ impl WalPublishError {
         match self {
             Self::NumberTaken | Self::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
             Self::OutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
+            Self::Write { kind, .. } => crate::error::classify_store_failure(*kind),
         }
     }
 }

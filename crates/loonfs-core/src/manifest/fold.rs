@@ -16,7 +16,7 @@ use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::protocol::WriterPosition;
-use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
+use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
 use crate::time::{Observation, OperationClock};
 use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
@@ -118,11 +118,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 let layouts = &layouts;
                 async move {
                     let layout = write_tail_content(
-                        &self.store,
+                        ContentWrites::new(&self.store, &self.content_writes),
                         &view,
                         &content,
                         pieces,
-                        &self.content_writes,
                     )
                     .await?;
                     {
@@ -237,10 +236,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         observed: Observation,
     ) -> Result<ManifestProjection<'_, S>> {
-        let anchor = self
-            .load_read_anchor(observed)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
+        let anchor = self.load_read_anchor(observed).await?;
         let basis = anchor.basis();
         let basis_checked = anchor.checked.clone();
         let head = anchor.read_state;
