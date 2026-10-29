@@ -511,8 +511,6 @@ enum ChainFilter {
     NotNeeded,
     /// The content IDs the revisions name, which a kept layout row matches.
     Loaded(BloomFilter),
-    /// The filter would exceed its byte limit, so the merge keeps every layout.
-    OverLimit,
 }
 
 struct MergeControl<'a> {
@@ -631,17 +629,12 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .fold(0_u64, |count, segment| {
                 count.saturating_add(segment.row_count)
             });
-        let Some(mut filter) = BloomFilter::new(
+        let mut filter = BloomFilter::new(
             expected_ids,
             self.output_run_no
                 .expect("a layout compaction should have a manifest basis")
                 .0,
-        ) else {
-            self.chain_filter = ChainFilter::OverLimit;
-            tracing::info!(namespace_id = %self.namespace_id, expected_ids,
-                "chain filter exceeded its byte limit; kept every layout");
-            return Ok(None);
-        };
+        );
         let loader = MetadataSegmentBlockLoader::new(self.store, None);
         for run in self.basis_runs {
             let segments = group_run_descriptors(run, MetadataFamilyGroup::Revisions)
@@ -666,9 +659,18 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                     break;
                 }
                 if let MetadataRow::FileRevision(row) = iterator[0].take_head() {
-                    filter
+                    // The filter is sized for the basis's revision rows, so a
+                    // refused insert means the segments hold more revision
+                    // rows than their descriptors declare.
+                    if filter
                         .insert(row.content_ref.content_id.as_str().as_bytes())
-                        .expect("revision rows should fit the basis row count");
+                        .is_none()
+                    {
+                        return Err(CoreError::NamespaceCorrupt(format!(
+                            "revision segments of {} hold more rows than their descriptors declare",
+                            self.namespace_id
+                        )));
+                    }
                 }
             }
         }
@@ -711,9 +713,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     }
 
     fn rule_for(&self, cluster: &RetentionCluster) -> RetentionRule {
-        if matches!(self.chain_filter, ChainFilter::OverLimit) {
-            RetentionRule::KeepEveryRow
-        } else if self.placement.may_drop_rows_below_the_retention_floor()
+        if self.placement.may_drop_rows_below_the_retention_floor()
             || cluster.rule == RetentionRule::FirstPerGroup
         {
             cluster.rule

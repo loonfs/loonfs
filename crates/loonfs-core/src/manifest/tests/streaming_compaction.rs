@@ -3661,7 +3661,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
 }
 
 #[tokio::test]
-async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_filter_cap() {
+async fn layout_merges_prune_absent_chains_only_at_the_base_even_past_the_filter_cap() {
     use crate::metadata::RevisionRecord;
     use loonfs_types::format::manifest::ContentLayoutRecord;
     use loonfs_types::{ContentExtent, ContentId, ContentLayout, ContentRef, ExtentObject};
@@ -3739,14 +3739,15 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
             .expect("revision segment"),
     );
     let group = MetadataFamilyGroup::ContentLayouts;
-    for (bottom, capped, expected) in [(true, false, 1), (false, false, 2), (true, true, 3)] {
+    for (bottom, capped, expected) in [(true, false, 1), (false, false, 2), (true, true, 1)] {
         if capped {
             let mut counted_runs = runs.clone();
             for run in &mut counted_runs {
                 for family in &mut run.segments {
+                    // 200 million IDs take the whole 64 MiB at about
+                    // 2.7 bits per ID.
                     if family.family == ApiMetadataRowFamily::Revisions {
-                        family.segments[0].row_count =
-                            crate::limits::MAX_BLOOM_FILTER_BYTES as u64 * 8 / 10 + 1;
+                        family.segments[0].row_count = 200_000_000;
                     }
                 }
             }
@@ -3780,7 +3781,7 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
                 .iter()
                 .filter(|read| read.0 == revision_key)
                 .count(),
-            if bottom && !capped { 2 } else { 0 }
+            if bottom { 2 } else { 0 }
         );
         {
             assert_eq!(result.rows_written, expected);
@@ -3813,7 +3814,7 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
                     .iter()
                     .any(|row| matches!(row, MetadataRow::ContentLayout(layout)
                 if layout.content_id == absent)),
-                !bottom || capped
+                !bottom
             );
         }
     }
