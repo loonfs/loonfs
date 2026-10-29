@@ -12,6 +12,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::{DirectMultipartIssuer, PresignedPartRequest};
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeReport};
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{AssemblySource, ObjectStoreError};
 use loonfs_objectstore::{
     AwsS3Credentials, ByteRange, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,

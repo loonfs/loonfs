@@ -61,12 +61,11 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
             raise.as_slice(),
             [
                 RecordedOperation::GetWithMetadata { key: loaded, .. },
-                RecordedOperation::CompareAndSwap { key: swapped, .. }
-                    | RecordedOperation::Put {
-                        key: swapped,
-                        mode: PutMode::CompareAndSwap { .. },
-                        ..
-                    },
+                RecordedOperation::Put {
+                    key: swapped,
+                    mode: PutMode::CompareAndSwap { .. },
+                    ..
+                },
             ] if *loaded == hint(&namespace_id) && *swapped == hint(&namespace_id)
         ),
         "{raise:?}"

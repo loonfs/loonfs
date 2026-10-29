@@ -18,6 +18,7 @@ use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
@@ -1642,14 +1643,10 @@ impl ObjectStore for HeldHintAnswer {
         get,
         put,
         put_streamed,
-        put_if_absent,
         put_immutable_verified,
         assemble,
-        compare_and_swap,
         delete,
-        list_prefix_stream,
         list_entries_from_stream,
-        list_prefix,
         list_child_prefixes,
     );
 
@@ -1817,14 +1814,10 @@ impl ObjectStore for EarlierManifestView {
         abort_multipart_upload,
         put,
         put_streamed,
-        put_if_absent,
         put_immutable_verified,
         assemble,
-        compare_and_swap,
         delete,
-        list_prefix_stream,
         list_entries_from_stream,
-        list_prefix,
         list_child_prefixes,
     );
 

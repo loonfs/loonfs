@@ -268,6 +268,7 @@ mod tests {
     use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
     use crate::test_support::gcs_fixture_service_account_key_file;
     use crate::ObjectStoreError;
+    use crate::ObjectStoreExtension;
     use crate::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore};
     use bytes::Bytes;
     use std::assert_matches;

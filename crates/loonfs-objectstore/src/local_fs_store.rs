@@ -911,6 +911,7 @@ mod tests {
     use super::LocalFsStore;
     use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
     use crate::keys::{hint, upload_session};
+    use crate::ObjectStoreExtension;
     use bytes::Bytes;
     use futures::{stream, StreamExt};
     use std::assert_matches;

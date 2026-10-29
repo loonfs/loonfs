@@ -8,6 +8,7 @@ use crate::error::{CoreError, Result};
 use futures::StreamExt;
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::format::control::PinPayload;
 use loonfs_types::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest, PinId, Snapshot};
 use serde::{Deserialize, Serialize};

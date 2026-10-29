@@ -2,6 +2,7 @@
 
 use super::*;
 use loonfs_objectstore::keys::{self, pin_prefix};
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::{replace_object, MetadataMapStore};
 use loonfs_types::format::control::PinOwner;
 

@@ -1787,10 +1787,7 @@ mod tests {
     fn writes_per_key(store: &RecordingStore<LocalFsStore>) -> Vec<(String, usize)> {
         let mut writes = std::collections::BTreeMap::new();
         for operation in store.snapshot() {
-            if matches!(
-                operation,
-                RecordedOperation::Put { .. } | RecordedOperation::CompareAndSwap { .. }
-            ) {
+            if matches!(operation, RecordedOperation::Put { .. }) {
                 *writes.entry(operation.key().to_owned()).or_insert(0) += 1;
             }
         }

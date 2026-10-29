@@ -5,7 +5,7 @@ use bytes::Bytes;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_objectstore::layout::{list_namespace_ids, NamespacePageCursor};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use tempfile::tempdir;
 

@@ -798,6 +798,7 @@ mod tests {
         aws_environment_lock, isolated_aws_environment, time_out, RequestFault,
     };
     use crate::ByteRange;
+    use crate::ObjectStoreExtension;
     use crate::{
         AssemblySource, AwsS3Credentials, ConfiguredObjectStoreKind, ObjectStoreError,
         ObjectStoreErrorKind,

@@ -10,6 +10,7 @@ use crate::{GrepError, Result};
 use bytes::Bytes;
 use loonfs::engine::{Observation, OperationClock, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs::CoreError;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::{ManifestNo, NamespaceId};
 

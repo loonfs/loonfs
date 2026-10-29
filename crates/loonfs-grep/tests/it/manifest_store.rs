@@ -10,6 +10,7 @@ use loonfs_grep::manifest::{
 };
 use loonfs_grep::GrepError;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
@@ -79,7 +80,16 @@ async fn publications_race_one_number_and_the_loser_replans_at_the_next() {
     let manifest_writes: Vec<_> = writes.iter().filter(|operation| matches!(operation, RecordedOperation::Put { key, .. } if key.starts_with(&manifests_prefix(&namespace_id)))).collect();
     assert_eq!(manifest_writes.len(), 2);
     assert!(manifest_writes.iter().all(|operation| matches!(operation, RecordedOperation::Put { key, mode: PutMode::CreateIfAbsent, .. } if key == &manifest_key(&namespace_id, &ManifestNo(2)))));
-    assert!(writes.iter().filter(|operation| matches!(operation, RecordedOperation::CompareAndSwap { .. } | RecordedOperation::Put { mode: PutMode::CompareAndSwap { .. }, .. })).all(|operation| matches!(operation, RecordedOperation::CompareAndSwap { key, .. } if key == &hint_key(&namespace_id))));
+    assert!(writes
+        .iter()
+        .filter(|operation| matches!(
+            operation,
+            RecordedOperation::Put {
+                mode: PutMode::CompareAndSwap { .. },
+                ..
+            }
+        ))
+        .all(|operation| operation.key() == hint_key(&namespace_id)));
     let current = load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
         .await
         .expect("discover")
@@ -353,7 +363,15 @@ async fn missing_hint_etags_fail_without_repeated_store_attempts() {
         store
             .take()
             .iter()
-            .filter(|operation| matches!(operation, RecordedOperation::CompareAndSwap { .. }))
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    RecordedOperation::Put {
+                        mode: PutMode::CompareAndSwap { .. },
+                        ..
+                    }
+                )
+            })
             .count(),
         1
     );

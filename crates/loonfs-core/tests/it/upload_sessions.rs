@@ -378,6 +378,7 @@ mod streamed_content {
     use super::*;
     use futures::StreamExt;
     use loonfs_objectstore::keys::content_blob;
+    use loonfs_objectstore::ObjectStoreExtension;
 
     #[tokio::test]
     async fn slow_upload_cannot_outlive_its_durable_cleanup_record() {

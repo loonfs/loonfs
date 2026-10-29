@@ -846,6 +846,7 @@ mod tests {
     use futures::poll;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
+    use loonfs_objectstore::ObjectStoreExtension;
     use loonfs_test_support::stores::{
         BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
     };

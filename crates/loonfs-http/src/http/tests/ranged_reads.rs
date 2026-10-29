@@ -10,7 +10,7 @@ use loonfs::{LoonFs, SharedObjectStore};
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath, ReadRange};
 use loonfs_objectstore::keys::{content_blob, content_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::{public_inode_id, ErrorCode, ErrorResponse, NamespaceId};

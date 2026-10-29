@@ -9,6 +9,7 @@ use crate::phase::Phase;
 use crate::time::OperationClock;
 use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, HintPayload, ManifestRef,

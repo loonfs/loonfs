@@ -802,6 +802,7 @@ mod tests {
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
+    use loonfs_objectstore::ObjectStoreExtension;
     use loonfs_test_support::ids::content_ref;
     use loonfs_test_support::stores::{
         KeyPredicate, MetadataMapStore, OperationSelector, RecordingStore,

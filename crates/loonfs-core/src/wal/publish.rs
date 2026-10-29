@@ -3,6 +3,7 @@
 use super::PreparedWalObject;
 use crate::wal::WalPublishError;
 use bytes::Bytes;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(

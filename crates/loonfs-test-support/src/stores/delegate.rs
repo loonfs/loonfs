@@ -19,14 +19,10 @@ macro_rules! delegate_object_store {
             get_with_metadata,
             put,
             put_streamed,
-            put_if_absent,
             put_immutable_verified,
             assemble,
-            compare_and_swap,
             delete,
-            list_prefix_stream,
             list_entries_from_stream,
-            list_prefix,
             list_child_prefixes,
         );
     };
@@ -41,9 +37,7 @@ macro_rules! delegate_object_store {
             get_with_metadata,
             get,
             delete,
-            list_prefix_stream,
             list_entries_from_stream,
-            list_prefix,
             list_child_prefixes,
         );
         $crate::delegate_object_store!($receiver; buffered);
@@ -295,32 +289,6 @@ macro_rules! __delegate_object_store_method {
             })
         }
     };
-    (compare_and_swap, $receiver:ident, $inner:expr) => {
-        fn compare_and_swap<'store, 'key, 'etag, 'future>(
-            &'store $receiver,
-            key: &'key str,
-            expected_etag: &'etag str,
-            bytes: ::bytes::Bytes,
-        ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<
-                    Output = ::core::result::Result<
-                        ::loonfs_objectstore::ObjectMetadata,
-                        ::loonfs_objectstore::ObjectStoreError,
-                    >,
-                > + Send
-                + 'future,
-        >>
-        where
-            'store: 'future,
-            'key: 'future,
-            'etag: 'future,
-            Self: 'future,
-        {
-            ::std::boxed::Box::pin(async move {
-                $inner.compare_and_swap(key, expected_etag, bytes).await
-            })
-        }
-    };
     (delete, $receiver:ident, $inner:expr) => {
         fn delete<'store, 'key, 'future>(
             &'store $receiver,
@@ -349,28 +317,6 @@ macro_rules! __delegate_object_store_method {
             ::core::result::Result<::loonfs_objectstore::ListedObject, ::loonfs_objectstore::ObjectStoreError>,
         > {
             $inner.list_entries_from_stream(prefix, start_after)
-        }
-    };
-    (put_if_absent, $receiver:ident, $inner:expr) => {
-        fn put_if_absent<'store, 'key, 'future>(
-            &'store $receiver,
-            key: &'key str,
-            bytes: ::bytes::Bytes,
-        ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<
-                    Output = ::core::result::Result<
-                        ::loonfs_objectstore::ObjectMetadata,
-                        ::loonfs_objectstore::ObjectStoreError,
-                    >,
-                > + Send
-                + 'future,
-        >>
-        where
-            'store: 'future,
-            'key: 'future,
-            Self: 'future,
-        {
-            ::std::boxed::Box::pin(async move { $inner.put_if_absent(key, bytes).await })
         }
     };
     (put_immutable_verified, $receiver:ident, $inner:expr) => {
@@ -410,17 +356,6 @@ macro_rules! __delegate_object_store_method {
             ::std::boxed::Box::pin(async move { $inner.assemble(key, sources, tail, expected).await })
         }
     };
-    (list_prefix_stream, $receiver:ident, $inner:expr) => {
-        fn list_prefix_stream(
-            &$receiver,
-            prefix: &str,
-        ) -> ::futures::stream::BoxStream<
-            'static,
-            ::core::result::Result<String, ::loonfs_objectstore::ObjectStoreError>,
-        > {
-            $inner.list_prefix_stream(prefix)
-        }
-    };
     (list_child_prefixes, $receiver:ident, $inner:expr) => {
         fn list_child_prefixes<'store, 'prefix, 'start, 'future>(
             &'store $receiver,
@@ -445,24 +380,6 @@ macro_rules! __delegate_object_store_method {
             ::std::boxed::Box::pin(async move {
                 $inner.list_child_prefixes(prefix, start_after, limit).await
             })
-        }
-    };
-    (list_prefix, $receiver:ident, $inner:expr) => {
-        fn list_prefix<'store, 'prefix, 'future>(
-            &'store $receiver,
-            prefix: &'prefix str,
-        ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<
-                    Output = ::core::result::Result<Vec<String>, ::loonfs_objectstore::ObjectStoreError>,
-                > + Send
-                + 'future,
-        >>
-        where
-            'store: 'future,
-            'prefix: 'future,
-            Self: 'future,
-        {
-            ::std::boxed::Box::pin(async move { $inner.list_prefix(prefix).await })
         }
     };
 }

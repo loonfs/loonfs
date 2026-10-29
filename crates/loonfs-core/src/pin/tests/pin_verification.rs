@@ -2,6 +2,7 @@
 
 use super::*;
 use loonfs_objectstore::keys::pin_prefix;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::control::PinOwner;
 use std::assert_matches;

@@ -19,11 +19,11 @@ pub enum OperationSelector {
     GetWithMetadata,
     /// Either byte-read form.
     Read,
-    /// Any `put` mode, assemblies, and compare-and-swap calls.
+    /// Any `put` mode, streamed puts, and assemblies.
     Put,
     /// Create-if-absent puts.
     PutCreateIfAbsent,
-    /// Compare-and-swap calls and CAS-mode puts.
+    /// CAS-mode puts.
     CompareAndSwap,
     /// Deletes.
     Delete,
@@ -62,7 +62,6 @@ impl OperationSelector {
                 OperationKind::Put { .. }
                     | OperationKind::PutStreamed { .. }
                     | OperationKind::Assemble { .. }
-                    | OperationKind::CompareAndSwap { .. }
             ),
             Self::PutCreateIfAbsent => matches!(
                 kind,
@@ -75,14 +74,12 @@ impl OperationSelector {
             ),
             Self::CompareAndSwap => matches!(
                 kind,
-                OperationKind::CompareAndSwap { .. }
-                    | OperationKind::Put {
-                        mode: PutMode::CompareAndSwap { .. },
-                        ..
-                    }
-                    | OperationKind::PutStreamed {
-                        mode: PutMode::CompareAndSwap { .. },
-                    }
+                OperationKind::Put {
+                    mode: PutMode::CompareAndSwap { .. },
+                    ..
+                } | OperationKind::PutStreamed {
+                    mode: PutMode::CompareAndSwap { .. },
+                }
             ),
             Self::Delete => matches!(kind, OperationKind::Delete),
             Self::List => matches!(kind, OperationKind::List),
@@ -147,10 +144,6 @@ impl<'a> OperationContext<'a> {
                 bytes: tail.iter().map(Bytes::len).sum(),
                 expected: (*expected).clone(),
             },
-            OperationKind::CompareAndSwap { bytes, .. } => RecordedOperation::CompareAndSwap {
-                key: self.key.to_owned(),
-                bytes: bytes.len(),
-            },
             OperationKind::Delete => RecordedOperation::Delete {
                 key: self.key.to_owned(),
             },
@@ -194,13 +187,6 @@ pub enum OperationKind<'a> {
         /// Whole result checksum.
         expected: &'a Checksum,
     },
-    /// A `compare_and_swap` call.
-    CompareAndSwap {
-        /// Expected current etag.
-        expected_etag: &'a str,
-        /// Bytes supplied by the caller.
-        bytes: &'a Bytes,
-    },
     /// A `delete` call.
     Delete,
     /// A prefix listing: a `list_entries_from_stream` call or one
@@ -240,8 +226,6 @@ pub enum RecordedOperation {
         bytes: usize,
         expected: Checksum,
     },
-    /// A compare-and-swap call.
-    CompareAndSwap { key: String, bytes: usize },
     /// A delete.
     Delete { key: String },
     /// A prefix-list call.
@@ -270,7 +254,6 @@ impl RecordedOperation {
             | Self::Put { key, .. }
             | Self::PutStreamed { key, .. }
             | Self::Assemble { key, .. }
-            | Self::CompareAndSwap { key, .. }
             | Self::Delete { key } => key,
             Self::List { prefix } => prefix,
         }

@@ -2872,6 +2872,7 @@ mod direct_download {
         PresignedPutRequest, PresignedUrl,
     };
     use loonfs_objectstore::ByteRange;
+    use loonfs_objectstore::ObjectStoreExtension;
     use loonfs_types::api::v0::ObjectTransferAccess;
     use loonfs_types::{
         api::v0::UploadContentClaim, Checksum, ChecksumAlgorithm, RevisionNo,

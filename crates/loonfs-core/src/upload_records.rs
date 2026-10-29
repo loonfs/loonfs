@@ -15,6 +15,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::{upload_outcome, upload_session};
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, UploadOutcome, UploadOutcomePayload,

@@ -8,6 +8,7 @@ use loonfs::{
     NamespaceId, PutFileOptions, SharedObjectStore, UploadMode,
 };
 use loonfs_objectstore::keys::hint;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::api::v0::{UploadContentClaim, UploadSessionStatus};
 use loonfs_types::Checksum;
 

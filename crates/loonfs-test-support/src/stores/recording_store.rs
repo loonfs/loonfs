@@ -203,12 +203,6 @@ fn fold_count(mut counts: StoreCounts, operation: &RecordedOperation) -> StoreCo
                 u64::try_from(*bytes).expect("buffered write length should fit in u64");
             fold_put_mode(&mut counts, &PutMode::CreateIfAbsent);
         }
-        RecordedOperation::CompareAndSwap { bytes, .. } => {
-            counts.puts += 1;
-            counts.compare_and_swaps += 1;
-            counts.written_bytes +=
-                u64::try_from(*bytes).expect("buffered write length should fit in u64");
-        }
         RecordedOperation::Delete { .. } => counts.deletes += 1,
         RecordedOperation::List { .. } => counts.lists += 1,
     }

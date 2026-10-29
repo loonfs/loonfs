@@ -13,6 +13,7 @@ use crate::namespace::basis::ReadBasis;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::keys::pin;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{DeleteSnapshotResponse, PinId, Snapshot};

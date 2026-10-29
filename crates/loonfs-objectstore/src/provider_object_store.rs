@@ -743,6 +743,7 @@ mod tests {
     use super::*;
     use crate::metrics::{InstrumentedObjectStore, VecObjectStoreMetricsRecorder};
     use crate::test_support::{auth_rejection, transport_glitch};
+    use crate::ObjectStoreExtension as _;
     use futures::{StreamExt, TryStreamExt};
     use object_store::memory::InMemory;
     use provider_store::list::PaginatedListResult;

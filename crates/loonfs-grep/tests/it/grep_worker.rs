@@ -22,6 +22,7 @@ use loonfs_grep::{
 };
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{first_page, nonzero_usize};

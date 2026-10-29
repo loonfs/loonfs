@@ -1,5 +1,6 @@
-//! The [`ObjectStore`] contract every provider implements, plus its
-//! shared value and error types.
+//! The [`ObjectStore`] contract every provider implements, the
+//! [`ObjectStoreExtension`] conveniences built on it, and their shared value and
+//! error types.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -7,6 +8,7 @@ use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm, EffectiveLimit, Page};
 use std::borrow::Cow;
 use std::fmt::Debug;
+use std::future::Future;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -552,30 +554,6 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// ambiguous transport failures are returned.
     async fn delete(&self, key: &str) -> Result<()>;
 
-    /// Streams keys under `prefix` in ascending lexicographic order.
-    ///
-    /// Invalid prefixes and listing failures arrive as stream items.
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
-        self.list_prefix_from_stream(prefix, None)
-    }
-
-    /// Streams keys under `prefix` strictly after `start_after` in ascending
-    /// lexicographic order.
-    ///
-    /// `start_after` is a durable key rather than a provider continuation
-    /// token. Invalid prefixes, invalid resume keys, and listing failures
-    /// arrive as stream items.
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String>> {
-        Box::pin(
-            self.list_entries_from_stream(prefix, start_after)
-                .map_ok(|entry| entry.key),
-        )
-    }
-
     /// Streams objects under `prefix` strictly after `start_after` in ascending
     /// key order, including modification times when the provider reports them.
     ///
@@ -590,13 +568,6 @@ pub trait ObjectStore: Send + Sync + Debug {
         prefix: &str,
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<ListedObject>>;
-
-    /// Collects every key under `prefix` in the order returned by the provider.
-    ///
-    /// The operation fails if prefix validation or any streamed provider page fails.
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        self.list_prefix_stream(prefix).try_collect().await
-    }
 
     /// Lists one page of the child prefixes directly under `prefix`, in
     /// ascending order.
@@ -619,14 +590,6 @@ pub trait ObjectStore: Send + Sync + Debug {
         start_after: Option<&str>,
         limit: EffectiveLimit,
     ) -> Result<Page<String, String>>;
-
-    /// Creates `key` only when no object is present.
-    ///
-    /// Existing objects return [`ObjectStoreError::PreconditionFailed`];
-    /// invalid keys, permission failures, and transport failures are also returned.
-    async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
-        self.put(key, bytes, PutMode::CreateIfAbsent).await
-    }
 
     /// Creates an immutable object and accepts an occupied key only when its stored
     /// checksum equals the checksum of `bytes`.
@@ -657,12 +620,84 @@ pub trait ObjectStore: Send + Sync + Debug {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata>;
+}
+
+/// Convenience methods that every [`ObjectStore`] has, built on its `put` and
+/// `list_entries_from_stream` methods.
+///
+/// One blanket implementation covers every store, so no store can override
+/// these methods, and a store that wraps another store implements only
+/// [`ObjectStore`].
+pub trait ObjectStoreExtension: ObjectStore {
+    /// Streams keys under `prefix` in ascending lexicographic order.
+    ///
+    /// Invalid prefixes and listing failures arrive as stream items.
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>>;
+
+    /// Streams keys under `prefix` strictly after `start_after` in ascending
+    /// lexicographic order.
+    ///
+    /// `start_after` is a durable key rather than a provider continuation
+    /// token. Invalid prefixes, invalid resume keys, and listing failures
+    /// arrive as stream items.
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>>;
+
+    /// Collects every key under `prefix` in the order returned by the provider.
+    ///
+    /// The operation fails if prefix validation or any streamed provider page fails.
+    fn list_prefix(&self, prefix: &str) -> impl Future<Output = Result<Vec<String>>> + Send;
+
+    /// Creates `key` only when no object is present.
+    ///
+    /// Existing objects return [`ObjectStoreError::PreconditionFailed`];
+    /// invalid keys, permission failures, and transport failures are also returned.
+    fn put_if_absent(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> impl Future<Output = Result<ObjectMetadata>> + Send;
 
     /// Replaces `key` only while its current opaque token equals `expected_etag`.
     ///
     /// A missing object or stale token returns
     /// [`ObjectStoreError::PreconditionFailed`]; invalid keys, permission
     /// failures, and transport failures are also returned.
+    fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: Bytes,
+    ) -> impl Future<Output = Result<ObjectMetadata>> + Send;
+}
+
+impl<S: ObjectStore + ?Sized> ObjectStoreExtension for S {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
+        self.list_prefix_from_stream(prefix, None)
+    }
+
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
+        Box::pin(
+            self.list_entries_from_stream(prefix, start_after)
+                .map_ok(|entry| entry.key),
+        )
+    }
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        self.list_prefix_stream(prefix).try_collect().await
+    }
+
+    async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
+        self.put(key, bytes, PutMode::CreateIfAbsent).await
+    }
+
     async fn compare_and_swap(
         &self,
         key: &str,
@@ -736,20 +771,12 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().delete(key).await
     }
 
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
-        self.as_ref().list_prefix_stream(prefix)
-    }
-
     fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<ListedObject>> {
         self.as_ref().list_entries_from_stream(prefix, start_after)
-    }
-
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        self.as_ref().list_prefix(prefix).await
     }
 
     async fn list_child_prefixes(
@@ -761,10 +788,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref()
             .list_child_prefixes(prefix, start_after, limit)
             .await
-    }
-
-    async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
-        self.as_ref().put_if_absent(key, bytes).await
     }
 
     async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
@@ -779,17 +802,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
         self.as_ref().assemble(key, sources, tail, expected).await
-    }
-
-    async fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata> {
-        self.as_ref()
-            .compare_and_swap(key, expected_etag, bytes)
-            .await
     }
 }
 
@@ -849,20 +861,12 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         (*self).delete(key).await
     }
 
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
-        (*self).list_prefix_stream(prefix)
-    }
-
     fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<ListedObject>> {
         (*self).list_entries_from_stream(prefix, start_after)
-    }
-
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        (*self).list_prefix(prefix).await
     }
 
     async fn list_child_prefixes(
@@ -874,10 +878,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         (*self)
             .list_child_prefixes(prefix, start_after, limit)
             .await
-    }
-
-    async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
-        (*self).put_if_absent(key, bytes).await
     }
 
     async fn put_immutable_verified(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
@@ -892,15 +892,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
         (*self).assemble(key, sources, tail, expected).await
-    }
-
-    async fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata> {
-        (*self).compare_and_swap(key, expected_etag, bytes).await
     }
 }
 
@@ -952,7 +943,6 @@ mod tests {
 
     #[derive(Debug)]
     struct ListOverrideStore {
-        override_reached: Arc<AtomicBool>,
         resume_reached: Arc<AtomicBool>,
     }
 
@@ -1016,11 +1006,6 @@ mod tests {
             })]))
         }
 
-        async fn list_prefix(&self, _prefix: &str) -> Result<Vec<String>> {
-            self.override_reached.store(true, Ordering::SeqCst);
-            Ok(vec!["overridden".to_owned()])
-        }
-
         async fn list_child_prefixes(
             &self,
             _prefix: &str,
@@ -1035,29 +1020,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn arc_dyn_store_forwards_overridden_list_prefix() {
-        let override_reached = Arc::new(AtomicBool::new(false));
-        let store: Arc<dyn ObjectStore> = Arc::new(ListOverrideStore {
-            override_reached: Arc::clone(&override_reached),
-            resume_reached: Arc::new(AtomicBool::new(false)),
-        });
-
-        let keys = <Arc<dyn ObjectStore> as ObjectStore>::list_prefix(&store, "prefix/")
-            .await
-            .expect("overridden list should succeed");
-
-        assert_eq!(keys, vec!["overridden"]);
-        assert!(override_reached.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
     async fn arc_and_reference_stores_forward_start_after_listing() {
         let arc_reached = Arc::new(AtomicBool::new(false));
         let store: Arc<dyn ObjectStore> = Arc::new(ListOverrideStore {
-            override_reached: Arc::new(AtomicBool::new(false)),
             resume_reached: Arc::clone(&arc_reached),
         });
-        let arc_keys = <Arc<dyn ObjectStore> as ObjectStore>::list_prefix_from_stream(
+        let arc_keys = <Arc<dyn ObjectStore> as ObjectStoreExtension>::list_prefix_from_stream(
             &store,
             "prefix/",
             Some("prefix/key"),
@@ -1070,10 +1038,9 @@ mod tests {
 
         let reference_reached = Arc::new(AtomicBool::new(false));
         let concrete = ListOverrideStore {
-            override_reached: Arc::new(AtomicBool::new(false)),
             resume_reached: Arc::clone(&reference_reached),
         };
-        let reference_keys = <&ListOverrideStore as ObjectStore>::list_prefix_from_stream(
+        let reference_keys = <&ListOverrideStore as ObjectStoreExtension>::list_prefix_from_stream(
             &&concrete,
             "prefix/",
             Some("prefix/key"),

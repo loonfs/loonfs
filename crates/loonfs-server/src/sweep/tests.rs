@@ -9,6 +9,7 @@ use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
 use loonfs_http::{HeldNamespace, Namespaces, WriterSessions};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};

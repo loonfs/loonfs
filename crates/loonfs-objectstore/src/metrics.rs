@@ -12,7 +12,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{BoxStream, TryStreamExt};
+use futures::stream::BoxStream;
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -115,8 +115,7 @@ pub enum ObjectStoreOperation {
     CompleteMultipartUpload,
     /// Measures abandoning a multipart upload and its parts.
     AbortMultipartUpload,
-    /// Measures a listing returned whole: a full prefix listing, or one page
-    /// of child prefixes.
+    /// Measures one page of child prefixes.
     ListPrefix,
     /// Measures a listing stream until completion or early drop.
     ListPrefixStream,
@@ -630,25 +629,6 @@ where
             items: 0,
             first_error: None,
         })
-    }
-
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let listed = async {
-            let mut keys: Vec<String> = self.inner.list_prefix_stream(prefix).try_collect().await?;
-            keys.sort();
-            Ok(keys)
-        };
-        self.measure(
-            ObjectStoreOperation::ListPrefix,
-            prefix,
-            listed,
-            classify_result,
-            |result, sample| {
-                sample.item_count = result.as_ref().ok().map(|keys| keys.len() as u64);
-                sample.range_class = Some(RangeKind::Prefix);
-            },
-        )
-        .await
     }
 
     async fn list_child_prefixes(
