@@ -13,7 +13,7 @@ use crate::{Error, Result, SharedObjectStore};
 use loonfs_core::cache::{
     CompletedUploadSessionCache, HeadAndWalTailCache, MetadataSegmentCache, ObjectCache,
 };
-use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
+use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceStore, NamespaceWriterEngine};
 use loonfs_types::{
     decode_cursor, encode_cursor, CapabilityDocument, CompactorEpoch, FileRevision,
     FileRevisionsPageCursor, ListPageCursor, Page, PageCursor, PageRequest, Subject, WriterId,
@@ -258,41 +258,51 @@ impl RuntimeCore {
         Arc::clone(&self.inner.store)
     }
 
+    /// Returns `namespace_id`'s components: this core's store, segment cache,
+    /// clocks, content write permits, and run policy.
+    pub(crate) fn namespace_store(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> NamespaceStore<SharedObjectStore> {
+        NamespaceStore::new(
+            Arc::clone(&self.inner.store),
+            namespace_id.clone(),
+            self.metadata_segment_cache(),
+            Arc::clone(&self.inner.wall_clock),
+            Arc::clone(&self.inner.timer),
+            self.inner.config.execution_budget.content_writes(),
+            self.inner.config.run_policy,
+        )
+    }
+
     /// A read-only engine: no actor identity, so a reader cannot mutate
     /// even by mistake.
     pub(crate) fn reader_engine(
         &self,
         namespace_id: &NamespaceId,
     ) -> NamespaceReaderEngine<SharedObjectStore> {
-        let engine = NamespaceReaderEngine::reader(
-            self.inner.store.clone(),
-            namespace_id.clone(),
-            self.inner.config.execution_budget.content_writes(),
-        )
-        .with_wall_clock(self.inner.wall_clock.clone())
-        .with_monotonic_timer(Arc::clone(&self.inner.timer));
+        let engine = NamespaceReaderEngine::reader(self.namespace_store(namespace_id));
         match &self.subject {
             Some(subject) => engine.with_subject(subject.clone()),
             None => engine,
         }
     }
 
-    /// A mutating engine bound to one actor identity.
+    /// A mutating engine bound to one actor identity, with this core's
+    /// subject.
     pub(crate) fn writer_engine(
         &self,
         actor: &WriterIdentity,
         namespace_id: &NamespaceId,
     ) -> NamespaceWriterEngine<SharedObjectStore> {
-        NamespaceWriterEngine::writer(
-            self.inner.store.clone(),
-            namespace_id.clone(),
+        let engine = NamespaceWriterEngine::writer(
+            self.namespace_store(namespace_id),
             actor.writer_id.clone(),
-            self.inner.config.execution_budget.content_writes(),
-        )
-        .with_wall_clock(self.inner.wall_clock.clone())
-        .with_monotonic_timer(Arc::clone(&self.inner.timer))
-        .with_metadata_run_policy(self.inner.config.metadata_run_policy)
-        .with_metadata_segment_cache(self.metadata_segment_cache())
+        );
+        match &self.subject {
+            Some(subject) => engine.with_subject(subject.clone()),
+            None => engine,
+        }
     }
 }
 

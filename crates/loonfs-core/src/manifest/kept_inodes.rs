@@ -12,10 +12,11 @@
 //! under a recoverable deletion. A walk of the basis's directory tree finds
 //! them.
 
-use super::compaction_step::{group_run_descriptors, CompactionUnitOutcome, MergePlacement};
+use super::compaction_step::{group_run_descriptors, CompactionUnitOutcome};
 use super::runs::MetadataFamilyGroup;
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::MetadataCompactionCancellation;
+use super::streaming_compaction::MetadataCompactionSpec;
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_KEPT_INODE_WALK_DEPTH;
@@ -94,8 +95,8 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
     }
 }
 
-/// Builds the kept inode filter for a merge of `group` at `placement` over
-/// `basis`, or returns the outcome that stopped the walk.
+/// Builds the kept inode filter for the merge that `spec` plans over `basis`,
+/// or returns the outcome that stopped the walk.
 ///
 /// A basis whose manifest has an acknowledged floor of 0 keeps every row
 /// without building the filter. Every deletion's sequence is at least 1, so
@@ -113,11 +114,11 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
 pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     basis: &VerifiedMetadataSegments<'_, S>,
     namespace_id: &NamespaceId,
-    group: MetadataFamilyGroup,
-    placement: MergePlacement,
+    spec: &MetadataCompactionSpec,
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<std::result::Result<KeptInodeFilter, CompactionUnitOutcome>> {
-    if !placement.may_drop_rows_below_the_retention_floor() || !removes_hidden_rows(group) {
+    let group = spec.group();
+    if !spec.placement().may_drop_rows_below_the_retention_floor() || !removes_hidden_rows(group) {
         return Ok(Ok(KeptInodeFilter::EveryInode));
     }
     let manifest = basis

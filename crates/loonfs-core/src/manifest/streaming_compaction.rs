@@ -21,7 +21,7 @@ use super::compaction_step::{
 };
 use super::index_block_load::{segment_object_bytes, SegmentWriter};
 use super::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
-use super::publish::{update_manifest, ManifestChange};
+use super::publish::ManifestChange;
 use super::published::PublishedManifest;
 use super::runs::{runs_newest_first, MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
@@ -30,6 +30,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::LoadedManifest;
+use crate::namespace::store::NamespaceStore;
 use crate::namespace::PublicationBasis;
 use crate::time::Deadline;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -132,7 +133,6 @@ impl MetadataCompactionSpec {
         self.frozen_floor_seq
     }
 
-    #[cfg(test)]
     pub(super) fn placement(&self) -> MergePlacement {
         self.placement
     }
@@ -212,36 +212,26 @@ pub(super) struct MetadataMergeReport {
 /// from the manifest used to create the specification.
 pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
-    output_cache: Option<&MetadataSegmentCache>,
+    output_cache: &MetadataSegmentCache,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    policy: MetadataRunPolicy,
+    run_policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<std::result::Result<MetadataMergeReport, CompactionUnitOutcome>> {
     let input_runs = resolve_input_runs(segments, spec)?;
-    let kept_inodes = match load_kept_inode_filter(
-        segments,
-        namespace_id,
-        spec.group,
-        spec.placement,
-        cancellation,
-    )
-    .await?
-    {
-        Ok(kept_inodes) => kept_inodes,
-        Err(stopped) => return Ok(Err(stopped)),
-    };
+    let kept_inodes =
+        match load_kept_inode_filter(segments, namespace_id, spec, cancellation).await? {
+            Ok(kept_inodes) => kept_inodes,
+            Err(stopped) => return Ok(Err(stopped)),
+        };
     let merge = GroupMerge::new(
         segments,
         output_cache,
         namespace_id,
-        spec.group,
-        spec.placement,
-        spec.frozen_floor_seq,
-        policy,
+        spec,
+        run_policy,
         input_runs,
         kept_inodes,
-        ProgressReporter::new(spec.input_rows()),
     );
     merge.run(&MergeControl { cancellation }).await
 }
@@ -258,126 +248,124 @@ impl CompactionPublication {
     }
 }
 
-/// Swaps the rebuilt run in for the input it replaces.
-///
-/// The publication starts from `basis`, the manifest that the unit planned
-/// from, or loads the current manifest when `basis` is `None`. Each attempt
-/// checks the current manifest that `update_manifest` found.
-/// That manifest must still contain the segments the unit merged, and the
-/// replacement keeps every run published meanwhile. A lost manifest put is
-/// retried over the manifest that won, while changes to the unit's input
-/// abandon the output.
-///
-/// The publication budget starts during finalization rather than at the start
-/// of the potentially long rebuild.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "finalization takes the unit's basis, plan, inputs, output, and publication clock"
-)]
-pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    basis: Option<PublicationBasis>,
-    spec: &MetadataCompactionSpec,
-    input_keys: &BTreeSet<String>,
-    result: MetadataMergeReport,
-    cancellation: &MetadataCompactionCancellation,
-    publication: &CompactionPublication,
-) -> Result<CompactionUnitOutcome> {
-    let output_segments = &result.output_segments;
-    // `None` stands for the publication, and `Some` for every other outcome.
-    let finalized = update_manifest(
-        store,
-        namespace_id,
-        basis,
-        &publication.publication,
-        MAX_FINALIZATION_ATTEMPTS,
-        |current: LoadedManifest| async move {
-            let settled = |outcome| Ok(ManifestChange::Finished(Some(outcome)));
-            if publication.expired() {
-                return settled(CompactionUnitOutcome::Abandoned);
-            }
-            if cancellation.is_cancelled() {
-                return settled(CompactionUnitOutcome::Cancelled);
-            }
-            let previous = current.state.envelope.payload();
-            if previous.status.is_deleted() {
-                return settled(CompactionUnitOutcome::Abandoned);
-            }
-            if previous.compactor_epoch != publication.compactor_epoch {
-                return settled(CompactionUnitOutcome::Fenced);
-            }
-            if input_segment_keys(&runs_newest_first(previous), spec).as_ref() != Some(input_keys) {
-                tracing::info!(
-                    namespace_id = namespace_id.as_str(),
-                    families = ?spec.families(),
-                    "metadata compaction unit abandoned: its input runs moved while it ran"
-                );
-                return settled(CompactionUnitOutcome::Abandoned);
-            }
-            let surviving = previous
-                .runs
-                .iter()
-                .filter_map(|run| {
-                    let mut run = run.clone();
-                    run.segments.retain(|descriptor| {
-                        !input_keys.contains(&metadata_segment_object_key(descriptor))
-                    });
-                    (!run.segments.is_empty()).then_some(run)
-                })
-                .collect();
-            let manifest = build_replacement_manifest(
-                namespace_id,
-                previous,
-                surviving,
-                ReplacementOutput {
-                    segments: output_segments.clone(),
-                    placement: spec.placement,
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Swaps the rebuilt run in for the input it replaces.
+    ///
+    /// The publication starts from `basis`, the manifest that the unit planned
+    /// from, or loads the current manifest when `basis` is `None`. Each attempt
+    /// checks the current manifest that `update_manifest` found.
+    /// That manifest must still contain the segments the unit merged, and the
+    /// replacement keeps every run published meanwhile. A lost manifest put is
+    /// retried over the manifest that won, while changes to the unit's input
+    /// abandon the output.
+    ///
+    /// The publication budget starts during finalization rather than at the start
+    /// of the potentially long rebuild.
+    pub(super) async fn finalize_metadata_compaction(
+        &self,
+        basis: Option<PublicationBasis>,
+        spec: &MetadataCompactionSpec,
+        input_keys: &BTreeSet<String>,
+        result: MetadataMergeReport,
+        cancellation: &MetadataCompactionCancellation,
+        publication: &CompactionPublication,
+    ) -> Result<CompactionUnitOutcome> {
+        let output_segments = &result.output_segments;
+        // `None` stands for the publication, and `Some` for every other outcome.
+        let finalized = self
+            .update_manifest(
+                basis,
+                &publication.publication,
+                MAX_FINALIZATION_ATTEMPTS,
+                |current: LoadedManifest| async move {
+                    let settled = |outcome| Ok(ManifestChange::Finished(Some(outcome)));
+                    if publication.expired() {
+                        return settled(CompactionUnitOutcome::Abandoned);
+                    }
+                    if cancellation.is_cancelled() {
+                        return settled(CompactionUnitOutcome::Cancelled);
+                    }
+                    let previous = current.state.envelope.payload();
+                    if previous.status.is_deleted() {
+                        return settled(CompactionUnitOutcome::Abandoned);
+                    }
+                    if previous.compactor_epoch != publication.compactor_epoch {
+                        return settled(CompactionUnitOutcome::Fenced);
+                    }
+                    if input_segment_keys(&runs_newest_first(previous), spec).as_ref()
+                        != Some(input_keys)
+                    {
+                        tracing::info!(
+                            namespace_id = self.namespace_id.as_str(),
+                            families = ?spec.families(),
+                            "metadata compaction unit abandoned: its input runs moved while it ran"
+                        );
+                        return settled(CompactionUnitOutcome::Abandoned);
+                    }
+                    let surviving = previous
+                        .runs
+                        .iter()
+                        .filter_map(|run| {
+                            let mut run = run.clone();
+                            run.segments.retain(|descriptor| {
+                                !input_keys.contains(&metadata_segment_object_key(descriptor))
+                            });
+                            (!run.segments.is_empty()).then_some(run)
+                        })
+                        .collect();
+                    let manifest = build_replacement_manifest(
+                        &self.namespace_id,
+                        previous,
+                        surviving,
+                        ReplacementOutput {
+                            segments: output_segments.clone(),
+                            placement: spec.placement,
+                        },
+                        spec.frozen_floor_seq(),
+                    )?;
+                    // The last check before the swap that makes this output reader
+                    // truth. Everything above it is reads and objects nothing references.
+                    if cancellation.is_cancelled() {
+                        return settled(CompactionUnitOutcome::Cancelled);
+                    }
+                    if publication.expired() {
+                        return settled(CompactionUnitOutcome::Abandoned);
+                    }
+                    Ok(ManifestChange::Next(Box::new(manifest), None))
                 },
-                spec.frozen_floor_seq(),
-            )?;
-            // The last check before the swap that makes this output reader
-            // truth. Everything above it is reads and objects nothing references.
-            if cancellation.is_cancelled() {
-                return settled(CompactionUnitOutcome::Cancelled);
+            )
+            .await;
+        match finalized {
+            Ok((Some(outcome), _, _)) => Ok(outcome),
+            Ok((None, published, _)) => Ok(CompactionUnitOutcome::Published {
+                group: spec.group(),
+                manifest: PublishedManifest::new(
+                    &published.state.envelope,
+                    Some(publication.publication.origin()),
+                ),
+                input_runs: spec.input_runs(),
+                rows_read: result.rows_read,
+                rows_written: result.rows_written,
+                input_bytes: result.input_bytes,
+                output_bytes: result.output_bytes,
+                output_segments: result.output_segments.len(),
+            }),
+            // Every attempt lost its manifest number to another publication.
+            Err(CoreError::StoreContention { .. }) => {
+                tracing::info!(
+                    namespace_id = self.namespace_id.as_str(),
+                    families = ?spec.families(),
+                    attempts = MAX_FINALIZATION_ATTEMPTS,
+                    "metadata compaction unit lost every publication attempt; a later unit plans it again"
+                );
+                Ok(CompactionUnitOutcome::Abandoned)
             }
-            if publication.expired() {
-                return settled(CompactionUnitOutcome::Abandoned);
+            // The namespace's objects were removed while the unit ran.
+            Err(CoreError::ControlObjectLoad(ControlObjectLoadError::MissingObject { .. })) => {
+                Ok(CompactionUnitOutcome::Abandoned)
             }
-            Ok(ManifestChange::Next(Box::new(manifest), None))
-        },
-    )
-    .await;
-    match finalized {
-        Ok((Some(outcome), _, _)) => Ok(outcome),
-        Ok((None, published, _)) => Ok(CompactionUnitOutcome::Published {
-            group: spec.group(),
-            manifest: PublishedManifest::new(
-                &published.state.envelope,
-                Some(publication.publication.origin()),
-            ),
-            input_runs: spec.input_runs(),
-            rows_read: result.rows_read,
-            rows_written: result.rows_written,
-            input_bytes: result.input_bytes,
-            output_bytes: result.output_bytes,
-            output_segments: result.output_segments.len(),
-        }),
-        // Every attempt lost its manifest number to another publication.
-        Err(CoreError::StoreContention { .. }) => {
-            tracing::info!(
-                namespace_id = namespace_id.as_str(),
-                families = ?spec.families(),
-                attempts = MAX_FINALIZATION_ATTEMPTS,
-                "metadata compaction unit lost every publication attempt; a later unit plans it again"
-            );
-            Ok(CompactionUnitOutcome::Abandoned)
+            Err(error) => Err(error),
         }
-        // The namespace's objects were removed while the unit ran.
-        Err(CoreError::ControlObjectLoad(ControlObjectLoadError::MissingObject { .. })) => {
-            Ok(CompactionUnitOutcome::Abandoned)
-        }
-        Err(error) => Err(error),
     }
 }
 
@@ -491,7 +479,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     /// The cache that receives the segments the merge writes. The merge
     /// reads its input without any cache.
-    output_cache: Option<&'a MetadataSegmentCache>,
+    output_cache: &'a MetadataSegmentCache,
     namespace_id: &'a NamespaceId,
     group: MetadataFamilyGroup,
     /// Where the output stands in the group and whether rows may be dropped.
@@ -500,7 +488,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     /// The basis manifest's acknowledged floor, at or below which a listed
     /// deletion that no undelete cancelled has expired.
     acknowledged_floor_seq: ChangeSeq,
-    policy: MetadataRunPolicy,
+    run_policy: MetadataRunPolicy,
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
     output_run_no: Option<RunNo>,
@@ -552,22 +540,16 @@ impl ProgressReporter {
 }
 
 impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "construction keeps one merge's coordinated state explicit"
-    )]
     fn new(
         basis: &'a VerifiedMetadataSegments<'_, S>,
-        output_cache: Option<&'a MetadataSegmentCache>,
+        output_cache: &'a MetadataSegmentCache,
         namespace_id: &'a NamespaceId,
-        group: MetadataFamilyGroup,
-        placement: MergePlacement,
-        frozen_floor_seq: ChangeSeq,
-        policy: MetadataRunPolicy,
+        spec: &MetadataCompactionSpec,
+        run_policy: MetadataRunPolicy,
         input_runs: Vec<MetadataRunManifest>,
         kept_inodes: KeptInodeFilter,
-        progress: ProgressReporter,
     ) -> Self {
+        let group = spec.group();
         let input_bytes = input_runs
             .iter()
             .flat_map(|run| group_run_descriptors(run, group))
@@ -588,9 +570,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             output_cache,
             namespace_id,
             group,
-            placement,
-            frozen_floor_seq,
-            policy,
+            placement: spec.placement(),
+            frozen_floor_seq: spec.frozen_floor_seq(),
+            run_policy,
             input_runs,
             result: MetadataMergeReport {
                 input_bytes,
@@ -599,7 +581,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             canonical_digest: RowDigest::default(),
             index_digest: RowDigest::default(),
             last_input_key_by_family: BTreeMap::new(),
-            progress,
+            progress: ProgressReporter::new(spec.input_rows()),
         }
     }
 
@@ -667,7 +649,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 refill_iterators(
                     &loader,
                     &mut iterator,
-                    self.policy.max_decoded_input_bytes_per_step.get(),
+                    self.run_policy.max_decoded_input_bytes_per_step.get(),
                 )
                 .await?;
                 if iterator[0].head().is_none() {
@@ -875,7 +857,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let resident = refill_iterators(
             &MetadataSegmentBlockLoader::new(self.store, None),
             iterators,
-            self.policy.max_decoded_input_bytes_per_step.get(),
+            self.run_policy.max_decoded_input_bytes_per_step.get(),
         )
         .await?;
         self.result.peak_resident_blocks = self.result.peak_resident_blocks.max(resident);
@@ -903,7 +885,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             }
             _ => writer.push(row, &mut |_| {}),
         }
-        writer.roll_full_segments(puts, self.policy).await
+        writer.roll_full_segments(puts, self.run_policy).await
     }
 
     /// Refuses to hand back a run whose secondary index does not hold the same

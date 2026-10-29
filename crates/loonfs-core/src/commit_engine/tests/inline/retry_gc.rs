@@ -2,15 +2,15 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::gc::{gc_namespace, GcOptions};
+use crate::gc::GcOptions;
 use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, OperationSelector};
 use loonfs_types::ErrorCode;
 use std::assert_matches;
 
 #[tokio::test]
 async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_commit() {
-    let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let (_directory, store, engine, context) = setup().await;
+    let namespace_id = engine.namespace.namespace_id.clone();
     let original = inline(&namespace_id, Bytes::from_static(b"durable bytes"));
     let failed = FailStore::new(
         store.clone(),
@@ -20,9 +20,14 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     )
     .apply_then_fail();
     failed.fail_next(1);
+    // The writer session publishes through the store that loses the
+    // acknowledgment, which passes later requests through to `store`.
+    let mut engine = NamespaceCommitEngine {
+        namespace: crate::test_support::namespace_store(&failed, &namespace_id),
+        position: engine.position,
+    };
     let error = engine
         .publish_batch(
-            &failed,
             [candidate("lost-ack", vec![original.clone()])],
             &context,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -34,7 +39,9 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .expect_err("the landed write has an unknown outcome");
     assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
     assert_eq!(failed.attempts(), 1);
-    let landed = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let landed = namespace
+        .load_current_metadata_view()
         .await
         .expect("landed commit");
     assert_eq!(landed.head().seq, ChangeSeq(1));
@@ -43,7 +50,8 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     // Remove the physical evidence from WAL before the client retries. The
     // folded receipt and commit record must supply the original result.
     assert_eq!(
-        fold_wal(&store, &namespace_id)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
             .await
             .expect("fold landed commit")
             .outcome,
@@ -54,20 +62,17 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         store.clone(),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
     );
-    let report = gc_namespace(
-        &aged,
-        None,
-        None,
-        &namespace_id,
-        &options,
-        &MutationContext {
-            now_ms: options.grace_window_ms + 1,
-            ..context.clone()
-        },
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect folded WAL");
+    let report = crate::test_support::namespace_store(&aged, &namespace_id)
+        .gc(
+            None,
+            &options,
+            &MutationContext {
+                now_ms: options.grace_window_ms + 1,
+                ..context.clone()
+            },
+        )
+        .await
+        .expect("collect folded WAL");
     assert_eq!(report.deleted.wal_objects, 2);
     assert!(store
         .list_prefix(&wal_prefix(&namespace_id))
@@ -80,7 +85,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     assert_ne!(original.content_ref(), retried_value.content_ref());
     let retry = candidate("lost-ack", vec![retried_value]);
     store.reset();
-    let committed = publish(&mut engine, &store, &context, retry.clone())
+    let committed = publish(&mut engine, &context, retry.clone())
         .await
         .expect("recover the original receipt");
     assert_eq!(committed.committed_seq, ChangeSeq(1));
@@ -88,17 +93,16 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     assert_no_writes(&store);
 
     drop(engine);
-    let mut restarted = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+    let mut restarted =
+        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
     restarted
-        .session_writer_epoch(&store, &context)
+        .position
+        .session_writer_epoch(&restarted.namespace, &context)
         .await
         .expect("new writer fence");
     store.reset();
     assert_eq!(
-        publish(&mut restarted, &store, &context, retry)
+        publish(&mut restarted, &context, retry)
             .await
             .expect("replay after restart"),
         committed
@@ -108,12 +112,14 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         vec![inline(&namespace_id, Bytes::from_static(b"changed bytes"))],
     );
     assert_matches!(
-        publish(&mut restarted, &store, &context, changed).await,
+        publish(&mut restarted, &context, changed).await,
         Err(CoreError::CommitIdReuseConflict { .. })
     );
     assert_no_writes(&store);
 
-    let view = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("fresh view");
     assert_eq!(view.head().seq, ChangeSeq(1));

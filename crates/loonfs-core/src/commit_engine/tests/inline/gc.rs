@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::gc::{gc_namespace, GcOptions};
+use crate::gc::GcOptions;
 use crate::storage::content::content_object_key_for_ref;
 use loonfs_test_support::stores::{BlockingStore, MetadataMapStore, OperationSelector};
 
@@ -16,20 +16,17 @@ async fn collect_aged_wal(
         store.clone(),
         KeyPredicate::prefix(wal_prefix(namespace_id)),
     );
-    gc_namespace(
-        &aged,
-        None,
-        None,
-        namespace_id,
-        &options,
-        &MutationContext {
-            now_ms: options.grace_window_ms + 1,
-            ..context.clone()
-        },
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect aged WAL");
+    crate::test_support::namespace_store(&aged, namespace_id)
+        .gc(
+            None,
+            &options,
+            &MutationContext {
+                now_ms: options.grace_window_ms + 1,
+                ..context.clone()
+            },
+        )
+        .await
+        .expect("collect aged WAL");
 }
 
 async fn assert_files_readable(
@@ -39,7 +36,9 @@ async fn assert_files_readable(
     values: &[InlineContent],
 ) {
     // A fresh view must work without the publishing engine's cached WAL bytes.
-    let view = load_current_metadata_view(store, namespace_id)
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("fresh view");
     for (index, value) in values.iter().enumerate() {
@@ -57,22 +56,16 @@ async fn assert_files_readable(
 
 #[tokio::test]
 async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
-    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = &engine.namespace_id.clone();
+    let namespace_id = &engine.namespace.namespace_id.clone();
     let values = vec![
         inline(namespace_id, Bytes::from_static(b"first")),
         inline(namespace_id, Bytes::from_static(b"last")),
         inline(namespace_id, Bytes::new()),
     ];
-    publish(
-        &mut engine,
-        &store,
-        &context,
-        candidate("handoff", values.clone()),
-    )
-    .await
-    .expect("publish");
+    publish(&mut engine, &context, candidate("handoff", values.clone()))
+        .await
+        .expect("publish");
     let wal_before = store
         .list_prefix(&wal_prefix(namespace_id))
         .await
@@ -87,15 +80,8 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
     blocked.block_next();
     let timer = Arc::new(StdMonotonicTimer::default());
     let deadline = crate::time::Deadline::start(timer.clone());
-    let fold = fold_wal_tail(
-        &blocked,
-        None,
-        namespace_id,
-        engine.wal_fold_input(),
-        &deadline,
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    );
+    let namespace = crate::test_support::namespace_store(&blocked, namespace_id);
+    let fold = namespace.fold_wal_tail(engine.wal_fold_input(), &deadline);
     let collect_during_fold = async {
         blocked.wait_until_blocked().await;
         assert!(store
@@ -130,13 +116,11 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
 
 #[tokio::test]
 async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
-    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = &engine.namespace_id.clone();
+    let namespace_id = &engine.namespace.namespace_id.clone();
     let values = vec![inline(namespace_id, Bytes::from_static(b"shared"))];
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("competing-gc", values.clone()),
     )
@@ -151,28 +135,17 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
     blocked.block_next();
     let timer = Arc::new(StdMonotonicTimer::default());
     let deadline = crate::time::Deadline::start(timer.clone());
-    let loser = fold_wal_tail(
-        &blocked,
-        None,
-        namespace_id,
-        Some(input.clone()),
-        &deadline,
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    );
+    let namespace = crate::test_support::namespace_store(&blocked, namespace_id);
+    let loser = namespace.fold_wal_tail(Some(input.clone()), &deadline);
     let winner = async {
         blocked.wait_until_blocked().await;
-        let folded = fold_wal_tail(
-            &store,
-            None,
-            namespace_id,
-            Some(input),
-            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            crate::manifest::MetadataRunPolicy::default(),
-            &content_writes,
-        )
-        .await
-        .expect("winning fold");
+        let folded = crate::test_support::namespace_store(&store, namespace_id)
+            .fold_wal_tail(
+                Some(input),
+                &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
+            .await
+            .expect("winning fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
         collect_aged_wal(&store, namespace_id, &context).await;
         assert!(store

@@ -54,7 +54,8 @@ async fn revision_bytes(
     path: &str,
     revision_no: u64,
 ) -> Vec<u8> {
-    load_current_metadata_view(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_metadata_view()
         .await
         .expect("view")
         .read_file_revision_bytes(
@@ -73,7 +74,8 @@ async fn current_ref(
     namespace_id: &NamespaceId,
     path: &str,
 ) -> ContentRef {
-    let entry = load_current_metadata_view(store, namespace_id)
+    let entry = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_metadata_view()
         .await
         .expect("view")
         .resolve_path(
@@ -92,11 +94,10 @@ async fn current_ref(
 #[tokio::test]
 async fn same_chain_appends_keep_pending_bytes_in_the_wal_without_content_writes() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let original = inline(&namespace_id, Bytes::from_static(b"hello"));
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("file", vec![original.clone()]),
     )
@@ -106,7 +107,6 @@ async fn same_chain_appends_keep_pending_bytes_in_the_wal_without_content_writes
         store.reset();
         publish(
             &mut engine,
-            &store,
             &context,
             request(commit_id, vec![append("/file-0", bytes)]),
         )
@@ -149,14 +149,13 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
     engine.invalidate_projection();
     publish(
         &mut engine,
-        &store,
         &context,
         request("append", vec![append("/file-0", b" world")]),
     )
     .await
     .expect("append");
 
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     assert_eq!(
         newest_pieces(&store, &namespace_id).await,
         vec![WalInlineContent {
@@ -183,7 +182,10 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
             read_file(&store, &namespace_id, RevisionNo(1)).await,
             b"hello"
         );
-        fold_wal(&store, &namespace_id).await.expect("fold");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold");
     }
     assert_eq!(
         store
@@ -198,7 +200,7 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
 #[tokio::test]
 async fn appends_in_one_commit_chain_in_operation_order_after_a_put() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let value = inline(&namespace_id, Bytes::from_static(b"ab"));
     let mut chain = request(
         "chain",
@@ -210,9 +212,7 @@ async fn appends_in_one_commit_chain_in_operation_order_after_a_put() {
         ],
     );
     chain.inline_content.push(value.clone());
-    publish(&mut engine, &store, &context, chain)
-        .await
-        .expect("chain");
+    publish(&mut engine, &context, chain).await.expect("chain");
 
     let content_id = &value.content_ref().content_id;
     let pieces = newest_pieces(&store, &namespace_id).await;
@@ -238,7 +238,7 @@ async fn appends_in_one_commit_chain_in_operation_order_after_a_put() {
 #[tokio::test]
 async fn an_append_to_a_restored_revision_starts_a_new_chain_from_it() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let (_, original) = folded_file(&store, &mut engine, &context, b"one").await;
     engine.invalidate_projection();
     for (commit_id, operation) in [
@@ -252,14 +252,9 @@ async fn an_append_to_a_restored_revision_starts_a_new_chain_from_it() {
         ),
         ("three", append("/file-0", b"three")),
     ] {
-        publish(
-            &mut engine,
-            &store,
-            &context,
-            request(commit_id, vec![operation]),
-        )
-        .await
-        .expect(commit_id);
+        publish(&mut engine, &context, request(commit_id, vec![operation]))
+            .await
+            .expect(commit_id);
     }
 
     let pieces = newest_pieces(&store, &namespace_id).await;
@@ -268,9 +263,8 @@ async fn an_append_to_a_restored_revision_starts_a_new_chain_from_it() {
     };
     assert_ne!(piece.content_id, original.content_id);
     assert_eq!(piece.offset, 3);
-    let view = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     let carried = view
         .projected_metadata_view()
         .content_layout(&piece.content_id)
@@ -288,7 +282,10 @@ async fn an_append_to_a_restored_revision_starts_a_new_chain_from_it() {
             read_file(&store, &namespace_id, RevisionNo(2)).await,
             b"onetwo"
         );
-        fold_wal(&store, &namespace_id).await.expect("fold");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold");
     }
 }
 
@@ -331,14 +328,9 @@ async fn append_guards_name_the_inode_and_revision_they_require() {
         ),
     ] {
         store.reset();
-        let error = publish(
-            &mut engine,
-            &store,
-            &context,
-            request(name, vec![operation]),
-        )
-        .await
-        .expect_err(name);
+        let error = publish(&mut engine, &context, request(name, vec![operation]))
+            .await
+            .expect_err(name);
         assert_eq!(error.code(), code, "{name}: {error}");
         assert_no_writes(&store);
     }
@@ -346,17 +338,12 @@ async fn append_guards_name_the_inode_and_revision_they_require() {
         ("current", guarded(Some(inode_id), Some(RevisionNo(1)))),
         ("current-by-inode", by_inode(Some(RevisionNo(2)))),
     ] {
-        publish(
-            &mut engine,
-            &store,
-            &context,
-            request(name, vec![operation]),
-        )
-        .await
-        .expect(name);
+        publish(&mut engine, &context, request(name, vec![operation]))
+            .await
+            .expect(name);
     }
     assert_eq!(
-        read_file(&store, &engine.namespace_id, RevisionNo(3)).await,
+        read_file(&store, &engine.namespace.namespace_id, RevisionNo(3)).await,
         b"log!?"
     );
 }
@@ -368,7 +355,6 @@ async fn appends_name_an_existing_file() {
     engine.invalidate_projection();
     publish(
         &mut engine,
-        &store,
         &context,
         request(
             "directory",
@@ -408,14 +394,9 @@ async fn appends_name_an_existing_file() {
         ),
     ] {
         store.reset();
-        let error = publish(
-            &mut engine,
-            &store,
-            &context,
-            request(name, vec![operation]),
-        )
-        .await
-        .expect_err(name);
+        let error = publish(&mut engine, &context, request(name, vec![operation]))
+            .await
+            .expect_err(name);
         assert_eq!(error.code(), code, "{name}: {error}");
         assert_no_writes(&store);
     }
@@ -433,7 +414,7 @@ async fn empty_and_oversized_appends_are_refused_before_planning() {
         ],
     );
     store.reset();
-    match publish(&mut engine, &store, &context, empty).await {
+    match publish(&mut engine, &context, empty).await {
         Err(CoreError::FailedOperation {
             operation_index: 0,
             error: source,
@@ -446,7 +427,7 @@ async fn empty_and_oversized_appends_are_refused_before_planning() {
         ) => {}
         other => panic!("expected an empty append to be refused, got {other:?}"),
     }
-    match publish(&mut engine, &store, &context, oversized).await {
+    match publish(&mut engine, &context, oversized).await {
         Err(
             error @ CoreError::FailedOperation {
                 operation_index: 1, ..
@@ -464,7 +445,6 @@ async fn an_append_retry_replays_and_changed_bytes_conflict() {
     engine.invalidate_projection();
     let committed = publish(
         &mut engine,
-        &store,
         &context,
         request("retry", vec![append("/file-0", b"+")]),
     )
@@ -474,7 +454,6 @@ async fn an_append_retry_replays_and_changed_bytes_conflict() {
     assert_eq!(
         publish(
             &mut engine,
-            &store,
             &context,
             request("retry", vec![append("/file-0", b"+")]),
         )
@@ -485,7 +464,6 @@ async fn an_append_retry_replays_and_changed_bytes_conflict() {
     assert_matches!(
         publish(
             &mut engine,
-            &store,
             &context,
             request("retry", vec![append("/file-0", b"-")]),
         )
@@ -494,7 +472,7 @@ async fn an_append_retry_replays_and_changed_bytes_conflict() {
     );
     assert_no_writes(&store);
     assert_eq!(
-        read_file(&store, &engine.namespace_id, RevisionNo(2)).await,
+        read_file(&store, &engine.namespace.namespace_id, RevisionNo(2)).await,
         b"log+"
     );
 }
@@ -504,7 +482,7 @@ async fn an_append_retry_replays_and_changed_bytes_conflict() {
 #[tokio::test]
 async fn appends_reject_a_base_in_another_store_algorithm() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let (inode_id, _) = folded_file(&store, &mut engine, &context, b"seed").await;
     for (revision_no, checksum) in [
         (2, Checksum::crc64nvme(b"direct")),
@@ -519,40 +497,38 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
             )
             .await
             .expect("direct upload");
-        crate::test_support::ops::append_wal_commit(
-            &store,
-            &namespace_id,
-            vec![WalDelta::AppendFileRevision {
-                delta_index: 0,
-                inode_id,
-                revision_no: RevisionNo(revision_no),
-                content_ref: ContentRef {
-                    kind: ContentRefKind::BlobV1,
-                    owner_namespace_id: namespace_id.clone(),
-                    content_id: content_id.clone(),
-                    size_bytes: 6,
-                    checksum: checksum.clone(),
-                },
-                layout: Some(loonfs_types::ContentLayout {
-                    extents: vec![loonfs_types::ContentExtent {
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .append_wal_commit(
+                vec![WalDelta::AppendFileRevision {
+                    delta_index: 0,
+                    inode_id,
+                    revision_no: RevisionNo(revision_no),
+                    content_ref: ContentRef {
+                        kind: ContentRefKind::BlobV1,
                         owner_namespace_id: namespace_id.clone(),
-                        content_id,
-                        object: loonfs_types::ExtentObject::Whole,
-                        offset: 0,
-                        length: 6,
-                    }],
-                }),
-                append_offset: None,
-            }],
-            Vec::new(),
-        )
-        .await
-        .expect("commit the upload");
+                        content_id: content_id.clone(),
+                        size_bytes: 6,
+                        checksum: checksum.clone(),
+                    },
+                    layout: Some(loonfs_types::ContentLayout {
+                        extents: vec![loonfs_types::ContentExtent {
+                            owner_namespace_id: namespace_id.clone(),
+                            content_id,
+                            object: loonfs_types::ExtentObject::Whole,
+                            offset: 0,
+                            length: 6,
+                        }],
+                    }),
+                    append_offset: None,
+                }],
+                Vec::new(),
+            )
+            .await
+            .expect("commit the upload");
         engine.invalidate_projection();
         store.reset();
         let appended = publish(
             &mut engine,
-            &store,
             &context,
             request(
                 &format!("append-{revision_no}"),
@@ -571,7 +547,10 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
                     read_file(&store, &namespace_id, RevisionNo(3)).await,
                     b"direct+tail"
                 );
-                fold_wal(&store, &namespace_id).await.expect("fold");
+                crate::test_support::namespace_store(&store, &namespace_id)
+                    .fold_wal()
+                    .await
+                    .expect("fold");
             }
         } else {
             let error = appended.expect_err("wrong store algorithm");
@@ -584,12 +563,11 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
 #[tokio::test]
 async fn a_copy_appends_from_its_revision_checksums_under_a_fresh_chain_id() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let (_, original) = folded_file(&store, &mut engine, &context, b"hello").await;
     engine.invalidate_projection();
     publish(
         &mut engine,
-        &store,
         &context,
         request(
             "copy",
@@ -604,18 +582,19 @@ async fn a_copy_appends_from_its_revision_checksums_under_a_fresh_chain_id() {
     .expect("copy");
     publish(
         &mut engine,
-        &store,
         &context,
         request("original", vec![append("/file-0", b"!")]),
     )
     .await
     .expect("append original");
-    fold_wal(&store, &namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     engine.invalidate_projection();
     store.reset();
     publish(
         &mut engine,
-        &store,
         &context,
         request("copied", vec![append("/copy", b"?")]),
     )
@@ -643,7 +622,7 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
     for folded in [false, true] {
         for scope in ["commit", "batch", "tail"] {
             let (_directory, store, mut engine, context) = setup().await;
-            let namespace_id = engine.namespace_id.clone();
+            let namespace_id = engine.namespace.namespace_id.clone();
             let prefix = vec![b'a'; MAX_WAL_INLINE_CONTENT_BYTES / 2];
             let resident = vec![b'b'; MAX_WAL_INLINE_CONTENT_BYTES / 2 + 10];
             let suffix = vec![b'?'; MAX_WAL_INLINE_CONTENT_BYTES];
@@ -651,13 +630,15 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             if folded {
                 publish(
                     &mut engine,
-                    &store,
                     &context,
                     candidate("file", vec![value.clone()]),
                 )
                 .await
                 .expect("file");
-                fold_wal(&store, &namespace_id).await.expect("fold prefix");
+                crate::test_support::namespace_store(&store, &namespace_id)
+                    .fold_wal()
+                    .await
+                    .expect("fold prefix");
                 engine.invalidate_projection();
             }
             let mut operations = Vec::new();
@@ -685,14 +666,13 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             }
             if scope == "tail" {
                 for candidate in candidates {
-                    publish(&mut engine, &store, &context, candidate)
+                    publish(&mut engine, &context, candidate)
                         .await
                         .expect("branch");
                 }
             } else {
                 let results = engine
                     .publish_batch(
-                        &store,
                         candidates,
                         &context,
                         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -715,9 +695,8 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             assert_eq!(pieces.len(), 1);
             assert_eq!(pieces[0].offset, (prefix.len() + resident.len()) as u64);
             assert_eq!(pieces[0].bytes, suffix);
-            let view = load_current_metadata_view(&store, &namespace_id)
-                .await
-                .expect("view");
+            let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+            let view = namespace.load_current_metadata_view().await.expect("view");
             let carried = view
                 .projected_metadata_view()
                 .content_layout(&fresh.content_id)
@@ -734,7 +713,8 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             let copied_bytes = [prefix.as_slice(), resident.as_slice(), b"!"].concat();
             for after_fold in [false, true] {
                 if after_fold {
-                    fold_wal(&store, &namespace_id)
+                    crate::test_support::namespace_store(&store, &namespace_id)
+                        .fold_wal()
                         .await
                         .expect("fold both chains");
                 }
@@ -747,7 +727,9 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
                     copied_bytes
                 );
             }
-            let view = load_current_metadata_view(&store, &namespace_id)
+            let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+            let view = namespace
+                .load_current_metadata_view()
                 .await
                 .expect("folded view");
             let row = view
@@ -776,7 +758,7 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
     let mut sizes = Vec::new();
     for count in [1, 16] {
         let (_directory, store, mut engine, context) = setup().await;
-        let namespace_id = engine.namespace_id.clone();
+        let namespace_id = engine.namespace.namespace_id.clone();
         let bytes = vec![b'x'; MAX_WAL_INLINE_CONTENT_BYTES];
         let mut base = candidate(
             "base",
@@ -785,12 +767,9 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
         base.intent_mut()
             .operations
             .extend((1..count).map(|_| append("/base-0", &bytes)));
-        publish(&mut engine, &store, &context, base)
-            .await
-            .expect("base");
+        publish(&mut engine, &context, base).await.expect("base");
         publish(
             &mut engine,
-            &store,
             &context,
             request(
                 "copy",
@@ -801,7 +780,6 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
         .expect("copy");
         publish(
             &mut engine,
-            &store,
             &context,
             request("append", vec![append("/copy", b"?")]),
         )
@@ -834,19 +812,17 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
 #[tokio::test]
 async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let value = inline(&namespace_id, Bytes::from_static(b"abc"));
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("file", vec![value.clone()]),
     )
     .await
     .expect("file");
-    let view = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     let inode_id = view
         .resolve_path(
             "/file-0",
@@ -883,7 +859,6 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
     store.reset();
     let error = publish(
         &mut engine,
-        &store,
         &context,
         request("missing", vec![append("/file-0", b"!")]),
     )

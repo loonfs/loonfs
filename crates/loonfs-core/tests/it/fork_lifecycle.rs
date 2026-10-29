@@ -3,17 +3,15 @@
 //! Tests cover conditional manifest installation and
 //! namespace state before the first metadata publication.
 
-use crate::common::commit_split_support::*;
-use crate::common::namespace_engine;
+use crate::common::*;
 use bytes::Bytes;
-use loonfs_core::content::store_bytes_as_content;
-use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::FilesystemOperation;
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::{CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore,
     MetadataMapStore, OperationSelector, RecordedOperation, RecordingStore,
@@ -97,16 +95,10 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .expect("snapshot")
         .response;
     let snapshot_record = load_pin(&store, &source, &snapshot.snapshot_id).await;
-    write_file_bytes(
-        &store,
-        &source,
-        "/docs/later.txt",
-        b"later",
-        &context,
-        Some("later"),
-    )
-    .await
-    .expect("advance source");
+    NamespaceFixture::new(&store, &source, &context)
+        .write_file_bytes("/docs/later.txt", b"later", Some(&commit_id("later")))
+        .await
+        .expect("advance source");
     engine.fold_wal().await.expect("fold current source");
     let floor = engine
         .advance_retention_floor(loonfs_core::RetentionTarget::Head)
@@ -135,17 +127,10 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     assert!(compacted);
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 4;
-    let collected = loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &source,
-        &loonfs_core::GcOptions::default(),
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("collect source before fork");
+    let collected = namespace_store(&store, &source)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .await
+        .expect("collect source before fork");
     assert!(collected.deleted.metadata_segments > 0);
     let fork = engine
         .fork_namespace(
@@ -176,17 +161,10 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .await
         .expect("release snapshot");
     aged.now_ms = u64::MAX / 2;
-    loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &source,
-        &loonfs_core::GcOptions::default(),
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("collect source past grace window");
+    namespace_store(&store, &source)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .await
+        .expect("collect source past grace window");
     assert_eq!(listed_names(&store, &target).await, ["shared.txt"]);
     assert_eq!(
         read_file_bytes(&store, &target, "/docs/shared.txt")
@@ -306,26 +284,22 @@ async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) {
-    bootstrap_namespace(store, source_namespace_id, context)
+    NamespaceFixture::new(store, source_namespace_id, context)
+        .create()
         .await
         .expect("bootstrap source namespace");
-    write_file_bytes(
-        store,
-        source_namespace_id,
-        "/docs/shared.txt",
-        b"base",
-        context,
-        Some("seed-shared"),
-    )
-    .await
-    .expect("seed shared file");
+    NamespaceFixture::new(store, source_namespace_id, context)
+        .write_file_bytes("/docs/shared.txt", b"base", Some(&commit_id("seed-shared")))
+        .await
+        .expect("seed shared file");
 }
 
 async fn head_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> loonfs_core::control::NamespaceReadState {
-    load_namespace_read_state(store, namespace_id, loonfs_core::test_support::std_timer())
+    namespace_store(store, namespace_id)
+        .load_read_state()
         .await
         .expect("load head")
 }
@@ -347,7 +321,8 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    let created = bootstrap_namespace(&store, &namespace_id, &context)
+    let created = NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap namespace");
     assert_eq!(created.namespace_id, namespace_id);
@@ -369,27 +344,18 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         root_entry.inode_kind(),
         loonfs_types::EntryInodeKind::Directory
     );
-    let status = loonfs_core::cache::load_namespace_diagnostics(
-        &store,
-        &namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("status");
+    let status = namespace_store(&store, &namespace_id)
+        .load_diagnostics()
+        .await
+        .expect("status");
     assert_eq!(status.current_manifest_no, ManifestNo(1));
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
     assert_eq!(status.acknowledged_floor_seq, ChangeSeq(0));
 
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/first.txt",
-        b"hello",
-        &context,
-        Some("first-write"),
-    )
-    .await
-    .expect("a fresh namespace accepts writes");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/first.txt", b"hello", Some(&commit_id("first-write")))
+        .await
+        .expect("a fresh namespace accepts writes");
     let file = read_file_bytes(&store, &namespace_id, "/docs/first.txt")
         .await
         .expect("read back");
@@ -424,13 +390,10 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
             .bytes,
         b"hello"
     );
-    let status = loonfs_core::cache::load_namespace_diagnostics(
-        &store,
-        &namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("status after fold");
+    let status = namespace_store(&store, &namespace_id)
+        .load_diagnostics()
+        .await
+        .expect("status after fold");
     assert_eq!(status.current_manifest_no, ManifestNo(3));
 }
 
@@ -467,9 +430,10 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     // A create racing a fork for a fresh id: same rule, and the loser never
     // sees a half-installed namespace.
     let contested = NamespaceId::parse("contested").expect("valid namespace id");
+    let contested_fixture = NamespaceFixture::new(store.as_ref(), &contested, &context);
     let (created, forked) = tokio::join!(
-        bootstrap_namespace(store.as_ref(), &contested, &context),
-        fork_namespace(store.as_ref(), &source, &contested, &second,),
+        contested_fixture.create(),
+        fork_namespace(store.as_ref(), &source, &contested, &second),
     );
     assert_eq!(
         usize::from(created.is_ok()) + usize::from(forked.is_ok()),
@@ -497,19 +461,19 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         context: &MutationContext,
     ) -> loonfs_types::ContentRef {
         let engine = namespace_engine(store, namespace_id, context);
-        let upload = engine.begin_upload(None).await.expect("begin upload");
+        let upload = engine.begin_upload().await.expect("begin upload");
         let staged = engine
-            .upload_content(&upload.upload_id, None, bytes)
+            .upload_content(&upload.upload_id, bytes)
             .await
             .expect("upload bytes");
-        let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
+        let catalog = namespace_store(store, namespace_id)
+            .load_catalog_entry()
             .await
             .expect("catalog");
         let completed = engine
             .complete_upload(
                 &catalog,
                 &upload.upload_id,
-                None,
                 loonfs_types::api::v0::CompleteUploadBody::ServiceProxied {},
             )
             .await
@@ -527,7 +491,8 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
-    bootstrap_namespace(&store, &source_namespace_id, &context)
+    NamespaceFixture::new(&store, &source_namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap source");
     let source_ref = upload_content(&store, &source_namespace_id, b"base", &context).await;
@@ -535,7 +500,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     submit_operation(
         &store,
         &source_namespace_id,
-        test_commit_id(Some("seed-shared")),
+        commit_id("seed-shared"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
             content: loonfs_types::FileContent::Ref(source_ref),
@@ -580,13 +545,10 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let clone_head = head_state(&store, &clone_namespace_id).await;
 
     assert_eq!(clone_head.seq, ChangeSeq(1));
-    let clone_status = loonfs_core::cache::load_namespace_diagnostics(
-        &store,
-        &clone_namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("clone status");
+    let clone_status = namespace_store(&store, &clone_namespace_id)
+        .load_diagnostics()
+        .await
+        .expect("clone status");
     assert_eq!(
         (
             clone_status.retention_floor_seq,
@@ -666,16 +628,14 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         .expect("empty changes");
     assert!(empty_clone_changes.changes.is_empty());
 
-    write_file_bytes(
-        &store,
-        &source_namespace_id,
-        "/docs/shared.txt",
-        b"source-after-fork",
-        &context,
-        Some("source-after-fork"),
-    )
-    .await
-    .expect("source replace");
+    NamespaceFixture::new(&store, &source_namespace_id, &context)
+        .write_file_bytes(
+            "/docs/shared.txt",
+            b"source-after-fork",
+            Some(&commit_id("source-after-fork")),
+        )
+        .await
+        .expect("source replace");
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
             .await
@@ -690,7 +650,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let clone_write = submit_operation(
         &store,
         &clone_namespace_id,
-        test_commit_id(Some("clone-after-fork")),
+        commit_id("clone-after-fork"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
             content: loonfs_types::FileContent::Ref(uploaded_ref.clone()),
@@ -735,10 +695,10 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         .fold_wal()
         .await
         .expect("fold clone");
-    let clone_root =
-        loonfs_core::control::load_namespace_current_manifest(&store, &clone_namespace_id)
-            .await
-            .expect("clone metadata root");
+    let clone_root = namespace_store(&store, &clone_namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("clone metadata root");
     let clone_manifest_bytes = store
         .get(
             &metadata_manifest_object(
@@ -808,7 +768,8 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
 
 /// The inode rows that the current manifest's segments store.
 async fn inode_rows<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> u64 {
-    loonfs_core::control::load_namespace_statistics(store, namespace_id)
+    namespace_store(store, namespace_id)
+        .load_statistics()
         .await
         .expect("load the namespace's statistics")
         .inode_record_count
@@ -826,30 +787,25 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
     let context = mutation_context();
     let source_namespace_id = namespace_id("source");
     let fork_namespace_id = NamespaceId::parse("fork").expect("valid namespace id");
-    bootstrap_namespace(&store, &source_namespace_id, &context)
+    NamespaceFixture::new(&store, &source_namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap source");
     // Each file is folded into a run of its own, so the fork inherits more
     // than one run of the inode and revision groups, and its compaction of
     // those groups has a window to merge.
     let source = namespace_engine(&store, &source_namespace_id, &context);
-    for (path, commit_id) in [("/old/a.txt", "seed-old"), ("/kept.txt", "seed-kept")] {
-        write_file_bytes(
-            &store,
-            &source_namespace_id,
-            path,
-            b"body",
-            &context,
-            Some(commit_id),
-        )
-        .await
-        .expect("seed a file");
+    for (path, commit) in [("/old/a.txt", "seed-old"), ("/kept.txt", "seed-kept")] {
+        NamespaceFixture::new(&store, &source_namespace_id, &context)
+            .write_file_bytes(path, b"body", Some(&commit_id(commit)))
+            .await
+            .expect("seed a file");
         source.fold_wal().await.expect("fold the file");
     }
     submit_operation(
         &store,
         &source_namespace_id,
-        test_commit_id(Some("delete-old")),
+        commit_id("delete-old"),
         FilesystemOperation::DeletePath {
             path: AbsolutePath::parse("/old").expect("path"),
             behavior: loonfs_types::DeleteDirectoryBehavior::Recursive,
@@ -901,16 +857,10 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
         "no writer session ran in the fork"
     );
 
-    let first_write = write_file_bytes(
-        &store,
-        &fork_namespace_id,
-        "/new.txt",
-        b"new",
-        &context,
-        Some("fork-first-write"),
-    )
-    .await
-    .expect("the fork's first write");
+    let first_write = NamespaceFixture::new(&store, &fork_namespace_id, &context)
+        .write_file_bytes("/new.txt", b"new", Some(&commit_id("fork-first-write")))
+        .await
+        .expect("the fork's first write");
     assert_eq!(first_write.committed_seq.0, fork_head.seq.0 + 1);
 }
 
@@ -958,16 +908,14 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .await
         .expect("fork descendant");
 
-    write_file_bytes(
-        &store,
-        &descendant,
-        "/docs/own.txt",
-        b"own",
-        &context,
-        Some("descendant-write"),
-    )
-    .await
-    .expect("write descendant");
+    NamespaceFixture::new(&store, &descendant, &context)
+        .write_file_bytes(
+            "/docs/own.txt",
+            b"own",
+            Some(&commit_id("descendant-write")),
+        )
+        .await
+        .expect("write descendant");
     let engine = namespace_engine(&store, &descendant, &context);
     engine.fold_wal().await.expect("fold descendant");
     let mut compacted = false;
@@ -1001,17 +949,10 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
 
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
-    loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &ancestor,
-        &loonfs_core::GcOptions::default(),
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("collect ancestor");
+    namespace_store(&store, &ancestor)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .await
+        .expect("collect ancestor");
 
     assert_eq!(
         read_file_bytes(&store, &descendant, "/docs/shared.txt")
@@ -1021,114 +962,65 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         b"base"
     );
     let options = loonfs_core::GcOptions::default();
-    let parent_deadline =
-        load_namespace_read_state(&store, &parent, loonfs_core::test_support::std_timer())
-            .await
-            .expect("parent tombstone")
-            .status
-            .deleted_at_ms()
-            .expect("deletion stamp")
-            + options
-                .grace_window_ms
-                .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
-    let parent_waiting = loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &parent,
-        &options,
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("parent waits");
+    let parent_deadline = namespace_store(&store, &parent)
+        .load_read_state()
+        .await
+        .expect("parent tombstone")
+        .status
+        .deleted_at_ms()
+        .expect("deletion stamp")
+        + options
+            .grace_window_ms
+            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
+    let parent_waiting = namespace_store(&store, &parent)
+        .gc(None, &options, &aged)
+        .await
+        .expect("parent waits");
     assert_eq!(parent_waiting.reclaimable_at_ms, Some(parent_deadline));
-    let ancestor_waiting = loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &ancestor,
-        &options,
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("ancestor waits");
+    let ancestor_waiting = namespace_store(&store, &ancestor)
+        .gc(None, &options, &aged)
+        .await
+        .expect("ancestor waits");
     assert_eq!(ancestor_waiting.deleted_checkpoints_by_owner.fork, 0);
     namespace_engine(&store, &descendant, &aged)
         .delete_namespace(Default::default())
         .await
         .expect("delete descendant");
-    aged.now_ms =
-        load_namespace_read_state(&store, &descendant, loonfs_core::test_support::std_timer())
-            .await
-            .expect("descendant tombstone")
-            .status
-            .deleted_at_ms()
-            .expect("deletion stamp");
-    let retired = loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &descendant,
-        &options,
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("retire descendant");
+    aged.now_ms = namespace_store(&store, &descendant)
+        .load_read_state()
+        .await
+        .expect("descendant tombstone")
+        .status
+        .deleted_at_ms()
+        .expect("deletion stamp");
+    let retired = namespace_store(&store, &descendant)
+        .gc(None, &options, &aged)
+        .await
+        .expect("retire descendant");
     let descendant_deadline = retired
         .reclaimable_at_ms
         .expect("descendant retired despite compaction");
     assert_eq!(retired.deleted.content_objects, 0);
-    let waiting = loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &parent,
-        &options,
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("wait for descendant grace");
+    let waiting = namespace_store(&store, &parent)
+        .gc(None, &options, &aged)
+        .await
+        .expect("wait for descendant grace");
     assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
     aged.now_ms = descendant_deadline;
-    loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &descendant,
-        &options,
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("descendant releases its source pin");
-    let released = loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &parent,
-        &options,
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("parent releases its source pin");
+    namespace_store(&store, &descendant)
+        .gc(None, &options, &aged)
+        .await
+        .expect("descendant releases its source pin");
+    let released = namespace_store(&store, &parent)
+        .gc(None, &options, &aged)
+        .await
+        .expect("parent releases its source pin");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
     assert_eq!(released.reclaimable_at_ms, Some(parent_deadline));
-    let released = loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &ancestor,
-        &options,
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("collect ancestor after parent releases its pin");
+    let released = namespace_store(&store, &ancestor)
+        .gc(None, &options, &aged)
+        .await
+        .expect("collect ancestor after parent releases its pin");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 0);
     assert!(released.reclaimable_at_ms.is_some());
 }
@@ -1144,15 +1036,8 @@ async fn a_fork_survives_a_concurrent_collection_pass() {
 
     let gc_options = loonfs_core::GcOptions::default();
     let forking = fork_namespace(store.as_ref(), &source, &clone, &context);
-    let collecting = loonfs_core::gc_namespace(
-        store.as_ref(),
-        None,
-        None,
-        &source,
-        &gc_options,
-        &context,
-        loonfs_core::test_support::std_timer(),
-    );
+    let source_store = namespace_store(store.as_ref(), &source);
+    let collecting = source_store.gc(None, &gc_options, &context);
     let (forked, collected) = tokio::join!(forking, collecting);
     forked.expect("creation grace protects the fork");
     collected.expect("the pass finishes");
@@ -1278,7 +1163,8 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
         foreign_bytes.clone(),
     );
 
-    let error = bootstrap_namespace(&store, &namespace_id, &context)
+    let error = NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect_err("another namespace owns the id");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
@@ -1303,10 +1189,12 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"will vanish")
+    let content = namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"will vanish")
         .await
         .expect("stage content");
     submit_operation(
@@ -1381,33 +1269,21 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/keep.txt",
-        b"keep me",
-        &context,
-        Some("keep"),
-    )
-    .await
-    .expect("write");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/keep.txt", b"keep me", Some(&commit_id("keep")))
+        .await
+        .expect("write");
 
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
-    let report = loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &loonfs_core::GcOptions::default(),
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("gc a namespace with no root");
+    let report = namespace_store(&store, &namespace_id)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .await
+        .expect("gc a namespace with no root");
     assert_eq!(report.deleted.wal_objects, 0, "{report:?}");
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/keep.txt")
@@ -1422,39 +1298,28 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .await
         .expect("delete");
     // The runtime that deleted the namespace raises its hint to the tombstone.
-    let tombstone = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+    let tombstone = namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("tombstone")
         .state
         .manifest()
         .manifest_no;
-    loonfs_core::control::raise_namespace_hint(&store, &namespace_id, tombstone, None)
+    namespace_store(&store, &namespace_id)
+        .raise_hint(tombstone, None)
         .await
         .expect("raise the hint");
-    let report = loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &loonfs_core::GcOptions::default(),
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("gc the tombstone");
+    let report = namespace_store(&store, &namespace_id)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .await
+        .expect("gc the tombstone");
     assert!(report.deleted.wal_objects >= 1, "{report:?}");
-    loonfs_core::gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &loonfs_core::GcOptions::default(),
-        &aged,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("collect obsolete tombstone version");
-    let current = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+    namespace_store(&store, &namespace_id)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .await
+        .expect("collect obsolete tombstone version");
+    let current = namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current tombstone");
     let mut expected = vec![hint(&namespace_id), current.object_key.clone()];
@@ -1486,7 +1351,8 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
     );
     let context = mutation_context();
     let source = namespace_id("source");
-    bootstrap_namespace(&store, &source, &context)
+    NamespaceFixture::new(&store, &source, &context)
+        .create()
         .await
         .expect("bootstrap");
     let puts: Vec<_> = store
@@ -1544,9 +1410,16 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
     for allow_existing in [false, true] {
         store.reset();
         let result = if allow_existing {
-            bootstrap_namespace_allowing_existing(&store, &source, &context).await
+            NamespaceFixture::new(&store, &source, &context)
+                .create_with_options(&loonfs_core::CreateNamespaceOptions {
+                    allow_existing: true,
+                    ..Default::default()
+                })
+                .await
         } else {
-            bootstrap_namespace(&store, &source, &context).await
+            NamespaceFixture::new(&store, &source, &context)
+                .create()
+                .await
         };
         if allow_existing {
             assert_eq!(result.expect("adopt source").namespace_id, source);
@@ -1582,10 +1455,16 @@ async fn bootstrap_hint_read_failures_write_nothing() {
         let store = RecordingStore::new(failing, KeyPredicate::any());
         for allow_existing in [false, true] {
             let error = (if allow_existing {
-                bootstrap_namespace_allowing_existing(&store, &namespace_id, &mutation_context())
+                NamespaceFixture::new(&store, &namespace_id, &mutation_context())
+                    .create_with_options(&loonfs_core::CreateNamespaceOptions {
+                        allow_existing: true,
+                        ..Default::default()
+                    })
                     .await
             } else {
-                bootstrap_namespace(&store, &namespace_id, &mutation_context()).await
+                NamespaceFixture::new(&store, &namespace_id, &mutation_context())
+                    .create()
+                    .await
             })
             .expect_err("hint read failed");
             assert_matches!(error, CoreError::ControlObjectLoad(_));
@@ -1613,9 +1492,16 @@ async fn bootstrap_of_a_corrupt_hint_writes_nothing() {
     store.reset();
     for allow_existing in [false, true] {
         let error = (if allow_existing {
-            bootstrap_namespace_allowing_existing(&store, &namespace_id, &mutation_context()).await
+            NamespaceFixture::new(&store, &namespace_id, &mutation_context())
+                .create_with_options(&loonfs_core::CreateNamespaceOptions {
+                    allow_existing: true,
+                    ..Default::default()
+                })
+                .await
         } else {
-            bootstrap_namespace(&store, &namespace_id, &mutation_context()).await
+            NamespaceFixture::new(&store, &namespace_id, &mutation_context())
+                .create()
+                .await
         })
         .expect_err("corrupt hint");
         assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
@@ -1638,10 +1524,13 @@ async fn a_creator_losing_after_namespace_discovery_leaves_no_extra_objects() {
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
     store.block_next();
-    let delayed = bootstrap_namespace(&store, &namespace_id, &context);
+    let delayed_fixture = NamespaceFixture::new(&store, &namespace_id, &context);
+    let delayed = delayed_fixture.create();
     let winner = async {
         store.wait_until_blocked().await;
-        let result = bootstrap_namespace(&store, &namespace_id, &context).await;
+        let result = NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
+            .await;
         store.release();
         result.expect("concurrent creator wins")
     };
@@ -1674,16 +1563,14 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
     fork_namespace(&store, &source, &sibling, &setup)
         .await
         .expect("fork sibling");
-    write_file_bytes(
-        &store,
-        &sibling,
-        "/docs/sibling.txt",
-        b"sibling",
-        &setup,
-        Some("sibling-write"),
-    )
-    .await
-    .expect("write sibling");
+    NamespaceFixture::new(&store, &sibling, &setup)
+        .write_file_bytes(
+            "/docs/sibling.txt",
+            b"sibling",
+            Some(&commit_id("sibling-write")),
+        )
+        .await
+        .expect("write sibling");
     let source_file = read_file_bytes(&store, &source, "/docs/shared.txt")
         .await
         .expect("source");
@@ -1702,16 +1589,10 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         fork_namespace(&store, &source, &leaf, &setup)
             .await
             .expect("fork leaf");
-        write_file_bytes(
-            &store,
-            &leaf,
-            "/docs/own.txt",
-            b"leaf",
-            &setup,
-            Some("leaf-write"),
-        )
-        .await
-        .expect("write leaf");
+        NamespaceFixture::new(&store, &leaf, &setup)
+            .write_file_bytes("/docs/own.txt", b"leaf", Some(&commit_id("leaf-write")))
+            .await
+            .expect("write leaf");
         submit_operation(
             &store,
             &leaf,
@@ -1736,17 +1617,10 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .await
             .expect("delete leaf");
         store.reset();
-        let report = loonfs_core::gc_namespace(
-            &store,
-            None,
-            None,
-            &leaf,
-            &options,
-            &aged,
-            loonfs_core::test_support::std_timer(),
-        )
-        .await
-        .expect("collect leaf");
+        let report = namespace_store(&store, &leaf)
+            .gc(None, &options, &aged)
+            .await
+            .expect("collect leaf");
         assert_eq!(report.deleted.retired_content_objects, 1);
         let content_lists = store
             .snapshot()
@@ -1789,29 +1663,22 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         .delete_namespace(Default::default())
         .await
         .expect("delete source");
-    let source_deadline =
-        load_namespace_read_state(&store, &source, loonfs_core::test_support::std_timer())
-            .await
-            .expect("source tombstone")
-            .status
-            .deleted_at_ms()
-            .expect("deletion stamp")
-            + options
-                .grace_window_ms
-                .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
+    let source_deadline = namespace_store(&store, &source)
+        .load_read_state()
+        .await
+        .expect("source tombstone")
+        .status
+        .deleted_at_ms()
+        .expect("deletion stamp")
+        + options
+            .grace_window_ms
+            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
     for _ in 0..3 {
         aged.now_ms += options.grace_window_ms;
-        let report = loonfs_core::gc_namespace(
-            &store,
-            None,
-            None,
-            &source,
-            &options,
-            &aged,
-            loonfs_core::test_support::std_timer(),
-        )
-        .await
-        .expect("collect deleted source");
+        let report = namespace_store(&store, &source)
+            .gc(None, &options, &aged)
+            .await
+            .expect("collect deleted source");
         assert_eq!(report.reclaimable_at_ms, Some(source_deadline));
         assert_eq!(report.deleted.retired_content_objects, 0);
         assert!(store

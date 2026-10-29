@@ -560,10 +560,6 @@ mod tests {
     use super::*;
     use crate::commit::CandidateAllocation;
     use crate::context::MutationContext;
-    use crate::path::read::load_current_metadata_view;
-    use crate::storage::content::store_bytes_as_content;
-    use crate::test_support::ops::create;
-    use crate::test_support::ops::{delete_path, put_file};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::api::v0::FilesystemChange;
     use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
@@ -656,7 +652,8 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
         (temp_dir, store, namespace_id, context)
@@ -667,7 +664,9 @@ mod tests {
         namespace_id: &NamespaceId,
         request: &CommitIntent,
     ) -> Result<TestPreparedCommit> {
-        let view = load_current_metadata_view(store, namespace_id)
+        let namespace = crate::test_support::namespace_store(store, namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
             .await
             .expect("metadata view");
         let session = PublishPlanningSession::new(view.head(), view.wal_tail());
@@ -680,7 +679,7 @@ mod tests {
             .map(crate::storage::content_admission::PreparedContent::for_durable_content_write)
             .collect();
         let validated = prepare_commit_against_publish_view(
-            store,
+            &store,
             &crate::test_support::content_writes(),
             &CommitCandidate::prepared(request.clone(), content),
             loonfs_test_support::ids::commit_fingerprint("test"),
@@ -710,19 +709,19 @@ mod tests {
     #[tokio::test]
     async fn put_file_creates_missing_parent_directories() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        put_file(
-            &store,
-            &namespace_id,
-            "/docs/nested/a.txt",
-            b"hello",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&CommitId::parse("put-with-parents").expect("valid commit id")),
-        )
-        .await
-        .expect("put file");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                "/docs/nested/a.txt",
+                b"hello",
+                DestinationBehavior::NoReplace,
+                Some(&CommitId::parse("put-with-parents").expect("valid commit id")),
+            )
+            .await
+            .expect("put file");
 
-        let view = load_current_metadata_view(&store, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
             .await
             .expect("metadata view");
         let resolved = view
@@ -736,68 +735,56 @@ mod tests {
     #[tokio::test]
     async fn recreate_after_delete_succeeds_at_the_same_path() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        put_file(
-            &store,
-            &namespace_id,
-            "/docs/tmp.txt",
-            b"first",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&CommitId::parse("recreate-seed").expect("valid commit id")),
-        )
-        .await
-        .expect("seed file");
-        delete_path(
-            &store,
-            &namespace_id,
-            "/docs/tmp.txt",
-            &context,
-            Some(&CommitId::parse("recreate-delete").expect("valid commit id")),
-        )
-        .await
-        .expect("delete file");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                "/docs/tmp.txt",
+                b"first",
+                DestinationBehavior::NoReplace,
+                Some(&CommitId::parse("recreate-seed").expect("valid commit id")),
+            )
+            .await
+            .expect("seed file");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .delete_path(
+                "/docs/tmp.txt",
+                Some(&CommitId::parse("recreate-delete").expect("valid commit id")),
+            )
+            .await
+            .expect("delete file");
 
         // The tombstone covers the dead inode, not the name: the name is
         // reusable immediately, with or without an intervening rebuild.
-        put_file(
-            &store,
-            &namespace_id,
-            "/docs/tmp.txt",
-            b"second",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&CommitId::parse("recreate-put").expect("valid commit id")),
-        )
-        .await
-        .expect("recreate at the deleted path");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                "/docs/tmp.txt",
+                b"second",
+                DestinationBehavior::NoReplace,
+                Some(&CommitId::parse("recreate-put").expect("valid commit id")),
+            )
+            .await
+            .expect("recreate at the deleted path");
     }
 
     #[tokio::test]
     async fn deleted_subtree_names_replan_as_fresh_state() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         let seed_commit_id = CommitId::parse("seed-dead-tree").expect("valid commit id");
-        put_file(
-            &store,
-            &namespace_id,
-            "/dead/file.txt",
-            b"hello",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&seed_commit_id),
-        )
-        .await
-        .expect("seed file");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                "/dead/file.txt",
+                b"hello",
+                DestinationBehavior::NoReplace,
+                Some(&seed_commit_id),
+            )
+            .await
+            .expect("seed file");
         let delete_commit_id = CommitId::parse("delete-dead-tree").expect("valid commit id");
-        delete_path(
-            &store,
-            &namespace_id,
-            "/dead",
-            &context,
-            Some(&delete_commit_id),
-        )
-        .await
-        .expect("delete tree");
-        let staged = store_bytes_as_content(&store, &namespace_id, b"new")
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .delete_path("/dead", Some(&delete_commit_id))
+            .await
+            .expect("delete tree");
+        let staged = crate::test_support::namespace_store(&store, &namespace_id)
+            .store_bytes_as_content(b"new")
             .await
             .expect("stage");
         // The deleted name is invisible, so planning under it starts a
@@ -821,7 +808,8 @@ mod tests {
     #[tokio::test]
     async fn later_operations_resolve_against_earlier_ones() {
         let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
-        let staged = store_bytes_as_content(&store, &namespace_id, b"hello")
+        let staged = crate::test_support::namespace_store(&store, &namespace_id)
+            .store_bytes_as_content(b"hello")
             .await
             .expect("stage");
         let planned = plan_against_current_state(
@@ -893,18 +881,17 @@ mod tests {
     #[tokio::test]
     async fn delete_then_create_resolves_against_the_delete() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        put_file(
-            &store,
-            &namespace_id,
-            "/docs/tmp.txt",
-            b"first",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&CommitId::parse("seed-replaceable").expect("valid commit id")),
-        )
-        .await
-        .expect("seed file");
-        let staged = store_bytes_as_content(&store, &namespace_id, b"second")
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                "/docs/tmp.txt",
+                b"first",
+                DestinationBehavior::NoReplace,
+                Some(&CommitId::parse("seed-replaceable").expect("valid commit id")),
+            )
+            .await
+            .expect("seed file");
+        let staged = crate::test_support::namespace_store(&store, &namespace_id)
+            .store_bytes_as_content(b"second")
             .await
             .expect("stage");
 
@@ -988,36 +975,24 @@ mod tests {
             ("/docs/b.txt", "occupant", DestinationBehavior::NoReplace),
             ("/docs/gone.txt", "gone", DestinationBehavior::NoReplace),
         ] {
-            put_file(
-                &store,
-                &namespace_id,
-                path,
-                body.as_bytes(),
-                behavior,
-                &context,
-                None,
-            )
-            .await
-            .expect("seed file");
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                .put_file(path, body.as_bytes(), behavior, None)
+                .await
+                .expect("seed file");
         }
-        crate::commit_engine::publish_namespace_commits_batch(
-            &store,
-            &namespace_id,
-            vec![CommitCandidate::new(CommitIntent::single(
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .publish_candidates(vec![CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("seed-owner").expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
                 set_owner("/docs/a.txt", "ada"),
-            ))],
-            &context,
-            std::sync::Arc::new(crate::test_support::content_writes()),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .pop()
-        .expect("one result")
-        .expect("seed attributes");
-        let deletion = delete_path(&store, &namespace_id, "/docs/gone.txt", &context, None)
+            ))])
+            .await
+            .pop()
+            .expect("one result")
+            .expect("seed attributes");
+        let deletion = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .delete_path("/docs/gone.txt", None)
             .await
             .expect("seed deletion");
         let deleted_inode_id = deletion
@@ -1035,7 +1010,8 @@ mod tests {
             destination_parent_inode_id: None,
             destination_display_name: None,
         };
-        let staged = store_bytes_as_content(&store, &namespace_id, b"staged")
+        let staged = crate::test_support::namespace_store(&store, &namespace_id)
+            .store_bytes_as_content(b"staged")
             .await
             .expect("stage")
             .into_content_ref();
@@ -1051,26 +1027,24 @@ mod tests {
         let restricted = NamespaceId::parse("restricted").expect("valid namespace id");
         let principal_scope = PrincipalScope::parse("org_demo").expect("principal scope");
         let administrator = PrincipalId::parse("prn_root").expect("principal id");
-        crate::namespace::bootstrap::bootstrap_namespace(
-            &store,
-            &restricted,
-            &context,
-            &loonfs_test_support::test_actor(),
-            &crate::options::CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: principal_scope.clone(),
-                    root_grants: AccessGrants::new(BTreeMap::from([(
-                        administrator.clone(),
-                        AccessRights::ADMIN,
-                    )]))
-                    .expect("root grants"),
+        crate::test_support::NamespaceFixture::new(&store, &restricted, &context)
+            .engine()
+            .bootstrap_namespace(
+                &loonfs_test_support::test_actor(),
+                &crate::options::CreateNamespaceOptions {
+                    access: NamespaceAccess::Acl {
+                        principal_scope: principal_scope.clone(),
+                        root_grants: AccessGrants::new(BTreeMap::from([(
+                            administrator.clone(),
+                            AccessRights::ADMIN,
+                        )]))
+                        .expect("root grants"),
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("bootstrap a restricted namespace");
+            )
+            .await
+            .expect("bootstrap a restricted namespace");
         let update_access = request(FilesystemOperation::UpdateAccess {
             path: AbsolutePath::root(),
             boundary: false,

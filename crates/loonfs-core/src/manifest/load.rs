@@ -116,13 +116,14 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
 /// the position's last check is at the revalidation bound.
 pub async fn load_position_basis<S: ObjectStore + ?Sized>(
     store: &S,
-    segment_cache: Option<&MetadataSegmentCache>,
+    segment_cache: &MetadataSegmentCache,
     position: &WalFoldInput,
 ) -> crate::error::Result<Option<PublicationBasis>> {
     if !position.basis_checked.is_within_revalidation_bound() {
         return Ok(None);
     }
-    let segments = load_manifest_segments(store, segment_cache, position.basis.manifest()).await?;
+    let segments =
+        load_manifest_segments(store, Some(segment_cache), position.basis.manifest()).await?;
     Ok(Some(PublicationBasis {
         manifest: segments.loaded_manifest(),
         checked: position.basis_checked.clone(),

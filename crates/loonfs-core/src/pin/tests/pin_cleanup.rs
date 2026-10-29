@@ -36,24 +36,24 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
             .await
             .expect("bootstrap");
         for path in ["/one", "/two"] {
-            write_file_bytes(&store, &namespace_id, path, b"data", &setup, None)
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+                .write_file_bytes(path, b"data", None)
                 .await
                 .expect("write");
-            fold_wal(&store, &namespace_id).await.expect("fold");
+            crate::test_support::namespace_store(&store, &namespace_id)
+                .fold_wal()
+                .await
+                .expect("fold");
         }
-        let selected = load_current_manifest(&store, &namespace_id)
+        let selected = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("selected manifest");
         store.inner().fail_next(1);
         store.block_next();
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         let (creation, ()) = tokio::join!(
-            create::create_pin_at_basis(
-                &store,
-                &namespace_id,
-                owner,
-                selected.state.manifest(),
-                &setup,
-            ),
+            namespace.create_pin_at_basis(owner, selected.state.manifest(), &setup),
             async {
                 store.wait_until_blocked().await;
                 super::pin_verification::compact_and_collect_replaced_segments(
@@ -84,54 +84,42 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
         assert_eq!(pins.len(), 1, "failed cleanup left its unverified pin");
 
         // A missing basis is still an error while the record must be retained.
-        let young = crate::gc::gc_namespace(
-            &store,
-            None,
-            None,
-            &namespace_id,
-            &crate::gc::GcOptions::default(),
-            &setup,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect_err("young pin remains protected");
+        let young = crate::test_support::namespace_store(&store, &namespace_id)
+            .gc(None, &crate::gc::GcOptions::default(), &setup)
+            .await
+            .expect_err("young pin remains protected");
         assert_eq!(young.code(), ErrorCode::NamespaceCorrupt);
 
-        let collected = crate::gc::gc_namespace(
-            &store,
-            None,
-            None,
-            &namespace_id,
-            &crate::gc::GcOptions::default(),
-            &mutation_context(
-                "collector",
-                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_001,
-            ),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("reap abandoned pin once owner rules permit deletion");
+        let collected = crate::test_support::namespace_store(&store, &namespace_id)
+            .gc(
+                None,
+                &crate::gc::GcOptions::default(),
+                &mutation_context(
+                    "collector",
+                    crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_001,
+                ),
+            )
+            .await
+            .expect("reap abandoned pin once owner rules permit deletion");
         assert_eq!(
             collected.deleted_checkpoints_by_owner.user
                 + collected.deleted_checkpoints_by_owner.fork,
             1
         );
         assert!(store.head(&pins[0]).await.expect("pin").is_none());
-        crate::gc::gc_namespace(
-            &store,
-            None,
-            None,
-            &namespace_id,
-            &crate::gc::GcOptions::default(),
-            &mutation_context(
-                "collector",
-                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_002,
-            ),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("next pass also succeeds");
-        load_current_metadata_view(&store, &namespace_id)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .gc(
+                None,
+                &crate::gc::GcOptions::default(),
+                &mutation_context(
+                    "collector",
+                    crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_002,
+                ),
+            )
+            .await
+            .expect("next pass also succeeds");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_metadata_view()
             .await
             .expect("current view remains readable");
     }
@@ -152,12 +140,18 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
     let pin = create_checkpoint(&base, &namespace_id, &setup)
         .await
         .expect("pin");
-    write_file_bytes(&base, &namespace_id, "/new", b"data", &setup, None)
+    crate::test_support::NamespaceFixture::new(&base, &namespace_id, &setup)
+        .write_file_bytes("/new", b"data", None)
         .await
         .expect("write");
-    fold_wal(&base, &namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(&base, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     // The runtime that published the fold raises the hint.
-    crate::test_support::raise_hint_to_current_manifest(&base, &namespace_id).await;
+    crate::test_support::namespace_store(&base, &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
     let old_manifest = metadata_manifest_object(&namespace_id, &pin.manifest_no);
     let store = BlockingStore::new(
         base,
@@ -170,43 +164,26 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
     );
     let options = crate::gc::GcOptions::default();
     store.block_next();
-    let (collection, ()) = tokio::join!(
-        crate::gc::gc_namespace(
-            &store,
-            None,
-            None,
-            &namespace_id,
-            &options,
-            &aged,
-            crate::test_support::std_timer()
-        ),
-        async {
-            store.wait_until_blocked().await;
-            store
-                .inner()
-                .delete(&keys::pin(&namespace_id, &pin.checkpoint_id))
-                .await
-                .expect("release pin");
-            crate::gc::gc_namespace(
-                store.inner(),
-                None,
-                None,
-                &namespace_id,
-                &options,
-                &aged,
-                crate::test_support::std_timer(),
-            )
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let (collection, ()) = tokio::join!(namespace.gc(None, &options, &aged), async {
+        store.wait_until_blocked().await;
+        store
+            .inner()
+            .delete(&keys::pin(&namespace_id, &pin.checkpoint_id))
+            .await
+            .expect("release pin");
+        crate::test_support::namespace_store(store.inner(), &namespace_id)
+            .gc(None, &options, &aged)
             .await
             .expect("other collector");
-            assert!(store
-                .inner()
-                .head(&old_manifest)
-                .await
-                .expect("manifest")
-                .is_none());
-            store.release();
-        }
-    );
+        assert!(store
+            .inner()
+            .head(&old_manifest)
+            .await
+            .expect("manifest")
+            .is_none());
+        store.release();
+    });
     collection.expect("concurrent pin release is not corruption");
 }
 
@@ -224,7 +201,8 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
     bootstrap_namespace(&store, &namespace_id, &setup)
         .await
         .expect("bootstrap");
-    let manifest = load_current_manifest(&store, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("manifest");
     let mut ids = [
@@ -250,12 +228,18 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         .await
         .expect("write pin");
     }
-    write_file_bytes(&store, &namespace_id, "/new", b"data", &setup, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .write_file_bytes("/new", b"data", None)
         .await
         .expect("write");
-    fold_wal(&store, &namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     // The runtime that published the fold raises the hint.
-    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
     // Deliberate corruption checks must stay fail-closed, even when the first
     // listed pin for this same manifest is independently eligible for deletion.
     store
@@ -267,48 +251,27 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     );
     let options = crate::gc::GcOptions::default();
-    let error = crate::gc::gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &options,
-        &aged,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect_err("second pin still requires the missing basis");
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &options, &aged)
+        .await
+        .expect_err("second pin still requires the missing basis");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(error.message().contains(ids[1].as_str()));
     store.fail_all();
-    let error = crate::gc::gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &options,
-        &aged,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect_err("unreadable pin is not absent");
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &options, &aged)
+        .await
+        .expect_err("unreadable pin is not absent");
     assert_eq!(error.code(), ErrorCode::ServerError);
     store.clear();
     let key = keys::pin(&namespace_id, &ids[0]);
     replace_object(&store, &key, Bytes::from_static(b"not json"))
         .await
         .expect("malformed pin");
-    let error = crate::gc::gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &options,
-        &aged,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect_err("malformed pin is not deletable");
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &options, &aged)
+        .await
+        .expect_err("malformed pin is not deletable");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     for id in ids {
         assert!(store

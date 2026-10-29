@@ -1,15 +1,14 @@
 //! Path-intent planning, query visibility, and mutation semantics.
 
-use crate::common::commit_split_support::*;
-use crate::common::{namespace_engine, read_context};
+use crate::common::*;
 use loonfs_core::commit::CommitValidationError;
-use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::time::Deadline;
 use loonfs_core::{CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::ids::{namespace_id, page_limit};
+use loonfs_test_support::ids::{commit_id, namespace_id, page_limit};
 use loonfs_test_support::stores::OperationSelector;
 use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
@@ -37,68 +36,21 @@ struct WritePreconditions {
     revision_no: Option<RevisionNo>,
 }
 
-async fn delete_path<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-    context: &MutationContext,
-    commit_id: Option<&str>,
-) -> Result<loonfs_types::Commit, CoreError> {
-    submit_operation(
-        store,
-        namespace_id,
-        test_commit_id(commit_id),
-        FilesystemOperation::DeletePath {
-            path: AbsolutePath::parse(absolute_path).expect("path"),
-            behavior: DeleteDirectoryBehavior::Recursive,
-            expected_inode_id: None,
-        },
-        context,
-    )
-    .await
-}
-
 async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<loonfs_types::Commit, CoreError> {
     submit_operation(
         store,
         namespace_id,
-        test_commit_id(commit_id),
+        commit_id.cloned().unwrap_or_else(CommitId::generate),
         FilesystemOperation::DeletePath {
             path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: None,
-        },
-        context,
-    )
-    .await
-}
-
-async fn move_path<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    source_path: &str,
-    destination_path: &str,
-    context: &MutationContext,
-    commit_id: Option<&str>,
-) -> Result<loonfs_types::Commit, CoreError> {
-    submit_operation(
-        store,
-        namespace_id,
-        test_commit_id(commit_id),
-        FilesystemOperation::MovePath {
-            source_path: AbsolutePath::parse(source_path).expect("path"),
-            destination_path: AbsolutePath::parse(destination_path).expect("path"),
-            precondition: loonfs_types::DestinationPrecondition {
-                behavior: DestinationBehavior::NoReplace,
-                expected_inode_id: None,
-                expected_revision_no: None,
-            },
         },
         context,
     )
@@ -111,12 +63,12 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
     source_path: &str,
     destination_path: &str,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<loonfs_types::Commit, CoreError> {
     submit_operation(
         store,
         namespace_id,
-        test_commit_id(commit_id),
+        commit_id.cloned().unwrap_or_else(CommitId::generate),
         FilesystemOperation::CopyPath {
             source_path: AbsolutePath::parse(source_path).expect("path"),
             destination_path: AbsolutePath::parse(destination_path).expect("path"),
@@ -140,7 +92,9 @@ async fn put_file_with_preconditions<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: &str,
 ) -> Result<loonfs_types::Commit, CoreError> {
-    let content = store_bytes_as_content(store, namespace_id, bytes).await?;
+    let content = namespace_store(store, namespace_id)
+        .store_bytes_as_content(bytes)
+        .await?;
     submit_operation(
         store,
         namespace_id,
@@ -151,27 +105,6 @@ async fn put_file_with_preconditions<S: ObjectStore + ?Sized>(
             behavior: DestinationBehavior::Replace,
             expected_inode_id: preconditions.inode_id,
             expected_revision_no: preconditions.revision_no,
-        },
-        context,
-    )
-    .await
-}
-
-async fn restore_file_revision<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-    source_revision_no: RevisionNo,
-    context: &MutationContext,
-    commit_id: Option<&str>,
-) -> Result<loonfs_types::Commit, CoreError> {
-    submit_operation(
-        store,
-        namespace_id,
-        test_commit_id(commit_id),
-        FilesystemOperation::RestoreRevision {
-            path: AbsolutePath::parse(absolute_path).expect("path"),
-            source_revision_no,
         },
         context,
     )
@@ -321,28 +254,33 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    create_directory_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
-        .await
-        .expect("create docs");
+    create_directory_path(
+        &store,
+        &namespace_id,
+        "/docs",
+        &context,
+        Some(&commit_id("mkdir-docs")),
+    )
+    .await
+    .expect("create docs");
 
     for index in 0..3 {
         let path = format!("/docs/file-{index}.txt");
         let bytes = format!("file-{index}-bytes");
-        let commit_id = format!("put-file-{index}");
-        put_file(
-            &store,
-            &namespace_id,
-            &path,
-            bytes.as_bytes(),
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&commit_id),
-        )
-        .await
-        .expect("put file");
+        let commit = commit_id(&format!("put-file-{index}"));
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                &path,
+                bytes.as_bytes(),
+                DestinationBehavior::NoReplace,
+                Some(&commit),
+            )
+            .await
+            .expect("put file");
     }
 
     store.reset();
@@ -381,91 +319,75 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"alpha",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-alpha"),
-    )
-    .await
-    .expect("put alpha");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/b.txt",
-        b"bravo",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-bravo"),
-    )
-    .await
-    .expect("put bravo");
-    put_file(
-        &store,
-        &namespace_id,
-        "/dead/leaf.txt",
-        b"dead",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-dead"),
-    )
-    .await
-    .expect("put dead");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"alpha",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-alpha")),
+        )
+        .await
+        .expect("put alpha");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/b.txt",
+            b"bravo",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-bravo")),
+        )
+        .await
+        .expect("put bravo");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/dead/leaf.txt",
+            b"dead",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-dead")),
+        )
+        .await
+        .expect("put dead");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("base checkpoint");
 
-    move_path(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        "/docs/moved.txt",
-        &context,
-        Some("move-alpha"),
-    )
-    .await
-    .expect("move alpha");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/b.txt",
-        b"bravo two",
-        DestinationBehavior::Replace,
-        &context,
-        Some("replace-bravo"),
-    )
-    .await
-    .expect("replace bravo");
-    delete_path(
-        &store,
-        &namespace_id,
-        "/dead",
-        &context,
-        Some("delete-dead"),
-    )
-    .await
-    .expect("delete dead");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .move_path(
+            "/docs/a.txt",
+            "/docs/moved.txt",
+            Some(&commit_id("move-alpha")),
+        )
+        .await
+        .expect("move alpha");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/b.txt",
+            b"bravo two",
+            DestinationBehavior::Replace,
+            Some(&commit_id("replace-bravo")),
+        )
+        .await
+        .expect("replace bravo");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/dead", Some(&commit_id("delete-dead")))
+        .await
+        .expect("delete dead");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("delta checkpoint");
 
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/wal.txt",
-        b"wal",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-wal"),
-    )
-    .await
-    .expect("put wal tail");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/wal.txt",
+            b"wal",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-wal")),
+        )
+        .await
+        .expect("put wal tail");
 
     let expected_stat = resolve_path(&store, &namespace_id, "/docs/moved.txt")
         .await
@@ -520,31 +442,28 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/report",
-        b"short",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-report"),
-    )
-    .await
-    .expect("put report");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/report-2024",
-        b"newer-longer",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-report-2024"),
-    )
-    .await
-    .expect("put report-2024");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/report",
+            b"short",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-report")),
+        )
+        .await
+        .expect("put report");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/report-2024",
+            b"newer-longer",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-report-2024")),
+        )
+        .await
+        .expect("put report-2024");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint");
@@ -568,18 +487,25 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    create_directory_path(&store, &namespace_id, "/wide", &context, Some("mkdir-wide"))
-        .await
-        .expect("create wide");
+    create_directory_path(
+        &store,
+        &namespace_id,
+        "/wide",
+        &context,
+        Some(&commit_id("mkdir-wide")),
+    )
+    .await
+    .expect("create wide");
     create_directory_path(
         &store,
         &namespace_id,
         "/other",
         &context,
-        Some("mkdir-other"),
+        Some(&commit_id("mkdir-other")),
     )
     .await
     .expect("create other");
@@ -595,31 +521,27 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
                 .expect("fold seed writes");
         }
         let path = format!("/wide/file-{index:03}.txt");
-        put_file(
-            &store,
-            &namespace_id,
-            &path,
-            b"first",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&format!("put-{index:03}")),
-        )
-        .await
-        .expect("put file");
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                &path,
+                b"first",
+                DestinationBehavior::NoReplace,
+                Some(&commit_id(&format!("put-{index:03}"))),
+            )
+            .await
+            .expect("put file");
     }
     for index in [3u32, 35, 68] {
         let path = format!("/wide/file-{index:03}.txt");
-        put_file(
-            &store,
-            &namespace_id,
-            &path,
-            b"rebound",
-            DestinationBehavior::Replace,
-            &context,
-            Some(&format!("rebind-{index:03}")),
-        )
-        .await
-        .expect("rebind file");
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                &path,
+                b"rebound",
+                DestinationBehavior::Replace,
+                Some(&commit_id(&format!("rebind-{index:03}"))),
+            )
+            .await
+            .expect("rebind file");
     }
     create_checkpoint(&store, &namespace_id, &context)
         .await
@@ -628,36 +550,27 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
     // Tail-only mutations over checkpointed state: a delete whose unbind
     // lives only in the WAL tail, and a rename into another directory whose
     // current binding lives outside the listed parent.
-    delete_path(
-        &store,
-        &namespace_id,
-        "/wide/file-010.txt",
-        &context,
-        Some("delete-tail-unbind"),
-    )
-    .await
-    .expect("delete over checkpointed bind");
-    move_path(
-        &store,
-        &namespace_id,
-        "/wide/file-020.txt",
-        "/other/moved-away.txt",
-        &context,
-        Some("move-cross-directory"),
-    )
-    .await
-    .expect("move into other directory");
-    put_file(
-        &store,
-        &namespace_id,
-        "/wide/file-005.txt",
-        b"tail-rebound",
-        DestinationBehavior::Replace,
-        &context,
-        Some("tail-rebind-005"),
-    )
-    .await
-    .expect("tail rebind over checkpointed bind");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/wide/file-010.txt", Some(&commit_id("delete-tail-unbind")))
+        .await
+        .expect("delete over checkpointed bind");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .move_path(
+            "/wide/file-020.txt",
+            "/other/moved-away.txt",
+            Some(&commit_id("move-cross-directory")),
+        )
+        .await
+        .expect("move into other directory");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/wide/file-005.txt",
+            b"tail-rebound",
+            DestinationBehavior::Replace,
+            Some(&commit_id("tail-rebind-005")),
+        )
+        .await
+        .expect("tail rebind over checkpointed bind");
 
     let mut listed = Vec::new();
     let mut cursor = None;
@@ -697,117 +610,102 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    create_directory_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
-        .await
-        .expect("create docs");
+    create_directory_path(
+        &store,
+        &namespace_id,
+        "/docs",
+        &context,
+        Some(&commit_id("mkdir-docs")),
+    )
+    .await
+    .expect("create docs");
     create_directory_path(
         &store,
         &namespace_id,
         "/docs/a-dir",
         &context,
-        Some("mkdir-a-dir"),
+        Some(&commit_id("mkdir-a-dir")),
     )
     .await
     .expect("create a-dir");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/c-file.txt",
-        b"charlie",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-c-file"),
-    )
-    .await
-    .expect("put c-file");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/stale.txt",
-        b"stale",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-stale"),
-    )
-    .await
-    .expect("put stale");
-    move_path(
-        &store,
-        &namespace_id,
-        "/docs/stale.txt",
-        "/docs/b-renamed.txt",
-        &context,
-        Some("move-stale"),
-    )
-    .await
-    .expect("move stale");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/dead/leaf.txt",
-        b"dead",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-dead"),
-    )
-    .await
-    .expect("put dead");
-    delete_path(
-        &store,
-        &namespace_id,
-        "/docs/dead",
-        &context,
-        Some("delete-dead"),
-    )
-    .await
-    .expect("delete dead");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/c-file.txt",
+            b"charlie",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-c-file")),
+        )
+        .await
+        .expect("put c-file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/stale.txt",
+            b"stale",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-stale")),
+        )
+        .await
+        .expect("put stale");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .move_path(
+            "/docs/stale.txt",
+            "/docs/b-renamed.txt",
+            Some(&commit_id("move-stale")),
+        )
+        .await
+        .expect("move stale");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/dead/leaf.txt",
+            b"dead",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-dead")),
+        )
+        .await
+        .expect("put dead");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/docs/dead", Some(&commit_id("delete-dead")))
+        .await
+        .expect("delete dead");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint manifest children");
 
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/d-tail.txt",
-        b"delta",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-d-tail"),
-    )
-    .await
-    .expect("put d-tail");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/d-tail.txt",
+            b"delta",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-d-tail")),
+        )
+        .await
+        .expect("put d-tail");
     create_directory_path(
         &store,
         &namespace_id,
         "/docs/e-tail-dir",
         &context,
-        Some("mkdir-e-tail-dir"),
+        Some(&commit_id("mkdir-e-tail-dir")),
     )
     .await
     .expect("create tail dir");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/tail-dead/leaf.txt",
-        b"tail-dead",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-tail-dead"),
-    )
-    .await
-    .expect("put tail dead");
-    delete_path(
-        &store,
-        &namespace_id,
-        "/docs/tail-dead",
-        &context,
-        Some("delete-tail-dead"),
-    )
-    .await
-    .expect("delete tail dead");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/tail-dead/leaf.txt",
+            b"tail-dead",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-tail-dead")),
+        )
+        .await
+        .expect("put tail dead");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/docs/tail-dead", Some(&commit_id("delete-tail-dead")))
+        .await
+        .expect("delete tail dead");
 
     let first = list_path_page(&store, &namespace_id, "/docs", 2, None)
         .await
@@ -891,21 +789,20 @@ async fn revision_history_and_change_feed_name_the_same_supplied_commit() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     let supplied_commit_id = CommitId::parse("c_cross_projection").expect("commit id");
 
-    let response = write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/provenance.txt",
-        b"provenance",
-        &context,
-        Some(supplied_commit_id.as_str()),
-    )
-    .await
-    .expect("commit file mutation");
+    let response = NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes(
+            "/docs/provenance.txt",
+            b"provenance",
+            Some(&supplied_commit_id),
+        )
+        .await
+        .expect("commit file mutation");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint committed row");
@@ -937,35 +834,28 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
 
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/rev.txt",
-        b"one",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("rev-create"),
-    )
-    .await
-    .expect("create file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/rev.txt",
+            b"one",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("rev-create")),
+        )
+        .await
+        .expect("create file");
     let replacement_context = MutationContext {
         writer_id: context.writer_id.clone(),
         now_ms: 2_000,
     };
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/rev.txt",
-        b"two",
-        &replacement_context,
-        Some("rev-replace"),
-    )
-    .await
-    .expect("replace file");
+    NamespaceFixture::new(&store, &namespace_id, &replacement_context)
+        .write_file_bytes("/docs/rev.txt", b"two", Some(&commit_id("rev-replace")))
+        .await
+        .expect("replace file");
 
     let entry = resolve_path(&store, &namespace_id, "/docs/rev.txt")
         .await
@@ -1003,16 +893,14 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
             .expect("read inode revision");
     assert_eq!(inode_historical, b"two");
 
-    move_path(
-        &store,
-        &namespace_id,
-        "/docs/rev.txt",
-        "/docs/moved.txt",
-        &context,
-        Some("rev-move"),
-    )
-    .await
-    .expect("move file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .move_path(
+            "/docs/rev.txt",
+            "/docs/moved.txt",
+            Some(&commit_id("rev-move")),
+        )
+        .await
+        .expect("move file");
     assert_eq!(
         list_file_revisions(&store, &namespace_id, "/docs/rev.txt")
             .await
@@ -1026,16 +914,14 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
             .expect("inode revisions");
     assert_eq!(inode_revisions.revisions.len(), 2);
 
-    restore_file_revision(
-        &store,
-        &namespace_id,
-        "/docs/moved.txt",
-        RevisionNo(1),
-        &context,
-        Some("rev-restore"),
-    )
-    .await
-    .expect("restore first revision");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .restore_file_revision(
+            "/docs/moved.txt",
+            RevisionNo(1),
+            Some(&commit_id("rev-restore")),
+        )
+        .await
+        .expect("restore first revision");
     let restored = read_file_bytes(&store, &namespace_id, "/docs/moved.txt")
         .await
         .expect("read restored");
@@ -1060,7 +946,8 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     // A spelling whose canonical lookup key differs from it: planning must
@@ -1116,17 +1003,17 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"hello")
+    let content = namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"hello")
         .await
         .expect("stage content");
 
-    let responses = publish_namespace_commits_batch(
-        &store,
-        &namespace_id,
-        vec![
+    let responses = NamespaceFixture::new(&store, &namespace_id, &context)
+        .publish_candidates(vec![
             prepared_candidate(
                 &store,
                 &namespace_id,
@@ -1158,10 +1045,8 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
                     },
                 },
             )),
-        ],
-        &context,
-    )
-    .await;
+        ])
+        .await;
 
     assert_eq!(
         responses[0].as_ref().expect("put").committed_seq,
@@ -1195,7 +1080,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
         "/docs/b.txt",
         "/docs/c.txt",
         &context,
-        Some("copy-path"),
+        Some(&commit_id("copy-path")),
     )
     .await
     .expect("copy path");
@@ -1206,7 +1091,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
         &namespace_id,
         "/docs/b.txt",
         &context,
-        Some("delete-path"),
+        Some(&commit_id("delete-path")),
     )
     .await
     .expect("delete path");
@@ -1223,34 +1108,31 @@ async fn move_path_respells_the_same_slot_without_a_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context)
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .create()
         .await
         .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/docs/report.pdf",
-        b"alpha",
-        &context,
-        Some("seed-respell"),
-    )
-    .await
-    .expect("seed respell");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .write_file_bytes(
+            "/docs/report.pdf",
+            b"alpha",
+            Some(&commit_id("seed-respell")),
+        )
+        .await
+        .expect("seed respell");
     let before = resolve_path_latest(&store, &namespace_id("demo"), "/docs/report.pdf")
         .await
         .expect("resolve before respell");
 
     // Case-only rename: same name key under the same parent, new spelling.
-    move_path(
-        &store,
-        &namespace_id("demo"),
-        "/docs/report.pdf",
-        "/docs/REPORT.PDF",
-        &context,
-        Some("respell"),
-    )
-    .await
-    .expect("case-only respelling lands");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .move_path(
+            "/docs/report.pdf",
+            "/docs/REPORT.PDF",
+            Some(&commit_id("respell")),
+        )
+        .await
+        .expect("case-only respelling lands");
 
     let after = resolve_path_latest(&store, &namespace_id("demo"), "/docs/report.pdf")
         .await
@@ -1259,16 +1141,14 @@ async fn move_path_respells_the_same_slot_without_a_conflict() {
     assert_eq!(after.inode_id, before.inode_id);
 
     // Repeating the identical spelling changes nothing and stays a conflict.
-    let error = move_path(
-        &store,
-        &namespace_id("demo"),
-        "/docs/REPORT.PDF",
-        "/docs/REPORT.PDF",
-        &context,
-        Some("respell-noop"),
-    )
-    .await
-    .expect_err("unchanged spelling");
+    let error = NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .move_path(
+            "/docs/REPORT.PDF",
+            "/docs/REPORT.PDF",
+            Some(&commit_id("respell-noop")),
+        )
+        .await
+        .expect_err("unchanged spelling");
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
@@ -1277,53 +1157,39 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context)
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .create()
         .await
         .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/docs/old.txt",
-        b"old",
-        &context,
-        Some("seed-docs"),
-    )
-    .await
-    .expect("seed docs");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/tmp/source.txt",
-        b"source",
-        &context,
-        Some("seed-source"),
-    )
-    .await
-    .expect("seed source");
-    delete_path(
-        &store,
-        &namespace_id("demo"),
-        "/docs",
-        &context,
-        Some("delete-docs"),
-    )
-    .await
-    .expect("delete docs");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .write_file_bytes("/docs/old.txt", b"old", Some(&commit_id("seed-docs")))
+        .await
+        .expect("seed docs");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .write_file_bytes(
+            "/tmp/source.txt",
+            b"source",
+            Some(&commit_id("seed-source")),
+        )
+        .await
+        .expect("seed source");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .delete_path("/docs", Some(&commit_id("delete-docs")))
+        .await
+        .expect("delete docs");
 
     // Deleting `/docs` unbinds the name: it is reusable immediately, and
     // writes and moves under it create a fresh subtree rather than
     // conflicting with the dead one. The old subtree stays dead — its
     // previous child is not resurrected by the recreation.
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/docs/new.txt",
-        b"new",
-        &context,
-        Some("put-under-recreated"),
-    )
-    .await
-    .expect("put recreates the subtree");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .write_file_bytes(
+            "/docs/new.txt",
+            b"new",
+            Some(&commit_id("put-under-recreated")),
+        )
+        .await
+        .expect("put recreates the subtree");
     let old_child = resolve_path(&store, &namespace_id("demo"), "/docs/old.txt").await;
     assert_eq!(
         old_child
@@ -1332,16 +1198,14 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
         loonfs_types::ErrorCode::PathNotFound
     );
 
-    move_path(
-        &store,
-        &namespace_id("demo"),
-        "/tmp/source.txt",
-        "/docs/source.txt",
-        &context,
-        Some("move-under-recreated"),
-    )
-    .await
-    .expect("move lands in the recreated subtree");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .move_path(
+            "/tmp/source.txt",
+            "/docs/source.txt",
+            Some(&commit_id("move-under-recreated")),
+        )
+        .await
+        .expect("move lands in the recreated subtree");
 }
 
 #[tokio::test]
@@ -1349,7 +1213,8 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context)
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .create()
         .await
         .expect("bootstrap namespace");
 
@@ -1358,7 +1223,7 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
         &namespace_id("demo"),
         "/docs",
         &context,
-        Some("mkdir-docs"),
+        Some(&commit_id("mkdir-docs")),
     )
     .await
     .expect("create dir");
@@ -1373,7 +1238,7 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
         &namespace_id("demo"),
         "/missing/nested",
         &context,
-        Some("mkdir-missing-parent"),
+        Some(&commit_id("mkdir-missing-parent")),
     )
     .await
     .expect_err("mkdir does not auto-create parents");
@@ -1385,33 +1250,26 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context)
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .create()
         .await
         .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/docs/a.txt",
-        b"hello",
-        &context,
-        Some("seed-a"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .write_file_bytes("/docs/a.txt", b"hello", Some(&commit_id("seed-a")))
+        .await
+        .expect("seed file");
     let file = resolve_path(&store, &namespace_id("demo"), "/docs/a.txt")
         .await
         .expect("resolve file");
 
-    move_path(
-        &store,
-        &namespace_id("demo"),
-        "/docs/a.txt",
-        "/docs/b.txt",
-        &context,
-        Some("move-a-to-b"),
-    )
-    .await
-    .expect("move file");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .move_path(
+            "/docs/a.txt",
+            "/docs/b.txt",
+            Some(&commit_id("move-a-to-b")),
+        )
+        .await
+        .expect("move file");
     let move_count = list_changes_after(&store, &namespace_id("demo"), ChangeSeq(0))
         .await
         .expect("change feed")
@@ -1470,54 +1328,43 @@ async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context)
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .create()
         .await
         .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/docs/hello.txt",
-        b"hello",
-        &context,
-        Some("seed-hello"),
-    )
-    .await
-    .expect("seed file");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/Cafe\u{0301}.txt",
-        b"hello",
-        &context,
-        Some("seed-unicode-name"),
-    )
-    .await
-    .expect("seed unicode name");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .write_file_bytes("/docs/hello.txt", b"hello", Some(&commit_id("seed-hello")))
+        .await
+        .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .write_file_bytes(
+            "/Cafe\u{0301}.txt",
+            b"hello",
+            Some(&commit_id("seed-unicode-name")),
+        )
+        .await
+        .expect("seed unicode name");
 
-    let error = put_file(
-        &store,
-        &namespace_id("demo"),
-        "/docs/hello.txt",
-        b"new-bytes",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-no-force"),
-    )
-    .await
-    .expect_err("put without force");
+    let error = NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .put_file(
+            "/docs/hello.txt",
+            b"new-bytes",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-no-force")),
+        )
+        .await
+        .expect_err("put without force");
     assert_eq!(error.code(), ErrorCode::PathConflict);
 
-    let error = put_file(
-        &store,
-        &namespace_id("demo"),
-        "/CAF\u{00c9}.TXT",
-        b"new-bytes",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("create-only-conflict"),
-    )
-    .await
-    .expect_err("create-only conflict");
+    let error = NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .put_file(
+            "/CAF\u{00c9}.TXT",
+            b"new-bytes",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("create-only-conflict")),
+        )
+        .await
+        .expect_err("create-only conflict");
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
@@ -1527,42 +1374,34 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
 
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/aba.txt",
-        b"old inode",
-        &context,
-        Some("seed-put-aba"),
-    )
-    .await
-    .expect("seed ABA file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes(
+            "/docs/aba.txt",
+            b"old inode",
+            Some(&commit_id("seed-put-aba")),
+        )
+        .await
+        .expect("seed ABA file");
     let old = resolve_path(&store, &namespace_id, "/docs/aba.txt")
         .await
         .expect("observe ABA file");
-    delete_path(
-        &store,
-        &namespace_id,
-        "/docs/aba.txt",
-        &context,
-        Some("delete-put-aba"),
-    )
-    .await
-    .expect("delete observed file");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/aba.txt",
-        b"new inode",
-        &context,
-        Some("recreate-put-aba"),
-    )
-    .await
-    .expect("recreate ABA path");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/docs/aba.txt", Some(&commit_id("delete-put-aba")))
+        .await
+        .expect("delete observed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes(
+            "/docs/aba.txt",
+            b"new inode",
+            Some(&commit_id("recreate-put-aba")),
+        )
+        .await
+        .expect("recreate ABA path");
     let recreated = resolve_path(&store, &namespace_id, "/docs/aba.txt")
         .await
         .expect("observe recreated file");
@@ -1654,13 +1493,14 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     .await
     .expect("matching inode and revision preconditions allow replacement");
 
-    let rejected_content = store_bytes_as_content(&store, &namespace_id, b"must not land")
+    let rejected_content = namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"must not land")
         .await
         .expect("stage rejected content");
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("no-replace-with_preconditions-put")),
+        commit_id("no-replace-with_preconditions-put"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/aba.txt").expect("path"),
             content: loonfs_types::FileContent::Ref(rejected_content.into_content_ref()),
@@ -1687,26 +1527,21 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context)
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .create()
         .await
         .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/docs/hello.txt",
-        b"hello",
-        &context,
-        Some("seed-docs"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .write_file_bytes("/docs/hello.txt", b"hello", Some(&commit_id("seed-docs")))
+        .await
+        .expect("seed file");
 
     let error = delete_path_non_recursive(
         &store,
         &namespace_id("demo"),
         "/docs",
         &context,
-        Some("delete-docs"),
+        Some(&commit_id("delete-docs")),
     )
     .await
     .expect_err("non-recursive delete should reject non-empty dir");
@@ -1725,19 +1560,18 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context)
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .create()
         .await
         .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        "/docs/source.txt",
-        b"hello",
-        &context,
-        Some("seed-source"),
-    )
-    .await
-    .expect("seed source");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .write_file_bytes(
+            "/docs/source.txt",
+            b"hello",
+            Some(&commit_id("seed-source")),
+        )
+        .await
+        .expect("seed source");
 
     copy_file_path(
         &store,
@@ -1745,7 +1579,7 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
         "/docs/source.txt",
         "/docs/copy.txt",
         &context,
-        Some("copy-file"),
+        Some(&commit_id("copy-file")),
     )
     .await
     .expect("copy file");
@@ -1786,13 +1620,12 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
     );
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap namespace");
-    let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    );
+    let mut engine =
+        loonfs_core::publish::NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
     let mut entries = std::collections::BTreeMap::<NameKey, PathEntry>::new();
     for NameVector {
         display_name,
@@ -1814,7 +1647,6 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
             store.take();
             let result = engine
                 .publish_batch(
-                    &store,
                     vec![candidate],
                     &context,
                     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -1854,7 +1686,8 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context)
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .create()
         .await
         .expect("bootstrap namespace");
 
@@ -1864,29 +1697,26 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
     create_directory_path(&store, &namespace_id("demo"), "/dead", &context, None)
         .await
         .expect("create dead dir");
-    put_file(
-        &store,
-        &namespace_id("demo"),
-        "/live/kept.txt",
-        b"alive",
-        DestinationBehavior::NoReplace,
-        &context,
-        None,
-    )
-    .await
-    .expect("put live file");
-    put_file(
-        &store,
-        &namespace_id("demo"),
-        "/dead/gone.txt",
-        b"doomed",
-        DestinationBehavior::NoReplace,
-        &context,
-        None,
-    )
-    .await
-    .expect("put doomed file");
-    delete_path(&store, &namespace_id("demo"), "/dead", &context, None)
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .put_file(
+            "/live/kept.txt",
+            b"alive",
+            DestinationBehavior::NoReplace,
+            None,
+        )
+        .await
+        .expect("put live file");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .put_file(
+            "/dead/gone.txt",
+            b"doomed",
+            DestinationBehavior::NoReplace,
+            None,
+        )
+        .await
+        .expect("put doomed file");
+    NamespaceFixture::new(&store, &namespace_id("demo"), &context)
+        .delete_path("/dead", None)
         .await
         .expect("delete dead subtree");
 
@@ -1941,31 +1771,28 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"alpha",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-a"),
-    )
-    .await
-    .expect("put a");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/b.txt",
-        b"beta",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-b"),
-    )
-    .await
-    .expect("put b");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"alpha",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-a")),
+        )
+        .await
+        .expect("put a");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/b.txt",
+            b"beta",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-b")),
+        )
+        .await
+        .expect("put b");
 
     // The default stays create-only: an occupied destination is a conflict.
     let error = submit_operation(
@@ -2027,23 +1854,28 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    put_file(
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"alpha",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-a")),
+        )
+        .await
+        .expect("put a");
+    create_directory_path(
         &store,
         &namespace_id,
-        "/docs/a.txt",
-        b"alpha",
-        DestinationBehavior::NoReplace,
+        "/docs/dir",
         &context,
-        Some("put-a"),
+        Some(&commit_id("mkdir")),
     )
     .await
-    .expect("put a");
-    create_directory_path(&store, &namespace_id, "/docs/dir", &context, Some("mkdir"))
-        .await
-        .expect("mkdir");
+    .expect("mkdir");
 
     // Mirrors put: only a file destination can be replaced.
     let error = submit_operation(
@@ -2101,31 +1933,28 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"alpha",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-a"),
-    )
-    .await
-    .expect("put a");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/b.txt",
-        b"beta",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("put-b"),
-    )
-    .await
-    .expect("put b");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"alpha",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-a")),
+        )
+        .await
+        .expect("put a");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/b.txt",
+            b"beta",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("put-b")),
+        )
+        .await
+        .expect("put b");
     let before = list_file_revisions(&store, &namespace_id, "/docs/b.txt")
         .await
         .expect("destination revisions before");
@@ -2171,10 +2000,11 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    for (path, bytes, commit_id) in [
+    for (path, bytes, commit) in [
         ("/docs/source.txt", b"source".as_slice(), "seed-move-source"),
         (
             "/docs/destination.txt",
@@ -2192,16 +2022,10 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
             "seed-inode-move-destination",
         ),
     ] {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            path,
-            bytes,
-            &context,
-            Some(commit_id),
-        )
-        .await
-        .expect("seed move fixture");
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, bytes, Some(&commit_id(commit)))
+            .await
+            .expect("seed move fixture");
     }
     let destination = resolve_path(&store, &namespace_id, "/docs/destination.txt")
         .await
@@ -2213,7 +2037,7 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("move-inode-only-destination-precondition")),
+        commit_id("move-inode-only-destination-precondition"),
         FilesystemOperation::MovePath {
             source_path: AbsolutePath::parse("/docs/inode-source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/inode-destination.txt").expect("path"),
@@ -2231,7 +2055,7 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("move-revision-only-destination-precondition")),
+        commit_id("move-revision-only-destination-precondition"),
         FilesystemOperation::MovePath {
             source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
@@ -2250,7 +2074,7 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("move-no-replace-destination-precondition")),
+        commit_id("move-no-replace-destination-precondition"),
         FilesystemOperation::MovePath {
             source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
@@ -2283,7 +2107,7 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("move-stale-destination-revision")),
+        commit_id("move-stale-destination-revision"),
         FilesystemOperation::MovePath {
             source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
@@ -2302,7 +2126,7 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("move-correct-destination-preconditions")),
+        commit_id("move-correct-destination-preconditions"),
         FilesystemOperation::MovePath {
             source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
@@ -2331,10 +2155,11 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    for (path, bytes, commit_id) in [
+    for (path, bytes, commit) in [
         ("/docs/source.txt", b"source".as_slice(), "seed-copy-source"),
         (
             "/docs/aba-destination.txt",
@@ -2342,39 +2167,29 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
             "seed-copy-aba-destination",
         ),
     ] {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            path,
-            bytes,
-            &context,
-            Some(commit_id),
-        )
-        .await
-        .expect("seed copy fixture");
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, bytes, Some(&commit_id(commit)))
+            .await
+            .expect("seed copy fixture");
     }
     let old = resolve_path(&store, &namespace_id, "/docs/aba-destination.txt")
         .await
         .expect("observe ABA destination");
-    delete_path(
-        &store,
-        &namespace_id,
-        "/docs/aba-destination.txt",
-        &context,
-        Some("delete-copy-aba-destination"),
-    )
-    .await
-    .expect("delete ABA destination");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/aba-destination.txt",
-        b"new destination",
-        &context,
-        Some("recreate-copy-aba-destination"),
-    )
-    .await
-    .expect("recreate ABA destination");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path(
+            "/docs/aba-destination.txt",
+            Some(&commit_id("delete-copy-aba-destination")),
+        )
+        .await
+        .expect("delete ABA destination");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes(
+            "/docs/aba-destination.txt",
+            b"new destination",
+            Some(&commit_id("recreate-copy-aba-destination")),
+        )
+        .await
+        .expect("recreate ABA destination");
     let recreated = resolve_path(&store, &namespace_id, "/docs/aba-destination.txt")
         .await
         .expect("observe recreated destination");
@@ -2384,7 +2199,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("with_preconditions-copy-aba")),
+        commit_id("with_preconditions-copy-aba"),
         FilesystemOperation::CopyPath {
             source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
@@ -2418,7 +2233,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("copy-revision-only-destination-precondition")),
+        commit_id("copy-revision-only-destination-precondition"),
         FilesystemOperation::CopyPath {
             source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
@@ -2437,7 +2252,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("copy-no-replace-destination-precondition")),
+        commit_id("copy-no-replace-destination-precondition"),
         FilesystemOperation::CopyPath {
             source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
@@ -2463,7 +2278,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("copy-inode-only-destination-precondition")),
+        commit_id("copy-inode-only-destination-precondition"),
         FilesystemOperation::CopyPath {
             source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
@@ -2480,7 +2295,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("copy-inode-revision-destination-precondition")),
+        commit_id("copy-inode-revision-destination-precondition"),
         FilesystemOperation::CopyPath {
             source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
@@ -2502,49 +2317,42 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/source.txt",
-        b"source",
-        &context,
-        Some("seed-inode-move-source"),
-    )
-    .await
-    .expect("seed source");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/destination.txt",
-        b"destination",
-        &context,
-        Some("seed-inode-move-destination"),
-    )
-    .await
-    .expect("seed destination");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/source-two.txt",
-        b"source two",
-        &context,
-        Some("seed-inode-move-source-two"),
-    )
-    .await
-    .expect("seed second source");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/destination-two.txt",
-        b"destination two",
-        &context,
-        Some("seed-inode-move-destination-two"),
-    )
-    .await
-    .expect("seed second destination");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes(
+            "/docs/source.txt",
+            b"source",
+            Some(&commit_id("seed-inode-move-source")),
+        )
+        .await
+        .expect("seed source");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes(
+            "/docs/destination.txt",
+            b"destination",
+            Some(&commit_id("seed-inode-move-destination")),
+        )
+        .await
+        .expect("seed destination");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes(
+            "/docs/source-two.txt",
+            b"source two",
+            Some(&commit_id("seed-inode-move-source-two")),
+        )
+        .await
+        .expect("seed second source");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes(
+            "/docs/destination-two.txt",
+            b"destination two",
+            Some(&commit_id("seed-inode-move-destination-two")),
+        )
+        .await
+        .expect("seed second destination");
     let docs = resolve_path(&store, &namespace_id, "/docs")
         .await
         .expect("resolve destination parent");
@@ -2572,7 +2380,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("inode-move-wrong-destination")),
+        commit_id("inode-move-wrong-destination"),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_version: binding_version.clone(),
@@ -2594,7 +2402,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("inode-move-revision-only-destination")),
+        commit_id("inode-move-revision-only-destination"),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_version: binding_version.clone(),
@@ -2616,7 +2424,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("inode-move-no-replace-destination-precondition")),
+        commit_id("inode-move-no-replace-destination-precondition"),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_version: binding_version.clone(),
@@ -2652,7 +2460,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("inode-move-inode-only-destination-precondition")),
+        commit_id("inode-move-inode-only-destination-precondition"),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_version: binding_version,
@@ -2672,7 +2480,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("inode-move-inode-revision-destination-precondition")),
+        commit_id("inode-move-inode-revision-destination-precondition"),
         FilesystemOperation::MoveByInode {
             inode_id: source_two.inode_id,
             expected_binding_version: binding_version_two,

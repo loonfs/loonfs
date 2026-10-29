@@ -2,7 +2,6 @@
 //! shard at a time.
 
 use super::charged_set::{Charge, ChargedSet};
-use super::deletes::apply_decisions;
 use super::live_set::LiveSet;
 use super::sweep::{ContentReference, Sweep};
 use crate::bloom_filter::BloomFilter;
@@ -48,13 +47,13 @@ pub(super) struct ContentSweep<'a> {
 }
 
 impl<'a> ContentSweep<'a> {
-    pub(super) async fn load<S: ObjectStore + ?Sized>(
+    pub(super) async fn load<S: ObjectStore>(
         sweep: &Sweep<'a, S>,
         shard_rows: usize,
         max_bytes: usize,
     ) -> Result<Option<Self>> {
         let live = sweep.live;
-        let namespace_id = sweep.namespace_id;
+        let namespace_id = &sweep.namespace.namespace_id;
         if live.current_tombstone.is_some() {
             tracing::info!(namespace_id = %namespace_id, shard_width = 0,
                 layout_segments = 0, "collecting namespace");
@@ -105,7 +104,7 @@ impl<'a> ContentSweep<'a> {
         }))
     }
 
-    pub(super) async fn sweep<S: ObjectStore + ?Sized>(
+    pub(super) async fn sweep<S: ObjectStore>(
         &self,
         sweep: &Sweep<'_, S>,
         report: &mut GcResponse,
@@ -120,8 +119,12 @@ impl<'a> ContentSweep<'a> {
                 Ok(ControlFlow::Continue(()))
             })
             .await?;
-            let prefix = format!("{}{id_prefix}", content_prefix(sweep.namespace_id));
+            let prefix = format!(
+                "{}{id_prefix}",
+                content_prefix(&sweep.namespace.namespace_id)
+            );
             let decisions = sweep
+                .namespace
                 .store
                 .list_entries_from_stream(&prefix, None)
                 .map_err(|error| CoreError::store(&prefix, &error))
@@ -137,7 +140,7 @@ impl<'a> ContentSweep<'a> {
                     };
                     sweep.content_candidate(entry, reference)
                 });
-            apply_decisions(sweep.store, decisions, report).await?;
+            sweep.namespace.apply_decisions(decisions, report).await?;
         }
         Ok(())
     }
@@ -173,7 +176,7 @@ fn distinct_layout_segments(live: &LiveSet) -> Result<(Vec<ScanDescriptor<'_>>, 
     Ok((segments, charge))
 }
 
-async fn scan_layout_extents<S: ObjectStore + ?Sized>(
+async fn scan_layout_extents<S: ObjectStore>(
     sweep: &Sweep<'_, S>,
     segments: &[ScanDescriptor<'_>],
     id_prefix: &str,
@@ -185,15 +188,15 @@ async fn scan_layout_extents<S: ObjectStore + ?Sized>(
     );
     let upper_bound = string_prefix_upper_bound(&prefix);
     visit_segment_rows(
-        sweep.store,
-        sweep.segment_cache,
+        &sweep.namespace.store,
+        Some(sweep.namespace.segment_cache.as_ref()),
         segments,
         &prefix,
         upper_bound.as_deref(),
         |row| {
             let row = content_layout_from_manifest_row(row)?;
             for extent in &row.layout.extents {
-                if extent.owner_namespace_id == *sweep.namespace_id
+                if extent.owner_namespace_id == sweep.namespace.namespace_id
                     && visit(&row, extent)?.is_break()
                 {
                     return Ok(ControlFlow::Break(()));

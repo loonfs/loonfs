@@ -8,47 +8,55 @@
 //!
 //! # Example
 //!
-//! Commits are published as candidate batches through
+//! A [`NamespaceStore`] holds one namespace's object store with the caches,
+//! clocks, content write permits, and run policy its operations use. Commits
+//! are published as candidate batches through
 //! [`publish::NamespaceCommitEngine`]; day-to-day reads and writes should go
 //! through the `loonfs` crate's `LoonFs` runtime and `Namespace` handles,
 //! which wrap this crate with caching and batching.
 //!
 //! ```no_run
-//! use loonfs_types::{AbsolutePath, ActorId, CommitId, NamespaceId};
+//! use loonfs_core::cache::MetadataSegmentCache;
 //! use loonfs_core::publish::{
-//!     FilesystemOperation, CommitIntent, NamespaceCommitEngine, CommitCandidate,
+//!     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 //! };
-//! use loonfs_core::time::Deadline;
-//! use loonfs_types::StdMonotonicTimer;
-//! use std::sync::Arc;
-//! use loonfs_core::{CreateNamespaceOptions, MutationContext, NamespaceEngine};
-//! use loonfs_types::WriterId;
+//! use loonfs_core::time::{Deadline, SystemWallClock};
+//! use loonfs_core::{
+//!     CreateNamespaceOptions, MetadataRunPolicy, MutationContext, NamespaceEngine,
+//!     NamespaceStore, PermitPool,
+//! };
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
+//! use loonfs_types::StdMonotonicTimer;
+//! use loonfs_types::{AbsolutePath, ActorId, CommitId, NamespaceId, WriterId};
+//! use std::num::NonZeroUsize;
+//! use std::sync::Arc;
 //!
 //! let store = LocalFsStore::new(std::env::temp_dir())
 //!     .expect("a temporary-directory-backed store should initialize");
-//! let namespace = NamespaceId::parse("docs").expect("valid namespace id");
+//! let namespace = NamespaceStore::new(
+//!     Arc::new(store),
+//!     NamespaceId::parse("docs").expect("valid namespace id"),
+//!     Arc::new(MetadataSegmentCache::unshared(64 * 1024 * 1024)),
+//!     Arc::new(SystemWallClock),
+//!     Arc::new(StdMonotonicTimer::default()),
+//!     Arc::new(PermitPool::new(
+//!         NonZeroUsize::new(32).expect("a nonzero limit"),
+//!         None,
+//!     )),
+//!     MetadataRunPolicy::default(),
+//! );
 //!
 //! let writer_id = WriterId::parse("example-writer").expect("valid writer id");
-//! let content_writes = std::sync::Arc::new(loonfs_core::PermitPool::new(
-//!     std::num::NonZeroUsize::new(32).expect("a nonzero limit"),
-//!     None,
-//! ));
-//! let engine = NamespaceEngine::writer(
-//!     store, namespace.clone(), writer_id.clone(), std::sync::Arc::clone(&content_writes),
-//! );
+//! let engine = NamespaceEngine::writer(namespace.clone(), writer_id.clone());
 //! let actor_id = ActorId::parse("example-actor").expect("valid actor id");
 //! let _ = engine.bootstrap_namespace(&actor_id, &CreateNamespaceOptions::default());
 //!
-//! let publish_store = LocalFsStore::new(std::env::temp_dir())
-//!     .expect("a temporary-directory-backed store should initialize");
 //! let context = MutationContext {
 //!     writer_id,
 //!     now_ms: 0,
 //! };
-//! let mut publisher = NamespaceCommitEngine::new(namespace, content_writes);
+//! let mut publisher = NamespaceCommitEngine::new(namespace);
 //! let _ = publisher.publish_batch(
-//!     &publish_store,
 //!     vec![CommitCandidate::new(CommitIntent::single(
 //!         CommitId::generate(),
 //!         ActorId::parse("example-service").expect("a static actor ID should parse"),
@@ -142,37 +150,24 @@ pub mod cache {
         SegmentBlockCache, SegmentBlockLoad, SharedHeadsAndWalTails, SharedSegmentBlocks,
         WalTailCacheKey,
     };
-    pub use crate::namespace::status::{
-        load_namespace, load_namespace_diagnostics, NamespaceStorageDiagnostics,
-    };
+    pub use crate::namespace::status::NamespaceStorageDiagnostics;
     #[cfg(any(test, feature = "test-support"))]
-    pub use crate::namespace::status::{load_namespace_wal_tail_usage, NamespaceWalTailUsage};
+    pub use crate::namespace::status::NamespaceWalTailUsage;
 }
 
-/// Typed loaders for namespace control objects and verified catalog state,
-/// and the function that raises a namespace's hint.
+/// Namespace control objects and verified catalog state, as the loaders of
+/// [`NamespaceStore`] return them.
 ///
 /// The `loonfs` read and write paths and the layout tests use this module.
 pub mod control {
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
-    pub use crate::manifest::{
-        load_checkpoint_statistics, load_namespace_statistics, load_position_basis,
-        NamespaceStatistics,
-    };
-    pub use crate::namespace::catalog::{
-        load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry,
-    };
-    pub use crate::namespace::control::{
-        load_namespace_current_manifest, load_namespace_read_state, raise_namespace_hint,
-        CurrentManifest, LoadedHint, LoadedManifest,
-    };
-    pub use crate::namespace::read_anchor::{
-        load_live_read_anchor, load_read_anchor, manifest_has_successor, project_anchor_tail,
-        same_epoch_manifests_above, NamespaceReadAnchor,
-    };
+    pub use crate::manifest::{load_position_basis, NamespaceStatistics};
+    pub use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+    pub use crate::namespace::control::{CurrentManifest, LoadedHint, LoadedManifest};
+    pub use crate::namespace::read_anchor::{project_anchor_tail, NamespaceReadAnchor};
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::{MetadataBasis, PublicationBasis};
-    pub use crate::pin::{load_snapshot_read_basis, SnapshotReadBasis};
+    pub use crate::pin::SnapshotReadBasis;
     pub use crate::wal::probe_namespace_wal;
 }
 
@@ -203,15 +198,16 @@ pub use error::{
     classify_store_failure, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
     MetadataViewError, Result, WriterFence,
 };
-pub use gc::{gc_namespace, grace_age, GcOptions, GraceAge};
+pub use gc::{grace_age, GcOptions, GraceAge};
 pub use manifest::ManifestLoadError;
 pub use manifest::{
-    fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator, CompactionAdmission,
+    next_run_no_after, refill_iterators, select_next_iterator, CompactionAdmission,
     CompactionUnitOutcome, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
     MetadataCompactionCancellation, MetadataCompactionPolicy, MetadataFamilyGroup,
     MetadataRunPolicy, PublicationReport, PublishedManifest, RetentionTarget, SegmentBlockLoader,
     SegmentRowIterator,
 };
+pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,

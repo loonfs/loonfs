@@ -16,7 +16,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -199,7 +198,7 @@ fn lost_wal_put_ack_store(
 
 fn test_runtime_core(
     store: SharedStore,
-    metadata_run_policy: loonfs_core::MetadataRunPolicy,
+    run_policy: loonfs_core::MetadataRunPolicy,
 ) -> RuntimeCore {
     let execution_budget = ExecutionBudget::default();
     let metadata_cache =
@@ -212,7 +211,7 @@ fn test_runtime_core(
             manifest_revalidation_interval_ms: 1000,
             max_staleness_ms: 1000,
             consistency: crate::ReadConsistency::Eventual,
-            metadata_run_policy,
+            run_policy,
             trace_mode: TraceMode::Remote,
             store_kind: Some(ConfiguredObjectStoreKind::LocalFs),
         },
@@ -1402,7 +1401,8 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         .expect("delete task")
         .expect("delete succeeds");
     assert_eq!(response.head_seq, ChangeSeq(2));
-    let statistics = loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)
+    let statistics = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_statistics()
         .await
         .expect("final statistics");
     assert_eq!(statistics.activity.mutations.get(), 2);
@@ -1449,24 +1449,21 @@ async fn deletion_folds_the_tail_with_the_configured_run_policy() {
         );
         recv_commit(receiver, name).await;
     }
-    let diagnostics = loonfs_core::cache::load_namespace_diagnostics(
-        store.as_ref(),
-        &namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("load namespace diagnostics");
+    let diagnostics = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_diagnostics()
+        .await
+        .expect("load namespace diagnostics");
     assert!(diagnostics.wal_tail_objects > 0, "the tail is unfolded");
 
     publisher
         .submit_delete(DeleteNamespaceOptions::default())
         .await
         .expect("delete");
-    let deleted =
-        loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
-            .await
-            .expect("load the deleted manifest")
-            .state;
+    let deleted = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("load the deleted manifest")
+        .state;
     let payload = deleted.envelope.payload();
     assert!(payload.status.is_deleted());
     let row_counts: Vec<u64> = payload
@@ -1854,7 +1851,8 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         .put_upload_content(&upload.upload_id, b"hello")
         .await
         .expect("stage content");
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&shared, &namespace_id)
+    let catalog = loonfs_core::test_support::namespace_store(&shared, &namespace_id)
+        .load_catalog_entry()
         .await
         .expect("load namespace catalog");
     let prepared_content = loonfs_core::content::prepare_existing_content_ref(
@@ -2130,15 +2128,15 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    append_wal_objects(
+    loonfs_core::test_support::NamespaceFixture::new(
         store.as_ref(),
         &namespace_id,
-        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
 
@@ -2194,15 +2192,15 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    append_wal_objects(
+    loonfs_core::test_support::NamespaceFixture::new(
         store.as_ref(),
         &namespace_id,
-        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("seed").expect("writer"),
             now_ms: 1_000,
         },
     )
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
     .await
     .expect("seed tail");
     let value = InlineContent::new(
@@ -2232,7 +2230,8 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .await
         .expect("publish");
     namespace_writer.wait_for_fold().await.expect("fold");
-    let folded = loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)
+    let folded = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_statistics()
         .await
         .expect("inline statistics");
     assert_eq!(
@@ -2279,7 +2278,8 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .expect("folded receipt");
     assert_eq!(store.count(OperationSelector::Put), 0);
     assert_eq!(
-        loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)
+        loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+            .load_statistics()
             .await
             .expect("after extraction and retry")
             .activity,
@@ -2312,15 +2312,15 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    append_wal_objects(
+    loonfs_core::test_support::NamespaceFixture::new(
         failing.as_ref(),
         &namespace_id,
-        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
 
@@ -2358,17 +2358,13 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
             .is_some_and(|objects| objects >= FOLD_AT_WAL_OBJECTS),
         "the failed fold kept the position"
     );
-    loonfs_core::fold_wal_tail(
-        failing.inner(),
-        None,
-        &namespace_id,
-        None,
-        &Deadline::start(Arc::new(loonfs_types::StdMonotonicTimer::default())),
-        loonfs_core::MetadataRunPolicy::default(),
-        &loonfs_core::test_support::content_writes(),
-    )
-    .await
-    .expect("another process folds the tail");
+    loonfs_core::test_support::namespace_store(failing.inner(), &namespace_id)
+        .fold_wal_tail(
+            None,
+            &Deadline::start(Arc::new(loonfs_types::StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("another process folds the tail");
     namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "after-fold",
@@ -2416,15 +2412,15 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
             .create_namespace(namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("bootstrap");
-        append_wal_objects(
+        loonfs_core::test_support::NamespaceFixture::new(
             blocking.as_ref(),
             namespace_id,
-            FOLD_AT_WAL_OBJECTS - 1,
             &MutationContext {
                 writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
             },
         )
+        .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
         .await
         .expect("seed the WAL tail below the fold threshold");
     }
@@ -2508,15 +2504,15 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
             .create_namespace(namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("bootstrap");
-        append_wal_objects(
+        loonfs_core::test_support::NamespaceFixture::new(
             recording.as_ref(),
             namespace_id,
-            FOLD_AT_WAL_OBJECTS - 1,
             &MutationContext {
                 writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
             },
         )
+        .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
         .await
         .expect("seed the WAL tail below the fold threshold");
     }
@@ -2591,15 +2587,15 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    append_wal_objects(
+    loonfs_core::test_support::NamespaceFixture::new(
         blocking.inner(),
         &namespace_id,
-        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
 
@@ -2632,10 +2628,10 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         publisher_state(&publisher).admission,
         PublisherAdmissionStatus::Deleted
     ));
-    let manifest =
-        loonfs_core::control::load_namespace_current_manifest(blocking.inner(), &namespace_id)
-            .await
-            .expect("manifest during fold");
+    let manifest = loonfs_core::test_support::namespace_store(blocking.inner(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest during fold");
     assert!(!manifest.state.envelope.payload().status.is_deleted());
 
     blocking.release();
@@ -2697,15 +2693,15 @@ async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
             .await
             .expect("bootstrap");
     }
-    append_wal_objects(
+    loonfs_core::test_support::NamespaceFixture::new(
         blocking.as_ref(),
         &folding,
-        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS - 1)
     .await
     .expect("seed the WAL tail below the fold threshold");
     let writer_folding = writer.open_namespace(&folding).expect("open namespace");
@@ -3416,7 +3412,8 @@ async fn current_manifest_no(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
 ) -> loonfs_types::ManifestNo {
-    loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
+    loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest")
         .state

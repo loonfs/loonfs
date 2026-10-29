@@ -28,10 +28,7 @@ impl Namespace<Writable> {
     )]
     pub async fn create_upload(&self) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(self
-            .engine()
-            .begin_upload(self.core.subject.as_ref())
-            .await?)
+        Ok(self.engine().begin_upload().await?)
     }
 
     /// Mints the content object a direct upload will write to and returns
@@ -50,10 +47,7 @@ impl Namespace<Writable> {
     )]
     pub async fn create_direct_put_upload_target(&self) -> Result<DirectPutUploadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(self
-            .engine()
-            .begin_direct_put_upload_target(self.core.subject.as_ref())
-            .await?)
+        Ok(self.engine().begin_direct_put_upload_target().await?)
     }
 
     /// Runs [`Self::create_direct_multipart_upload_target_with_options`]
@@ -89,7 +83,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine()
-            .begin_direct_multipart_upload_target(self.core.subject.as_ref(), *options)
+            .begin_direct_multipart_upload_target(*options)
             .await?)
     }
 
@@ -114,7 +108,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine()
-            .direct_multipart_part_targets(upload_id, self.core.subject.as_ref(), requested)
+            .direct_multipart_part_targets(upload_id, requested)
             .await?)
     }
 
@@ -140,10 +134,7 @@ impl Namespace<Writable> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        Ok(self
-            .engine()
-            .upload_content(upload_id, self.core.subject.as_ref(), bytes)
-            .await?)
+        Ok(self.engine().upload_content(upload_id, bytes).await?)
     }
 
     /// Uploads content that arrives as a stream into an upload session.
@@ -173,10 +164,7 @@ impl Namespace<Writable> {
         body: ByteStream,
     ) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(self
-            .engine()
-            .upload_content_stream(upload_id, self.core.subject.as_ref(), body)
-            .await?)
+        Ok(self.engine().upload_content_stream(upload_id, body).await?)
     }
 
     /// Completes an upload session and returns proof for later publication.
@@ -203,7 +191,7 @@ impl Namespace<Writable> {
             .await?;
         Ok(self
             .engine()
-            .complete_upload(&catalog, upload_id, self.core.subject.as_ref(), completion)
+            .complete_upload(&catalog, upload_id, completion)
             .await?)
     }
 
@@ -222,10 +210,7 @@ impl Namespace<Writable> {
     )]
     pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(self
-            .engine()
-            .abort_upload(upload_id, self.core.subject.as_ref())
-            .await?)
+        Ok(self.engine().abort_upload(upload_id).await?)
     }
 
     /// Returns an upload session and new evidence when the upload is complete.
@@ -244,9 +229,6 @@ impl Namespace<Writable> {
     pub async fn get_upload(&self, upload_id: &UploadId) -> Result<UploadSessionView> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(self
-            .engine()
-            .get_upload(upload_id, self.core.subject.as_ref())
-            .await?)
+        Ok(self.engine().get_upload(upload_id).await?)
     }
 }

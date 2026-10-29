@@ -6,7 +6,7 @@ use crate::control_object::{
 };
 use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
-use crate::namespace::control::load_current_manifest;
+use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -101,63 +101,66 @@ pub(crate) fn pin_key_ids(
     Ok((namespace_id, pin_id))
 }
 
-pub(crate) async fn load_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    pin_id: &PinId,
-) -> Result<Option<LoadedPin>> {
-    let object_key = pin(namespace_id, pin_id);
-    let loaded = load_pin_at_key(store, &object_key).await;
-    match loaded {
-        Ok(loaded) => Ok(Some(loaded)),
-        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
-        Err(error) => Err(CoreError::ControlObjectLoad(error)),
+impl<S: ObjectStore> NamespaceStore<S> {
+    pub(crate) async fn load_pin(&self, pin_id: &PinId) -> Result<Option<LoadedPin>> {
+        let object_key = pin(&self.namespace_id, pin_id);
+        let loaded = load_pin_at_key(&self.store, &object_key).await;
+        match loaded {
+            Ok(loaded) => Ok(Some(loaded)),
+            Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
+            Err(error) => Err(CoreError::ControlObjectLoad(error)),
+        }
     }
-}
 
-/// Loads the user pin `pin_id`. A missing pin, or a fork pin, returns
-/// `snapshot_not_found`, because only a user pin is a snapshot.
-pub(crate) async fn load_user_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    pin_id: &PinId,
-) -> Result<LoadedPin> {
-    load_pin(store, namespace_id, pin_id)
-        .await?
-        .filter(|loaded| matches!(loaded.state.owner, PinOwner::User { .. }))
-        .ok_or_else(|| CoreError::SnapshotNotFound {
-            snapshot_id: pin_id.clone(),
-        })
-}
+    /// Loads the user pin `pin_id`. A missing pin, or a fork pin, returns
+    /// `snapshot_not_found`, because only a user pin is a snapshot.
+    pub(crate) async fn load_user_pin(&self, pin_id: &PinId) -> Result<LoadedPin> {
+        self.load_pin(pin_id)
+            .await?
+            .filter(|loaded| matches!(loaded.state.owner, PinOwner::User { .. }))
+            .ok_or_else(|| CoreError::SnapshotNotFound {
+                snapshot_id: pin_id.clone(),
+            })
+    }
 
-pub(crate) async fn delete_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    pin_id: &PinId,
-) -> Result<()> {
-    let object_key = pin(namespace_id, pin_id);
-    store
-        .delete(&object_key)
-        .await
-        .map_err(|error| CoreError::store(&object_key, &error))
-}
+    pub(crate) async fn delete_pin(&self, pin_id: &PinId) -> Result<()> {
+        let object_key = pin(&self.namespace_id, pin_id);
+        self.store
+            .delete(&object_key)
+            .await
+            .map_err(|error| CoreError::store(&object_key, &error))
+    }
 
-/// Deletes a pin whose creation failed with `error`. A failed delete is
-/// only logged, and collection removes the pin later.
-pub(crate) async fn delete_failed_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    pin_id: &PinId,
-    error: &CoreError,
-) {
-    if let Err(cleanup_error) = delete_pin(store, namespace_id, pin_id).await {
-        tracing::warn!(
-            namespace_id = %namespace_id,
-            pin_id = %pin_id,
-            original_error = %error,
-            cleanup_error = %cleanup_error,
-            "failed to delete a pin after its creation failed"
-        );
+    /// Deletes a pin whose creation failed with `error`. A failed delete is
+    /// only logged, and collection removes the pin later.
+    pub(crate) async fn delete_failed_pin(&self, pin_id: &PinId, error: &CoreError) {
+        if let Err(cleanup_error) = self.delete_pin(pin_id).await {
+            tracing::warn!(
+                namespace_id = %self.namespace_id,
+                pin_id = %pin_id,
+                original_error = %error,
+                cleanup_error = %cleanup_error,
+                "failed to delete a pin after its creation failed"
+            );
+        }
+    }
+
+    pub(crate) async fn verify_pin_basis(
+        &self,
+        record: &PinPayload,
+    ) -> Result<PinBasisVerification> {
+        let manifest = self.load_current_manifest().await?;
+        let pinned = record.manifest();
+        Ok(
+            if manifest.state.envelope.payload().status.is_deleted()
+                || manifest.state.manifest().manifest_no != pinned.manifest_no
+                || manifest.state.manifest().payload_checksum != pinned.payload_checksum
+            {
+                PinBasisVerification::Invalid
+            } else {
+                PinBasisVerification::Verified
+            },
+        )
     }
 }
 
@@ -165,24 +168,6 @@ pub(crate) async fn delete_failed_pin<S: ObjectStore + ?Sized>(
 pub(crate) enum PinBasisVerification {
     Verified,
     Invalid,
-}
-
-pub(crate) async fn verify_pin_basis<S: ObjectStore + ?Sized>(
-    store: &S,
-    record: &PinPayload,
-) -> Result<PinBasisVerification> {
-    let manifest = load_current_manifest(store, &record.namespace_id).await?;
-    let pinned = record.manifest();
-    Ok(
-        if manifest.state.envelope.payload().status.is_deleted()
-            || manifest.state.manifest().manifest_no != pinned.manifest_no
-            || manifest.state.manifest().payload_checksum != pinned.payload_checksum
-        {
-            PinBasisVerification::Invalid
-        } else {
-            PinBasisVerification::Verified
-        },
-    )
 }
 
 #[cfg(test)]

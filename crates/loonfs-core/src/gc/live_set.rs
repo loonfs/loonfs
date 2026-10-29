@@ -4,20 +4,21 @@
 //! provider timestamp.
 
 use super::charged_set::{Charge, ChargedMap, ChargedSet, PassMemory};
-use super::pins::{sweep_pin, GraceAge, PinSweep};
+use super::pins::{GraceAge, PinSweep};
 use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
-use super::uploads::{load_upload_sessions, ListedUploadSession};
+use super::uploads::ListedUploadSession;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::heap_bytes::manifest_heap_bytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS;
 use crate::manifest::cache::read_working_memory;
-use crate::manifest::{load_namespace_manifest_envelope_if_present, MetadataSegmentCache};
-use crate::namespace::control::{load_current_manifest_with_hint, CurrentManifest, LoadedManifest};
-use crate::namespace::read_anchor::{load_read_anchor_from_manifest, project_anchor_tail};
+use crate::manifest::load_namespace_manifest_envelope_if_present;
+use crate::namespace::control::{CurrentManifest, LoadedManifest};
+use crate::namespace::read_anchor::project_anchor_tail;
+use crate::namespace::store::NamespaceStore;
 use crate::pin::record::pin_key_ids;
-use crate::time::{MonotonicTimer, Observation};
+use crate::time::Observation;
 use crate::wal::{live_folded_wal_no, object_is_required};
 use futures::{future, stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{
@@ -60,41 +61,47 @@ pub(super) struct LiveSet {
 impl LiveSet {
     /// Loads roots, their segments, and in an active namespace the content they
     /// refer to, including superseded manifests with a young or undated successor
-    /// regardless of the discovery hint. Reads go through `segment_cache`, with
+    /// regardless of the discovery hint. Reads go through the namespace's
+    /// segment cache, with
     /// up to `STORE_READS_IN_FLIGHT` root manifests loading at once, and the
     /// object keys, content IDs, completed sessions, and manifests that the
     /// pass keeps are charged to its read working memory as they arrive. The
     /// pass doesn't read the record of a completed session that
     /// `session_cache` has.
-    pub(super) async fn load<S: ObjectStore + ?Sized>(
-        store: &S,
-        segment_cache: Option<&MetadataSegmentCache>,
+    pub(super) async fn load<S: ObjectStore>(
+        namespace: &NamespaceStore<S>,
         session_cache: Option<&CompletedUploadSessionCache>,
-        namespace_id: &NamespaceId,
         grace_window_ms: u64,
         context: &MutationContext,
-        timer: Arc<dyn MonotonicTimer>,
     ) -> Result<Self> {
-        let observed = Observation::now(timer);
-        let (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
+        let namespace_id = &namespace.namespace_id;
+        let observed = Observation::now(Arc::clone(&namespace.timer));
+        let (manifest, hint) = namespace.load_current_manifest_with_hint().await?;
         // Sessions are listed before the WAL tail is read. A session this pass
         // misses is newer than the pass, or it ended before the tail read and
         // the tail or a rooted manifest names every commit of its content.
-        let memory = PassMemory::new(namespace_id, read_working_memory(segment_cache));
+        let memory = PassMemory::new(
+            namespace_id,
+            read_working_memory(Some(namespace.segment_cache.as_ref())),
+        );
         let mut content_ids = ChargedSet::new(&memory);
         let mut completed_sessions = ChargedMap::new(&memory);
         if !manifest.state.envelope.payload().status.is_deleted() {
-            load_upload_sessions(store, namespace_id, session_cache, |listed| match listed {
-                ListedUploadSession::Completed { upload_id, session } => {
-                    content_ids.insert(session.content_id.clone())?;
-                    completed_sessions.insert(upload_id, session)
-                }
-                ListedUploadSession::Incomplete { content_id } => content_ids.insert(content_id),
-            })
-            .await?;
+            namespace
+                .load_upload_sessions(session_cache, |listed| match listed {
+                    ListedUploadSession::Completed { upload_id, session } => {
+                        content_ids.insert(session.content_id.clone())?;
+                        completed_sessions.insert(upload_id, session)
+                    }
+                    ListedUploadSession::Incomplete { content_id } => {
+                        content_ids.insert(content_id)
+                    }
+                })
+                .await?;
         }
-        let anchor =
-            load_read_anchor_from_manifest(store, namespace_id, manifest, hint, observed).await?;
+        let anchor = namespace
+            .load_read_anchor_from_manifest(manifest, hint, observed)
+            .await?;
         let head = anchor.manifest.state.envelope.payload();
         let mut live = Self {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
@@ -121,7 +128,7 @@ impl LiveSet {
         // a deleted owner is still authorized against its final access state.
         live.protect_manifest(&anchor.manifest)?;
         if live.current_tombstone.is_none() {
-            let tail = project_anchor_tail(store, segment_cache, &anchor)?;
+            let tail = project_anchor_tail(&namespace.store, &namespace.segment_cache, &anchor)?;
             for revision in tail.revisions() {
                 live.content_ids
                     .insert(revision.content_ref.content_id.clone())?;
@@ -135,10 +142,10 @@ impl LiveSet {
             }
         }
         let mut rooted = BTreeSet::from([head.manifest_no]);
-        live.load_pinned_manifests(store, namespace_id, grace_window_ms, context, &mut rooted)
+        live.load_pinned_manifests(namespace, grace_window_ms, context, &mut rooted)
             .await?;
         let prefix = metadata_manifest_prefix(namespace_id);
-        let mut listing = store.list_entries_from_stream(&prefix, None);
+        let mut listing = namespace.store.list_entries_from_stream(&prefix, None);
         let mut listed_manifests = BTreeMap::new();
         while let Some(entry) = listing
             .next()
@@ -163,7 +170,7 @@ impl LiveSet {
         // Another collector can delete a listed manifest after the listing, and
         // a manifest that's gone needs no protection.
         let mut loads = pin!(stream::iter(superseded)
-            .map(|manifest_no| load_root_manifest(store, namespace_id, manifest_no))
+            .map(|manifest_no| namespace.load_root_manifest(manifest_no))
             .buffered(STORE_READS_IN_FLIGHT));
         while let Some(manifest) = loads.try_next().await? {
             if let Some(manifest) = manifest {
@@ -180,21 +187,21 @@ impl LiveSet {
     /// The first listed pin for a manifest number loads that manifest, and
     /// later pins for the number use the result. A pin whose manifest is
     /// missing fails the pass unless pin cleanup would delete it.
-    async fn load_pinned_manifests<S: ObjectStore + ?Sized>(
+    async fn load_pinned_manifests<S: ObjectStore>(
         &mut self,
-        store: &S,
-        namespace_id: &NamespaceId,
+        namespace: &NamespaceStore<S>,
         grace_window_ms: u64,
         context: &MutationContext,
         rooted: &mut BTreeSet<ManifestNo>,
     ) -> Result<()> {
-        let prefix = pin_prefix(namespace_id);
+        let prefix = pin_prefix(&namespace.namespace_id);
         let mut has_pins = false;
         let mut requested = rooted.clone();
         {
             // `try_buffered` keeps listing order, so a pin that reuses an
             // earlier pin's load arrives after that load's result.
-            let mut pins = pin!(store
+            let mut pins = pin!(namespace
+                .store
                 .list_prefix_stream(&prefix)
                 .map_err(|error| CoreError::store(&prefix, &error))
                 .try_filter_map(|key| {
@@ -208,7 +215,7 @@ impl LiveSet {
                     let first = requested.insert(manifest_no);
                     async move {
                         let loaded = if first {
-                            Some(load_root_manifest(store, namespace_id, manifest_no).await?)
+                            Some(namespace.load_root_manifest(manifest_no).await?)
                         } else {
                             None
                         };
@@ -230,9 +237,16 @@ impl LiveSet {
                 // manifest is checked on its own, because another pin for the
                 // number can still require retention when an earlier pin was
                 // deletable.
-                match sweep_pin(store, &key, grace_window_ms, self, context).await? {
+                match namespace
+                    .sweep_pin(&key, grace_window_ms, self, context)
+                    .await?
+                {
                     PinSweep::Retain { .. } => {
-                        return Err(missing_root_manifest(namespace_id, manifest_no, &key));
+                        return Err(missing_root_manifest(
+                            &namespace.namespace_id,
+                            manifest_no,
+                            &key,
+                        ));
                     }
                     PinSweep::Gone | PinSweep::DeleteUser | PinSweep::DeleteFork => {}
                 }
@@ -304,22 +318,24 @@ fn pinned_manifest_no(key: &str) -> Result<Option<ManifestNo>> {
     Ok(Some(pin_id.manifest_no()))
 }
 
-/// Loads one root manifest, or returns `None` when the manifest is missing.
-async fn load_root_manifest<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    manifest_no: ManifestNo,
-) -> Result<Option<LoadedManifest>> {
-    let envelope = load_namespace_manifest_envelope_if_present(store, namespace_id, &manifest_no)
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Loads one root manifest, or returns `None` when the manifest is missing.
+    async fn load_root_manifest(&self, manifest_no: ManifestNo) -> Result<Option<LoadedManifest>> {
+        let envelope = load_namespace_manifest_envelope_if_present(
+            &self.store,
+            &self.namespace_id,
+            &manifest_no,
+        )
         .await
         .map_err(MetadataProjectionLoadError::from)?;
-    Ok(envelope.map(|(envelope, manifest_bytes)| LoadedManifest {
-        object_key: metadata_manifest_object(namespace_id, &manifest_no),
-        manifest_bytes,
-        state: CurrentManifest {
-            envelope: Arc::new(envelope),
-        },
-    }))
+        Ok(envelope.map(|(envelope, manifest_bytes)| LoadedManifest {
+            object_key: metadata_manifest_object(&self.namespace_id, &manifest_no),
+            manifest_bytes,
+            state: CurrentManifest {
+                envelope: Arc::new(envelope),
+            },
+        }))
+    }
 }
 
 fn missing_root_manifest(

@@ -92,14 +92,8 @@ impl BatchDedup {
 }
 
 /// Prepares a request and resolves commit-ID reuse.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "publication carries the store and shared content write permits"
-)]
 pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
-    store: &S,
     content_writes: &crate::PermitPool,
-    namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
     session: &PublishPlanningSession<'_>,
     candidate: &CommitCandidate,
@@ -107,6 +101,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     time: CandidateTime,
     dedup: &mut BatchDedup,
 ) -> CandidateAdmission {
+    let namespace_id = &view.head().namespace_id;
     if let Err(error) =
         Authorizer::for_request(namespace_id, &view.head().access, candidate.authority())
     {
@@ -149,7 +144,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     let mut allocation = session.begin_candidate();
     match session
         .prepare_commit(
-            store,
+            view.store(),
             content_writes,
             candidate,
             semantic_identity,

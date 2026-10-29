@@ -4,7 +4,6 @@ use super::*;
 use crate::cache::{
     DecodedBlockCacheStats, HeadAndWalTailCache, MetadataSegmentCache, WalTailCacheKey,
 };
-use crate::namespace::read_anchor::load_read_anchor;
 use crate::storage::content::{ContentLocation, DurableContentValidationError, StreamRange};
 use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_objectstore::keys::{content_blob, wal_object};
@@ -29,7 +28,8 @@ async fn fresh_context(
     store: &RecordingStore<LocalFsStore>,
     namespace_id: &NamespaceId,
 ) -> RuntimeReadContext {
-    let loaded = load_read_anchor(store, namespace_id, crate::test_support::observed_now())
+    let loaded = crate::test_support::namespace_store(store, namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("read basis");
     let basis = loaded.basis();
@@ -52,35 +52,38 @@ fn assert_no_content_requests(store: &RecordingStore<LocalFsStore>) {
 async fn every_read_verifies_tail_content_without_requesting_an_object() {
     let (_directory, store, mut publisher, mutation_context) = setup().await;
     let values = vec![
-        inline(&publisher.namespace_id, Bytes::from_static(b"inline bytes")),
-        inline(&publisher.namespace_id, Bytes::new()),
+        inline(
+            &publisher.namespace.namespace_id,
+            Bytes::from_static(b"inline bytes"),
+        ),
+        inline(&publisher.namespace.namespace_id, Bytes::new()),
     ];
     publish(
         &mut publisher,
-        &store,
         &mutation_context,
         candidate("read", values.clone()),
     )
     .await
     .expect("publish");
-    let engine = NamespaceEngine::reader(
+    let engine = NamespaceEngine::reader(crate::test_support::namespace_store(
         &store,
-        publisher.namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+        &publisher.namespace.namespace_id,
+    ));
     for (index, value) in values.iter().enumerate() {
         let path = format!("/read-{index}");
-        let inode_id = load_current_metadata_view(&store, &publisher.namespace_id)
-            .await
-            .expect("view")
-            .resolve_path(
-                &path,
-                AttributeInclusion::Omit,
-                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
-            )
-            .await
-            .expect("entry")
-            .inode_id;
+        let inode_id =
+            crate::test_support::namespace_store(&store, &publisher.namespace.namespace_id)
+                .load_current_metadata_view()
+                .await
+                .expect("view")
+                .resolve_path(
+                    &path,
+                    AttributeInclusion::Omit,
+                    &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                )
+                .await
+                .expect("entry")
+                .inode_id;
         for method in [
             "path",
             "revision",
@@ -90,7 +93,7 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
             "inode_stream",
             "reference",
         ] {
-            let context = fresh_context(&store, &publisher.namespace_id).await;
+            let context = fresh_context(&store, &publisher.namespace.namespace_id).await;
             store.reset();
             let bytes = match method {
                 "path" => {
@@ -184,10 +187,12 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
 #[tokio::test]
 async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     let (_directory, store, mut publisher, mutation_context) = setup().await;
-    let value = inline(&publisher.namespace_id, Bytes::from_static(b"owned bytes"));
+    let value = inline(
+        &publisher.namespace.namespace_id,
+        Bytes::from_static(b"owned bytes"),
+    );
     let result = publisher
         .publish_batch(
-            &store,
             [candidate("owned", vec![value.clone()])],
             &mutation_context,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -223,11 +228,10 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
             .bytes
             .as_ptr()
     );
-    let engine = NamespaceEngine::reader(
+    let engine = NamespaceEngine::reader(crate::test_support::namespace_store(
         &store,
-        publisher.namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+        &publisher.namespace.namespace_id,
+    ));
     store.reset();
     assert_eq!(
         engine
@@ -246,7 +250,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     );
     assert!(store.snapshot().iter().all(|operation| !operation
         .key()
-        .starts_with(&wal_prefix(&publisher.namespace_id))));
+        .starts_with(&wal_prefix(&publisher.namespace.namespace_id))));
     assert_no_content_requests(&store);
     assert_eq!(
         context.head_and_wal_tail_cache.tail_stats(),
@@ -257,10 +261,12 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     let old_tail = Arc::as_ptr(&tail) as usize;
     // Holding the tail here would make the publish copy it.
     drop((tail, context));
-    let later = inline(&publisher.namespace_id, Bytes::from_static(b"later"));
+    let later = inline(
+        &publisher.namespace.namespace_id,
+        Bytes::from_static(b"later"),
+    );
     let published = publisher
         .publish_batch(
-            &store,
             [candidate("later", vec![later])],
             &mutation_context,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -277,13 +283,15 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
 
 #[tokio::test]
 async fn a_publish_shares_every_earlier_chunk_with_a_tail_a_reader_holds() {
-    let (_directory, store, mut publisher, mutation_context) = setup().await;
+    let (_directory, _store, mut publisher, mutation_context) = setup().await;
     let mut tails = Vec::new();
     for name in ["first", "second"] {
-        let value = inline(&publisher.namespace_id, Bytes::from_static(b"bytes"));
+        let value = inline(
+            &publisher.namespace.namespace_id,
+            Bytes::from_static(b"bytes"),
+        );
         let published = publisher
             .publish_batch(
-                &store,
                 [candidate(name, vec![value])],
                 &mutation_context,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -308,21 +316,22 @@ async fn a_publish_shares_every_earlier_chunk_with_a_tail_a_reader_holds() {
 #[tokio::test]
 async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     let (_directory, store, mut publisher, mutation_context) = setup().await;
-    let value = inline(&publisher.namespace_id, Bytes::from_static(b"copied"));
+    let value = inline(
+        &publisher.namespace.namespace_id,
+        Bytes::from_static(b"copied"),
+    );
     publish(
         &mut publisher,
-        &store,
         &mutation_context,
         candidate("source", vec![value.clone()]),
     )
     .await
     .expect("publish");
-    let mut context = fresh_context(&store, &publisher.namespace_id).await;
-    let engine = NamespaceEngine::reader(
+    let mut context = fresh_context(&store, &publisher.namespace.namespace_id).await;
+    let engine = NamespaceEngine::reader(crate::test_support::namespace_store(
         &store,
-        publisher.namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+        &publisher.namespace.namespace_id,
+    ));
     engine
         .read_file("/source-0", &context, None)
         .await
@@ -337,7 +346,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
             precondition: DestinationPrecondition::default(),
         },
     ));
-    publish(&mut publisher, &store, &mutation_context, copy)
+    publish(&mut publisher, &mutation_context, copy)
         .await
         .expect("copy");
     store.reset();
@@ -369,10 +378,12 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
         publisher.wal_fold_input().expect("publish tail").tail_state
     );
 
-    let later = inline(&publisher.namespace_id, Bytes::from_static(b"later"));
+    let later = inline(
+        &publisher.namespace.namespace_id,
+        Bytes::from_static(b"later"),
+    );
     publish(
         &mut publisher,
-        &store,
         &mutation_context,
         candidate("later", vec![later]),
     )
@@ -404,21 +415,22 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
 #[tokio::test]
 async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write() {
     let (_directory, store, mut publisher, mutation_context) = setup().await;
-    let value = inline(&publisher.namespace_id, Bytes::from_static(b"local"));
+    let value = inline(
+        &publisher.namespace.namespace_id,
+        Bytes::from_static(b"local"),
+    );
     publish(
         &mut publisher,
-        &store,
         &mutation_context,
         candidate("local", vec![value.clone()]),
     )
     .await
     .expect("publish");
-    let context = fresh_context(&store, &publisher.namespace_id).await;
-    let engine = NamespaceEngine::reader(
+    let context = fresh_context(&store, &publisher.namespace.namespace_id).await;
+    let engine = NamespaceEngine::reader(crate::test_support::namespace_store(
         &store,
-        publisher.namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+        &publisher.namespace.namespace_id,
+    ));
     let foreign = ContentRef::blob_v1(
         NamespaceId::parse("foreign").expect("owner"),
         value.content_ref().content_id.clone(),
@@ -441,7 +453,8 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
     );
     assert_no_content_requests(&store);
     assert_no_writes(&store);
-    let stored = store_bytes_as_content(&store, &publisher.namespace_id, b"object")
+    let stored = crate::test_support::namespace_store(&store, &publisher.namespace.namespace_id)
+        .store_bytes_as_content(b"object")
         .await
         .expect("store object");
     let candidate = CommitCandidate::prepared(
@@ -455,10 +468,10 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
             stored.content_ref().clone(),
         )],
     );
-    publish(&mut publisher, &store, &mutation_context, candidate)
+    publish(&mut publisher, &mutation_context, candidate)
         .await
         .expect("publish object");
-    let context = fresh_context(&store, &publisher.namespace_id).await;
+    let context = fresh_context(&store, &publisher.namespace.namespace_id).await;
     let path_target = engine
         .direct_download_target("/object", None, 0, &context)
         .await
@@ -481,10 +494,12 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
 #[tokio::test]
 async fn inline_checksum_failures_match_object_validation() {
     let (_directory, store, mut publisher, mutation_context) = setup().await;
-    let value = inline(&publisher.namespace_id, Bytes::from_static(b"right"));
+    let value = inline(
+        &publisher.namespace.namespace_id,
+        Bytes::from_static(b"right"),
+    );
     publish(
         &mut publisher,
-        &store,
         &mutation_context,
         candidate("valid", vec![value.clone()]),
     )
@@ -493,7 +508,7 @@ async fn inline_checksum_failures_match_object_validation() {
     let input = publisher.wal_fold_input().expect("head");
     let bytes = store
         .get(
-            &wal_object(&publisher.namespace_id, &input.head.wal_no),
+            &wal_object(&publisher.namespace.namespace_id, &input.head.wal_no),
             None,
         )
         .await
@@ -525,7 +540,7 @@ async fn inline_checksum_failures_match_object_validation() {
     }
     record.inline_content[0].content_id = corrupt_ref.content_id.clone();
     record.inline_content[0].bytes = b"wrong".to_vec();
-    let key = wal_object(&publisher.namespace_id, &payload.wal_no);
+    let key = wal_object(&publisher.namespace.namespace_id, &payload.wal_no);
     let bytes = loonfs_types::format::wal::encode_wal_object_envelope_zstd(payload)
         .expect("codec does not hash")
         .into_bytes();
@@ -533,12 +548,11 @@ async fn inline_checksum_failures_match_object_validation() {
         .put(&key, Bytes::from(bytes), PutMode::CreateIfAbsent)
         .await
         .expect("next WAL");
-    let context = fresh_context(&store, &publisher.namespace_id).await;
-    let engine = NamespaceEngine::reader(
+    let context = fresh_context(&store, &publisher.namespace.namespace_id).await;
+    let engine = NamespaceEngine::reader(crate::test_support::namespace_store(
         &store,
-        publisher.namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+        &publisher.namespace.namespace_id,
+    ));
     store.reset();
     let error = engine
         .read_file("/valid-0", &context, None)
@@ -554,13 +568,15 @@ async fn inline_checksum_failures_match_object_validation() {
     assert_no_writes(&store);
     assert_eq!(store.counts().heads, 1);
     assert_eq!(store.counts().gets, 0);
-    let fold_error = fold_wal(&store, &publisher.namespace_id)
-        .await
-        .expect_err("corrupt tail");
+    let fold_error =
+        crate::test_support::namespace_store(&store, &publisher.namespace.namespace_id)
+            .fold_wal()
+            .await
+            .expect_err("corrupt tail");
     assert_eq!(fold_error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
     assert_eq!(fold_error.to_string(), error.to_string());
     assert_no_writes(&store);
-    let key = content_blob(&publisher.namespace_id, &corrupt_ref.content_id);
+    let key = content_blob(&publisher.namespace.namespace_id, &corrupt_ref.content_id);
     store
         .put(&key, Bytes::from_static(b"wrong"), PutMode::CreateIfAbsent)
         .await
@@ -580,37 +596,35 @@ async fn inline_checksum_failures_match_object_validation() {
 async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() {
     let (_directory, store, mut publisher, context) = setup().await;
     let values = vec![
-        inline(&publisher.namespace_id, Bytes::new()),
-        inline(&publisher.namespace_id, Bytes::from_static(b"materialized")),
+        inline(&publisher.namespace.namespace_id, Bytes::new()),
+        inline(
+            &publisher.namespace.namespace_id,
+            Bytes::from_static(b"materialized"),
+        ),
     ];
-    publish(
-        &mut publisher,
-        &store,
-        &context,
-        candidate("fold", values.clone()),
-    )
-    .await
-    .expect("publish");
-    let folded = fold_wal(&store, &publisher.namespace_id)
+    publish(&mut publisher, &context, candidate("fold", values.clone()))
+        .await
+        .expect("publish");
+    let folded = crate::test_support::namespace_store(&store, &publisher.namespace.namespace_id)
+        .fold_wal()
         .await
         .expect("fold");
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
     for delete_wal in [false, true] {
         if delete_wal {
             for object in store
-                .list_prefix(&wal_prefix(&publisher.namespace_id))
+                .list_prefix(&wal_prefix(&publisher.namespace.namespace_id))
                 .await
                 .expect("WAL")
             {
                 store.delete(&object).await.expect("delete folded WAL");
             }
         }
-        let context = fresh_context(&store, &publisher.namespace_id).await;
-        let engine = NamespaceEngine::reader(
+        let context = fresh_context(&store, &publisher.namespace.namespace_id).await;
+        let engine = NamespaceEngine::reader(crate::test_support::namespace_store(
             &store,
-            publisher.namespace_id.clone(),
-            std::sync::Arc::new(crate::test_support::content_writes()),
-        );
+            &publisher.namespace.namespace_id,
+        ));
         for (index, value) in values.iter().enumerate() {
             let path = format!("/fold-{index}");
             let location = engine
@@ -657,7 +671,7 @@ fn content_gets(store: &RecordingStore<LocalFsStore>) -> Vec<(String, Option<(u6
 #[tokio::test]
 async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
     let (_directory, store, mut publisher, context) = setup().await;
-    let namespace_id = publisher.namespace_id.clone();
+    let namespace_id = publisher.namespace.namespace_id.clone();
     let (inode_id, original) = folded_file(&store, &mut publisher, &context, b"hello").await;
     commit_piece(
         &store,
@@ -670,11 +684,8 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
     )
     .await;
     let key = content_blob(&namespace_id, &original.content_id);
-    let engine = NamespaceEngine::reader(
-        &store,
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+    let engine =
+        NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
     let read_context = fresh_context(&store, &namespace_id).await;
 
     store.reset();
@@ -738,7 +749,7 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
 #[tokio::test]
 async fn a_reference_older_than_its_object_reads_only_its_prefix() {
     let (_directory, store, mut publisher, context) = setup().await;
-    let namespace_id = publisher.namespace_id.clone();
+    let namespace_id = publisher.namespace.namespace_id.clone();
     let (inode_id, original) = folded_file(&store, &mut publisher, &context, b"hello").await;
     commit_piece(
         &store,
@@ -750,7 +761,8 @@ async fn a_reference_older_than_its_object_reads_only_its_prefix() {
         None,
     )
     .await;
-    fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold the append");
     let key = loonfs_objectstore::keys::content_span(&namespace_id, &original.content_id, 0, 11);

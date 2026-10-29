@@ -775,11 +775,11 @@ impl<M: crate::Mode> Namespace<M> {
     pub async fn metadata(&self) -> Result<crate::NamespaceMetadata> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        let timer = Arc::clone(&self.core.inner.timer);
-        Ok(
-            loonfs_core::cache::load_namespace(self.core.store(), &self.namespace_id, timer)
-                .await?,
-        )
+        Ok(self
+            .core
+            .namespace_store(&self.namespace_id)
+            .load_metadata()
+            .await?)
     }
 
     /// Resolves an absolute path to its authoritative entry at the current

@@ -13,7 +13,8 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("no-heads").expect("namespace");
     folded_namespace_with_two_files(&store, &namespace_id).await;
-    let manifest = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("manifest");
     let successor = manifest
@@ -22,7 +23,8 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
         .manifest_no
         .successor()
         .expect("successor");
-    let hinted = crate::namespace::control::load_hint(&store, &namespace_id)
+    let hinted = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_hint()
         .await
         .expect("hint")
         .state
@@ -36,17 +38,10 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
         MetadataMapStore::aged(store, KeyPredicate::any()),
         KeyPredicate::any(),
     );
-    let report = gc_namespace(
-        &recorded,
-        None,
-        None,
-        &namespace_id,
-        &options(),
-        &context(GRACE_MS + 1),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("pass");
+    let report = crate::test_support::namespace_store(&recorded, &namespace_id)
+        .gc(None, &options(), &context(GRACE_MS + 1))
+        .await
+        .expect("pass");
     assert_eq!(report.deleted.content_objects, 1);
     let mut operations = recorded.snapshot();
     loonfs_test_support::stores::sort_head_runs(&mut operations);
@@ -67,44 +62,21 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
     expected.push(metadata_manifest_object(&namespace_id, &successor));
     assert_eq!(heads, expected);
     let target = NamespaceId::parse("retired-no-heads").expect("target");
-    let content_writes = Arc::new(crate::test_support::content_writes());
-    fork_namespace(
-        &recorded,
-        &namespace_id,
-        &target,
-        &loonfs_test_support::test_actor(),
-        None,
-        &context(1_000),
-        Arc::new(StdMonotonicTimer::default()),
-        Default::default(),
-        None,
-        &content_writes,
-    )
-    .await
-    .expect("fork");
-    delete_namespace(
-        &recorded,
-        &target,
-        DeleteNamespaceOptions::default(),
-        &context(1_000),
-        crate::manifest::MetadataRunPolicy::default(),
-        content_writes,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("delete target");
+    crate::test_support::NamespaceFixture::new(&recorded, &namespace_id, &context(1_000))
+        .engine()
+        .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
+        .await
+        .expect("fork");
+    crate::test_support::NamespaceFixture::new(&recorded, &target, &context(1_000))
+        .engine()
+        .delete_namespace(DeleteNamespaceOptions::default())
+        .await
+        .expect("delete target");
     recorded.reset();
-    let retired = gc_namespace(
-        &recorded,
-        None,
-        None,
-        &target,
-        &options(),
-        &context(1_000 + retirement_ms()),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("retire fork");
+    let retired = crate::test_support::namespace_store(&recorded, &target)
+        .gc(None, &options(), &context(1_000 + retirement_ms()))
+        .await
+        .expect("retire fork");
     assert_eq!(retired.deleted_checkpoints_by_owner.fork, 1);
     // The fork's hint lags at its first manifest, so discovery's probe finds
     // the manifest after it and probes one window above that, and a tombstone
@@ -120,7 +92,8 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("listed-ages").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
-    create(&store, &namespace_id, &context(1_000))
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+        .create()
         .await
         .expect("namespace");
     let undated_key = content_blob(&namespace_id, &loonfs_types::ContentId::generate());
@@ -134,17 +107,10 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
     let aged = MetadataMapStore::aged(store, KeyPredicate::any());
     let undated = MetadataMapStore::without_last_modified(aged, KeyPredicate::exact(&undated_key));
     let recorded = RecordingStore::new(undated, KeyPredicate::any());
-    let report = gc_namespace(
-        &recorded,
-        None,
-        None,
-        &namespace_id,
-        &options(),
-        &context(GRACE_MS + 1),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("pass");
+    let report = crate::test_support::namespace_store(&recorded, &namespace_id)
+        .gc(None, &options(), &context(GRACE_MS + 1))
+        .await
+        .expect("pass");
     assert_eq!(report.retained.no_provider_timestamp, 1);
     assert_eq!(report.deleted.content_objects, 1);
     let deleted: Vec<_> = recorded
@@ -179,9 +145,7 @@ fn layout_segments(manifest: &crate::namespace::control::LoadedManifest) -> BTre
 
 #[tokio::test]
 async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments() {
-    use crate::manifest::{compact_unit, fold_wal, CompactionUnitOutcome};
-    use crate::namespace::control::load_current_manifest;
-    use crate::namespace::writer_epoch::acquire_writer_epoch;
+    use crate::manifest::CompactionUnitOutcome;
 
     for own_runs in [false, true] {
         let directory = tempdir().expect("directory");
@@ -190,7 +154,8 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::any(),
         ));
-        create(&store, &namespace_id, &context(1_000))
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+            .create()
             .await
             .expect("namespace");
         for name in ["one", "two"] {
@@ -202,24 +167,29 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                 &context(1_000),
             )
             .await;
-            fold_wal(&store, &namespace_id).await.expect("fold");
+            crate::test_support::namespace_store(&store, &namespace_id)
+                .fold_wal()
+                .await
+                .expect("fold");
         }
-        let previous = load_current_manifest(&store, &namespace_id)
+        let previous = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("previous");
         if own_runs {
             for _ in 0..16 {
-                let outcome = compact_unit(
+                let outcome = crate::test_support::NamespaceFixture::new(
                     &store,
-                    None,
                     &namespace_id,
+                    &crate::test_support::mutation_context("test-writer", 0),
+                )
+                .engine()
+                .compact_metadata_unit(
                     None,
-                    loonfs_types::CompactorEpoch(0),
-                    Default::default(),
                     MetadataCompactionPolicy::CompactImmediately,
                     crate::manifest::CompactionAdmission::AnySize,
+                    loonfs_types::CompactorEpoch(0),
                     &crate::manifest::MetadataCompactionCancellation::default(),
-                    crate::test_support::std_timer(),
                 )
                 .await
                 .expect("compact");
@@ -234,11 +204,13 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                 }
             }
         } else {
-            acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+            crate::test_support::namespace_store(&store, &namespace_id)
+                .acquire_writer_epoch(&context(1_000))
                 .await
                 .expect("supersede");
         }
-        let current = load_current_manifest(&store, &namespace_id)
+        let current = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("current");
         assert_eq!(
@@ -255,33 +227,19 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             },
         );
         let rooted = RecordingStore::metadata_segments(recent);
-        gc_namespace(
-            &rooted,
-            None,
-            None,
-            &namespace_id,
-            &options(),
-            &context(now_ms),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("root predecessor");
+        crate::test_support::namespace_store(&rooted, &namespace_id)
+            .gc(None, &options(), &context(now_ms))
+            .await
+            .expect("root predecessor");
         // Reads within one pass have no fixed order, so both lists are
         // compared sorted.
         let mut rooted_reads = rooted.take_get_keys();
         rooted_reads.sort();
         let current_only = RecordingStore::metadata_segments(Arc::clone(&store));
-        gc_namespace(
-            &current_only,
-            None,
-            None,
-            &namespace_id,
-            &options(),
-            &context(now_ms),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("current only");
+        crate::test_support::namespace_store(&current_only, &namespace_id)
+            .gc(None, &options(), &context(now_ms))
+            .await
+            .expect("current only");
         let mut current_reads = current_only.take_get_keys();
         current_reads.sort();
         if own_runs {
@@ -304,8 +262,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
 /// more than one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
 #[tokio::test]
 async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_it() {
-    use crate::manifest::{compact_unit, fold_wal, CompactionUnitOutcome};
-    use crate::namespace::control::load_current_manifest;
+    use crate::manifest::CompactionUnitOutcome;
 
     const DELTA_RUNS: usize = 8;
     let directory = tempdir().expect("directory");
@@ -316,7 +273,8 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
     ));
     let setup_store = store.inner().inner();
     let setup = context(1_000);
-    create(setup_store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(setup_store, &namespace_id, &setup)
+        .create()
         .await
         .expect("namespace");
     let mut segments = BTreeSet::new();
@@ -331,8 +289,12 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
             &setup,
         )
         .await;
-        fold_wal(setup_store, &namespace_id).await.expect("fold");
-        let folded = load_current_manifest(setup_store, &namespace_id)
+        crate::test_support::namespace_store(setup_store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold");
+        let folded = crate::test_support::namespace_store(setup_store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("folded manifest");
         if index == 0 {
@@ -344,17 +306,18 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
     // Compacting the layouts replaces the base, so each fold's manifest except
     // the last adds a layout segment that no earlier root lists.
     while !matches!(
-        compact_unit(
+        crate::test_support::NamespaceFixture::new(
             setup_store,
-            None,
             &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0)
+        )
+        .engine()
+        .compact_metadata_unit(
             None,
-            loonfs_types::CompactorEpoch(0),
-            Default::default(),
             MetadataCompactionPolicy::CompactImmediately,
             crate::manifest::CompactionAdmission::AnySize,
-            &crate::manifest::MetadataCompactionCancellation::default(),
-            crate::test_support::std_timer(),
+            loonfs_types::CompactorEpoch(0),
+            &crate::manifest::MetadataCompactionCancellation::default()
         )
         .await
         .expect("compact"),
@@ -363,24 +326,18 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
             ..
         }
     ) {}
-    let current = load_current_manifest(setup_store, &namespace_id)
+    let current = crate::test_support::namespace_store(setup_store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("compacted manifest");
     assert!(layout_segments(&current).is_disjoint(&base));
     segments.extend(layout_segments(&current));
     // Every successor is younger than the grace, so every manifest is a root.
     let now_ms = now_after_newest_object(setup_store, &namespace_id, 1).await;
-    gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &options(),
-        &context(now_ms),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("pass");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &options(), &context(now_ms))
+        .await
+        .expect("pass");
 
     // Without a segment cache, each read of a small segment is one GET. A
     // merge per view would read the base once for each of the eight views

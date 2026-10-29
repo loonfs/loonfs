@@ -2,14 +2,16 @@
 //! readers discover state without listing, and maintenance publishes manifests
 //! without advancing the head sequence.
 
-use crate::common::{mutation_context, namespace_engine, read_context};
+use crate::common::{namespace_engine, read_context};
 use bytes::Bytes;
-use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
+use loonfs_core::content::prepare_existing_content_ref;
 use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
+use loonfs_core::test_support::mutation_context;
+use loonfs_core::test_support::namespace_store;
 use loonfs_core::time::Deadline;
-use loonfs_core::{gc_namespace, GcOptions};
+use loonfs_core::GcOptions;
 use loonfs_core::{CreateNamespaceOptions, MutationContext};
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -29,45 +31,43 @@ async fn put_file<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     context: &MutationContext,
 ) {
-    let content = store_bytes_as_content(store, namespace_id, bytes)
+    let content = namespace_store(store, namespace_id)
+        .store_bytes_as_content(bytes)
         .await
         .expect("stage content");
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
+    let catalog = namespace_store(store, namespace_id)
+        .load_catalog_entry()
         .await
         .expect("load namespace catalog");
     let prepared = prepare_existing_content_ref(store, &catalog, content.into_content_ref())
         .await
         .expect("prepare existing content");
     let content_ref = prepared.content_ref().clone();
-    NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    )
-    .publish_batch(
-        store,
-        vec![CommitCandidate::prepared(
-            CommitIntent::single(
-                loonfs_types::CommitId::generate(),
-                loonfs_test_support::test_actor(),
-                None,
-                FilesystemOperation::PutFile {
-                    path: AbsolutePath::parse(absolute_path).expect("path"),
-                    content: loonfs_types::FileContent::Ref(content_ref),
-                    behavior: loonfs_types::DestinationBehavior::NoReplace,
-                    expected_inode_id: None,
-                    expected_revision_no: None,
-                },
-            ),
-            vec![prepared],
-        )],
-        context,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .pop()
-    .expect("one result")
-    .expect("put file");
+    NamespaceCommitEngine::new(namespace_store(store, namespace_id))
+        .publish_batch(
+            vec![CommitCandidate::prepared(
+                CommitIntent::single(
+                    loonfs_types::CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse(absolute_path).expect("path"),
+                        content: loonfs_types::FileContent::Ref(content_ref),
+                        behavior: loonfs_types::DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
+                ),
+                vec![prepared],
+            )],
+            context,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("put file");
 }
 
 #[tokio::test]
@@ -99,19 +99,19 @@ async fn reads_commits_and_change_feed_never_list() {
         .expect("write junk");
 
     let baseline = store.count(OperationSelector::List);
-    let staged = engine.begin_upload(None).await.expect("begin upload");
+    let staged = engine.begin_upload().await.expect("begin upload");
     engine
-        .upload_content(&staged.upload_id, None, b"uploaded\n")
+        .upload_content(&staged.upload_id, b"uploaded\n")
         .await
         .expect("upload content");
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+    let catalog = namespace_store(&store, &namespace_id)
+        .load_catalog_entry()
         .await
         .expect("load namespace catalog");
     engine
         .complete_upload(
             &catalog,
             &staged.upload_id,
-            None,
             CompleteUploadBody::ServiceProxied {},
         )
         .await
@@ -191,13 +191,10 @@ async fn maintenance_preserves_writer_and_logical_head() {
     )
     .await;
 
-    let before = loonfs_core::control::load_namespace_read_state(
-        &store,
-        &namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("namespace state");
+    let before = namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("namespace state");
 
     engine
         .create_snapshot("test-pin".to_owned(), None)
@@ -207,42 +204,32 @@ async fn maintenance_preserves_writer_and_logical_head() {
         .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await
         .expect("advance floor");
-    gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &GcOptions::default(),
-        &context,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("gc pass");
-    let staged = engine.begin_upload(None).await.expect("second upload");
+    namespace_store(&store, &namespace_id)
+        .gc(None, &GcOptions::default(), &context)
+        .await
+        .expect("gc pass");
+    let staged = engine.begin_upload().await.expect("second upload");
     engine
-        .upload_content(&staged.upload_id, None, b"more\n")
+        .upload_content(&staged.upload_id, b"more\n")
         .await
         .expect("second upload content");
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+    let catalog = namespace_store(&store, &namespace_id)
+        .load_catalog_entry()
         .await
         .expect("load namespace catalog");
     engine
         .complete_upload(
             &catalog,
             &staged.upload_id,
-            None,
             CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("second upload complete");
 
-    let after = loonfs_core::control::load_namespace_read_state(
-        &store,
-        &namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("namespace state");
+    let after = namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("namespace state");
     assert_eq!(after.writer_epoch, before.writer_epoch);
     assert_eq!(after.writer, before.writer);
     assert_eq!(after.seq, before.seq);

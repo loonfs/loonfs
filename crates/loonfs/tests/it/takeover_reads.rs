@@ -136,7 +136,8 @@ impl Takeover {
     }
 
     async fn current_manifest_no(&self) -> ManifestNo {
-        loonfs_core::control::load_namespace_current_manifest(&self.store, &self.namespace_id)
+        loonfs_core::test_support::namespace_store(&self.store, &self.namespace_id)
+            .load_current_manifest()
             .await
             .expect("current manifest")
             .state

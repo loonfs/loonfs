@@ -8,7 +8,8 @@ use loonfs_types::{DeleteDirectoryBehavior, InodeId};
 
 /// The inode rows that the current manifest's segments store.
 async fn inode_rows(store: &dyn ObjectStore, namespace_id: &NamespaceId) -> u64 {
-    loonfs_core::control::load_namespace_statistics(store, namespace_id)
+    loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_statistics()
         .await
         .expect("load the namespace's statistics")
         .inode_record_count

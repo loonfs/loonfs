@@ -3,9 +3,10 @@
 #[cfg(any(test, feature = "test-support"))]
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::namespace::read_anchor::{load_live_read_anchor, load_read_anchor, NamespaceReadAnchor};
+use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
-use crate::time::{MonotonicTimer, Observation};
+use crate::namespace::store::NamespaceStore;
+use crate::time::Observation;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ForkBasis;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -24,31 +25,48 @@ pub struct NamespaceWalTailUsage {
     pub wal_tail_inline_bytes: usize,
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub async fn load_namespace_wal_tail_usage<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<NamespaceWalTailUsage> {
-    let loaded = crate::namespace::read_anchor::load_read_anchor(
-        store,
-        namespace_id,
-        crate::test_support::observed_now(),
-    )
-    .await
-    .map_err(CoreError::ControlObjectLoad)?;
-    super::control::ensure_namespace_live(&loaded.read_state)?;
-    let basis = crate::manifest::load_basis_metadata_segments(store, None, &loaded.basis()).await?;
-    let tail = crate::wal::replay_discovered_tail(
-        &basis.replay_head(&loaded.read_state),
-        &basis.base_state,
-        &loaded.tail,
-    )
-    .map_err(CoreError::MetadataProjection)?;
-    Ok(NamespaceWalTailUsage {
-        head_seq: loaded.read_state.seq,
-        wal_tail_objects: loaded.read_state.unfolded_wal_objects(),
-        wal_tail_inline_bytes: tail.projected_tail.inline_bytes(),
-    })
+impl<S: ObjectStore> NamespaceStore<S> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn load_wal_tail_usage(&self) -> Result<NamespaceWalTailUsage> {
+        let loaded = self
+            .load_read_anchor(crate::test_support::observed_now())
+            .await
+            .map_err(CoreError::ControlObjectLoad)?;
+        super::control::ensure_namespace_live(&loaded.read_state)?;
+        let basis =
+            crate::manifest::load_basis_metadata_segments(&self.store, None, &loaded.basis())
+                .await?;
+        let tail = crate::wal::replay_discovered_tail(
+            &basis.replay_head(&loaded.read_state),
+            &basis.base_state,
+            &loaded.tail,
+        )
+        .map_err(CoreError::MetadataProjection)?;
+        Ok(NamespaceWalTailUsage {
+            head_seq: loaded.read_state.seq,
+            wal_tail_objects: loaded.read_state.unfolded_wal_objects(),
+            wal_tail_inline_bytes: tail.projected_tail.inline_bytes(),
+        })
+    }
+
+    /// Loads the current state of a live namespace.
+    pub async fn load_metadata(&self) -> Result<NamespaceMetadata> {
+        let anchor = self
+            .load_read_anchor(Observation::now(Arc::clone(&self.timer)))
+            .await?;
+        super::control::ensure_namespace_live(&anchor.read_state)?;
+        Ok(namespace_metadata(
+            anchor.read_state,
+            anchor.manifest.state.envelope.payload(),
+        ))
+    }
+
+    pub async fn load_diagnostics(&self) -> Result<NamespaceStorageDiagnostics> {
+        let anchor = self
+            .load_live_read_anchor(Observation::now(Arc::clone(&self.timer)))
+            .await?;
+        Ok(NamespaceStorageDiagnostics::from(&anchor))
+    }
 }
 
 /// Namespace storage diagnostics that do not require checkpoint enumeration.
@@ -71,20 +89,6 @@ fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
         source_namespace_id: basis.manifest.owner_namespace_id,
         source_head_seq: basis.manifest.head_seq,
     })
-}
-
-/// Loads the current state of a live namespace.
-pub async fn load_namespace<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-    timer: Arc<dyn MonotonicTimer>,
-) -> Result<NamespaceMetadata> {
-    let anchor = load_read_anchor(store, expected_namespace_id, Observation::now(timer)).await?;
-    super::control::ensure_namespace_live(&anchor.read_state)?;
-    Ok(namespace_metadata(
-        anchor.read_state,
-        anchor.manifest.state.envelope.payload(),
-    ))
 }
 
 /// Returns the state of a namespace that this call created with `manifest`.
@@ -131,14 +135,4 @@ impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {
             wal_tail_newest_commit_at_ms: anchor.tail.newest_commit_at_ms(),
         }
     }
-}
-
-pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-    timer: Arc<dyn MonotonicTimer>,
-) -> Result<NamespaceStorageDiagnostics> {
-    let anchor =
-        load_live_read_anchor(store, expected_namespace_id, Observation::now(timer)).await?;
-    Ok(NamespaceStorageDiagnostics::from(&anchor))
 }

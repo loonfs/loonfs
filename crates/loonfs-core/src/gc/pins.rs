@@ -5,7 +5,7 @@ use super::live_set::LiveSet;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::fork::target_retains_pin;
+use crate::namespace::store::NamespaceStore;
 use crate::pin::record::load_pin_at_key;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{ForkBasis, PinOwner, PinPayload};
@@ -21,100 +21,101 @@ pub(super) enum PinSweep {
     },
 }
 
-pub(super) async fn sweep_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    grace_window_ms: u64,
-    live: &LiveSet,
-    context: &MutationContext,
-) -> Result<PinSweep> {
-    let record = match load_pin_at_key(store, key).await {
-        Ok(loaded) => loaded.state,
-        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(PinSweep::Gone),
-        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
-    };
-    let deletion = match &record.owner {
-        PinOwner::User { .. } => PinSweep::DeleteUser,
-        PinOwner::Fork {
-            target_namespace_id,
-        } => {
-            return Ok(
-                match fork_pin_is_retained(
-                    store,
-                    &record,
-                    target_namespace_id,
-                    grace_window_ms,
-                    context,
-                )
-                .await?
-                {
-                    false => PinSweep::DeleteFork,
-                    true => {
-                        tracing::debug!(object_key = key, "retaining fork pin");
-                        PinSweep::Retain {
-                            reclaimable_at_ms: None,
+impl<S: ObjectStore> NamespaceStore<S> {
+    pub(super) async fn sweep_pin(
+        &self,
+        key: &str,
+        grace_window_ms: u64,
+        live: &LiveSet,
+        context: &MutationContext,
+    ) -> Result<PinSweep> {
+        let record = match load_pin_at_key(&self.store, key).await {
+            Ok(loaded) => loaded.state,
+            Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(PinSweep::Gone),
+            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
+        };
+        let deletion = match &record.owner {
+            PinOwner::User { .. } => PinSweep::DeleteUser,
+            PinOwner::Fork {
+                target_namespace_id,
+            } => {
+                return Ok(
+                    match self
+                        .fork_pin_is_retained(
+                            &record,
+                            target_namespace_id,
+                            grace_window_ms,
+                            context,
+                        )
+                        .await?
+                    {
+                        false => PinSweep::DeleteFork,
+                        true => {
+                            tracing::debug!(object_key = key, "retaining fork pin");
+                            PinSweep::Retain {
+                                reclaimable_at_ms: None,
+                            }
                         }
-                    }
-                },
-            );
-        }
-    };
-    let expires_at_ms = record
-        .owner
-        .expires_at_ms()
-        .map(|expiry| expiry.saturating_add(grace_window_ms));
-    let ages_out_at_ms = live
-        .current_tombstone
-        .is_some()
-        .then(|| record.created_at_ms.saturating_add(grace_window_ms));
-    let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
-    Ok(match reclaimable_at_ms {
-        Some(at_ms) if context.now_ms >= at_ms => deletion,
-        _ => PinSweep::Retain { reclaimable_at_ms },
-    })
-}
-
-async fn fork_pin_is_retained<S: ObjectStore + ?Sized>(
-    store: &S,
-    record: &PinPayload,
-    target_namespace_id: &NamespaceId,
-    grace_window_ms: u64,
-    context: &MutationContext,
-) -> Result<bool> {
-    if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
-        return Ok(true);
+                    },
+                );
+            }
+        };
+        let expires_at_ms = record
+            .owner
+            .expires_at_ms()
+            .map(|expiry| expiry.saturating_add(grace_window_ms));
+        let ages_out_at_ms = live
+            .current_tombstone
+            .is_some()
+            .then(|| record.created_at_ms.saturating_add(grace_window_ms));
+        let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
+        Ok(match reclaimable_at_ms {
+            Some(at_ms) if context.now_ms >= at_ms => deletion,
+            _ => PinSweep::Retain { reclaimable_at_ms },
+        })
     }
-    match target_retains_pin(store, record, target_namespace_id).await {
-        Err(CoreError::ControlObjectLoad(error @ ControlObjectLoadError::Store { .. })) => {
-            tracing::warn!(
-                namespace_id = %target_namespace_id,
-                error = %error,
-                "the fork target did not read; retaining its source pin"
-            );
-            Ok(true)
-        }
-        result => result,
-    }
-}
 
-pub(super) async fn delete_source_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    basis: &ForkBasis,
-) -> Result<bool> {
-    let key =
-        loonfs_objectstore::keys::pin(&basis.manifest.owner_namespace_id, &basis.source_pin_id);
-    let present = store
-        .get_with_metadata(&key)
-        .await
-        .map_err(|error| CoreError::store(&key, &error))?
-        .is_some();
-    crate::pin::record::delete_pin(
-        store,
-        &basis.manifest.owner_namespace_id,
-        &basis.source_pin_id,
-    )
-    .await?;
-    Ok(present)
+    async fn fork_pin_is_retained(
+        &self,
+        record: &PinPayload,
+        target_namespace_id: &NamespaceId,
+        grace_window_ms: u64,
+        context: &MutationContext,
+    ) -> Result<bool> {
+        if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
+            return Ok(true);
+        }
+        match self
+            .with_namespace(target_namespace_id.clone())
+            .target_retains_pin(record)
+            .await
+        {
+            Err(CoreError::ControlObjectLoad(error @ ControlObjectLoadError::Store { .. })) => {
+                tracing::warn!(
+                    namespace_id = %target_namespace_id,
+                    error = %error,
+                    "the fork target did not read; retaining its source pin"
+                );
+                Ok(true)
+            }
+            result => result,
+        }
+    }
+
+    pub(super) async fn delete_source_pin(&self, basis: &ForkBasis) -> Result<bool> {
+        let key =
+            loonfs_objectstore::keys::pin(&basis.manifest.owner_namespace_id, &basis.source_pin_id);
+        let present = self
+            .store
+            .get_with_metadata(&key)
+            .await
+            .map_err(|error| CoreError::store(&key, &error))?
+            .is_some();
+        self.with_namespace(basis.manifest.owner_namespace_id.clone())
+            .delete_pin(&basis.source_pin_id)
+            .await?;
+        Ok(present)
+    }
 }
 
 /// Where one unreferenced candidate stands against the grace window.

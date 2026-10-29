@@ -3,15 +3,15 @@
 use super::index_block_load::segment_object_bytes;
 use super::publish::manifest_ref_for;
 use crate::error::{CoreError, Result};
-use crate::namespace::control::{load_current_manifest, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::store::NamespaceStore;
 use crate::pin::load_pin_basis;
-use crate::pin::record::load_pin;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::{
     ManifestActivity, MetadataRowFamily, NamespaceManifestEnvelope,
 };
-use loonfs_types::{NamespaceId, PinId, WalNo};
+use loonfs_types::{PinId, WalNo};
 use std::collections::BTreeMap;
 
 /// Statistics through the selected manifest's folded head. Newer WAL commits
@@ -49,31 +49,27 @@ impl LoadedManifest {
     }
 }
 
-/// Reads the current manifest's statistics without folding or scanning the WAL,
-/// metadata segments, content, or pins. Deleted namespaces retain final totals.
-pub async fn load_namespace_statistics<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<NamespaceStatistics> {
-    load_current_manifest(store, namespace_id)
-        .await?
-        .statistics()
-}
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Reads the current manifest's statistics without folding or scanning the WAL,
+    /// metadata segments, content, or pins. Deleted namespaces retain final totals.
+    pub async fn load_statistics(&self) -> Result<NamespaceStatistics> {
+        self.load_current_manifest().await?.statistics()
+    }
 
-/// Reads the exact manifest a pin of any owner references. Later namespace
-/// activity is excluded. A missing pin returns `snapshot_not_found`.
-pub async fn load_checkpoint_statistics<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    checkpoint_id: &PinId,
-) -> Result<NamespaceStatistics> {
-    let Some(loaded) = load_pin(store, namespace_id, checkpoint_id).await? else {
-        return Err(CoreError::SnapshotNotFound {
-            snapshot_id: checkpoint_id.clone(),
-        });
-    };
-    let pinned = load_pin_basis(store, None, loaded.state).await?;
-    manifest_statistics(pinned.segments.manifest(), pinned.segments.manifest_bytes)
+    /// Reads the exact manifest a pin of any owner references. Later namespace
+    /// activity is excluded. A missing pin returns `snapshot_not_found`.
+    pub async fn load_checkpoint_statistics(
+        &self,
+        checkpoint_id: &PinId,
+    ) -> Result<NamespaceStatistics> {
+        let Some(loaded) = self.load_pin(checkpoint_id).await? else {
+            return Err(CoreError::SnapshotNotFound {
+                snapshot_id: checkpoint_id.clone(),
+            });
+        };
+        let pinned = load_pin_basis(&self.store, &self.segment_cache, loaded.state).await?;
+        manifest_statistics(pinned.segments.manifest(), pinned.segments.manifest_bytes)
+    }
 }
 
 fn manifest_statistics(
@@ -104,7 +100,7 @@ fn manifest_statistics(
         }
     }
     Ok(NamespaceStatistics {
-        manifest: manifest_ref_for(&payload.namespace_id, manifest),
+        manifest: manifest_ref_for(manifest),
         manifest_bytes,
         segments_by_family,
         created_at_ms: payload.created_at_ms,

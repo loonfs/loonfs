@@ -1,19 +1,15 @@
 //! Change-feed behavior for operations that create or replace file content.
 
-use crate::common::commit_split_support::*;
-use crate::common::namespace_engine;
+use crate::common::*;
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::NamespaceFixture;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::ids::commit_id;
 use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId,
-    RevisionNo,
+    AbsolutePath, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
 };
 use tempfile::tempdir;
-
-fn commit_id(value: &str) -> CommitId {
-    CommitId::parse(value).expect("valid commit id")
-}
 
 fn path(value: &str) -> AbsolutePath {
     AbsolutePath::parse(value).expect("valid absolute path")
@@ -71,24 +67,29 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("feed-matrix").expect("namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap namespace");
 
-    put_file(
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/report.txt",
+            b"revision one",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("create-file")),
+        )
+        .await
+        .expect("create file");
+    create_directory_path(
         &store,
         &namespace_id,
-        "/report.txt",
-        b"revision one",
-        DestinationBehavior::NoReplace,
+        "/empty",
         &context,
-        Some("create-file"),
+        Some(&commit_id("mkdir")),
     )
     .await
-    .expect("create file");
-    create_directory_path(&store, &namespace_id, "/empty", &context, Some("mkdir"))
-        .await
-        .expect("create directory");
+    .expect("create directory");
     submit_operation(
         &store,
         &namespace_id,
@@ -101,17 +102,15 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
     )
     .await
     .expect("create nested directories");
-    put_file(
-        &store,
-        &namespace_id,
-        "/report.txt",
-        b"revision two",
-        DestinationBehavior::Replace,
-        &context,
-        Some("replace-file"),
-    )
-    .await
-    .expect("replace file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/report.txt",
+            b"revision two",
+            DestinationBehavior::Replace,
+            Some(&commit_id("replace-file")),
+        )
+        .await
+        .expect("replace file");
     submit_operation(
         &store,
         &namespace_id,
@@ -207,21 +206,15 @@ async fn append_events_report_where_the_appended_bytes_begin_before_and_after_a_
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("feed-appends").expect("namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap namespace");
     for (target, bytes) in [("/log.txt", b"hello".as_slice()), ("/empty.txt", b"")] {
-        put_file(
-            &store,
-            &namespace_id,
-            target,
-            bytes,
-            DestinationBehavior::NoReplace,
-            &context,
-            None,
-        )
-        .await
-        .expect("create file");
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(target, bytes, DestinationBehavior::NoReplace, None)
+            .await
+            .expect("create file");
     }
     for (id, operations) in [
         ("append", vec![append("/log.txt", b" world")]),
@@ -253,17 +246,15 @@ async fn append_events_report_where_the_appended_bytes_begin_before_and_after_a_
             .await
             .expect("publish commit");
     }
-    put_file(
-        &store,
-        &namespace_id,
-        "/log.txt",
-        b"replaced",
-        DestinationBehavior::Replace,
-        &context,
-        Some("replace"),
-    )
-    .await
-    .expect("replace file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/log.txt",
+            b"replaced",
+            DestinationBehavior::Replace,
+            Some(&commit_id("replace")),
+        )
+        .await
+        .expect("replace file");
 
     let expected = [
         ("append", vec![Some(5)]),
@@ -305,20 +296,14 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
     let source = NamespaceId::parse("feed-source").expect("namespace id");
     let fork = NamespaceId::parse("feed-fork").expect("namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &source, &context)
+    NamespaceFixture::new(&store, &source, &context)
+        .create()
         .await
         .expect("bootstrap namespace");
-    put_file(
-        &store,
-        &source,
-        "/log.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        None,
-    )
-    .await
-    .expect("create file");
+    NamespaceFixture::new(&store, &source, &context)
+        .put_file("/log.txt", b"hello", DestinationBehavior::NoReplace, None)
+        .await
+        .expect("create file");
     let forked = namespace_engine(&store, &source, &context)
         .fork_namespace(&fork, &loonfs_test_support::test_actor(), None)
         .await

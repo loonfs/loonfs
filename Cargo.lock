@@ -1874,6 +1874,7 @@ dependencies = [
  "crc-fast",
  "futures",
  "loonfs",
+ "loonfs-core",
  "loonfs-objectstore",
  "loonfs-test-support",
  "loonfs-types",

@@ -5,19 +5,20 @@ use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::manifest::same_head;
 use crate::manifest::{
     load_basis_metadata_segments, metadata_basis_from_manifest, LoadedMetadataBasis,
-    MetadataSegmentCache, PublishedManifest, VerifiedMetadataSegments,
+    PublishedManifest, VerifiedMetadataSegments,
 };
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::ensure_namespace_live;
-use crate::namespace::read_anchor::{load_read_anchor, NamespaceReadAnchor};
+use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
+use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::wal::ProjectedWalTail;
 use crate::wal::{replay_discovered_tail, ValidatedWalTail};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{ChangeSeq, CommitId, NamespaceId};
+use loonfs_types::{ChangeSeq, CommitId};
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
@@ -36,6 +37,11 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     pub(super) fn head(&self) -> &NamespaceReadState {
         &self.position.head
+    }
+
+    /// Returns the store the view reads from, which a publication writes to.
+    pub(super) fn store(&self) -> &S {
+        self.manifest_segments.store()
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
@@ -163,57 +169,60 @@ enum ViewSource {
     Cold(Box<NamespaceReadAnchor>),
 }
 
-pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    segment_cache: Option<&'a MetadataSegmentCache>,
-    namespace_id: &NamespaceId,
-    acquired_writer: AcquiredWriter,
-    cached_position: Option<PublishTailPosition>,
-    acquired_anchor: Option<NamespaceReadAnchor>,
-    timer: std::sync::Arc<dyn crate::time::MonotonicTimer>,
-) -> Result<PublishMetadataView<'a, S>> {
-    let source = if let Some(anchor) = acquired_anchor {
-        ViewSource::Cold(Box::new(anchor))
-    } else if let Some(cached) = cached_position {
-        ViewSource::Cached(Box::new(cached))
-    } else {
-        let observed = crate::time::Observation::now(timer);
-        ViewSource::Cold(Box::new(
-            load_read_anchor(store, namespace_id, observed).await?,
-        ))
-    };
-    let (basis, loaded_basis, head) = match &source {
-        ViewSource::Cached(cached) => {
-            let basis = cached.basis().clone();
-            let loaded_basis = load_basis_metadata_segments(store, segment_cache, &basis).await?;
-            (basis, loaded_basis, &cached.head)
-        }
-        ViewSource::Cold(anchor) => (
-            anchor.basis(),
-            metadata_basis_from_manifest(store, segment_cache, &anchor.manifest),
-            &anchor.read_state,
-        ),
-    };
-    ensure_writer_not_fenced(head, &acquired_writer)?;
-    ensure_namespace_live(head)?;
-    let tail_discovered = matches!(source, ViewSource::Cold(_));
-    let position = match source {
-        ViewSource::Cached(cached) => *cached,
-        ViewSource::Cold(anchor) => {
-            load_publish_tail_position(&anchor.read_state, basis, &loaded_basis, &anchor.tail)?
-        }
-    };
+impl<S: ObjectStore> NamespaceStore<S> {
+    pub(crate) async fn load_publish_metadata_view(
+        &self,
+        acquired_writer: AcquiredWriter,
+        cached_position: Option<PublishTailPosition>,
+        acquired_anchor: Option<NamespaceReadAnchor>,
+    ) -> Result<PublishMetadataView<'_, S>> {
+        let source = if let Some(anchor) = acquired_anchor {
+            ViewSource::Cold(Box::new(anchor))
+        } else if let Some(cached) = cached_position {
+            ViewSource::Cached(Box::new(cached))
+        } else {
+            let observed = crate::time::Observation::now(Arc::clone(&self.timer));
+            ViewSource::Cold(Box::new(self.load_read_anchor(observed).await?))
+        };
+        let (basis, loaded_basis, head) = match &source {
+            ViewSource::Cached(cached) => {
+                let basis = cached.basis().clone();
+                let loaded_basis =
+                    load_basis_metadata_segments(&self.store, Some(&self.segment_cache), &basis)
+                        .await?;
+                (basis, loaded_basis, &cached.head)
+            }
+            ViewSource::Cold(anchor) => (
+                anchor.basis(),
+                metadata_basis_from_manifest(
+                    &self.store,
+                    Some(&self.segment_cache),
+                    &anchor.manifest,
+                ),
+                &anchor.read_state,
+            ),
+        };
+        ensure_writer_not_fenced(head, &acquired_writer)?;
+        ensure_namespace_live(head)?;
+        let tail_discovered = matches!(source, ViewSource::Cold(_));
+        let position = match source {
+            ViewSource::Cached(cached) => *cached,
+            ViewSource::Cold(anchor) => {
+                load_publish_tail_position(&anchor.read_state, basis, &loaded_basis, &anchor.tail)?
+            }
+        };
 
-    let manifest_segments = loaded_basis.segments;
-    let wal_tail_objects = position.head.unfolded_wal_objects();
-    let write_stop = (wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS).then_some(wal_tail_objects);
-    Ok(PublishMetadataView {
-        acquired_writer,
-        tail_discovered,
-        manifest_segments,
-        position,
-        write_stop,
-    })
+        let manifest_segments = loaded_basis.segments;
+        let wal_tail_objects = position.head.unfolded_wal_objects();
+        let write_stop = (wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS).then_some(wal_tail_objects);
+        Ok(PublishMetadataView {
+            acquired_writer,
+            tail_discovered,
+            manifest_segments,
+            position,
+            write_stop,
+        })
+    }
 }
 
 fn load_publish_tail_position<S: ObjectStore + ?Sized>(

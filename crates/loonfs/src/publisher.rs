@@ -31,14 +31,13 @@ use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, FoldWalOutcome,
-    MaintenanceCancellation, MetadataMaintenanceOutcome,
+    MaintenanceCancellation, MetadataMaintenanceOutcome, SharedObjectStore,
 };
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 pub(crate) use fold_trigger::FoldTrigger;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use loonfs_core::commit::CommitFingerprint;
-use loonfs_core::control::raise_namespace_hint;
 use loonfs_core::limits::{
     FOLD_AT_WAL_OBJECTS, HINT_RAISE_INTERVAL_MS, MAX_CONTENTION_ATTEMPTS, MAX_UNFOLDED_WAL_OBJECTS,
 };
@@ -131,8 +130,7 @@ struct RegistryShared {
 /// Raises each namespace's hint after this runtime's manifest publications,
 /// at most once per `HINT_RAISE_INTERVAL_MS` for each namespace.
 struct HintRaises {
-    store: crate::SharedObjectStore,
-    timer: Arc<dyn MonotonicTimer>,
+    runtime_core: RuntimeCore,
     /// When each raise that started less than `HINT_RAISE_INTERVAL_MS` ago
     /// started, on the monotonic timer. Each raise removes the older
     /// entries, so the map lists at most the namespaces whose hints this
@@ -152,7 +150,7 @@ impl HintRaises {
     /// later publication raises it, and discovery probes past a hint that
     /// lags.
     async fn raise(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
-        let now_ms = self.timer.monotonic_now_ms();
+        let now_ms = self.runtime_core.inner.timer.monotonic_now_ms();
         {
             let mut started_at_ms = lock_state(&self.started_at_ms);
             started_at_ms.retain(|_, at_ms| now_ms < at_ms.saturating_add(HINT_RAISE_INTERVAL_MS));
@@ -161,8 +159,11 @@ impl HintRaises {
                 std::collections::hash_map::Entry::Vacant(entry) => entry.insert(now_ms),
             };
         }
-        if let Err(error) =
-            raise_namespace_hint(self.store.as_ref(), namespace_id, manifest_no, None).await
+        if let Err(error) = self
+            .runtime_core
+            .namespace_store(namespace_id)
+            .raise_hint(manifest_no, None)
+            .await
         {
             tracing::debug!(
                 namespace_id = %namespace_id,
@@ -382,8 +383,7 @@ impl PublisherRegistry {
                 }),
                 panicked_units: AtomicUsize::new(0),
                 hint_raises: HintRaises {
-                    store: runtime_core.shared_store(),
-                    timer: Arc::clone(&runtime_core.inner.timer),
+                    runtime_core: runtime_core.clone(),
                     started_at_ms: Mutex::default(),
                 },
             }),
@@ -679,7 +679,7 @@ enum PositionChange {
 }
 
 impl PositionChange {
-    fn apply(self, engine: &mut NamespaceCommitEngine) {
+    fn apply(self, engine: &mut NamespaceCommitEngine<SharedObjectStore>) {
         match self {
             Self::Move(published) => engine.record_manifest_published(published),
             Self::Drop => engine.invalidate_projection(),
@@ -733,7 +733,7 @@ struct NamespacePublisher {
 struct EngineSlot {
     /// Built on the first unit of work and kept for the publisher's life.
     /// Invalidation drops only its position and the position's WAL tail.
-    engine: Option<NamespaceCommitEngine>,
+    engine: Option<NamespaceCommitEngine<SharedObjectStore>>,
     /// Never dropped or rebuilt while the publisher lives.
     session: SharedWriterSessionStatus,
 }
@@ -1779,11 +1779,10 @@ impl NamespacePublisher {
     ) -> Vec<Result<Commit, CoreError>> {
         let mut slot = self.lock_engine().await;
         let engine = self.engine_for(&mut slot);
-        let store = self.runtime_core.store();
         // Boxing erases the engine's deeply nested publish future. Without
         // it, callers awaiting a put or commit (CLI, server, embedding
         // crates) exceed rustc's type-recursion depth.
-        let publish = Box::pin(engine.publish_batch(&store, candidates, context, batch)).await;
+        let publish = Box::pin(engine.publish_batch(candidates, context, batch)).await;
         if !publish.results.iter().any(is_retryable_wal_publish) {
             for (permit, result) in permits.iter().zip(&publish.results) {
                 // A commit refused at the write stop publishes later, so its
@@ -1849,19 +1848,13 @@ impl NamespacePublisher {
     ///
     /// Each publish loads the namespace identity from the head, so construction
     /// only needs the runtime's cache views and the writer session.
-    fn engine_for<'slot>(&self, slot: &'slot mut EngineSlot) -> &'slot mut NamespaceCommitEngine {
+    fn engine_for<'slot>(
+        &self,
+        slot: &'slot mut EngineSlot,
+    ) -> &'slot mut NamespaceCommitEngine<SharedObjectStore> {
         slot.engine.get_or_insert_with(|| {
-            NamespaceCommitEngine::new(
-                self.namespace_id.clone(),
-                self.runtime_core
-                    .inner
-                    .config
-                    .execution_budget
-                    .content_writes(),
-            )
-            .monotonic_timer(Arc::clone(&self.timer))
-            .segment_cache(self.runtime_core.metadata_segment_cache())
-            .writer_session(Arc::clone(&slot.session))
+            NamespaceCommitEngine::new(self.runtime_core.namespace_store(&self.namespace_id))
+                .writer_session(Arc::clone(&slot.session))
         })
     }
 
@@ -2074,23 +2067,16 @@ impl NamespacePublisher {
                 .and_then(NamespaceCommitEngine::wal_fold_input)
         };
         let started_at_ms = self.timer.monotonic_now_ms();
-        let segment_cache = self.runtime_core.metadata_segment_cache();
-        let config = &self.runtime_core.inner.config;
-        let result = loonfs_core::fold_wal_tail(
-            self.runtime_core.store(),
-            Some(segment_cache.as_ref()),
-            &self.namespace_id,
-            input,
-            &Deadline::start(Arc::clone(&self.timer)),
-            config.metadata_run_policy,
-            &config.execution_budget.content_writes(),
-        )
-        .instrument(phase_span!(
-            self.runtime_core,
-            "wal_fold",
-            self.namespace_id
-        ))
-        .await;
+        let result = self
+            .runtime_core
+            .namespace_store(&self.namespace_id)
+            .fold_wal_tail(input, &Deadline::start(Arc::clone(&self.timer)))
+            .instrument(phase_span!(
+                self.runtime_core,
+                "wal_fold",
+                self.namespace_id
+            ))
+            .await;
         self.runtime_core
             .instruments()
             .publisher_wal_fold_duration(self.elapsed_ms_since(started_at_ms));

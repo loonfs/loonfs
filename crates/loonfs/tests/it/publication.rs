@@ -70,7 +70,8 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         .put_upload_content(&upload.upload_id, b"b")
         .await
         .expect("stage second put content");
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+    let catalog = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_catalog_entry()
         .await
         .expect("load namespace catalog");
     let prepared = loonfs_core::content::prepare_existing_content_ref(

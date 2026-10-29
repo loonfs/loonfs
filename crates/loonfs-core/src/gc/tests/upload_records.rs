@@ -18,35 +18,31 @@ async fn commit_upload<S: ObjectStore>(
     prepared: PreparedContent,
 ) {
     let content_ref = prepared.content_ref().clone();
-    NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        Arc::new(crate::test_support::content_writes()),
-    )
-    .publish_batch(
-        store,
-        vec![CommitCandidate::prepared(
-            CommitIntent::single(
-                loonfs_types::CommitId::generate(),
-                loonfs_test_support::test_actor(),
-                None,
-                FilesystemOperation::PutFile {
-                    path: loonfs_types::AbsolutePath::parse(path).expect("path"),
-                    content: loonfs_types::FileContent::Ref(content_ref),
-                    behavior: loonfs_types::DestinationBehavior::Replace,
-                    expected_inode_id: None,
-                    expected_revision_no: None,
-                },
-            ),
-            vec![prepared],
-        )],
-        &context(2_000),
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .pop()
-    .expect("one result")
-    .expect("published");
+    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
+        .publish_batch(
+            vec![CommitCandidate::prepared(
+                CommitIntent::single(
+                    loonfs_types::CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        path: loonfs_types::AbsolutePath::parse(path).expect("path"),
+                        content: loonfs_types::FileContent::Ref(content_ref),
+                        behavior: loonfs_types::DestinationBehavior::Replace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
+                ),
+                vec![prepared],
+            )],
+            &context(2_000),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("published");
 }
 
 async fn complete_proxied<S: ObjectStore + ?Sized>(
@@ -55,15 +51,17 @@ async fn complete_proxied<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     now_ms: u64,
 ) -> crate::error::Result<crate::protocol::CompletedUpload> {
-    crate::protocol::complete_upload(
-        store,
-        namespace_id,
-        upload_id,
-        None,
-        CompleteUploadBody::ServiceProxied {},
-        &context(now_ms),
-    )
-    .await
+    crate::test_support::NamespaceFixture::new(store, namespace_id, &context(now_ms))
+        .engine()
+        .complete_upload(
+            &crate::test_support::namespace_store(store, namespace_id)
+                .load_catalog_entry()
+                .await
+                .expect("load the catalog"),
+            upload_id,
+            CompleteUploadBody::ServiceProxied {},
+        )
+        .await
 }
 
 async fn abort<S: ObjectStore + ?Sized>(
@@ -72,10 +70,14 @@ async fn abort<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     now_ms: u64,
 ) -> crate::error::Result<loonfs_types::api::v0::UploadSession> {
-    let catalog = crate::namespace::catalog::load_namespace_catalog_entry(store, namespace_id)
+    let catalog = crate::test_support::namespace_store(store, namespace_id)
+        .load_catalog_entry()
         .await
         .expect("catalog");
-    crate::protocol::abort_upload(store, &catalog, upload_id, None, &context(now_ms)).await
+    crate::test_support::NamespaceFixture::new(store, catalog.namespace_id(), &context(now_ms))
+        .engine()
+        .abort_upload(upload_id)
+        .await
 }
 
 async fn upload_keys<S: ObjectStore + ?Sized>(
@@ -93,16 +95,9 @@ async fn pass<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     now_ms: u64,
 ) -> crate::error::Result<GcResponse> {
-    gc_namespace(
-        store,
-        None,
-        None,
-        namespace_id,
-        &options(),
-        &context(now_ms),
-        crate::test_support::std_timer(),
-    )
-    .await
+    crate::test_support::namespace_store(store, namespace_id)
+        .gc(None, &options(), &context(now_ms))
+        .await
 }
 
 /// A pass that stops between deleting a session's two records leaves the
@@ -130,7 +125,8 @@ async fn a_pass_that_stops_between_the_two_deletes_leaves_an_outcome_the_next_pa
         InjectedError::Transport("the process stopped".to_owned()),
     );
     let setup = context(1_000);
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
@@ -191,7 +187,8 @@ async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_r
         LocalFsStore::new(temp_dir.path()).expect("store"),
         BlockedOutcome::Completed,
     );
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
@@ -225,9 +222,15 @@ async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_r
         complete_proxied(&store, &namespace_id, &upload_id, 4_000)
             .await
             .map(drop),
-        crate::protocol::get_upload(&store, &namespace_id, &upload_id, None, 4_000)
-            .await
-            .map(drop),
+        crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 4_000),
+        )
+        .engine()
+        .get_upload(&upload_id)
+        .await
+        .map(drop),
     ] {
         assert_matches!(result, Err(CoreError::UploadNotFound { .. }));
     }
@@ -250,7 +253,8 @@ async fn an_outcome_without_its_session_record_is_deleted_only_once_older_than_t
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    create(&store, &namespace_id, &context(1_000))
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+        .create()
         .await
         .expect("bootstrap");
     let session = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
@@ -302,7 +306,8 @@ async fn an_abort_stalled_across_a_pass_that_deleted_a_completed_session_keeps_i
         LocalFsStore::new(temp_dir.path()).expect("store"),
         BlockedOutcome::Aborted,
     );
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;

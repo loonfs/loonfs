@@ -132,7 +132,8 @@ async fn hint_and_current(harness: &Harness) -> (u64, u64) {
         loonfs_objectstore::local_fs_store::LocalFsStore::new(harness.store_root("default"))
             .expect("store");
     let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
-    let current = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+    let current = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest")
         .state

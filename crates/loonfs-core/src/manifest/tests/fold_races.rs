@@ -1,10 +1,10 @@
 //! A fold that loses its manifest number to another publication.
 
-use super::fold::{fold_wal, fold_wal_tail, FoldWalResponse, FoldedWalTail};
+use super::fold::{FoldWalResponse, FoldedWalTail};
 use super::*;
 use crate::error::Result;
 use crate::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
-use crate::manifest::{claim_compactor, PublishedManifest};
+use crate::manifest::PublishedManifest;
 use crate::namespace::control::CurrentManifest;
 use crate::publish::{InlineContent, WalFoldInput};
 use crate::time::Observation;
@@ -29,27 +29,33 @@ enum Rival {
 
 impl Rival {
     async fn publish(&self, store: &LocalFsStore, namespace_id: &NamespaceId) {
-        let content_writes = crate::test_support::content_writes();
         match self {
             Self::CompactorClaim => {
-                claim_compactor(store, namespace_id, crate::test_support::std_timer())
-                    .await
-                    .expect("claim the compactor");
+                crate::test_support::NamespaceFixture::new(
+                    store,
+                    namespace_id,
+                    &crate::test_support::mutation_context("test-writer", 0),
+                )
+                .engine()
+                .claim_compactor()
+                .await
+                .expect("claim the compactor");
             }
             Self::Merge => {
                 let mut merges = 0;
                 loop {
-                    match compact_unit(
+                    match crate::test_support::NamespaceFixture::new(
                         store,
-                        None,
                         namespace_id,
+                        &crate::test_support::mutation_context("test-writer", 0),
+                    )
+                    .engine()
+                    .compact_metadata_unit(
                         None,
-                        CompactorEpoch(0),
-                        MetadataRunPolicy::default(),
                         MetadataCompactionPolicy::CompactImmediately,
                         crate::manifest::CompactionAdmission::AnySize,
+                        CompactorEpoch(0),
                         &crate::manifest::MetadataCompactionCancellation::default(),
-                        crate::test_support::std_timer(),
                     )
                     .await
                     .expect("merge")
@@ -62,29 +68,24 @@ impl Rival {
                 assert!(merges > 0, "the merge rival should publish");
             }
             Self::RetentionAdvance => {
-                advance_retention_floor(
+                crate::test_support::NamespaceFixture::new(
                     store,
-                    None,
                     namespace_id,
-                    RetentionTarget::Head,
-                    crate::test_support::grace_elapsed_after(test_context().now_ms),
-                    crate::test_support::std_timer(),
+                    &crate::test_support::mutation_context(
+                        "test-writer",
+                        crate::test_support::grace_elapsed_after(test_context().now_ms),
+                    ),
                 )
+                .engine()
+                .advance_retention_floor(RetentionTarget::Head)
                 .await
                 .expect("advance the floor");
             }
             Self::Fold(input) => {
-                let folded = fold_wal_tail(
-                    store,
-                    None,
-                    namespace_id,
-                    Some(WalFoldInput::clone(input)),
-                    &deadline(),
-                    crate::manifest::MetadataRunPolicy::default(),
-                    &content_writes,
-                )
-                .await
-                .expect("rival fold");
+                let folded = crate::test_support::namespace_store(store, namespace_id)
+                    .fold_wal_tail(Some(WalFoldInput::clone(input)), &deadline())
+                    .await
+                    .expect("rival fold");
                 assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
             }
         }
@@ -94,7 +95,7 @@ impl Rival {
 struct Writer {
     directory: tempfile::TempDir,
     store: Arc<RecordingStore<LocalFsStore>>,
-    engine: NamespaceCommitEngine,
+    engine: NamespaceCommitEngine<Arc<RecordingStore<LocalFsStore>>>,
     context: MutationContext,
     namespace_id: NamespaceId,
 }
@@ -108,14 +109,15 @@ impl Writer {
         ));
         let namespace_id = NamespaceId::parse("fold-race").expect("namespace");
         let context = test_context();
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("create");
         Self {
-            engine: NamespaceCommitEngine::new(
-                namespace_id.clone(),
-                std::sync::Arc::new(crate::test_support::content_writes()),
-            ),
+            engine: NamespaceCommitEngine::new(crate::test_support::namespace_store(
+                Arc::clone(&store),
+                &namespace_id,
+            )),
             directory,
             store,
             context,
@@ -172,7 +174,7 @@ impl Writer {
             values,
         );
         self.engine
-            .publish_batch(&*self.store, [candidate], &self.context, &deadline())
+            .publish_batch([candidate], &self.context, &deadline())
             .await
             .results
             .pop()
@@ -190,7 +192,6 @@ impl Writer {
     /// process, its next put waits for the next rival, and so on. The request
     /// log is cleared after each rival.
     async fn fold_against(&mut self, rivals: &[Rival]) -> Result<FoldedWalTail> {
-        let content_writes = crate::test_support::content_writes();
         let input = self.engine.wal_fold_input().expect("tail");
         let basis = input.basis.manifest_no();
         let other = self.other_process();
@@ -210,25 +211,15 @@ impl Writer {
             store = gate;
         }
         let deadline = deadline();
-        let (folded, ()) = futures::join!(
-            fold_wal_tail(
-                &*store,
-                None,
-                &self.namespace_id,
-                Some(input),
-                &deadline,
-                crate::manifest::MetadataRunPolicy::default(),
-                &content_writes,
-            ),
-            async {
-                for (gate, rival) in gates.iter().zip(rivals) {
-                    gate.wait_until_blocked().await;
-                    rival.publish(&other, &self.namespace_id).await;
-                    self.store.reset();
-                    gate.release();
-                }
+        let namespace = crate::test_support::namespace_store(&*store, &self.namespace_id);
+        let (folded, ()) = futures::join!(namespace.fold_wal_tail(Some(input), &deadline), async {
+            for (gate, rival) in gates.iter().zip(rivals) {
+                gate.wait_until_blocked().await;
+                rival.publish(&other, &self.namespace_id).await;
+                self.store.reset();
+                gate.release();
             }
-        );
+        });
         if let Ok(folded) = &folded {
             self.engine
                 .record_manifest_published(folded.manifest.clone());
@@ -308,7 +299,6 @@ fn request_counts(store: &RecordingStore<LocalFsStore>) -> StoreCounts {
 
 #[tokio::test]
 async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
-    let content_writes = crate::test_support::content_writes();
     for rival in [Rival::Merge, Rival::CompactorClaim, Rival::RetentionAdvance] {
         let mut writer = Writer::open().await;
         writer
@@ -347,17 +337,10 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
         assert!(!after_park.iter().any(is_content), "{after_park:?}");
 
         rival.publish(&twin, &writer.namespace_id).await;
-        let cold = fold_wal_tail(
-            &twin,
-            None,
-            &writer.namespace_id,
-            None,
-            &deadline(),
-            crate::manifest::MetadataRunPolicy::default(),
-            &content_writes,
-        )
-        .await
-        .expect("cold fold");
+        let cold = crate::test_support::namespace_store(&twin, &writer.namespace_id)
+            .fold_wal_tail(None, &deadline())
+            .await
+            .expect("cold fold");
         assert_eq!(held.response.outcome, FoldWalOutcome::Published);
         assert_eq!(held.response, cold.response);
         let held = load_current_projection(&*writer.store, &writer.namespace_id)
@@ -499,11 +482,9 @@ async fn a_fold_from_a_fresh_position_puts_on_its_basis_and_reads_no_hint() {
         // The runtime that published the session's claim raises the hint,
         // or hasn't raised it yet.
         if !hint_lags {
-            crate::test_support::raise_hint_to_current_manifest(
-                writer.store.as_ref(),
-                &writer.namespace_id,
-            )
-            .await;
+            crate::test_support::namespace_store(writer.store.as_ref(), &writer.namespace_id)
+                .raise_hint_to_current_manifest()
+                .await;
         }
         let basis = writer
             .engine
@@ -534,7 +515,6 @@ async fn a_fold_from_a_fresh_position_puts_on_its_basis_and_reads_no_hint() {
 /// is older than the grace window.
 #[tokio::test]
 async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
-    let content_writes = crate::test_support::content_writes();
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let mut held = writer.engine.wal_fold_input().expect("tail");
@@ -546,11 +526,14 @@ async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
     // collection removes the position's manifest once the fold is older
     // than the grace window.
     let other = writer.other_process();
-    let folded_by_other = fold_wal(&other, &writer.namespace_id)
+    let folded_by_other = crate::test_support::namespace_store(&other, &writer.namespace_id)
+        .fold_wal()
         .await
         .expect("the other process folds");
     assert_eq!(folded_by_other.outcome, FoldWalOutcome::Published);
-    crate::test_support::raise_hint_to_current_manifest(&other, &writer.namespace_id).await;
+    crate::test_support::namespace_store(&other, &writer.namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
     writer
         .store
         .delete(&superseded)
@@ -559,17 +542,10 @@ async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
     clock.advance_ms(READ_REVALIDATION_BOUND_MS);
 
     writer.store.reset();
-    let folded = fold_wal_tail(
-        &*writer.store,
-        None,
-        &writer.namespace_id,
-        Some(held),
-        &deadline(),
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    )
-    .await
-    .expect("a fold past the bound loads the tail from the store");
+    let folded = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
+        .fold_wal_tail(Some(held), &deadline())
+        .await
+        .expect("a fold past the bound loads the tail from the store");
     assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
     assert_eq!(
         folded.manifest.manifest.manifest_no,
@@ -636,11 +612,9 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
         );
         // The runtimes that published the manifests raise the hint, so the
         // next fold's discovery starts at the current manifest in both cases.
-        crate::test_support::raise_hint_to_current_manifest(
-            writer.store.inner(),
-            &writer.namespace_id,
-        )
-        .await;
+        crate::test_support::namespace_store(writer.store.inner(), &writer.namespace_id)
+            .raise_hint_to_current_manifest()
+            .await;
         writer.commit("second", Vec::new(), &["/b"]).await;
         let publish = request_counts(&writer.store);
         let hint = hint(&writer.namespace_id);
@@ -697,14 +671,11 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
     let checkpoint = checkpoint.expect("checkpoint");
     let after_park = writer.store.take();
     assert!(writer.wal_reads(&after_park).is_empty(), "{after_park:?}");
-    let pin = load_pin(
-        &*writer.store,
-        &writer.namespace_id,
-        &checkpoint.checkpoint_id,
-    )
-    .await
-    .expect("pin record")
-    .expect("pin");
+    let pin = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
+        .load_pin(&checkpoint.checkpoint_id)
+        .await
+        .expect("pin record")
+        .expect("pin");
     assert_eq!(pin.state.manifest().manifest_no, ManifestNo(basis.0 + 2));
 }
 
@@ -714,7 +685,6 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
 /// session finds that it's fenced at its next commit.
 #[tokio::test]
 async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
-    let content_writes = crate::test_support::content_writes();
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let input = writer.engine.wal_fold_input().expect("tail");
@@ -732,25 +702,18 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
     gate.block_next();
     let other = writer.other_process();
     let fold_deadline = deadline();
+    let namespace = crate::test_support::namespace_store(&gate, &writer.namespace_id);
     let (folded, ()) = futures::join!(
-        fold_wal_tail(
-            &gate,
-            None,
-            &writer.namespace_id,
-            Some(input),
-            &fold_deadline,
-            crate::manifest::MetadataRunPolicy::default(),
-            &content_writes,
-        ),
+        namespace.fold_wal_tail(Some(input), &fold_deadline),
         async {
             gate.wait_until_blocked().await;
-            crate::namespace::writer_epoch::acquire_writer_epoch(
-                &other,
-                &writer.namespace_id,
-                &crate::test_support::mutation_context("other-writer", 2_000),
-            )
-            .await
-            .expect("another writer claims the namespace");
+            crate::test_support::namespace_store(&other, &writer.namespace_id)
+                .acquire_writer_epoch(&crate::test_support::mutation_context(
+                    "other-writer",
+                    2_000,
+                ))
+                .await
+                .expect("another writer claims the namespace");
             gate.release();
         }
     );
@@ -774,7 +737,6 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
     let results = writer
         .engine
         .publish_batch(
-            &*writer.store,
             [CommitCandidate::new(CommitIntent {
                 commit_id: CommitId::parse("after").expect("commit id"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -806,7 +768,6 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
         Drops,
         Stays,
     }
-    let content_writes = crate::test_support::content_writes();
     for (epoch_after, wal_after, outcome, expected) in [
         (0, 0, Some(FoldWalOutcome::Published), Position::Moves),
         (1, 0, Some(FoldWalOutcome::Published), Position::Drops),
@@ -819,17 +780,10 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
         writer.commit("first", Vec::new(), &["/a"]).await;
         let input = writer.engine.wal_fold_input().expect("tail");
         let before = input.basis.clone();
-        let folded = fold_wal_tail(
-            &*writer.store,
-            None,
-            &writer.namespace_id,
-            Some(input),
-            &deadline(),
-            crate::manifest::MetadataRunPolicy::default(),
-            &content_writes,
-        )
-        .await
-        .expect("fold");
+        let folded = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
+            .fold_wal_tail(Some(input), &deadline())
+            .await
+            .expect("fold");
         let recorded = outcome.map(|outcome| FoldedWalTail {
             response: FoldWalResponse {
                 outcome,
@@ -865,7 +819,6 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
 /// began, moves the position onto that process's manifest with no tail.
 #[tokio::test]
 async fn a_fold_covered_past_its_start_moves_the_position_onto_the_covering_fold() {
-    let content_writes = crate::test_support::content_writes();
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let input = writer.engine.wal_fold_input().expect("tail");
@@ -874,17 +827,10 @@ async fn a_fold_covered_past_its_start_moves_the_position_onto_the_covering_fold
     Rival::Fold(Box::new(newest.clone()))
         .publish(&writer.other_process(), &writer.namespace_id)
         .await;
-    let folded = fold_wal_tail(
-        &*writer.store,
-        None,
-        &writer.namespace_id,
-        Some(input.clone()),
-        &deadline(),
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    )
-    .await
-    .expect("fold");
+    let folded = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
+        .fold_wal_tail(Some(input.clone()), &deadline())
+        .await
+        .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
     assert_eq!(folded.manifest.folded_wal_no, newest.head.wal_no);
     assert!(input.head.wal_no < newest.head.wal_no);

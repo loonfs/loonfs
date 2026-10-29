@@ -2,43 +2,49 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::manifest::{compact_unit, fold_wal, CompactionUnitOutcome};
-use crate::namespace::control::{load_current_manifest, raise_namespace_hint, LoadedManifest};
+use crate::manifest::CompactionUnitOutcome;
+use crate::namespace::control::LoadedManifest;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_types::MetadataFamilyGroup;
 use std::assert_matches;
 
 async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> LoadedManifest {
     let setup = context(1_000);
-    create(store, namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(store, namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     for name in ["one", "two"] {
         write_test_file(store, namespace_id, &format!("/docs/{name}"), name, &setup).await;
-        fold_wal(store, namespace_id).await.expect("fold");
+        crate::test_support::namespace_store(store, namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold");
     }
     assert!(store
         .list_prefix(&pin_prefix(namespace_id))
         .await
         .expect("list pins")
         .is_empty());
-    load_current_manifest(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("previous manifest")
 }
 
 async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> LoadedManifest {
-    let outcome = compact_unit(
+    let outcome = crate::test_support::NamespaceFixture::new(
         store,
-        None,
         namespace_id,
+        &crate::test_support::mutation_context("test-writer", 0),
+    )
+    .engine()
+    .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
-        Default::default(),
         MetadataCompactionPolicy::CompactImmediately,
         crate::manifest::CompactionAdmission::AnySize,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("compact bindings");
@@ -49,7 +55,8 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
             ..
         }
     );
-    load_current_manifest(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("compacted manifest")
 }
@@ -86,12 +93,13 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 LocalFsStore::new(directory.path()).expect("store"),
                 KeyPredicate::any(),
             );
-            let raise_hint =
-                |manifest_no| raise_namespace_hint(&store, &namespace_id, manifest_no, None);
+            let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+            let raise_hint = |manifest_no| namespace.raise_hint(manifest_no, None);
             let previous = seed_segments(&store, &namespace_id).await;
             // Load without shared caches and leave path reads until after GC,
             // so resolving /docs/one needs the bindings compaction drops.
-            let view = load_current_metadata_view(&store, &namespace_id)
+            let view = namespace
+                .load_current_metadata_view()
                 .await
                 .expect("retain the previous view");
             let current = compact_bindings(&store, &namespace_id).await;
@@ -113,13 +121,10 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 .cloned()
                 .collect();
             assert!(!dropped.is_empty());
-            let anchor = crate::namespace::read_anchor::load_read_anchor(
-                &store,
-                &namespace_id,
-                crate::test_support::observed_now(),
-            )
-            .await
-            .expect("current anchor");
+            let anchor = crate::test_support::namespace_store(&store, &namespace_id)
+                .load_read_anchor(crate::test_support::observed_now())
+                .await
+                .expect("current anchor");
             assert_eq!(
                 previous.state.manifest().manifest_no < anchor.hint.state.manifest_no,
                 !lagging_hint
@@ -141,17 +146,14 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 grace_window_ms,
                 ..Default::default()
             };
-            let retained = gc_namespace(
-                &recent,
-                None,
-                None,
-                &namespace_id,
-                &options,
-                &context(published_at_ms + grace_window_ms - 1),
-                crate::test_support::std_timer(),
-            )
-            .await
-            .expect("collect within successor grace");
+            let retained = crate::test_support::namespace_store(&recent, &namespace_id)
+                .gc(
+                    None,
+                    &options,
+                    &context(published_at_ms + grace_window_ms - 1),
+                )
+                .await
+                .expect("collect within successor grace");
             assert_objects_exist(&store, &dropped, true).await;
             assert!(store
                 .head(&previous.object_key)
@@ -176,17 +178,10 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
             raise_hint(current.state.manifest().manifest_no)
                 .await
                 .expect("advance hint");
-            let collected = gc_namespace(
-                &recent,
-                None,
-                None,
-                &namespace_id,
-                &options,
-                &context(published_at_ms + grace_window_ms),
-                crate::test_support::std_timer(),
-            )
-            .await
-            .expect("collect at successor grace boundary");
+            let collected = crate::test_support::namespace_store(&recent, &namespace_id)
+                .gc(None, &options, &context(published_at_ms + grace_window_ms))
+                .await
+                .expect("collect at successor grace boundary");
             assert_objects_exist(&store, &dropped, false).await;
             assert!(store
                 .head(&previous.object_key)
@@ -224,12 +219,16 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         .cloned()
         .collect();
     assert!(!dropped.is_empty());
-    crate::namespace::writer_epoch::acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer_epoch(&context(1_000))
         .await
         .expect("supersede the compaction manifest");
     // The runtime that published the claim raises the hint.
-    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
-    let current = load_current_manifest(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest");
     assert!(current.state.manifest().manifest_no > successor.state.manifest().manifest_no);
@@ -246,17 +245,10 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         Arc::clone(&recent),
         KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
     );
-    gc_namespace(
-        &recorded,
-        None,
-        None,
-        &namespace_id,
-        &options(),
-        &context(now_ms),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("root an older predecessor");
+    crate::test_support::namespace_store(&recorded, &namespace_id)
+        .gc(None, &options(), &context(now_ms))
+        .await
+        .expect("root an older predecessor");
     // Discovery's probe and the anchor's check each send a HEAD request for
     // the missing manifest after the current one.
     assert_eq!(recorded.counts().heads, 2);
@@ -283,17 +275,10 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         .delete(&successor.object_key)
         .await
         .expect("remove successor");
-    gc_namespace(
-        &recent,
-        None,
-        None,
-        &namespace_id,
-        &options(),
-        &context(now_ms),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect with missing successor");
+    crate::test_support::namespace_store(&recent, &namespace_id)
+        .gc(None, &options(), &context(now_ms))
+        .await
+        .expect("collect with missing successor");
     assert_objects_exist(&store, &dropped, false).await;
     assert!(store
         .head(&previous.object_key)
@@ -314,7 +299,9 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     let previous = seed_segments(&store, &namespace_id).await;
     let current = compact_bindings(&store, &namespace_id).await;
     // The runtime that published the compaction raises the hint.
-    crate::test_support::raise_hint_to_current_manifest(&store, &namespace_id).await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
     let dropped: BTreeSet<_> = segment_keys(&previous)
         .difference(&segment_keys(&current))
         .cloned()
@@ -323,17 +310,10 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     let undated =
         MetadataMapStore::without_last_modified(&store, KeyPredicate::exact(&current.object_key));
     let aged = context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GRACE_MS + 1);
-    let retained = gc_namespace(
-        &undated,
-        None,
-        None,
-        &namespace_id,
-        &options(),
-        &aged,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect with undated successor");
+    let retained = crate::test_support::namespace_store(&undated, &namespace_id)
+        .gc(None, &options(), &aged)
+        .await
+        .expect("collect with undated successor");
     assert_objects_exist(&store, &dropped, true).await;
     assert!(store
         .head(&previous.object_key)
@@ -343,17 +323,10 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     assert_eq!(retained.deleted.metadata_segments, 0);
     assert_eq!(retained.retained.no_provider_timestamp, 0);
 
-    let collected = gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &options(),
-        &aged,
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect with aged successor timestamp");
+    let collected = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &options(), &aged)
+        .await
+        .expect("collect with aged successor timestamp");
     assert_objects_exist(&store, &dropped, false).await;
     assert!(store
         .head(&previous.object_key)

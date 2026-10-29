@@ -431,7 +431,7 @@ impl CoreConfig {
             }
             .build()
         });
-        let metadata_run_policy = MetadataRunPolicy {
+        let run_policy = MetadataRunPolicy {
             max_decoded_input_bytes_per_step: execution_budget.max_merge_input_bytes(),
             ..MetadataRunPolicy::default()
         };
@@ -458,7 +458,7 @@ impl CoreConfig {
                 manifest_revalidation_interval_ms: self.manifest_revalidation_interval_ms,
                 max_staleness_ms: self.max_staleness_ms,
                 consistency: self.consistency,
-                metadata_run_policy,
+                run_policy,
                 execution_budget,
                 trace_mode: self.trace_mode,
                 store_kind,

@@ -241,13 +241,15 @@ async fn seed_unfolded_tail(writer: &LoonFs<Writable>, namespace_id: &NamespaceI
 /// the same hint, so a test that counts discovery's requests raises the hint
 /// first.
 async fn raise_hint_to_current_manifest(store: &dyn ObjectStore, namespace_id: &NamespaceId) {
-    let current = loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
+    let current = loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest")
         .state
         .manifest()
         .manifest_no;
-    loonfs_core::control::raise_namespace_hint(store, namespace_id, current, None)
+    loonfs_core::test_support::namespace_store(store, namespace_id)
+        .raise_hint(current, None)
         .await
         .expect("raise the hint");
 }
@@ -998,7 +1000,9 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
         }
         writer.shutdown().await.expect("stop the writer");
         for namespace_id in &names {
-            raise_hint_to_current_manifest(base.as_ref(), namespace_id).await;
+            loonfs_core::test_support::namespace_store(base.as_ref(), namespace_id)
+                .raise_hint_to_current_manifest()
+                .await;
         }
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("local store"),

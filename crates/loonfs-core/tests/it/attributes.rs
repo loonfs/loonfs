@@ -2,23 +2,22 @@
 //! preconditions reject, and what survives a fold, a fork, and every operation that
 //! moves an inode around.
 
-use crate::common::commit_split_support::*;
-use crate::common::namespace_engine;
-use loonfs_core::content::store_bytes_as_content;
+use crate::common::*;
 use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::time::Deadline;
 use loonfs_core::{CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     api::v0::FilesystemChange, AbsolutePath, AttributeKey, AttributeValue, Attributes,
-    AttributesRevisionNo, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    InodeId, NamespaceId, RevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
+    AttributesRevisionNo, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    NamespaceId, RevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
 };
 use std::assert_matches;
 use std::collections::BTreeMap;
@@ -26,11 +25,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn mutation_context() -> MutationContext {
-    crate::common::mutation_context("writer", 1)
-}
-
-fn commit_id(value: &str) -> CommitId {
-    CommitId::parse(value).expect("valid commit id")
+    loonfs_core::test_support::mutation_context("writer", 1)
 }
 
 fn path(value: &str) -> AbsolutePath {
@@ -103,7 +98,8 @@ async fn setup() -> (
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap namespace");
     (temp_dir, store, namespace_id, context)
@@ -120,15 +116,13 @@ async fn update<S: ObjectStore + ?Sized>(
     submit_operation(store, namespace_id, commit_id(id), operation, context).await
 }
 
-async fn publish_request<S: ObjectStore + ?Sized>(
-    engine: &mut NamespaceCommitEngine,
-    store: &S,
+async fn publish_request<S: ObjectStore>(
+    engine: &mut NamespaceCommitEngine<S>,
     request: CommitIntent,
     context: &MutationContext,
 ) -> Result<loonfs_types::Commit, CoreError> {
     engine
         .publish_batch(
-            store,
             vec![CommitCandidate::new(request)],
             context,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -146,14 +140,11 @@ async fn attribute_events<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<(InodeId, AttributesRevisionNo, Attributes)> {
-    let after_seq = loonfs_core::cache::load_namespace(
-        store,
-        namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("namespace state")
-    .retention_floor_seq;
+    let after_seq = namespace_store(store, namespace_id)
+        .load_metadata()
+        .await
+        .expect("namespace state")
+        .retention_floor_seq;
     list_changes_after(store, namespace_id, after_seq)
         .await
         .expect("read the change feed")
@@ -203,17 +194,15 @@ async fn inode_of<S: ObjectStore + ?Sized>(
 #[tokio::test]
 async fn an_update_writes_attributes_on_a_file_and_on_a_directory() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
 
     update(
         &store,
@@ -249,17 +238,15 @@ async fn an_update_writes_attributes_on_a_file_and_on_a_directory() {
 #[tokio::test]
 async fn an_empty_string_is_stored_until_the_key_is_removed() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     let file_inode = inode_of(&store, &namespace_id, "/docs/a.txt").await;
 
     update(
@@ -321,17 +308,15 @@ async fn an_update_rejects_the_root_and_a_missing_path() {
 #[tokio::test]
 async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
 
     let cases: Vec<(&str, FilesystemOperation)> = vec![
         (
@@ -386,17 +371,15 @@ async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
 #[tokio::test]
 async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     update(
         &store,
         &namespace_id,
@@ -422,16 +405,13 @@ async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
         operation,
     );
     let store = RecordingStore::new(store, KeyPredicate::any());
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    );
-    let receipt = publish_request(&mut engine, &store, request.clone(), &context)
+    let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
+    let receipt = publish_request(&mut engine, request.clone(), &context)
         .await
         .expect("an unchanged map advances the revision");
 
     store.reset();
-    let replay = publish_request(&mut engine, &store, request, &context)
+    let replay = publish_request(&mut engine, request, &context)
         .await
         .expect("the original receipt replays despite the stale precondition");
     assert_eq!(replay, receipt);
@@ -447,17 +427,15 @@ async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
 #[tokio::test]
 async fn an_update_is_rejected_when_the_resulting_map_breaks_a_limit() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
 
     // Fifteen maximum-length values sit just under the total; a sixteenth
     // pushes the resulting map over it.
@@ -509,17 +487,15 @@ async fn an_update_is_rejected_when_the_resulting_map_breaks_a_limit() {
 #[tokio::test]
 async fn an_already_satisfied_patch_reports_a_stale_expectation() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     update(
         &store,
         &namespace_id,
@@ -562,25 +538,22 @@ async fn an_already_satisfied_patch_reports_a_stale_expectation() {
 #[tokio::test]
 async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_the_path() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
 
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    );
+    // The engine keeps its writer session across the requests below, so it
+    // reads through the recording store from the start.
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
     publish_request(
         &mut engine,
-        &store,
         CommitIntent::single(
             commit_id("set-owner"),
             loonfs_test_support::test_actor(),
@@ -598,7 +571,7 @@ async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_t
     let directory_before = resolve_path(&store, &namespace_id, "/docs")
         .await
         .expect("read directory");
-    let store = RecordingStore::new(store, KeyPredicate::any());
+    store.reset();
     for (label, target) in [
         ("file", "/docs/a.txt"),
         ("directory", "/docs"),
@@ -616,7 +589,7 @@ async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_t
                 expected_attributes_revision_no: Some(AttributesRevisionNo(0)),
             },
         );
-        let error = publish_request(&mut engine, &store, request, &context)
+        let error = publish_request(&mut engine, request, &context)
             .await
             .expect_err("the revision precondition requires an inode precondition");
         assert_invalid_commit_request(&error, label);
@@ -646,17 +619,15 @@ async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_t
 #[tokio::test]
 async fn an_attribute_precondition_rejects_a_recreated_path_before_checking_its_revision() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     update(
         &store,
         &namespace_id,
@@ -682,17 +653,15 @@ async fn an_attribute_precondition_rejects_a_recreated_path_before_checking_its_
     )
     .await
     .expect("delete original inode");
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"replacement",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("recreate"),
-    )
-    .await
-    .expect("recreate file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"replacement",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("recreate")),
+        )
+        .await
+        .expect("recreate file");
     let replacement = resolve_path(&store, &namespace_id, "/docs/a.txt")
         .await
         .expect("read replacement inode");
@@ -733,17 +702,15 @@ async fn an_attribute_precondition_rejects_a_recreated_path_before_checking_its_
 #[tokio::test]
 async fn a_wrong_expected_inode_is_rejected() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
 
     let error = update(
         &store,
@@ -770,7 +737,8 @@ async fn a_wrong_expected_inode_is_rejected() {
 #[tokio::test]
 async fn a_put_and_an_update_of_the_new_path_commit_together() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    let content = store_bytes_as_content(&store, &namespace_id, b"hello")
+    let content = namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"hello")
         .await
         .expect("stage content");
 
@@ -810,17 +778,15 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
 #[tokio::test]
 async fn an_unchanged_update_and_a_second_update_commit_together() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
 
     submit_commit(
         &store,
@@ -861,17 +827,15 @@ async fn an_unchanged_update_and_a_second_update_commit_together() {
 #[tokio::test]
 async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
 
     let error = submit_commit(
         &store,
@@ -915,17 +879,15 @@ async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
 #[tokio::test]
 async fn attributes_survive_a_fold_and_the_counter_keeps_going() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     update(
         &store,
         &namespace_id,
@@ -998,17 +960,15 @@ async fn attributes_survive_a_fold_and_the_counter_keeps_going() {
 #[tokio::test]
 async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
     let (_temp_dir, store, source, context) = setup().await;
-    put_file(
-        &store,
-        &source,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &source, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     update(
         &store,
         &source,
@@ -1093,17 +1053,15 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
 #[tokio::test]
 async fn move_rename_replace_and_restore_preserve_attributes() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"first",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"first",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     update(
         &store,
         &namespace_id,
@@ -1132,16 +1090,10 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
     )
     .await
     .expect("move the file");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/moved.txt",
-        b"second",
-        &context,
-        Some("replace"),
-    )
-    .await
-    .expect("replace the content");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/moved.txt", b"second", Some(&commit_id("replace")))
+        .await
+        .expect("replace the content");
     update(
         &store,
         &namespace_id,
@@ -1170,17 +1122,15 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
 #[tokio::test]
 async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     update(
         &store,
         &namespace_id,
@@ -1256,17 +1206,15 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
 #[tokio::test]
 async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     update(
         &store,
         &namespace_id,
@@ -1327,17 +1275,15 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
 #[tokio::test]
 async fn a_copy_of_a_file_without_attributes_publishes_no_attribute_event() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
 
     update(
         &store,
@@ -1370,17 +1316,15 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
         ("/docs/a.txt", "seed-source"),
         ("/docs/b.txt", "seed-target"),
     ] {
-        put_file(
-            &store,
-            &namespace_id,
-            path_value,
-            b"hello",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(commit),
-        )
-        .await
-        .expect("seed file");
+        NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                path_value,
+                b"hello",
+                DestinationBehavior::NoReplace,
+                Some(&commit_id(commit)),
+            )
+            .await
+            .expect("seed file");
     }
     update(
         &store,
@@ -1430,17 +1374,15 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
 #[tokio::test]
 async fn clearing_every_attribute_publishes_the_empty_map() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file(
-        &store,
-        &namespace_id,
-        "/docs/a.txt",
-        b"hello",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("seed"),
-    )
-    .await
-    .expect("seed file");
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .put_file(
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            Some(&commit_id("seed")),
+        )
+        .await
+        .expect("seed file");
     update(
         &store,
         &namespace_id,

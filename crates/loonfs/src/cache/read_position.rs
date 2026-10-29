@@ -5,7 +5,6 @@ use crate::fs::RuntimeCore;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
 use loonfs_core::cache::{CachedHead, HeadAndWalTailCache, SharedCheck, WalTailCacheKey};
-use loonfs_core::control::{manifest_has_successor, same_epoch_manifests_above};
 use loonfs_core::publish::ReadPosition;
 use loonfs_core::time::Observation;
 use loonfs_core::PublishedManifest;
@@ -266,19 +265,16 @@ impl RuntimeCore {
             return Ok(());
         };
         let observed = Observation::now(Arc::clone(&self.inner.timer));
-        let successor =
-            manifest_has_successor(self.store(), namespace_id, position.basis.manifest_no())
-                .await
-                .map_err(MetadataProjectionLoadError::LoadHead)?;
-        let moves = if successor {
-            same_epoch_manifests_above(
-                self.store(),
-                namespace_id,
-                position.basis.manifest(),
-                position.head.writer_epoch,
-            )
+        let namespace = self.namespace_store(namespace_id);
+        let successor = namespace
+            .manifest_has_successor(position.basis.manifest_no())
             .await
-            .map_err(MetadataProjectionLoadError::LoadHead)?
+            .map_err(MetadataProjectionLoadError::LoadHead)?;
+        let moves = if successor {
+            namespace
+                .same_epoch_manifests_above(position.basis.manifest(), position.head.writer_epoch)
+                .await
+                .map_err(MetadataProjectionLoadError::LoadHead)?
         } else {
             Some(Vec::new())
         };

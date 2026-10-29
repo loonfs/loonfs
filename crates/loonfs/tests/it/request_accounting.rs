@@ -29,7 +29,8 @@ const STEP_EVERY_BATCHES: usize = 33;
 type SegmentMap = BTreeMap<String, (String, RunTier, u64, u64)>;
 
 async fn segment_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> SegmentMap {
-    let root = loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
+    let root = loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load metadata root");
     let manifest_key = metadata_manifest_object(namespace_id, &root.state.manifest().manifest_no);
@@ -150,7 +151,8 @@ async fn warm_phase_request_accounting() {
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+    let catalog = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_catalog_entry()
         .await
         .expect("load namespace catalog");
     // The bench publishes 100-mutation batches (one WAL object each) and
@@ -160,13 +162,10 @@ async fn warm_phase_request_accounting() {
         let mut candidates = Vec::with_capacity(BATCH);
         for _ in 0..BATCH.min(FILES - index) {
             let bytes = format!("body {index}");
-            let stored = loonfs_core::content::store_bytes_as_content(
-                &store,
-                &namespace_id,
-                bytes.as_bytes(),
-            )
-            .await
-            .expect("stage content");
+            let stored = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+                .store_bytes_as_content(bytes.as_bytes())
+                .await
+                .expect("stage content");
             // External tests prepare through the validating producer: one
             // content HEAD and one full GET by design.
             let prepared = loonfs_core::content::prepare_existing_content_ref(

@@ -4,7 +4,6 @@ use super::reads::ReadSource;
 use super::RuntimeCore;
 use crate::cache::PinnedRead;
 use crate::{Consistency, CoreError, Error, NamespaceId, Result};
-use loonfs_core::control::{load_namespace_current_manifest, load_snapshot_read_basis};
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::{ManifestLoadError, MetadataProjectionLoadError, RuntimeReadContext};
 use tracing::Instrument;
@@ -26,10 +25,11 @@ pub(super) async fn classify_read_result<T>(
     ) {
         return result;
     }
-    let store = core.store();
+    let namespace = core.namespace_store(&context.head.namespace_id);
     match source {
         ReadSource::Head => {
-            let current = load_namespace_current_manifest(store, &context.head.namespace_id)
+            let current = namespace
+                .load_current_manifest()
                 .await
                 .map_err(CoreError::from)?;
             let expected_manifest_no = context.basis.manifest_no();
@@ -43,7 +43,9 @@ pub(super) async fn classify_read_result<T>(
         }
         ReadSource::Snapshot(snapshot_id) => {
             let now_ms = core.now_ms();
-            load_snapshot_read_basis(store, None, &context.head, snapshot_id, now_ms).await?;
+            namespace
+                .load_snapshot_read_basis(&context.head, snapshot_id, now_ms)
+                .await?;
         }
     }
     result

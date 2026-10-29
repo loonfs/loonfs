@@ -1,10 +1,10 @@
 //! Lists existing pins: every pin as a checkpoint, or the user pins as
 //! snapshots.
 
-use super::record::{load_pin, load_pin_at_key};
+use super::record::load_pin_at_key;
 use crate::control_object::ControlObjectLoadError;
+use crate::engine::NamespaceEngine;
 use crate::error::{CoreError, Result};
-use crate::namespace::control::load_current_manifest;
 use futures::StreamExt;
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::ObjectStore;
@@ -73,121 +73,125 @@ impl CheckpointPageCursor {
     }
 }
 
-/// Loads one existing pin of any owner as the checkpoint row a listing
-/// returns for it. A missing pin returns `snapshot_not_found`.
-pub(crate) async fn get_checkpoint<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    checkpoint_id: &PinId,
-) -> Result<Checkpoint> {
-    load_current_manifest(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    let loaded = load_pin(store, namespace_id, checkpoint_id)
-        .await?
-        .ok_or_else(|| CoreError::SnapshotNotFound {
-            snapshot_id: checkpoint_id.clone(),
-        })?;
-    Ok(super::checkpoint_summary(loaded.state))
-}
-
-/// Lists one page of every pin, fork pins included, in ascending ID order.
-pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    request: PageRequest<CheckpointPageCursor>,
-) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
-    list_pins_page(store, namespace_id, request, |record| {
-        Some(super::checkpoint_summary(record))
-    })
-    .await
-}
-
-/// Lists one page of snapshots (the user pins) in ascending ID order,
-/// including expired snapshots that garbage collection hasn't deleted.
-pub(crate) async fn list_snapshots_page<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    request: PageRequest<SnapshotPageCursor>,
-) -> Result<Page<Snapshot, SnapshotPageCursor>> {
-    let request = PageRequest {
-        limit: request.limit,
-        cursor: request.cursor.map(CheckpointPageCursor::from),
-    };
-    let page = list_pins_page(store, namespace_id, request, super::user_pin_snapshot).await?;
-    Ok(Page {
-        items: page.items,
-        next_cursor: page.next_cursor.map(SnapshotPageCursor::from),
-    })
-}
-
-/// Lists the pins after the request's cursor and returns up to its limit of
-/// the rows that `row` returns for them. A pin for which `row` returns
-/// `None` doesn't count toward the limit.
-async fn list_pins_page<S: ObjectStore + ?Sized, T>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    request: PageRequest<CheckpointPageCursor>,
-    row: impl Fn(PinPayload) -> Option<T>,
-) -> Result<Page<T, CheckpointPageCursor>> {
-    load_current_manifest(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-
-    if let Some(cursor) = &request.cursor {
-        cursor.validate_for(namespace_id)?;
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
+    /// Loads one existing pin of any owner by id, as the checkpoint listing
+    /// returns it. An expired record stays readable until garbage collection
+    /// deletes it. A missing pin returns `snapshot_not_found`.
+    pub async fn get_checkpoint(&self, checkpoint_id: &PinId) -> Result<Checkpoint> {
+        self.namespace
+            .load_current_manifest()
+            .await
+            .map_err(CoreError::ControlObjectLoad)?;
+        let loaded = self
+            .namespace
+            .load_pin(checkpoint_id)
+            .await?
+            .ok_or_else(|| CoreError::SnapshotNotFound {
+                snapshot_id: checkpoint_id.clone(),
+            })?;
+        Ok(super::checkpoint_summary(loaded.state))
     }
 
-    let limit = request.limit;
-    let prefix = pin_prefix(namespace_id);
-    let start_after = request
-        .cursor
-        .as_ref()
-        .map(|cursor| cursor.last_key.as_str());
-    let keys = store
-        .list_prefix_from_stream(&prefix, start_after)
-        .peekable();
-    futures::pin_mut!(keys);
-    let mut rows = Vec::with_capacity(limit.as_usize());
-    let mut last_inspected_key = None;
-    while rows.len() < limit.as_usize() {
-        let Some(item) = keys.next().await else {
-            break;
-        };
-        let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
-        last_inspected_key = Some(key.clone());
-        // Skip records deleted after the key listing was read.
-        let loaded = match load_pin_at_key(store, &key).await {
-            Ok(loaded) => loaded,
-            Err(ControlObjectLoadError::MissingObject { .. }) => continue,
-            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
-        };
-        rows.extend(row(loaded.state));
+    /// Lists one page of existing checkpoints, fork pins included, in
+    /// ascending id order. Expired records remain visible until garbage
+    /// collection deletes them.
+    pub async fn list_checkpoints_page(
+        &self,
+        request: PageRequest<CheckpointPageCursor>,
+    ) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
+        self.list_pins_page(request, |record| Some(super::checkpoint_summary(record)))
+            .await
     }
-    let has_more = if rows.len() == limit.as_usize() {
-        match keys.as_mut().peek().await {
-            Some(Ok(_)) => true,
-            Some(Err(_)) => {
-                let error = keys
-                    .next()
-                    .await
-                    .expect("a peeked listing item should still be present")
-                    .expect_err("the peeked listing item should still be an error");
-                return Err(CoreError::store(&prefix, &error));
-            }
-            None => false,
+
+    /// Lists one page of snapshots (the user pins) in ascending ID order,
+    /// including expired snapshots that garbage collection hasn't deleted.
+    pub async fn list_snapshots_page(
+        &self,
+        request: PageRequest<SnapshotPageCursor>,
+    ) -> Result<Page<Snapshot, SnapshotPageCursor>> {
+        let request = PageRequest {
+            limit: request.limit,
+            cursor: request.cursor.map(CheckpointPageCursor::from),
+        };
+        let page = self
+            .list_pins_page(request, super::user_pin_snapshot)
+            .await?;
+        Ok(Page {
+            items: page.items,
+            next_cursor: page.next_cursor.map(SnapshotPageCursor::from),
+        })
+    }
+
+    /// Lists the pins after the request's cursor and returns up to its limit of
+    /// the rows that `row` returns for them. A pin for which `row` returns
+    /// `None` doesn't count toward the limit.
+    async fn list_pins_page<T>(
+        &self,
+        request: PageRequest<CheckpointPageCursor>,
+        row: impl Fn(PinPayload) -> Option<T>,
+    ) -> Result<Page<T, CheckpointPageCursor>> {
+        self.namespace
+            .load_current_manifest()
+            .await
+            .map_err(CoreError::ControlObjectLoad)?;
+
+        if let Some(cursor) = &request.cursor {
+            cursor.validate_for(&self.namespace.namespace_id)?;
         }
-    } else {
-        false
-    };
-    let next_cursor = has_more.then(|| CheckpointPageCursor {
-        namespace_id: namespace_id.clone(),
-        last_key: last_inspected_key.expect("a full page should inspect at least one key"),
-    });
-    Ok(Page {
-        items: rows,
-        next_cursor,
-    })
+
+        let limit = request.limit;
+        let prefix = pin_prefix(&self.namespace.namespace_id);
+        let start_after = request
+            .cursor
+            .as_ref()
+            .map(|cursor| cursor.last_key.as_str());
+        let keys = self
+            .namespace
+            .store
+            .list_prefix_from_stream(&prefix, start_after)
+            .peekable();
+        futures::pin_mut!(keys);
+        let mut rows = Vec::with_capacity(limit.as_usize());
+        let mut last_inspected_key = None;
+        while rows.len() < limit.as_usize() {
+            let Some(item) = keys.next().await else {
+                break;
+            };
+            let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
+            last_inspected_key = Some(key.clone());
+            // Skip records deleted after the key listing was read.
+            let loaded = match load_pin_at_key(&self.namespace.store, &key).await {
+                Ok(loaded) => loaded,
+                Err(ControlObjectLoadError::MissingObject { .. }) => continue,
+                Err(error) => return Err(CoreError::ControlObjectLoad(error)),
+            };
+            rows.extend(row(loaded.state));
+        }
+        let has_more = if rows.len() == limit.as_usize() {
+            match keys.as_mut().peek().await {
+                Some(Ok(_)) => true,
+                Some(Err(_)) => {
+                    let error = keys
+                        .next()
+                        .await
+                        .expect("a peeked listing item should still be present")
+                        .expect_err("the peeked listing item should still be an error");
+                    return Err(CoreError::store(&prefix, &error));
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        let next_cursor = has_more.then(|| CheckpointPageCursor {
+            namespace_id: self.namespace.namespace_id.clone(),
+            last_key: last_inspected_key.expect("a full page should inspect at least one key"),
+        });
+        Ok(Page {
+            items: rows,
+            next_cursor,
+        })
+    }
 }
 
 #[cfg(test)]

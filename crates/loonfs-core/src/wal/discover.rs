@@ -28,9 +28,9 @@ pub(crate) struct DiscoveredTail {
 
 pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
     manifest: &LoadedManifest,
 ) -> Result<DiscoveredTail, ControlObjectLoadError> {
+    let namespace_id = &manifest.state.envelope.payload().namespace_id;
     let mut head = NamespaceReadState::from(manifest.state.envelope.payload());
     let mut objects = Vec::new();
     if head.status.is_deleted() {

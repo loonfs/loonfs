@@ -39,7 +39,8 @@ async fn current_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> CurrentManifest {
-    loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
+    loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest")
         .state

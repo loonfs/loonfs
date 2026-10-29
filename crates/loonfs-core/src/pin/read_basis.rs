@@ -28,12 +28,12 @@ pub struct SnapshotReadBasis {
 
 pub(crate) async fn load_pin_basis<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
-    segment_cache: Option<&'a MetadataSegmentCache>,
+    segment_cache: &'a MetadataSegmentCache,
     record: PinPayload,
 ) -> Result<PinBasis<'a, S>> {
     let pin_id = &record.pin_id;
     let manifest = record.manifest();
-    let segments = load_manifest_segments(store, segment_cache, &manifest)
+    let segments = load_manifest_segments(store, Some(segment_cache), &manifest)
         .await
         .map_err(|error| match error {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
@@ -53,7 +53,7 @@ pub(crate) async fn load_pin_basis<'a, S: ObjectStore + ?Sized>(
 /// replayed. A pin whose manifest is gone returns `checkpoint_unavailable`.
 pub(crate) async fn load_snapshot_read_basis_from_record<S: ObjectStore + ?Sized>(
     store: &S,
-    segment_cache: Option<&MetadataSegmentCache>,
+    segment_cache: &MetadataSegmentCache,
     live_head: &NamespaceReadState,
     record: PinPayload,
 ) -> Result<SnapshotReadBasis> {

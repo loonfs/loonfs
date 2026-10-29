@@ -2,7 +2,7 @@
 //! basis, around a retention advance that the session hasn't moved onto yet.
 
 use super::*;
-use crate::manifest::{advance_retention_floor, RetentionTarget};
+use crate::manifest::RetentionTarget;
 use loonfs_types::api::v0::FilesystemChange;
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::{AbsolutePath, DeleteDirectoryBehavior, InodeId};
@@ -33,14 +33,12 @@ fn undelete(commit_id: &str, inode_id: InodeId, deletion_seq: ChangeSeq) -> Comm
     )
 }
 
-async fn publish<S: ObjectStore + ?Sized>(
-    engine: &mut NamespaceCommitEngine,
-    store: &S,
+async fn publish<S: ObjectStore>(
+    engine: &mut NamespaceCommitEngine<S>,
     candidate: CommitCandidate,
 ) -> Result<Commit> {
     engine
         .publish_batch(
-            store,
             [candidate],
             &context("writer"),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -53,14 +51,12 @@ async fn publish<S: ObjectStore + ?Sized>(
 
 /// Creates and deletes `/name`, and returns the deleted root and the
 /// deletion's sequence.
-async fn delete<S: ObjectStore + ?Sized>(
-    engine: &mut NamespaceCommitEngine,
-    store: &S,
+async fn delete<S: ObjectStore>(
+    engine: &mut NamespaceCommitEngine<S>,
     name: &str,
 ) -> (InodeId, ChangeSeq) {
     publish(
         engine,
-        store,
         operation(
             &format!("create-{name}"),
             FilesystemOperation::CreateDirectory {
@@ -73,7 +69,6 @@ async fn delete<S: ObjectStore + ?Sized>(
     .expect("create directory");
     let deleted = publish(
         engine,
-        store,
         operation(
             &format!("delete-{name}"),
             FilesystemOperation::DeletePath {
@@ -136,35 +131,32 @@ async fn an_undelete_is_validated_against_the_floor_of_the_sessions_basis() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("undelete-floor").expect("valid namespace id");
-    create(&store, &namespace_id, &context("writer"))
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context("writer"))
+        .create()
         .await
         .expect("bootstrap");
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
-    let (restored, restored_seq) = delete(&mut engine, &store, "restored").await;
-    let (expired, expired_seq) = delete(&mut engine, &store, "expired").await;
-    let folded = fold_wal_tail(
-        &store,
-        None,
-        &namespace_id,
-        engine.wal_fold_input(),
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        crate::manifest::MetadataRunPolicy::default(),
-        &crate::test_support::content_writes(),
-    )
-    .await
-    .expect("fold");
+    let mut engine =
+        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let (restored, restored_seq) = delete(&mut engine, "restored").await;
+    let (expired, expired_seq) = delete(&mut engine, "expired").await;
+    let folded = crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal_tail(
+            engine.wal_fold_input(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("fold");
     engine.record_manifest_published(folded.manifest);
-    let advanced = advance_retention_floor(
+    let advanced = crate::test_support::NamespaceFixture::new(
         &store,
-        None,
         &namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(1_000),
-        Arc::new(StdMonotonicTimer::default()),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(1_000),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("advance the floor");
     assert_eq!(advanced.response.retention_floor_seq, expired_seq);
@@ -172,7 +164,6 @@ async fn an_undelete_is_validated_against_the_floor_of_the_sessions_basis() {
     // The session still plans against the fold's manifest, whose floor is 0.
     let restored_commit = publish(
         &mut engine,
-        &store,
         undelete("undelete-before", restored, restored_seq),
     )
     .await
@@ -185,20 +176,15 @@ async fn an_undelete_is_validated_against_the_floor_of_the_sessions_basis() {
     engine.record_manifest_published(advanced.published.expect("a published advance"));
     let error = publish(
         &mut engine,
-        &store,
         undelete("undelete-expired", expired, expired_seq),
     )
     .await
     .expect_err("an undelete at the new floor");
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
-    let (above, above_seq) = delete(&mut engine, &store, "above").await;
-    let above_commit = publish(
-        &mut engine,
-        &store,
-        undelete("undelete-above", above, above_seq),
-    )
-    .await
-    .expect("an undelete above the new floor");
+    let (above, above_seq) = delete(&mut engine, "above").await;
+    let above_commit = publish(&mut engine, undelete("undelete-above", above, above_seq))
+        .await
+        .expect("an undelete above the new floor");
     assert_eq!(
         basis_floor_of(&store, &namespace_id, above_commit.committed_seq).await,
         expired_seq

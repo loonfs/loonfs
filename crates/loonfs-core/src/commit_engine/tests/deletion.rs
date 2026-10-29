@@ -1,7 +1,6 @@
 //! Writer fencing and deletion budgets.
 
 use super::*;
-use crate::test_support::ops::create;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -32,22 +31,17 @@ async fn deletion_budget_includes_writer_acquisition() {
         OperationSelector::Head,
     );
     let context = context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     let clock = Arc::new(ManualClock::new(0));
-    let mut publisher = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .monotonic_timer(clock.clone());
+    let mut publisher = NamespaceCommitEngine::new(crate::NamespaceStore {
+        timer: clock.clone(),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    });
     store.block_next();
-    let delete = publisher.delete_namespace(
-        &store,
-        Default::default(),
-        &context,
-        crate::manifest::MetadataRunPolicy::default(),
-    );
+    let delete = publisher.delete_namespace(Default::default(), &context);
     let delay = async {
         store.wait_until_blocked().await;
         clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
@@ -58,7 +52,8 @@ async fn deletion_budget_includes_writer_acquisition() {
         result,
         Err(CoreError::MetadataPublicationBudgetExceeded { .. })
     );
-    let manifest = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("manifest");
     assert!(!manifest.state.envelope.payload().status.is_deleted());
@@ -77,16 +72,14 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     );
     let namespace_id = NamespaceId::parse("terminal-writer").expect("namespace");
     let context = context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
-    let mut stale = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
+    let mut stale =
+        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
     stale
         .publish_batch(
-            &store,
             [CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("before-delete").expect("commit"),
                 loonfs_test_support::test_actor(),
@@ -103,18 +96,10 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         .results
         .remove(0)
         .expect("publish before deletion");
-    NamespaceCommitEngine::new(
-        namespace_id,
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .delete_namespace(
-        &store,
-        Default::default(),
-        &context,
-        crate::manifest::MetadataRunPolicy::default(),
-    )
-    .await
-    .expect("delete");
+    NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id))
+        .delete_namespace(Default::default(), &context)
+        .await
+        .expect("delete");
     let candidate = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("after-delete").expect("commit"),
         loonfs_test_support::test_actor(),
@@ -128,7 +113,6 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         store.reset();
         let error = stale
             .publish_batch(
-                &store,
                 [candidate.clone()],
                 &context,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -159,15 +143,15 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         KeyPredicate::any(),
     );
     let context = context();
-    create(&store, &namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     let clock = Arc::new(ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .monotonic_timer(clock.clone());
+    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
+        timer: clock.clone(),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    });
     let value = InlineContent::new(
         namespace_id.clone(),
         ContentId::generate(),
@@ -191,19 +175,15 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         vec![value],
     );
     engine
-        .publish_batch(
-            &store,
-            [candidate],
-            &context,
-            &Deadline::start(clock.clone()),
-        )
+        .publish_batch([candidate], &context, &Deadline::start(clock.clone()))
         .await
         .results
         .pop()
         .expect("result")
         .expect("publish inline content");
     let acquired_writer = engine
-        .session_writer_epoch(&store, &context)
+        .position
+        .session_writer_epoch(&engine.namespace, &context)
         .await
         .expect("acquired writer");
     for expected_head_seq in [ChangeSeq(0), ChangeSeq(1)] {
@@ -212,22 +192,18 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
         }
         store.reset();
-        let error = crate::namespace::delete::delete_namespace(
-            &store,
-            &namespace_id,
-            DeleteNamespaceOptions {
-                expected_head_seq: Some(expected_head_seq),
-            },
-            acquired_writer.clone(),
-            None,
-            &context,
-            &deadline,
-            crate::manifest::MetadataRunPolicy::default(),
-            None,
-            &crate::test_support::content_writes(),
-        )
-        .await
-        .expect_err("deletion rejected before folding");
+        let error = crate::test_support::namespace_store(&store, &namespace_id)
+            .delete_namespace(
+                DeleteNamespaceOptions {
+                    expected_head_seq: Some(expected_head_seq),
+                },
+                acquired_writer.clone(),
+                None,
+                &context,
+                &deadline,
+            )
+            .await
+            .expect_err("deletion rejected before folding");
         if expected_head_seq == ChangeSeq(0) {
             assert_matches!(
                 error,

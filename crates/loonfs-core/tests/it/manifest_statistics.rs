@@ -1,16 +1,12 @@
 //! Manifest activity and referenced storage observations.
 
-use crate::common::commit_split_support::*;
-use crate::common::namespace_engine;
-use loonfs_core::content::store_bytes_as_content;
-use loonfs_core::control::{
-    load_checkpoint_statistics, load_namespace_current_manifest, load_namespace_statistics,
-};
+use crate::common::*;
 use loonfs_core::publish::{CommitIntent, FilesystemOperation, NamespaceCommitEngine};
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{
     replace_object, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
     RecordingStore,
@@ -34,10 +30,12 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         );
         let ns = namespace_id("activity");
         let context = mutation_context();
-        bootstrap_namespace(&store, &ns, &context)
+        NamespaceFixture::new(&store, &ns, &context)
+            .create()
             .await
             .expect("bootstrap");
-        let initial = load_namespace_statistics(&store, &ns)
+        let initial = namespace_store(&store, &ns)
+            .load_statistics()
             .await
             .expect("activity");
         assert_eq!(initial.activity, ManifestActivity::default());
@@ -47,10 +45,12 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             (initial.inode_record_count, initial.metadata_stored_bytes),
             (0, 0)
         );
-        let content = store_bytes_as_content(&store, &ns, b"hello")
+        let content = namespace_store(&store, &ns)
+            .store_bytes_as_content(b"hello")
             .await
             .expect("content");
-        let empty = store_bytes_as_content(&store, &ns, b"")
+        let empty = namespace_store(&store, &ns)
+            .store_bytes_as_content(b"")
             .await
             .expect("empty content");
         let operations = [
@@ -80,10 +80,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                 expected_revision_no: None,
             },
         ];
-        let mut engine = NamespaceCommitEngine::new(
-            ns.clone(),
-            std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-        );
+        let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &ns));
         for (index, operation) in operations.into_iter().enumerate() {
             let request = CommitIntent::single(
                 CommitId::parse(format!("activity-{index}")).expect("id"),
@@ -94,7 +91,6 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             let candidate = prepared_candidate(&store, &ns, request).await;
             let first = engine
                 .publish_batch(
-                    &store,
                     vec![candidate.clone()],
                     &context,
                     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -105,7 +101,6 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                 .expect("commit");
             let retry = engine
                 .publish_batch(
-                    &store,
                     vec![candidate],
                     &context,
                     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
@@ -118,53 +113,52 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         }
         // Publishing commits and staging content do not advance folded activity.
         assert_eq!(
-            load_namespace_statistics(&store, &ns)
+            namespace_store(&store, &ns)
+                .load_statistics()
                 .await
                 .expect("unfolded")
                 .activity,
             initial.activity
         );
         let input = cached.then(|| engine.wal_fold_input().expect("the position's tail"));
-        loonfs_core::fold_wal_tail(
-            &store,
-            None,
-            &ns,
-            input.clone(),
-            &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
-            loonfs_core::MetadataRunPolicy::default(),
-            &loonfs_core::test_support::content_writes(),
-        )
-        .await
-        .expect("fold");
+        namespace_store(&store, &ns)
+            .fold_wal_tail(
+                input.clone(),
+                &loonfs_core::time::Deadline::start(std::sync::Arc::new(
+                    StdMonotonicTimer::default(),
+                )),
+            )
+            .await
+            .expect("fold");
         let expected = ManifestActivity {
             content_bytes: ActivityCounter::parse(10).expect("activity"),
             file_revisions: ActivityCounter::parse(3).expect("activity"),
             mutations: ActivityCounter::parse(5).expect("activity"),
         };
-        let folded = load_namespace_statistics(&store, &ns)
+        let folded = namespace_store(&store, &ns)
+            .load_statistics()
             .await
             .expect("folded activity");
         assert_eq!(folded.activity, expected);
         assert_eq!(folded.manifest.head_seq, ChangeSeq(4));
         assert_eq!(folded.inode_record_count, 5); // Root, two directories, two files.
                                                   // A stale cached fold and a fresh engine both see already-covered activity.
-        loonfs_core::fold_wal_tail(
-            &store,
-            None,
-            &ns,
-            input,
-            &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
-            loonfs_core::MetadataRunPolicy::default(),
-            &loonfs_core::test_support::content_writes(),
-        )
-        .await
-        .expect("repeat fold");
+        namespace_store(&store, &ns)
+            .fold_wal_tail(
+                input,
+                &loonfs_core::time::Deadline::start(std::sync::Arc::new(
+                    StdMonotonicTimer::default(),
+                )),
+            )
+            .await
+            .expect("repeat fold");
         namespace_engine(&store, &ns, &context)
             .fold_wal()
             .await
             .expect("restart fold");
         store.reset();
-        let current = load_namespace_current_manifest(&store, &ns)
+        let current = namespace_store(&store, &ns)
+            .load_current_manifest()
             .await
             .expect("manifest");
         let observed = current.statistics().expect("activity");
@@ -210,10 +204,12 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     let child = namespace_id("child");
     let grandchild = namespace_id("grandchild");
     let context = mutation_context();
-    bootstrap_namespace(&store, &parent, &context)
+    NamespaceFixture::new(&store, &parent, &context)
+        .create()
         .await
         .expect("bootstrap");
-    write_file_bytes(&store, &parent, "/file", b"old", &context, Some("old"))
+    NamespaceFixture::new(&store, &parent, &context)
+        .write_file_bytes("/file", b"old", Some(&commit_id("old")))
         .await
         .expect("write");
     let engine = namespace_engine(&store, &parent, &context);
@@ -222,10 +218,12 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .await
         .expect("snapshot")
         .response;
-    let baseline = load_checkpoint_statistics(&store, &parent, &snapshot.snapshot_id)
+    let baseline = namespace_store(&store, &parent)
+        .load_checkpoint_statistics(&snapshot.snapshot_id)
         .await
         .expect("pin activity");
-    write_file_bytes(&store, &parent, "/file", b"newer", &context, Some("newer"))
+    NamespaceFixture::new(&store, &parent, &context)
+        .write_file_bytes("/file", b"newer", Some(&commit_id("newer")))
         .await
         .expect("write");
     let unavailable_wal = FailStore::new(
@@ -236,7 +234,8 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     );
     unavailable_wal.fail_all();
     assert_eq!(
-        load_checkpoint_statistics(&unavailable_wal, &parent, &snapshot.snapshot_id)
+        namespace_store(&unavailable_wal, &parent)
+            .load_checkpoint_statistics(&snapshot.snapshot_id)
             .await
             .expect("checkpoint statistics exclude newer WAL"),
         baseline
@@ -247,7 +246,8 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .await
         .expect("layout snapshot")
         .response;
-    let current = load_namespace_current_manifest(&store, &parent)
+    let current = namespace_store(&store, &parent)
+        .load_current_manifest()
         .await
         .expect("manifest");
     assert_eq!(current.state.envelope.payload().runs.len(), 2);
@@ -266,7 +266,8 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     replace_object(&store, &current.object_key, manifest_bytes.into())
         .await
         .expect("manifest at another compression level");
-    let layout = load_namespace_statistics(&store, &parent)
+    let layout = namespace_store(&store, &parent)
+        .load_statistics()
         .await
         .expect("layout statistics");
     assert_eq!(layout.manifest_bytes, stored_length);
@@ -287,7 +288,8 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         ])
     );
     assert_eq!(
-        load_checkpoint_statistics(&store, &parent, &layout_snapshot.snapshot_id)
+        namespace_store(&store, &parent)
+            .load_checkpoint_statistics(&layout_snapshot.snapshot_id)
             .await
             .expect("checkpoint layout statistics"),
         layout
@@ -300,7 +302,8 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         )
         .await
         .expect("fork old snapshot");
-    let inherited = load_namespace_statistics(&store, &child)
+    let inherited = namespace_store(&store, &child)
+        .load_statistics()
         .await
         .expect("child activity");
     assert_eq!(baseline.activity.content_bytes.get(), 3);
@@ -314,19 +317,14 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         inherited.metadata_stored_bytes,
         baseline.metadata_stored_bytes
     );
-    write_file_bytes(
-        &store,
-        &child,
-        "/file",
-        b"child",
-        &context,
-        Some("child-write"),
-    )
-    .await
-    .expect("child write");
+    NamespaceFixture::new(&store, &child, &context)
+        .write_file_bytes("/file", b"child", Some(&commit_id("child-write")))
+        .await
+        .expect("child write");
     let child_engine = namespace_engine(&store, &child, &context);
     child_engine.fold_wal().await.expect("fold child");
-    let observed = load_namespace_statistics(&store, &child)
+    let observed = namespace_store(&store, &child)
+        .load_statistics()
         .await
         .expect("first metered observation");
     assert_eq!(
@@ -341,7 +339,8 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .fork_namespace(&grandchild, &loonfs_test_support::test_actor(), None)
         .await
         .expect("nested fork");
-    let nested = load_namespace_statistics(&store, &grandchild)
+    let nested = namespace_store(&store, &grandchild)
+        .load_statistics()
         .await
         .expect("nested activity");
     assert_eq!(nested.activity, ManifestActivity::default());
@@ -352,7 +351,8 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         observed.manifest
     );
     assert_eq!(
-        load_checkpoint_statistics(&store, &parent, &snapshot.snapshot_id)
+        namespace_store(&store, &parent)
+            .load_checkpoint_statistics(&snapshot.snapshot_id)
             .await
             .expect("pin unchanged"),
         baseline
@@ -365,14 +365,16 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     let store = LocalFsStore::new(dir.path()).expect("store");
     let ns = namespace_id("activity");
     let context = mutation_context();
-    bootstrap_namespace(&store, &ns, &context)
+    NamespaceFixture::new(&store, &ns, &context)
+        .create()
         .await
         .expect("bootstrap");
     create_directory_path(&store, &ns, "/dir", &context, None)
         .await
         .expect("directory");
     for path in ["/dir/a", "/dir/b"] {
-        write_file_bytes(&store, &ns, path, b"data", &context, None)
+        NamespaceFixture::new(&store, &ns, &context)
+            .write_file_bytes(path, b"data", None)
             .await
             .expect("file");
     }
@@ -382,7 +384,8 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
         .inode_id;
     let engine = namespace_engine(&store, &ns, &context);
     engine.fold_wal().await.expect("fold");
-    let before = load_namespace_statistics(&store, &ns)
+    let before = namespace_store(&store, &ns)
+        .load_statistics()
         .await
         .expect("activity");
     let deleted = submit_operation(
@@ -399,7 +402,8 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     .await
     .expect("delete subtree");
     engine.fold_wal().await.expect("fold delete");
-    let during = load_namespace_statistics(&store, &ns)
+    let during = namespace_store(&store, &ns)
+        .load_statistics()
         .await
         .expect("activity");
     submit_operation(
@@ -418,7 +422,8 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     .await
     .expect("undelete");
     engine.fold_wal().await.expect("fold undelete");
-    let after = load_namespace_statistics(&store, &ns)
+    let after = namespace_store(&store, &ns)
+        .load_statistics()
         .await
         .expect("activity");
     assert_eq!(
@@ -449,10 +454,12 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
     );
     let ns = namespace_id("activity");
     let context = mutation_context();
-    bootstrap_namespace(&store, &ns, &context)
+    NamespaceFixture::new(&store, &ns, &context)
+        .create()
         .await
         .expect("bootstrap");
-    write_file_bytes(&store, &ns, "/file", b"final", &context, None)
+    NamespaceFixture::new(&store, &ns, &context)
+        .write_file_bytes("/file", b"final", None)
         .await
         .expect("file");
     let engine = namespace_engine(&store, &ns, &context);
@@ -461,7 +468,8 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
         .delete_namespace(Default::default())
         .await
         .expect_err("cannot delete with an unaccounted tail");
-    assert!(!load_namespace_current_manifest(&store, &ns)
+    assert!(!namespace_store(&store, &ns)
+        .load_current_manifest()
         .await
         .expect("manifest")
         .state
@@ -470,7 +478,8 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
         .status
         .is_deleted());
     assert_eq!(
-        load_namespace_statistics(&store, &ns)
+        namespace_store(&store, &ns)
+            .load_statistics()
             .await
             .expect("activity")
             .activity,
@@ -481,7 +490,8 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
         .delete_namespace(Default::default())
         .await
         .expect("retry deletion");
-    let final_manifest = load_namespace_current_manifest(&store, &ns)
+    let final_manifest = namespace_store(&store, &ns)
+        .load_current_manifest()
         .await
         .expect("deleted manifest");
     assert!(final_manifest.state.envelope.payload().status.is_deleted());
@@ -510,10 +520,12 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
         let ns = namespace_id("activity");
         let context = mutation_context();
         let inner = LocalFsStore::new(dir.path()).expect("store");
-        bootstrap_namespace(&inner, &ns, &context)
+        NamespaceFixture::new(&inner, &ns, &context)
+            .create()
             .await
             .expect("bootstrap");
-        write_file_bytes(&inner, &ns, "/file", b"data", &context, None)
+        NamespaceFixture::new(&inner, &ns, &context)
+            .write_file_bytes("/file", b"data", None)
             .await
             .expect("write");
         let store = FailStore::new(
@@ -534,7 +546,8 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
         store.fail_next(1);
         let result = namespace_engine(&store, &ns, &context).fold_wal().await;
         assert_eq!(result.is_ok(), applied);
-        let observed = load_namespace_statistics(&store, &ns)
+        let observed = namespace_store(&store, &ns)
+            .load_statistics()
             .await
             .expect("statistics");
         assert_eq!(
@@ -549,7 +562,8 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
                 .expect("restart and retry");
         }
         assert_eq!(
-            load_namespace_statistics(&store, &ns)
+            namespace_store(&store, &ns)
+                .load_statistics()
                 .await
                 .expect("statistics")
                 .activity,

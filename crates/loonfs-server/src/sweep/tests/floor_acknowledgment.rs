@@ -28,12 +28,11 @@ impl SweepServer {
     /// The current manifest's writer epoch, and the writer ID in its writer
     /// block.
     async fn writer_block(&self, namespace_id: &NamespaceId) -> (WriterEpoch, Option<WriterId>) {
-        let manifest = loonfs::control::load_namespace_current_manifest(
-            &*self.runtime.object_store(),
-            namespace_id,
-        )
-        .await
-        .expect("load the current manifest");
+        let manifest =
+            loonfs_core::test_support::namespace_store(&*self.runtime.object_store(), namespace_id)
+                .load_current_manifest()
+                .await
+                .expect("load the current manifest");
         let payload = manifest.state.envelope.payload();
         (
             payload.writer_epoch,

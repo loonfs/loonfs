@@ -544,10 +544,11 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
     let manifest = |manifest_no| RecordedOperation::Head {
         key: metadata_manifest_object(&fixture.namespace_id, &manifest_no),
     };
-    let before = loonfs_core::control::load_namespace_current_manifest(
+    let before = loonfs_core::test_support::namespace_store(
         &(fixture.recording.clone() as SharedObjectStore),
         &fixture.namespace_id,
     )
+    .load_current_manifest()
     .await
     .expect("current manifest")
     .state

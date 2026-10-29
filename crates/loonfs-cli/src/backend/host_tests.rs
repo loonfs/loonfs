@@ -86,15 +86,15 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
             .expect("embedded host")
             .runtime
             .object_store();
-        loonfs_core::test_support::append_wal_objects(
+        loonfs_core::test_support::NamespaceFixture::new(
             store.as_ref(),
             &namespace_id,
-            FOLD_AT_WAL_OBJECTS,
             &loonfs_core::MutationContext {
                 writer_id: loonfs_types::WriterId::parse("tail-seed").expect("writer id"),
                 now_ms: 1_000,
             },
         )
+        .append_wal_objects(FOLD_AT_WAL_OBJECTS)
         .await
         .expect("seed a tail at the fold threshold");
     });

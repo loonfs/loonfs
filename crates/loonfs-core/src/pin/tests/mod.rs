@@ -6,17 +6,10 @@ mod pin_verification;
 mod snapshot_fork_gc;
 mod snapshot_renewal;
 
-use super::{create, record};
+use super::record;
 use crate::error::{CoreError, ErrorCode};
 use crate::manifest::tests::*;
-use crate::manifest::{
-    compact_unit, fold_wal, CompactionUnitOutcome, MetadataCompactionPolicy, MetadataRunPolicy,
-};
-use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
-use crate::namespace::writer_epoch::acquire_writer_epoch;
-use crate::path::read::load_current_metadata_view;
-use crate::pin::record::load_pin;
-use crate::test_support::ops::{create, write_file_bytes};
+use crate::manifest::{CompactionUnitOutcome, MetadataCompactionPolicy};
 use crate::time::{Deadline, StdMonotonicTimer};
 use crate::MutationContext;
 use async_trait::async_trait;

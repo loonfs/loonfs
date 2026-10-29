@@ -1,51 +1,34 @@
 //! [`NamespaceEngine`]: the namespace-scoped entry point for reads, writes,
-//! uploads, snapshots, and maintenance.
+//! uploads, snapshots, and maintenance. This module holds the type, its
+//! constructors, its authorization, and its per-subject reads; each other
+//! operation is a method in the module that implements it.
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
 use crate::cache::{HeadAndWalTailCache, MetadataSegmentCache, ObjectCache};
-use crate::commit_engine::CommitCandidate;
+use crate::commit_engine::{NamespaceCommitEngine, WalFoldInput};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
-use crate::manifest::{FoldWalResponse, PublicationReport};
 use crate::metadata::access::is_administrator;
-use crate::namespace::basis::{MetadataBasis, PublicationBasis};
+use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::state::NamespaceReadState;
-use crate::namespace::{bootstrap, fork};
-use crate::options::{CreateNamespaceOptions, DeleteNamespaceOptions};
+use crate::namespace::store::NamespaceStore;
 use crate::path::read::{
-    load_metadata_view, load_metadata_view_for_authorization, CurrentFileState,
-    DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes, LoadedMetadataView,
-    ReadLoadContext,
-};
-use crate::pin::{
-    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
-    ListCheckpointFilesOptions, SnapshotPageCursor,
-};
-use crate::protocol::{
-    CompletedUpload, DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets,
-    UploadSessionView,
+    CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
+    LoadedMetadataView, ReadLoadContext,
 };
 use crate::storage::content::{
-    open_content_import_reader, ContentLocation, DurableContentValidationError, FileContentStream,
-    StreamRange, StreamedPayloadKind,
+    ContentLocation, DurableContentValidationError, FileContentStream, StreamRange,
 };
-use crate::storage::content_admission::PreparedContent;
 use crate::wal::ProjectedWalTail;
-use loonfs_objectstore::{ByteStream, ObjectStore};
-use loonfs_types::api::v0::{
-    Commit, CompleteUploadBody, ListChangesResponse, UploadPartChecksumClaim, UploadSession,
-};
-use loonfs_types::format::control::PinOwner;
-use loonfs_types::options::{AccessState, DirectMultipartUploadOptions, ListOptions, StatOptions};
-use loonfs_types::CompactorEpoch;
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::api::v0::ListChangesResponse;
+use loonfs_types::options::{AccessState, ListOptions, StatOptions};
 use loonfs_types::EffectiveLimit;
 use loonfs_types::{
-    AdvanceRetentionResponse, ChangeSeq, CommitId, ContentRef, DeleteNamespaceResponse,
-    DeleteSnapshotResponse, FileRevision, FileRevisionsPageCursor, InodeId, ListPageCursor,
-    NamespaceAccess, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId,
-    RevisionNo, SetRetentionWindowResponse, Snapshot, Subject, TrashEntry, TrashPageCursor,
-    UploadId, WriterEpoch, WriterId, ROOT_INODE_ID,
+    ChangeSeq, CommitId, ContentRef, FileRevision, FileRevisionsPageCursor, InodeId,
+    ListPageCursor, NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, RevisionNo,
+    Subject, TrashEntry, TrashPageCursor, WriterId, ROOT_INODE_ID,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -71,7 +54,7 @@ pub struct RuntimeReadContext {
     pub tail: Option<Arc<ProjectedWalTail>>,
 }
 
-fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_, '_> {
+pub(crate) fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_, '_> {
     ReadLoadContext::pinned_head(
         &context.head,
         &context.basis,
@@ -111,31 +94,31 @@ pub struct RootAccess {
 
 /// A namespace-scoped core API.
 ///
-/// `NamespaceEngine` owns an object store handle and exposes operations
-/// selected by its mode. Use [`NamespaceEngine::reader`] for reads only or
-/// [`NamespaceEngine::writer`] for reads and mutations.
+/// `NamespaceEngine` owns one namespace's [`NamespaceStore`] and exposes
+/// operations selected by its mode. Use [`NamespaceEngine::reader`] for reads
+/// only or [`NamespaceEngine::writer`] for reads and mutations.
 #[derive(Debug)]
 pub struct NamespaceEngine<S, M> {
-    store: S,
-    namespace_id: NamespaceId,
+    pub(crate) namespace: NamespaceStore<S>,
     mode: M,
-    content_writes: Arc<crate::PermitPool>,
-    wall_clock: Arc<dyn crate::time::WallClock>,
-    timer: Arc<dyn crate::time::MonotonicTimer>,
-    subject: Option<Subject>,
+    pub(crate) subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
-    run_policy: crate::manifest::MetadataRunPolicy,
-    segment_cache: Option<Arc<MetadataSegmentCache>>,
     /// The writer session's position that [`NamespaceEngine::fold_wal`]
     /// folds, or `None` to load the tail from the store.
-    writer_position: Option<crate::commit_engine::WalFoldInput>,
-    /// A narrowed per-segment row budget, so a test can get many compacted
-    /// segments from a few thousand rows. See [`Self::narrow_segment_row_budget`].
-    #[cfg(any(test, feature = "test-support"))]
-    segment_row_budget: Option<std::num::NonZeroUsize>,
+    pub(crate) writer_position: Option<WalFoldInput>,
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
+    fn new(namespace: NamespaceStore<S>, mode: M) -> Self {
+        Self {
+            namespace,
+            mode,
+            subject: None,
+            authorization_head: None,
+            writer_position: None,
+        }
+    }
+
     /// Searches the supplied WAL and metadata view without acquiring a writer epoch.
     pub async fn find_commit_receipt(
         &self,
@@ -149,23 +132,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .await
     }
 
-    /// Sets the subject for this engine's reads.
+    /// Sets the subject for this engine's reads and uploads.
     pub fn with_subject(mut self, subject: Subject) -> Self {
         self.subject = Some(subject);
-        self
-    }
-
-    /// Supplies the wall clock behind every timestamp this engine records and
-    /// every commit age that its retention advances measure.
-    pub fn with_wall_clock(mut self, wall_clock: Arc<dyn crate::time::WallClock>) -> Self {
-        self.wall_clock = wall_clock;
-        self
-    }
-
-    /// Supplies the monotonic timer behind every deadline and observation
-    /// this engine starts.
-    pub fn with_monotonic_timer(mut self, timer: Arc<dyn loonfs_types::MonotonicTimer>) -> Self {
-        self.timer = timer;
         self
     }
 
@@ -184,7 +153,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         head_view: Option<&'a LoadedMetadataView<'a, S>>,
     ) -> Result<ReadAccess<'a, S>> {
         let authorizer = Authorizer::for_request(
-            &self.namespace_id,
+            &self.namespace.namespace_id,
             &context.head.access,
             CommitAuthority::Subject(self.subject.as_ref()),
         )?;
@@ -207,7 +176,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// that could otherwise answer before any per-subject read.
     pub fn ensure_subject(&self, context: &RuntimeReadContext) -> Result<()> {
         Authorizer::for_request(
-            &self.namespace_id,
+            &self.namespace.namespace_id,
             &context.head.access,
             CommitAuthority::Subject(self.subject.as_ref()),
         )
@@ -223,19 +192,17 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         // Historical data does not restore historical administrator grants.
         let context = self.authorization_head.as_ref().unwrap_or(context);
         let authorizer = Authorizer::for_request(
-            &self.namespace_id,
+            &self.namespace.namespace_id,
             &context.head.access,
             CommitAuthority::Subject(Some(subject)),
         )?;
         let Authorizer::Subject { principals } = authorizer else {
             return Ok(());
         };
-        let view = load_metadata_view_for_authorization(
-            &self.store,
-            &self.namespace_id,
-            runtime_read_load_context(context),
-        )
-        .await?;
+        let view = self
+            .namespace
+            .load_metadata_view_for_authorization(runtime_read_load_context(context))
+            .await?;
         if is_administrator(&mut view.metadata_view().session(), principals).await? {
             Ok(())
         } else {
@@ -250,7 +217,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub async fn root_access(&self, context: &RuntimeReadContext) -> Result<RootAccess> {
         if matches!(context.head.access, NamespaceAccess::Unrestricted {}) {
             return Err(CoreError::NamespaceUnrestricted {
-                namespace_id: self.namespace_id.clone(),
+                namespace_id: self.namespace.namespace_id.clone(),
             });
         }
         let view = self.load_read_view(context).await?;
@@ -278,12 +245,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Returns the namespace this engine is bound to.
     pub fn namespace_id(&self) -> &NamespaceId {
-        &self.namespace_id
+        &self.namespace.namespace_id
     }
 
     /// Returns the current wall-clock time.
-    fn now_ms(&self) -> u64 {
-        self.wall_clock.now_ms()
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.namespace.wall_clock.now_ms()
     }
 
     /// Stats one path against the pinned runtime read context.
@@ -352,177 +319,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         view.list_inode_children_page(inode_id, request, &options, &access)
             .await
     }
-}
 
-impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    fn new(
-        store: S,
-        namespace_id: NamespaceId,
-        content_writes: Arc<crate::PermitPool>,
-        mode: M,
-    ) -> Self {
-        Self {
-            store,
-            namespace_id,
-            content_writes,
-            mode,
-            wall_clock: Arc::new(crate::time::SystemWallClock),
-            timer: Arc::new(crate::time::StdMonotonicTimer::default()),
-            subject: None,
-            authorization_head: None,
-            run_policy: crate::manifest::MetadataRunPolicy::default(),
-            segment_cache: None,
-            writer_position: None,
-            #[cfg(any(test, feature = "test-support"))]
-            segment_row_budget: None,
-        }
-    }
-}
-
-impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
-    /// Creates a read-only engine bound to `namespace_id`.
-    pub fn reader(
-        store: S,
-        namespace_id: NamespaceId,
-        content_writes: Arc<crate::PermitPool>,
-    ) -> Self {
-        Self::new(store, namespace_id, content_writes, ReadOnly)
-    }
-}
-
-impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Creates a writable engine bound to `namespace_id` and `writer_id`.
-    pub fn writer(
-        store: S,
-        namespace_id: NamespaceId,
-        writer_id: WriterId,
-        content_writes: Arc<crate::PermitPool>,
-    ) -> Self {
-        Self::new(store, namespace_id, content_writes, Writable { writer_id })
-    }
-
-    /// Returns the writer id used for epoch acquisition and commit publication.
-    pub fn writer_id(&self) -> &WriterId {
-        &self.mode.writer_id
-    }
-
-    /// Sets the budgets this engine's WAL folds and compactions run under.
-    pub fn with_metadata_run_policy(mut self, policy: crate::manifest::MetadataRunPolicy) -> Self {
-        self.run_policy = policy;
-        self
-    }
-
-    /// Uses the runtime's metadata segment cache for this engine's folds,
-    /// compactions, pins, and retention floor advances.
-    pub fn with_metadata_segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
-        self.segment_cache = Some(segment_cache);
-        self
-    }
-
-    /// Sets a writer session's position for [`Self::fold_wal`] to fold, so
-    /// the fold takes the tail from the position instead of loading it from
-    /// the store, and publishes on the position's manifest.
-    pub fn with_writer_position(mut self, position: crate::commit_engine::WalFoldInput) -> Self {
-        self.writer_position = Some(position);
-        self
-    }
-
-    /// The compaction budgets this engine plans and compacts under.
-    fn effective_run_policy(&self) -> crate::manifest::MetadataRunPolicy {
-        let policy = self.run_policy;
-        #[cfg(any(test, feature = "test-support"))]
-        let policy = crate::manifest::MetadataRunPolicy {
-            max_rows_per_segment: self
-                .segment_row_budget
-                .unwrap_or(policy.max_rows_per_segment),
-            ..policy
-        };
-        policy
-    }
-
-    /// Narrows the rows one compacted segment may hold, so a namespace a test
-    /// can build in seconds compacts into many segments.
-    ///
-    /// The shipped segment target is 8 MiB of decoded rows, which takes over
-    /// a hundred thousand rows to fill several times. Test-only: folds keep
-    /// the shipped segment shape, and planning and publishing are unchanged.
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn narrow_segment_row_budget(
-        mut self,
-        max_rows_per_segment: std::num::NonZeroUsize,
-    ) -> Self {
-        self.segment_row_budget = Some(max_rows_per_segment);
-        self
-    }
-
-    /// Creates the namespace if it does not already exist.
-    ///
-    /// Use this before normal reads and writes for a new namespace. Returns
-    /// the namespace's status after manifest 1 is installed.
-    pub async fn bootstrap_namespace(
-        &self,
-        actor_id: &loonfs_types::ActorId,
-        options: &CreateNamespaceOptions,
-    ) -> Result<NamespaceMetadata> {
-        bootstrap::bootstrap_namespace(
-            &self.store,
-            &self.namespace_id,
-            &self.mutation_context(),
-            actor_id,
-            options,
-            Arc::clone(&self.timer),
-        )
-        .await
-    }
-
-    /// Creates a new namespace at this namespace's current head or an unexpired snapshot.
-    ///
-    /// The fork shares immutable file bytes but gets its own metadata history.
-    /// Returns the target's status at the fork point. The report includes the
-    /// manifest of this namespace that the fork's fold published, if it
-    /// published one.
-    pub async fn fork_namespace(
-        &self,
-        target: &NamespaceId,
-        actor_id: &loonfs_types::ActorId,
-        snapshot_id: Option<&PinId>,
-    ) -> Result<PublicationReport<NamespaceMetadata>> {
-        fork::fork_namespace(
-            &self.store,
-            &self.namespace_id,
-            target,
-            actor_id,
-            snapshot_id,
-            &self.mutation_context(),
-            Arc::clone(&self.timer),
-            self.effective_run_policy(),
-            self.segment_cache.as_deref(),
-            &self.content_writes,
-        )
-        .await
-    }
-
-    /// Deletes the current namespace by publishing a tombstone manifest.
-    /// Earlier committed changes remain durable. Later operations return `namespace_deleted`.
-    pub async fn delete_namespace(
-        &self,
-        options: DeleteNamespaceOptions,
-    ) -> Result<DeleteNamespaceResponse> {
-        crate::commit_engine::delete_namespace(
-            &self.store,
-            &self.namespace_id,
-            options,
-            &self.mutation_context(),
-            self.effective_run_policy(),
-            Arc::clone(&self.content_writes),
-            Arc::clone(&self.timer),
-        )
-        .await
-    }
-}
-
-impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads file content against the pinned runtime read context.
     pub async fn read_file(
         &self,
@@ -584,7 +381,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let content_ref = crate::path::read::file_content_ref(&entry)?;
         range.ensure_within(content_ref.size_bytes)?;
         Ok(FileContentStream::open_inner(
-            self.store.clone(),
+            self.namespace.store.clone(),
             view.resolve_content_location(&content_ref).await?,
             Some(entry),
             content_ref,
@@ -621,7 +418,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         .content_ref;
         range.ensure_within(content_ref.size_bytes)?;
         Ok(FileContentStream::open_inner(
-            self.store.clone(),
+            self.namespace.store.clone(),
             view.resolve_content_location(&content_ref).await?,
             None,
             content_ref,
@@ -648,7 +445,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             revision_no,
             start_offset,
             &access,
-            &self.content_writes,
+            &self.namespace.content_writes,
         )
         .await
     }
@@ -670,7 +467,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             revision_no,
             start_offset,
             &access,
-            &self.content_writes,
+            &self.namespace.content_writes,
         )
         .await
     }
@@ -715,35 +512,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         view.list_trash_page(request, &access).await
     }
 
-    /// Lists files from the manifest pinned by the snapshot `checkpoint_id`,
-    /// ordered by inode ID.
-    ///
-    /// The method ignores the current metadata basis and WAL tail, so every page
-    /// comes from the same snapshot even when new commits arrive. The read
-    /// context is used only to validate the namespace identity and confirm that
-    /// it has not been deleted. A snapshot that expired at or before the
-    /// current wall-clock time returns `snapshot_not_found`.
-    pub async fn list_checkpoint_files_page(
-        &self,
-        checkpoint_id: &PinId,
-        request: PageRequest<CheckpointFilesPageCursor>,
-        options: ListCheckpointFilesOptions,
-        context: &RuntimeReadContext,
-    ) -> Result<CheckpointFilesPage> {
-        // Rejects a mismatched or deleted namespace before any read work.
-        self.ensure_live_context(context)?;
-        crate::pin::list_checkpoint_files_page(
-            &self.store,
-            Some(context.segment_cache.as_ref()),
-            &context.head,
-            checkpoint_id,
-            request,
-            options,
-            self.now_ms(),
-        )
-        .await
-    }
-
     /// Resolves the current visibility, revision, and path for each inode ID.
     ///
     /// All results use the same pinned snapshot and preserve input order. Missing
@@ -769,12 +537,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         content_ref: &ContentRef,
         context: &RuntimeReadContext,
     ) -> Result<ContentLocation> {
-        let view = load_metadata_view_for_authorization(
-            &self.store,
-            &self.namespace_id,
-            runtime_read_load_context(context),
-        )
-        .await?;
+        let view = self
+            .namespace
+            .load_metadata_view_for_authorization(runtime_read_load_context(context))
+            .await?;
         if view
             .metadata_view()
             .content_published(&content_ref.content_id)
@@ -811,7 +577,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
         let location = view.resolve_content_location(content_ref).await?;
         location
-            .read_bytes(&self.store, Some(&context.object_cache), content_ref)
+            .read_bytes(
+                &self.namespace.store,
+                Some(&context.object_cache),
+                content_ref,
+            )
             .await
             .map_err(|error| match error {
                 DurableContentValidationError::MissingContentObject { .. } => {
@@ -821,8 +591,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             })
     }
 
-    fn ensure_live_context(&self, context: &RuntimeReadContext) -> Result<()> {
-        crate::namespace::control::ensure_head_identity(&context.head, &self.namespace_id)?;
+    pub(crate) fn ensure_live_context(&self, context: &RuntimeReadContext) -> Result<()> {
+        crate::namespace::control::ensure_head_identity(
+            &context.head,
+            &self.namespace.namespace_id,
+        )?;
         crate::namespace::control::ensure_namespace_live(&context.head)
     }
 
@@ -871,40 +644,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .await
     }
 
-    async fn load_read_view<'a>(
-        &'a self,
-        context: &'a RuntimeReadContext,
-    ) -> Result<LoadedMetadataView<'a, S>> {
-        load_metadata_view(
-            &self.store,
-            &self.namespace_id,
-            runtime_read_load_context(context),
-        )
-        .await
-    }
-}
-
-impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Publishes already-classified mutation candidates as one batch: one WAL
-    /// object, one numbered WAL put, one result per candidate in order.
-    pub async fn publish_namespace_commits_batch(
-        &self,
-        candidates: Vec<CommitCandidate>,
-    ) -> Result<Vec<Result<Commit>>> {
-        let context = self.mutation_context();
-        Ok(crate::commit_engine::publish_namespace_commits_batch(
-            &self.store,
-            &self.namespace_id,
-            candidates,
-            &context,
-            Arc::clone(&self.content_writes),
-            Arc::clone(&self.timer),
-        )
-        .await)
-    }
-}
-
-impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads up to `limit` committed changes after `after_seq`.
     pub async fn list_changes_after(
         &self,
@@ -915,537 +654,129 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let view = self.load_read_view(context).await?;
         crate::protocol::list_changes_after(&view, after_seq, limit).await
     }
-}
 
-impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Starts a service-proxied upload session. Direct transports use
-    /// [`Self::begin_direct_put_upload_target`] or [`Self::begin_direct_multipart_upload_target`].
-    pub async fn begin_upload(&self, subject: Option<&Subject>) -> Result<UploadSession> {
-        crate::protocol::begin_service_proxied_upload(
-            &self.store,
-            &self.namespace_id,
-            subject,
-            &self.mutation_context(),
-        )
-        .await
-    }
-
-    /// Starts a direct PUT upload and assigns its content identity.
-    pub async fn begin_direct_put_upload_target(
-        &self,
-        subject: Option<&Subject>,
-    ) -> Result<DirectPutUploadTarget> {
-        crate::protocol::begin_direct_put_upload_target(
-            &self.store,
-            &self.namespace_id,
-            subject,
-            &self.mutation_context(),
-        )
-        .await
-    }
-
-    /// Creates a direct multipart upload target with a new object identity,
-    /// provider upload ID, and required part size. The final size and checksum are
-    /// supplied when the upload is completed.
-    pub async fn begin_direct_multipart_upload_target(
-        &self,
-        subject: Option<&Subject>,
-        options: DirectMultipartUploadOptions,
-    ) -> Result<DirectMultipartUploadTarget> {
-        crate::protocol::begin_direct_multipart_upload_target(
-            &self.store,
-            &self.namespace_id,
-            subject,
-            options,
-            &self.mutation_context(),
-        )
-        .await
+    async fn load_read_view<'a>(
+        &'a self,
+        context: &'a RuntimeReadContext,
+    ) -> Result<LoadedMetadataView<'a, S>> {
+        self.namespace
+            .load_metadata_view(runtime_read_load_context(context))
+            .await
     }
 }
 
-impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Validates a group of multipart parts and returns the information needed
-    /// to sign their upload URLs. This method does not write durable state.
-    pub async fn direct_multipart_part_targets(
-        &self,
-        upload_id: &UploadId,
-        subject: Option<&Subject>,
-        requested: &[UploadPartChecksumClaim],
-    ) -> Result<MultipartPartTargets> {
-        crate::protocol::direct_multipart_part_targets(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            subject,
-            requested,
-            self.now_ms(),
-        )
-        .await
+impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
+    /// Creates a read-only engine over `namespace`.
+    pub fn reader(namespace: NamespaceStore<S>) -> Self {
+        Self::new(namespace, ReadOnly)
     }
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Uploads whole-file content into an upload session.
-    pub async fn upload_content(
-        &self,
-        upload_id: &UploadId,
-        subject: Option<&Subject>,
-        bytes: &[u8],
-    ) -> Result<UploadSession> {
-        let _permit = self.content_writes.acquire().await;
-        crate::protocol::upload_content(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            subject,
-            bytes,
-            self.now_ms(),
-        )
-        .await
+    /// Creates a writable engine over `namespace` that commits as `writer_id`.
+    pub fn writer(namespace: NamespaceStore<S>, writer_id: WriterId) -> Self {
+        Self::new(namespace, Writable { writer_id })
     }
 
-    /// Uploads content that arrives as a stream into an upload session,
-    /// hashing it on the way through instead of holding it.
-    pub async fn upload_content_stream(
-        &self,
-        upload_id: &UploadId,
-        subject: Option<&Subject>,
-        body: ByteStream,
-    ) -> Result<UploadSession> {
-        let _permit = self.content_writes.acquire().await;
-        crate::protocol::upload_content_stream(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            subject,
-            body,
-            self.now_ms(),
-        )
-        .await
+    /// Returns the writer id used for epoch acquisition and commit publication.
+    pub fn writer_id(&self) -> &WriterId {
+        &self.mode.writer_id
     }
 
-    /// Completes an upload session and returns time-bounded proof for later
-    /// publication. The caller passes the catalog it already holds, so
-    /// completion adds no head read.
-    pub async fn complete_upload(
-        &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
-        upload_id: &UploadId,
-        subject: Option<&Subject>,
-        completion: CompleteUploadBody,
-    ) -> Result<CompletedUpload> {
-        self.own_catalog(catalog);
-        crate::protocol::complete_upload(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            subject,
-            completion,
-            &self.mutation_context(),
-        )
-        .await
+    /// Sets a writer session's position for [`Self::fold_wal`] to fold, so
+    /// the fold takes the tail from the position instead of loading it from
+    /// the store, and publishes on the position's manifest.
+    pub fn with_writer_position(mut self, position: WalFoldInput) -> Self {
+        self.writer_position = Some(position);
+        self
     }
 
-    /// Stores in-process bytes as prepared content and completes the associated
-    /// upload session.
+    /// Narrows the rows one segment that this engine writes may hold, so a
+    /// namespace a test can build in seconds compacts into many segments.
     ///
-    /// This combines session creation, content upload, and completion without a
-    /// network round trip or receipt. It still writes the upload session's
-    /// records that garbage collection needs: the session record before the
-    /// content write, and the outcome record after it.
-    pub async fn stage_owned_bytes(
-        &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&loonfs_types::SubjectId>,
-        bytes: &[u8],
-    ) -> Result<PreparedContent> {
-        let _permit = self.content_writes.acquire().await;
-        crate::protocol::stage_owned_bytes(
-            &self.store,
-            self.own_catalog(catalog),
-            subject_id,
-            bytes,
-            &self.mutation_context(),
-        )
-        .await
+    /// The shipped segment target is 8 MiB of decoded rows, which takes over
+    /// a hundred thousand rows to fill several times. Test-only: planning and
+    /// publishing are unchanged.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn narrow_segment_row_budget(
+        mut self,
+        max_rows_per_segment: std::num::NonZeroUsize,
+    ) -> Self {
+        self.namespace.run_policy.max_rows_per_segment = max_rows_per_segment;
+        self
     }
 
-    /// Imports existing content under a fresh identity owned by this
-    /// namespace.
-    ///
-    /// A content reference locates bytes but does not identify the namespace
-    /// whose upload session keeps them alive. This streams the source bytes
-    /// chunk by chunk into a new local upload session, verifying the claimed
-    /// size and checksum against what was staged, so collection in the source
-    /// namespace cannot invalidate a later publication here. `owner_location`
-    /// is where the owner's view finds the bytes; without one, they are read
-    /// from the content object.
-    pub async fn import_content_ref(
-        &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&loonfs_types::SubjectId>,
-        content_ref: &ContentRef,
-        owner_location: Option<ContentLocation>,
-    ) -> Result<PreparedContent>
+    /// Narrows the rows, by their runs' descriptor counts, that a window of
+    /// this engine's compaction units may list when a unit admits only
+    /// windows within the row budget, so a test can starve that budget with
+    /// a few thousand rows. Test-only: folds and every other budget are
+    /// unchanged.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn narrow_compaction_input_rows(
+        mut self,
+        max_decoded_input_rows_per_step: std::num::NonZeroUsize,
+    ) -> Self {
+        self.namespace.run_policy.max_decoded_input_rows_per_step = max_decoded_input_rows_per_step;
+        self
+    }
+
+    /// Returns a commit engine for this engine's namespace: a one-shot
+    /// writer session that acquires its own epoch.
+    pub fn commit_engine(&self) -> NamespaceCommitEngine<S>
     where
-        S: Clone + 'static,
+        S: Clone,
     {
-        let catalog = self.own_catalog(catalog);
-        let context = self.mutation_context();
-        let location = match owner_location {
-            Some(location) => location,
-            None => ContentLocation::whole(content_ref),
-        };
-        let body = open_content_import_reader(self.store.clone(), location, content_ref).await?;
-        let _permit = self.content_writes.acquire().await;
-        crate::protocol::stage_owned_stream(
-            &self.store,
-            catalog,
-            subject_id,
-            body,
-            StreamedPayloadKind::ContentImport,
-            &context,
-        )
-        .await
+        NamespaceCommitEngine::new(self.namespace.clone())
     }
 
-    /// Stages a streamed payload as content a session owns, hashing it on
-    /// the way through instead of holding it.
-    ///
-    /// The streaming twin of [`Self::stage_owned_bytes`]; ownership and cost
-    /// are identical.
-    pub async fn stage_owned_stream(
-        &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&loonfs_types::SubjectId>,
-        body: ByteStream,
-    ) -> Result<PreparedContent> {
-        let _permit = self.content_writes.acquire().await;
-        crate::protocol::stage_owned_stream(
-            &self.store,
-            self.own_catalog(catalog),
-            subject_id,
-            body,
-            StreamedPayloadKind::Request,
-            &self.mutation_context(),
-        )
-        .await
+    /// Builds the mutation context for this engine's writer identity.
+    pub(crate) fn mutation_context(&self) -> MutationContext {
+        MutationContext {
+            writer_id: self.mode.writer_id.clone(),
+            now_ms: self.now_ms(),
+        }
     }
 
     /// Verifies that a runtime-supplied catalog belongs to this engine's
     /// namespace. A mismatch indicates an internal integration error.
-    fn own_catalog<'c>(
+    pub(crate) fn own_catalog<'c>(
         &self,
         catalog: &'c VerifiedNamespaceCatalogEntry,
     ) -> &'c VerifiedNamespaceCatalogEntry {
         assert_eq!(
             catalog.namespace_id(),
-            &self.namespace_id,
+            &self.namespace.namespace_id,
             "a runtime should give an engine its own namespace's catalog"
         );
         catalog
-    }
-
-    /// Aborts an upload session, then deletes the content object it owned.
-    ///
-    /// Terminal and idempotent: repeating it succeeds, and it refuses a
-    /// session that already completed, whose content may be published.
-    pub async fn abort_upload(
-        &self,
-        upload_id: &UploadId,
-        subject: Option<&Subject>,
-    ) -> Result<UploadSession> {
-        let catalog = crate::namespace::catalog::load_namespace_catalog_entry(
-            &self.store,
-            &self.namespace_id,
-        )
-        .await?;
-        crate::protocol::abort_upload(
-            &self.store,
-            &catalog,
-            upload_id,
-            subject,
-            &self.mutation_context(),
-        )
-        .await
-    }
-}
-
-impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Returns an upload session. Completed uploads include new evidence so
-    /// the caller can retry publication without uploading the content again.
-    pub async fn get_upload(
-        &self,
-        upload_id: &UploadId,
-        subject: Option<&Subject>,
-    ) -> Result<UploadSessionView> {
-        crate::protocol::get_upload(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            subject,
-            self.now_ms(),
-        )
-        .await
-    }
-}
-
-impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Creates a snapshot of the current namespace head.
-    ///
-    /// Every call generates a fresh `PinId`, and `name` is a label, not a
-    /// key. When WAL objects follow the current manifest's `folded_wal_no`,
-    /// the method first folds them into a new manifest without compacting
-    /// metadata. A snapshot with `expires_at_ms` can't be read after that
-    /// time, and it stays listed until collection deletes it. `None` keeps
-    /// the snapshot until it's deleted. The report includes the manifest the
-    /// fold published.
-    pub async fn create_snapshot(
-        &self,
-        name: String,
-        expires_at_ms: Option<u64>,
-    ) -> Result<PublicationReport<Snapshot>> {
-        let context = self.mutation_context();
-        crate::pin::create_pin(
-            &self.store,
-            &self.namespace_id,
-            PinOwner::User {
-                name,
-                expires_at_ms,
-            },
-            &context,
-            self.effective_run_policy(),
-            self.segment_cache.as_deref(),
-            &self.content_writes,
-            Arc::clone(&self.timer),
-        )
-        .await
-        .map(|report| report.map(crate::pin::snapshot_summary))
-    }
-}
-
-impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Lists one page of existing checkpoints in ascending id order. Expired
-    /// records remain visible until garbage collection deletes them.
-    pub async fn list_checkpoints_page(
-        &self,
-        request: PageRequest<CheckpointPageCursor>,
-    ) -> Result<Page<loonfs_types::Checkpoint, CheckpointPageCursor>> {
-        crate::pin::list_checkpoints_page(&self.store, &self.namespace_id, request).await
-    }
-
-    /// Loads one existing pin of any owner by id, as the checkpoint listing
-    /// returns it. An expired record stays readable until garbage collection
-    /// deletes it. A missing pin returns `snapshot_not_found`.
-    pub async fn get_checkpoint(&self, checkpoint_id: &PinId) -> Result<loonfs_types::Checkpoint> {
-        crate::pin::get_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
-    }
-
-    /// Lists one page of snapshots in ascending id order, including expired
-    /// snapshots that garbage collection hasn't deleted.
-    pub async fn list_snapshots_page(
-        &self,
-        request: PageRequest<SnapshotPageCursor>,
-    ) -> Result<Page<Snapshot, SnapshotPageCursor>> {
-        crate::pin::list_snapshots_page(&self.store, &self.namespace_id, request).await
-    }
-
-    /// Loads one snapshot by id, as the snapshot listing returns it,
-    /// including an expired snapshot that garbage collection hasn't deleted.
-    /// A missing id, or the id of a fork pin, returns `snapshot_not_found`.
-    pub async fn get_snapshot(&self, snapshot_id: &PinId) -> Result<Snapshot> {
-        crate::pin::get_snapshot(&self.store, &self.namespace_id, snapshot_id).await
-    }
-}
-
-impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Moves an unexpired snapshot's expiry to `requested_expires_at_ms`,
-    /// never earlier. A snapshot without an expiry is returned unchanged.
-    pub async fn extend_snapshot(
-        &self,
-        snapshot_id: &PinId,
-        requested_expires_at_ms: u64,
-    ) -> Result<Snapshot> {
-        crate::pin::extend_snapshot_expiry(
-            &self.store,
-            &self.namespace_id,
-            snapshot_id,
-            requested_expires_at_ms,
-            &self.mutation_context(),
-            Arc::clone(&self.timer),
-        )
-        .await
-    }
-
-    /// Deletes a snapshot. Deleting a missing snapshot succeeds, and the id
-    /// of a fork pin returns `snapshot_not_found`.
-    pub async fn delete_snapshot(&self, snapshot_id: &PinId) -> Result<DeleteSnapshotResponse> {
-        crate::pin::delete_snapshot(&self.store, &self.namespace_id, snapshot_id).await
-    }
-
-    /// Folds the visible WAL tail and publishes a
-    /// manifest covering the current head.
-    ///
-    /// This is the latest-state maintenance operation: it absorbs the visible
-    /// WAL tail into a new manifest, creating no
-    /// pin. Superseded manifests become garbage-collection
-    /// candidates once nothing pins them. If [`Self::with_writer_position`]
-    /// set a position, the fold takes the tail from that position while the
-    /// position's last check is within the revalidation bound. The report
-    /// includes the manifest this call published.
-    pub async fn fold_wal(&self) -> Result<PublicationReport<FoldWalResponse>> {
-        let folded = crate::manifest::fold_wal_tail(
-            &self.store,
-            self.segment_cache.as_deref(),
-            &self.namespace_id,
-            self.writer_position.clone(),
-            &crate::time::Deadline::start(Arc::clone(&self.timer)),
-            self.effective_run_policy(),
-            &self.content_writes,
-        )
-        .await?;
-        Ok(PublicationReport {
-            published: folded.published(),
-            response: folded.response,
-        })
-    }
-
-    /// Claims the namespace compactor epoch for a maintenance runtime. The
-    /// report includes the manifest that records the claim.
-    pub async fn claim_compactor(&self) -> Result<PublicationReport<CompactorEpoch>> {
-        crate::manifest::claim_compactor(&self.store, &self.namespace_id, Arc::clone(&self.timer))
-            .await
-    }
-
-    /// Acquires the namespace's writer epoch without a writer session, and
-    /// commits nothing under it (format spec, "Writer ownership").
-    ///
-    /// The acquisition publishes a claim manifest with the next epoch and
-    /// this engine's writer ID, then writes a fence at the next WAL number.
-    /// The fence records the retention floor of the manifest that the
-    /// acquisition discovered, so a fold of the fence acknowledges that
-    /// floor. A writer session with an older epoch returns `writer_fenced`
-    /// to its next publication. The report includes the claim manifest.
-    pub async fn acquire_writer_epoch(&self) -> Result<PublicationReport<WriterEpoch>> {
-        let acquisition = crate::namespace::writer_epoch::acquire_writer(
-            &self.store,
-            &self.namespace_id,
-            &self.mutation_context(),
-            Arc::clone(&self.timer),
-        )
-        .await?;
-        Ok(PublicationReport {
-            response: acquisition.writer.writer_epoch,
-            published: Some(acquisition.claim),
-        })
-    }
-
-    /// Runs one metadata compaction unit under the claimed compactor epoch.
-    ///
-    /// The unit plans from `basis`, a manifest that the caller already has,
-    /// or from the current manifest that it loads when `basis` is `None`.
-    /// `admission` decides whether the unit may merge a window over the run
-    /// policy's row budget, and `cancellation` stops the merge between
-    /// blocks.
-    pub async fn compact_metadata_unit(
-        &self,
-        basis: Option<PublicationBasis>,
-        compaction_policy: crate::manifest::MetadataCompactionPolicy,
-        admission: crate::manifest::CompactionAdmission,
-        compactor_epoch: CompactorEpoch,
-        cancellation: &crate::manifest::MetadataCompactionCancellation,
-    ) -> Result<crate::manifest::CompactionUnitOutcome> {
-        crate::manifest::compact_unit(
-            &self.store,
-            self.segment_cache.as_deref(),
-            &self.namespace_id,
-            basis,
-            compactor_epoch,
-            self.effective_run_policy(),
-            compaction_policy,
-            admission,
-            cancellation,
-            Arc::clone(&self.timer),
-        )
-        .await
-    }
-
-    /// Advances the retention floor toward `target` when a verified checkpoint
-    /// makes it safe. The advance uses this engine's wall clock as the current
-    /// time for the grace-window check and for a
-    /// [`Window`](crate::RetentionTarget::Window) cutoff. The report includes
-    /// the manifest that records the new floor.
-    pub async fn advance_retention_floor(
-        &self,
-        target: crate::manifest::RetentionTarget,
-    ) -> Result<PublicationReport<AdvanceRetentionResponse>> {
-        crate::manifest::advance_retention_floor(
-            &self.store,
-            self.segment_cache.as_deref(),
-            &self.namespace_id,
-            target,
-            self.now_ms(),
-            Arc::clone(&self.timer),
-        )
-        .await
-    }
-
-    /// Sets the namespace's retention window, or clears it with `None`. The
-    /// report includes the manifest that records the change.
-    pub async fn set_retention_window(
-        &self,
-        retention_window_ms: Option<NonZeroU64>,
-    ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
-        crate::manifest::set_retention_window(
-            &self.store,
-            &self.namespace_id,
-            retention_window_ms,
-            Arc::clone(&self.timer),
-        )
-        .await
-    }
-
-    /// Builds the mutation context for this engine's writer identity.
-    fn mutation_context(&self) -> MutationContext {
-        MutationContext {
-            writer_id: self.mode.writer_id.clone(),
-            now_ms: self.now_ms(),
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{mutation_context, namespace_store, NamespaceFixture};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
     #[tokio::test]
     async fn reader_engine_still_serves_reads() {
         let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer = NamespaceEngine::writer(
-            LocalFsStore::new(temp_dir.path()).expect("store"),
-            namespace_id.clone(),
-            WriterId::parse("writer-a").expect("writer id"),
-            std::sync::Arc::new(crate::test_support::content_writes()),
-        );
-        crate::test_support::ops::create(&writer.store, &namespace_id, &writer.mutation_context())
+        NamespaceFixture::new(&store, &namespace_id, &mutation_context("writer-a", 1_000))
+            .create()
             .await
             .expect("bootstrap namespace");
 
-        let reader = NamespaceEngine::reader(
-            LocalFsStore::new(temp_dir.path()).expect("store"),
-            namespace_id.clone(),
-            std::sync::Arc::new(crate::test_support::content_writes()),
-        );
-        let loaded = crate::namespace::read_anchor::load_read_anchor(
-            &reader.store,
-            &namespace_id,
-            crate::test_support::observed_now(),
-        )
-        .await
-        .expect("read basis");
+        let reader = NamespaceEngine::reader(namespace_store(&store, &namespace_id));
+        let loaded = reader
+            .namespace
+            .load_read_anchor(crate::test_support::observed_now())
+            .await
+            .expect("read basis");
         let context = RuntimeReadContext {
             basis: loaded.basis(),
             head: loaded.read_state,
@@ -1468,29 +799,20 @@ mod tests {
     #[tokio::test]
     async fn reader_engine_reads_upload_status_without_writer_identity() {
         let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer = NamespaceEngine::writer(
-            LocalFsStore::new(temp_dir.path()).expect("writer store"),
-            namespace_id.clone(),
-            WriterId::parse("writer-a").expect("writer id"),
-            std::sync::Arc::new(crate::test_support::content_writes()),
-        );
-        crate::test_support::ops::create(&writer.store, &namespace_id, &writer.mutation_context())
-            .await
-            .expect("bootstrap namespace");
-        let begun = writer.begin_upload(None).await.expect("begin upload");
+        let writer =
+            NamespaceFixture::new(&store, &namespace_id, &mutation_context("writer-a", 1_000));
+        writer.create().await.expect("bootstrap namespace");
+        let begun = writer.engine().begin_upload().await.expect("begin upload");
 
-        let reader = NamespaceEngine::reader(
-            LocalFsStore::new(temp_dir.path()).expect("reader store"),
-            namespace_id,
-            std::sync::Arc::new(crate::test_support::content_writes()),
-        );
+        let reader = NamespaceEngine::reader(namespace_store(&store, &namespace_id));
         let crate::UploadSessionView {
             session: status,
             evidence,
             ..
         } = reader
-            .get_upload(&begun.upload_id, None)
+            .get_upload(&begun.upload_id)
             .await
             .expect("reader engine reads upload status");
 

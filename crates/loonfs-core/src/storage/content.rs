@@ -4,7 +4,8 @@
 pub(crate) use super::content_location::ContentLocation;
 use crate::error::{CoreError, Result};
 #[cfg(any(test, feature = "test-support"))]
-use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::store::NamespaceStore;
 use crate::object_cache::ObjectCache;
 #[cfg(any(test, feature = "test-support"))]
 use crate::storage::content_admission::PreparedContent;
@@ -596,28 +597,26 @@ fn describe_checksum(checksum: &Checksum) -> String {
     format!("{}:{}", checksum.algorithm(), checksum.value())
 }
 
-/// Plants test content under a fresh identity owned by the current namespace.
-#[tracing::instrument(
-    level = "debug",
-    name = "loonfs.phase",
-    err(level = "warn"),
-    skip_all,
-    fields(phase = "write_content_blob", key_class = "content")
-)]
-#[cfg(any(test, feature = "test-support"))]
-pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
-    store: &S,
-    owner_namespace_id: &NamespaceId,
-    bytes: &[u8],
-) -> Result<StoredContent> {
-    load_namespace_catalog_entry(store, owner_namespace_id).await?;
-    stage_bytes_under_content_id(
-        store,
-        owner_namespace_id.clone(),
-        ContentId::generate(),
-        bytes,
-    )
-    .await
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Plants test content under a fresh identity owned by the current namespace.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.phase",
+        err(level = "warn"),
+        skip_all,
+        fields(phase = "write_content_blob", key_class = "content")
+    )]
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn store_bytes_as_content(&self, bytes: &[u8]) -> Result<StoredContent> {
+        self.load_catalog_entry().await?;
+        stage_bytes_under_content_id(
+            &self.store,
+            self.namespace_id.clone(),
+            ContentId::generate(),
+            bytes,
+        )
+        .await
+    }
 }
 
 /// Result of staging streamed content.

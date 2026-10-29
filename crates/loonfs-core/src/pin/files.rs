@@ -1,9 +1,10 @@
 //! Lists files from the manifest pinned by a snapshot.
 
 use super::read_basis::{load_pin_basis, PinBasis};
+use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
-use crate::manifest::MetadataSegmentCache;
 use crate::metadata::MetadataView;
+use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
@@ -76,111 +77,135 @@ impl PagedResponse for CheckpointFilesPage {
     }
 }
 
-/// Lists files visible in the state pinned by the snapshot `checkpoint_id`,
-/// or every file it retains with `include_deleted`.
-///
-/// Later WAL entries are not replayed. Directories are omitted. An ID that
-/// doesn't identify a snapshot, or a snapshot that expired at or before
-/// `now_ms`, returns `snapshot_not_found`, and a snapshot whose manifest is
-/// gone returns `checkpoint_unavailable`.
-pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: Option<&MetadataSegmentCache>,
-    head: &crate::namespace::state::NamespaceReadState,
-    checkpoint_id: &PinId,
-    request: PageRequest<CheckpointFilesPageCursor>,
-    options: ListCheckpointFilesOptions,
-    now_ms: u64,
-) -> Result<CheckpointFilesPage> {
-    let namespace_id = &head.namespace_id;
-    let record = super::load_unexpired_snapshot(store, namespace_id, checkpoint_id, now_ms)
-        .await?
-        .state;
-    let PinBasis { manifest, segments } = load_pin_basis(store, segment_cache, record).await?;
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
+    /// Lists files from the manifest pinned by the snapshot `checkpoint_id`,
+    /// ordered by inode ID: the files visible at the snapshot, or every file it
+    /// retains with `options.include_deleted`. Directories are omitted.
+    ///
+    /// The method ignores the current metadata basis and WAL tail, so every page
+    /// comes from the same snapshot even when new commits arrive. The read
+    /// context is used only to validate the namespace identity and confirm that
+    /// it has not been deleted. An ID that doesn't identify a snapshot, or a
+    /// snapshot that expired at or before the current wall-clock time, returns
+    /// `snapshot_not_found`, and a snapshot whose manifest is gone returns
+    /// `checkpoint_unavailable`.
+    pub async fn list_checkpoint_files_page(
+        &self,
+        checkpoint_id: &PinId,
+        request: PageRequest<CheckpointFilesPageCursor>,
+        options: ListCheckpointFilesOptions,
+        context: &RuntimeReadContext,
+    ) -> Result<CheckpointFilesPage> {
+        // Rejects a mismatched or deleted namespace before any read work.
+        self.ensure_live_context(context)?;
+        self.namespace
+            .list_checkpoint_files_page(checkpoint_id, request, options, self.now_ms())
+            .await
+    }
+}
 
-    let captured_seq = manifest.head_seq;
-    let view = MetadataView::over_manifest_segments(&segments, captured_seq);
-    let mut session = view.session();
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Lists one page of the files the snapshot `checkpoint_id` pins, as
+    /// [`NamespaceEngine::list_checkpoint_files_page`] describes, treating the
+    /// snapshot as expired at or before `now_ms`.
+    pub(crate) async fn list_checkpoint_files_page(
+        &self,
+        checkpoint_id: &PinId,
+        request: PageRequest<CheckpointFilesPageCursor>,
+        options: ListCheckpointFilesOptions,
+        now_ms: u64,
+    ) -> Result<CheckpointFilesPage> {
+        let record = self
+            .load_unexpired_snapshot(checkpoint_id, now_ms)
+            .await?
+            .state;
+        let PinBasis { manifest, segments } =
+            load_pin_basis(&self.store, &self.segment_cache, record).await?;
 
-    // Read one extra file to determine whether another page exists.
-    let wanted = request.limit.limit_plus_one();
-    let wave_rows = wanted.max(INODE_SCAN_WAVE_ROWS);
-    let mut lower_bound = match request.cursor {
-        Some(cursor) => lookup_keys::inode_key_after(cursor.after_inode_id),
-        None => lookup_keys::INODE_ROW_PREFIX.to_owned(),
-    };
-    let upper_bound = string_prefix_upper_bound(lookup_keys::INODE_ROW_PREFIX);
-    let mut files = Vec::with_capacity(wanted);
-    while files.len() < wanted {
-        let rows = segments
-            .scan_range_page_with_keys(
-                MetadataRowFamily::Inodes,
-                &lower_bound,
-                upper_bound.as_deref(),
-                wave_rows,
-            )
-            .await?;
-        let family_exhausted = rows.len() < wave_rows;
-        // Resume after the last scanned row, including rows filtered out below.
-        match rows.last() {
-            Some((row_key, _)) => lower_bound = lookup_keys::after_row_key(row_key),
-            None => break,
-        }
-        let inode_rows = rows
-            .into_iter()
-            .map(|(row_key, row)| match row {
-                MetadataRow::Inode(crate::metadata::InodeRecord {
+        let captured_seq = manifest.head_seq;
+        let view = MetadataView::over_manifest_segments(&segments, captured_seq);
+        let mut session = view.session();
+
+        // Read one extra file to determine whether another page exists.
+        let wanted = request.limit.limit_plus_one();
+        let wave_rows = wanted.max(INODE_SCAN_WAVE_ROWS);
+        let mut lower_bound = match request.cursor {
+            Some(cursor) => lookup_keys::inode_key_after(cursor.after_inode_id),
+            None => lookup_keys::INODE_ROW_PREFIX.to_owned(),
+        };
+        let upper_bound = string_prefix_upper_bound(lookup_keys::INODE_ROW_PREFIX);
+        let mut files = Vec::with_capacity(wanted);
+        while files.len() < wanted {
+            let rows = segments
+                .scan_range_page_with_keys(
+                    MetadataRowFamily::Inodes,
+                    &lower_bound,
+                    upper_bound.as_deref(),
+                    wave_rows,
+                )
+                .await?;
+            let family_exhausted = rows.len() < wave_rows;
+            // Resume after the last scanned row, including rows filtered out below.
+            match rows.last() {
+                Some((row_key, _)) => lower_bound = lookup_keys::after_row_key(row_key),
+                None => break,
+            }
+            let inode_rows = rows
+                .into_iter()
+                .map(|(row_key, row)| match row {
+                    MetadataRow::Inode(crate::metadata::InodeRecord {
+                        inode_id,
+                        inode_kind,
+                        ..
+                    }) => Ok((inode_id, inode_kind)),
+                    _ => Err(CoreError::NamespaceCorrupt(format!(
+                        "inodes family returned a non-inode row at `{row_key}`"
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let file_inode_ids = inode_rows
+                .iter()
+                .filter(|(_, inode_kind)| *inode_kind == InodeKind::File)
+                .map(|(inode_id, _)| *inode_id)
+                .collect::<Vec<_>>();
+            if !options.include_deleted {
+                session.preload_visibility(&file_inode_ids).await?;
+            }
+            for inode_id in file_inode_ids {
+                let revision = if options.include_deleted {
+                    view.latest_revision_record(inode_id).await?
+                } else if session.visible_inode(inode_id).await?.is_some() {
+                    session.latest_revision_head_of_visible(inode_id).await?
+                } else {
+                    None
+                };
+                let Some(revision) = revision else {
+                    continue;
+                };
+                files.push(CheckpointFile {
                     inode_id,
-                    inode_kind,
-                    ..
-                }) => Ok((inode_id, inode_kind)),
-                _ => Err(CoreError::NamespaceCorrupt(format!(
-                    "inodes family returned a non-inode row at `{row_key}`"
-                ))),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let file_inode_ids = inode_rows
-            .iter()
-            .filter(|(_, inode_kind)| *inode_kind == InodeKind::File)
-            .map(|(inode_id, _)| *inode_id)
-            .collect::<Vec<_>>();
-        if !options.include_deleted {
-            session.preload_visibility(&file_inode_ids).await?;
-        }
-        for inode_id in file_inode_ids {
-            let revision = if options.include_deleted {
-                view.latest_revision_record(inode_id).await?
-            } else if session.visible_inode(inode_id).await?.is_some() {
-                session.latest_revision_head_of_visible(inode_id).await?
-            } else {
-                None
-            };
-            let Some(revision) = revision else {
-                continue;
-            };
-            files.push(CheckpointFile {
-                inode_id,
-                revision_no: revision.revision_no,
-                size_bytes: revision.content_ref.size_bytes,
-                content_ref: revision.content_ref,
-            });
-            if files.len() == wanted {
+                    revision_no: revision.revision_no,
+                    size_bytes: revision.content_ref.size_bytes,
+                    content_ref: revision.content_ref,
+                });
+                if files.len() == wanted {
+                    break;
+                }
+            }
+            if family_exhausted {
                 break;
             }
         }
-        if family_exhausted {
-            break;
-        }
-    }
 
-    let next_cursor = request
-        .limit
-        .finish_page(&mut files, |last| CheckpointFilesPageCursor {
-            after_inode_id: last.inode_id,
-        });
-    Ok(CheckpointFilesPage {
-        captured_seq,
-        files,
-        next_cursor,
-    })
+        let next_cursor = request
+            .limit
+            .finish_page(&mut files, |last| CheckpointFilesPageCursor {
+                after_inode_id: last.inode_id,
+            });
+        Ok(CheckpointFilesPage {
+            captured_seq,
+            files,
+            next_cursor,
+        })
+    }
 }

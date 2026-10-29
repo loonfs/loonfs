@@ -299,7 +299,9 @@ async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval(
     // A runtime skips a hint raise less than a second after its last raise
     // of the same hint, so the test raises the hint to the current manifest
     // before it counts the tick's requests.
-    super::raise_hint_to_current_manifest(store.as_ref(), &namespace_id).await;
+    loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
     store.reset();
     server.tick_after(config.tick_interval_ms).await;
     assert_eq!(store.take().len(), 6);
@@ -424,17 +426,14 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
     server.tick_after(config.tick_interval_ms).await;
     server.sweep.tick().await;
     drop(held);
-    let first_epoch = loonfs_core::control::load_read_anchor(
-        &*store,
-        &namespace_id,
-        loonfs_core::time::Observation::now(std::sync::Arc::new(
+    let first_epoch = loonfs_core::test_support::namespace_store(&*store, &namespace_id)
+        .load_read_anchor(loonfs_core::time::Observation::now(std::sync::Arc::new(
             loonfs_types::StdMonotonicTimer::default(),
-        )),
-    )
-    .await
-    .expect("anchor")
-    .read_state
-    .writer_epoch;
+        )))
+        .await
+        .expect("anchor")
+        .read_state
+        .writer_epoch;
     store.reset();
     server
         .tick_after(config.idle_session_close_after_ms - config.tick_interval_ms)
@@ -483,18 +482,15 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
         .await
         .expect("publish");
     assert_eq!(
-        loonfs_core::control::load_read_anchor(
-            &*store,
-            &namespace_id,
-            loonfs_core::time::Observation::now(std::sync::Arc::new(
+        loonfs_core::test_support::namespace_store(&*store, &namespace_id)
+            .load_read_anchor(loonfs_core::time::Observation::now(std::sync::Arc::new(
                 loonfs_types::StdMonotonicTimer::default()
-            ))
-        )
-        .await
-        .expect("anchor")
-        .read_state
-        .writer_epoch
-        .0,
+            )))
+            .await
+            .expect("anchor")
+            .read_state
+            .writer_epoch
+            .0,
         first_epoch.0 + 1
     );
     server.runtime.shutdown().await.expect("shutdown");

@@ -16,13 +16,15 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
     );
     let setup = context(1_000);
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     let permanent = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("permanent pin");
-    let basis = crate::pin::record::load_pin(&store, &namespace_id, &permanent.checkpoint_id)
+    let basis = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&permanent.checkpoint_id)
         .await
         .expect("pin")
         .expect("record")
@@ -54,17 +56,10 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     )
     .await;
     store.reset();
-    let report = gc_namespace(
-        &store,
-        None,
-        None,
-        &namespace_id,
-        &options(),
-        &context(2_000 + GRACE_MS),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("complete pass");
+    let report = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &options(), &context(2_000 + GRACE_MS))
+        .await
+        .expect("complete pass");
     assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(report.deleted_checkpoints_by_owner.user, 1025);
     assert_eq!(report.retained.checkpoint_not_deletable, 1);

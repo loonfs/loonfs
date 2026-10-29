@@ -204,7 +204,9 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
     writer.drain().await.expect("the fold's compaction settles");
     // The fold's hint raise can come less than a second after the claim's,
     // which skips it, so the test raises the hint to the fold's manifest.
-    loonfs_core::test_support::raise_hint_to_current_manifest(store.as_ref(), &namespace_id).await;
+    loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
     store.reset();
 
     namespace_writer

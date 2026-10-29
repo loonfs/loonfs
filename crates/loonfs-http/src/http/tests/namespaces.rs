@@ -88,15 +88,12 @@ async fn create_namespace(state: &BindingState, namespace_id: &NamespaceId) {
 }
 
 async fn writer_epoch(state: &BindingState, namespace_id: &NamespaceId) -> u64 {
-    loonfs::control::load_namespace_read_state(
-        state.runtime.object_store().as_ref(),
-        namespace_id,
-        std::sync::Arc::new(loonfs_types::StdMonotonicTimer::default()),
-    )
-    .await
-    .expect("read head")
-    .writer_epoch
-    .0
+    loonfs_core::test_support::namespace_store(state.runtime.object_store().as_ref(), namespace_id)
+        .load_read_state()
+        .await
+        .expect("read head")
+        .writer_epoch
+        .0
 }
 
 #[tokio::test]

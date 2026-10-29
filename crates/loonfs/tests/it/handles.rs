@@ -9,7 +9,6 @@ use loonfs::{
     ManifestNo, NamespaceId, PutFileOptions, SharedObjectStore, StoreConfig, WalFoldStepOutcome,
     Writable,
 };
-use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -62,23 +61,22 @@ async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) {
-    let current = loonfs_core::control::load_namespace_read_state(
+    let current = loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_read_state()
+        .await
+        .expect("tail state");
+    loonfs_core::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        loonfs_core::test_support::std_timer(),
-    )
-    .await
-    .expect("tail state");
-    append_wal_objects(
-        store,
-        namespace_id,
-        loonfs_core::limits::MAX_UNFOLDED_WAL_OBJECTS
-            - (current.wal_no.0 - current.folded_wal_no.0)
-            - 1,
         &MutationContext {
             writer_id: loonfs_types::WriterId::parse("wal-tail-test-writer").expect("writer id"),
             now_ms: 1_000,
         },
+    )
+    .append_wal_objects(
+        loonfs_core::limits::MAX_UNFOLDED_WAL_OBJECTS
+            - (current.wal_no.0 - current.folded_wal_no.0)
+            - 1,
     )
     .await
     .expect("fill WAL tail to write-stop bound");
@@ -199,13 +197,10 @@ fn standalone_reader_builds_without_writer_identity() {
         // The only identity on the head is the writer's own label: a read
         // carries none and records none.
         let store = LocalFsStore::new(temp_dir.path()).expect("open store for inspection");
-        let head = loonfs_core::control::load_namespace_read_state(
-            &store,
-            &namespace_id,
-            loonfs_core::test_support::std_timer(),
-        )
-        .await
-        .expect("load head");
+        let head = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+            .load_read_state()
+            .await
+            .expect("load head");
         let writer_block = head.writer.expect("head records the writer that published");
         assert_eq!(writer_block.writer_id.as_str(), "handle-test-writer");
         assert_ne!(
@@ -580,15 +575,15 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             .open_namespace(&namespace_id)
             .expect("open namespace");
         let seed_wal_objects = wal_tail_object_threshold() - 1;
-        append_wal_objects(
+        loonfs_core::test_support::NamespaceFixture::new(
             failing.as_ref(),
             &namespace_id,
-            seed_wal_objects,
             &MutationContext {
                 writer_id: loonfs_types::WriterId::parse("fold-failure-seed").expect("writer id"),
                 now_ms: 1_000,
             },
         )
+        .append_wal_objects(seed_wal_objects)
         .await
         .expect("seed WAL tail below fold threshold");
 
@@ -665,15 +660,15 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        append_wal_objects(
+        loonfs_core::test_support::NamespaceFixture::new(
             blocking.inner(),
             &namespace_id,
-            wal_tail_object_threshold() - 1,
             &MutationContext {
                 writer_id: loonfs_types::WriterId::parse("parked-fold-seed").expect("writer id"),
                 now_ms: 1_000,
             },
         )
+        .append_wal_objects(wal_tail_object_threshold() - 1)
         .await
         .expect("seed the WAL tail below the fold threshold");
 

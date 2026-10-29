@@ -126,7 +126,8 @@ impl TestHarness {
     }
 
     async fn stage_content(&self, bytes: &[u8]) -> loonfs::ContentRef {
-        loonfs_core::content::store_bytes_as_content(&self.store, &self.namespace_id, bytes)
+        loonfs_core::test_support::namespace_store(&self.store, &self.namespace_id)
+            .store_bytes_as_content(bytes)
             .await
             .expect("stage content")
             .into_content_ref()
@@ -166,7 +167,8 @@ async fn prepare_content(
     namespace_id: &NamespaceId,
     content_ref: &loonfs::ContentRef,
 ) -> PreparedContent {
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
+    let catalog = loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_catalog_entry()
         .await
         .expect("load namespace catalog");
     loonfs_core::content::prepare_existing_content_ref(store, &catalog, content_ref.clone())
@@ -872,11 +874,11 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let content_ref =
-        loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"duplicate content")
-            .await
-            .expect("stage content")
-            .into_content_ref();
+    let content_ref = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"duplicate content")
+        .await
+        .expect("stage content")
+        .into_content_ref();
     let intent = put_request("in-flight-put", "/file.txt", content_ref.clone());
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates publication and duplicate join.
@@ -938,11 +940,11 @@ async fn stale_head_retry_preserves_content_admission() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let content_ref =
-        loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"retry content")
-            .await
-            .expect("stage content")
-            .into_content_ref();
+    let content_ref = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"retry content")
+        .await
+        .expect("stage content")
+        .into_content_ref();
     let intent = put_request("retry-put", "/file.txt", content_ref.clone());
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates publication retries.
@@ -973,11 +975,11 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let content_ref =
-        loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"mixed content")
-            .await
-            .expect("stage content")
-            .into_content_ref();
+    let content_ref = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"mixed content")
+        .await
+        .expect("stage content")
+        .into_content_ref();
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates mixed-batch publication.
     let prepared = prepare_content(&store, &namespace_id, &content_ref).await;

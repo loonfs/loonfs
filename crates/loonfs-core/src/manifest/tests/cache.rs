@@ -18,7 +18,8 @@ async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
         .expect("bootstrap");
     for index in 0..8 {
         let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(store, namespace_id, &path, b"file\n", context, None)
+        crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+            .write_file_bytes(&path, b"file\n", None)
             .await
             .expect("write file");
     }
@@ -240,23 +241,18 @@ async fn cached_manifest_carries_its_scan_order_runs() {
         .expect("bootstrap");
     for index in 0..4 {
         let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&path, b"file\n", None)
             .await
             .expect("write file");
     }
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create first checkpoint");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/tail.txt",
-        b"tail\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write tail file");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/tail.txt", b"tail\n", None)
+        .await
+        .expect("write tail file");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create second checkpoint");
@@ -402,10 +398,12 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(&store, &namespace_id, "/docs/a.txt", b"a\n", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/a.txt", b"a\n", None)
         .await
         .expect("write a");
-    write_file_bytes(&store, &namespace_id, "/docs/c.txt", b"c\n", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/c.txt", b"c\n", None)
         .await
         .expect("write c");
 
@@ -414,7 +412,8 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
         ..MetadataRunPolicy::default()
     };
     checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
-    write_file_bytes(&store, &namespace_id, "/docs/b.txt", b"b\n", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/b.txt", b"b\n", None)
         .await
         .expect("write b");
     checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
@@ -464,39 +463,21 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     // "gamma" in a delta run. The delta bind segment's key range then straddles
     // "beta", so min/max pruning cannot exclude it — only its bloom filter
     // can prove the name absent.
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/beta.txt",
-        b"beta\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write beta");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/beta.txt", b"beta\n", None)
+        .await
+        .expect("write beta");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("first checkpoint");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/alpha.txt",
-        b"alpha\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write alpha");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/gamma.txt",
-        b"gamma\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write gamma");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/alpha.txt", b"alpha\n", None)
+        .await
+        .expect("write alpha");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/gamma.txt", b"gamma\n", None)
+        .await
+        .expect("write gamma");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("second checkpoint");
@@ -562,16 +543,10 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     let manifest_number = {
         checkpoint_then_compact(
             &store,
@@ -629,16 +604,10 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     checkpoint_then_compact(
         &store,
         &namespace_id,
@@ -648,29 +617,29 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     .await;
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
 
-    let cache = MetadataSegmentCache::new(
+    let cache = Arc::new(MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(0, 0)),
         ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(0, None)),
         crate::limits::READAHEAD_WINDOW_BYTES,
-    );
+    ));
+    let namespace = crate::NamespaceStore {
+        segment_cache: Arc::clone(&cache),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    };
     let read_view = super::load_manifest_segments_for_inspection(
-        &store,
+        &namespace.store,
         Some(&cache),
         &namespace_id,
         &manifest_number,
     )
     .await
     .expect("read view");
-    let fold_view = fold::load_manifest_projection(
-        &store,
-        &namespace_id,
-        Some(&cache),
-        crate::test_support::observed_now(),
-    )
-    .await
-    .expect("fold view")
-    .manifest_segments;
+    let fold_view = namespace
+        .load_manifest_projection(crate::test_support::observed_now())
+        .await
+        .expect("fold view")
+        .manifest_segments;
     let key = "inode-00000000000000000001";
     for segments in [&read_view, &fold_view] {
         store.reset();
@@ -709,16 +678,10 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     // unfolded backlog takes.
     for names in [["a.txt", "z.txt"], ["b.txt", "y.txt"], ["c.txt", "x.txt"]] {
         for name in names {
-            write_file_bytes(
-                &store,
-                &namespace_id,
-                &format!("/docs/{name}"),
-                b"content\n",
-                &context,
-                None,
-            )
-            .await
-            .expect("write file");
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                .write_file_bytes(&format!("/docs/{name}"), b"content\n", None)
+                .await
+                .expect("write file");
         }
         create_checkpoint(&store, &namespace_id, &context)
             .await
@@ -833,16 +796,10 @@ async fn corrupt_inline_filter_fails_the_lookup() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -911,7 +868,8 @@ async fn checkpointed_direntry_segment() -> (
         .expect("bootstrap");
     for index in 0..4 {
         let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&path, b"file\n", None)
             .await
             .expect("write file");
     }
@@ -983,7 +941,8 @@ async fn multi_block_direntry_segment() -> (
         .expect("bootstrap");
     for index in 0..12 {
         let path = format!("/docs/file-{index:02}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&path, b"file\n", None)
             .await
             .expect("write file");
     }
@@ -1350,30 +1309,18 @@ async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
         .await
         .expect("bootstrap");
 
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/first.txt",
-        b"first\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write first");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/first.txt", b"first\n", None)
+        .await
+        .expect("write first");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create first checkpoint");
 
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/second.txt",
-        b"second\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write second");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/second.txt", b"second\n", None)
+        .await
+        .expect("write second");
     store.reset();
 
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
@@ -1492,7 +1439,8 @@ async fn current_segment_refs<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<MetadataSegmentRef> {
-    load_current_manifest(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("load the current manifest")
         .state
@@ -1537,10 +1485,12 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
         .expect("bootstrap");
     for index in 0..4 {
         let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(&path, b"file\n", None)
             .await
             .expect("write file");
-        fold::fold_wal(&store, &namespace_id)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
             .await
             .expect("fold the tail");
     }
@@ -1549,18 +1499,23 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
         .iter()
         .map(metadata_segment_object_key)
         .collect();
-    let cache = MetadataSegmentCache::unshared(usize::MAX);
-    let outcome = compact_unit(
-        &store,
-        Some(&cache),
-        &namespace_id,
+    let cache = Arc::new(MetadataSegmentCache::unshared(usize::MAX));
+    let outcome = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::mutation_context("test-writer", 0),
+        );
+        fixture.namespace.segment_cache = Arc::clone(&cache);
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
-        MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
         crate::manifest::CompactionAdmission::AnySize,
+        loonfs_types::CompactorEpoch(0),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("run a compaction unit");

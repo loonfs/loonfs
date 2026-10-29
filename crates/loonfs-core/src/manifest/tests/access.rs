@@ -73,17 +73,14 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
     }
     let state = builder.build();
 
-    let segments = build_manifest_segments(
-        &store,
-        None,
-        &namespace_id,
-        &state,
-        &HashMap::new(),
-        MetadataRunPolicy {
+    let segments = crate::NamespaceStore {
+        run_policy: MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
             ..MetadataRunPolicy::default()
         },
-    )
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .build_manifest_segments(&state, &HashMap::new())
     .await
     .expect("build segments");
     let access_segments = segments
@@ -151,17 +148,14 @@ async fn every_metadata_source_resolves_the_same_effective_rights() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let state = access_fixture_state();
     let visible_seq = ChangeSeq(10);
-    let segments = build_manifest_segments(
-        &store,
-        None,
-        &namespace_id,
-        &state,
-        &HashMap::new(),
-        MetadataRunPolicy {
+    let segments = crate::NamespaceStore {
+        run_policy: MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
             ..MetadataRunPolicy::default()
         },
-    )
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .build_manifest_segments(&state, &HashMap::new())
     .await
     .expect("build segments");
     let manifest = publish_manifest_with_segments(

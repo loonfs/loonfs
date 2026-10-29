@@ -1,8 +1,8 @@
 //! Access updates, structural rules, and revision continuity after a fold.
 
-use crate::common::commit_split_support::{bootstrap_namespace, submit_commit};
-use crate::common::{namespace_engine, read_context};
+use crate::common::{namespace_engine, read_context, submit_commit};
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::{CreateNamespaceOptions, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -48,7 +48,7 @@ async fn setup() -> (
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = crate::common::mutation_context("writer", 1);
+    let context = loonfs_core::test_support::mutation_context("writer", 1);
     namespace_engine(&store, &namespace_id, &context)
         .bootstrap_namespace(
             &loonfs_test_support::test_actor(),
@@ -194,7 +194,8 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
 #[tokio::test]
 async fn structural_rules_reject_admin_off_the_root_and_a_boundary_on_a_file() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    let content = loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"body")
+    let content = namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"body")
         .await
         .expect("content")
         .into_content_ref();
@@ -233,8 +234,9 @@ async fn an_unrestricted_namespace_refuses_access_updates() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = crate::common::mutation_context("writer", 1);
-    bootstrap_namespace(&store, &namespace_id, &context)
+    let context = loonfs_core::test_support::mutation_context("writer", 1);
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
         .await
         .expect("bootstrap");
     let error = submit_operation(
@@ -415,7 +417,8 @@ async fn an_acl_namespace_requires_a_subject_and_an_unrestricted_one_ignores_it(
     .await
     .expect("administrator commits");
     let unrestricted = NamespaceId::parse("unrestricted").expect("namespace");
-    bootstrap_namespace(&store, &unrestricted, &context)
+    NamespaceFixture::new(&store, &unrestricted, &context)
+        .create()
         .await
         .expect("bootstrap");
     commit_as(
@@ -433,7 +436,8 @@ async fn an_acl_namespace_requires_a_subject_and_an_unrestricted_one_ignores_it(
 async fn rights_gate_operations_and_absence_hides_the_inode() {
     use AccessRight::{Create, Read, Remove, Write};
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    let content = loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"body")
+    let content = namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"body")
         .await
         .expect("content")
         .into_content_ref();
@@ -557,7 +561,8 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
 async fn moves_are_authorized_as_the_equivalent_grant() {
     use AccessRight::{Admin, Create, Manage, Read, Remove, Share, Write};
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    let content = loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"body")
+    let content = namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"body")
         .await
         .expect("content")
         .into_content_ref();
@@ -837,7 +842,7 @@ async fn upload_sessions_belong_to_their_subject() {
     let engine = namespace_engine(&store, &namespace_id, &context);
     assert_eq!(
         engine
-            .begin_upload(None)
+            .begin_upload()
             .await
             .expect_err("subject required")
             .code(),
@@ -845,27 +850,33 @@ async fn upload_sessions_belong_to_their_subject() {
     );
     let ada = subject("usr_ada", &[]);
     let bob = subject("usr_bob", &[]);
-    let session = engine.begin_upload(Some(&ada)).await.expect("begin");
+    let as_ada = namespace_engine(&store, &namespace_id, &context).with_subject(ada.clone());
+    let session = as_ada.begin_upload().await.expect("begin");
     assert_eq!(
-        engine
-            .get_upload(&session.upload_id, Some(&bob))
+        namespace_engine(&store, &namespace_id, &context)
+            .with_subject(bob)
+            .get_upload(&session.upload_id)
             .await
             .expect_err("hidden session")
             .code(),
         ErrorCode::UploadNotFound
     );
-    engine
-        .get_upload(&session.upload_id, Some(&ada))
+    as_ada
+        .get_upload(&session.upload_id)
         .await
         .expect("owner session");
     let unrestricted = NamespaceId::parse("unrestricted").expect("namespace");
-    bootstrap_namespace(&store, &unrestricted, &context)
+    NamespaceFixture::new(&store, &unrestricted, &context)
+        .create()
         .await
         .expect("bootstrap");
-    let engine = namespace_engine(&store, &unrestricted, &context);
-    let session = engine.begin_upload(Some(&ada)).await.expect("begin");
-    engine
-        .get_upload(&session.upload_id, None)
+    let session = namespace_engine(&store, &unrestricted, &context)
+        .with_subject(ada)
+        .begin_upload()
+        .await
+        .expect("begin");
+    namespace_engine(&store, &unrestricted, &context)
+        .get_upload(&session.upload_id)
         .await
         .expect("subject ignored");
 }
@@ -897,12 +908,8 @@ fn read_engine<'a>(
     namespace_id: &NamespaceId,
     principal: &str,
 ) -> loonfs_core::NamespaceReaderEngine<&'a LocalFsStore> {
-    loonfs_core::NamespaceReaderEngine::reader(
-        store,
-        namespace_id.clone(),
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    )
-    .with_subject(subject(principal, &[principal]))
+    loonfs_core::NamespaceReaderEngine::reader(namespace_store(store, namespace_id))
+        .with_subject(subject(principal, &[principal]))
 }
 
 async fn resolve_path(
@@ -935,7 +942,8 @@ async fn read_fixture() -> (
 ) {
     use AccessRight::{Create, History, Read, Remove, Write};
     let (temp_dir, store, namespace_id, context) = setup().await;
-    let content = loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"body")
+    let content = namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"body")
         .await
         .expect("content")
         .into_content_ref();
@@ -1357,11 +1365,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
     );
     for engine in [
         read_engine(&store, &namespace_id, "prn_root"),
-        loonfs_core::NamespaceReaderEngine::reader(
-            &store,
-            namespace_id.clone(),
-            std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-        ),
+        loonfs_core::NamespaceReaderEngine::reader(namespace_store(&store, &namespace_id)),
     ] {
         engine
             .ensure_administrator(&context)
@@ -1381,11 +1385,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
             b"body"
         );
     }
-    let engine = loonfs_core::NamespaceReaderEngine::reader(
-        &store,
-        namespace_id,
-        std::sync::Arc::new(loonfs_core::test_support::content_writes()),
-    );
+    let engine = loonfs_core::NamespaceReaderEngine::reader(namespace_store(&store, &namespace_id));
     let error = engine
         .resolve_path("/team/file", StatOptions::default(), &context)
         .await

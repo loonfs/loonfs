@@ -1,7 +1,6 @@
 //! Bounded loading must return the same raw-row prefix as an unbounded scan.
 
 use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
-use super::super::build::write_manifest_segment;
 use super::super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
 use super::super::segment_block_cache::{MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad};
 use super::*;
@@ -59,12 +58,11 @@ async fn segment(store: &impl ObjectStore, rows: &[MetadataRow]) -> MetadataSegm
         built.bytes.len() > 288 * 1024,
         "exercise ranged, not eager reads"
     );
-    write_manifest_segment(
+    crate::test_support::namespace_store(
         store,
         &NamespaceId::parse("bounded-pages").expect("namespace"),
-        FAMILY,
-        built,
     )
+    .write_manifest_segment(FAMILY, built)
     .await
     .expect("write fixture segment")
 }
@@ -649,12 +647,11 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 .expect("encode row");
         }
         let built = builder.build().expect("segment");
-        let descriptor = write_manifest_segment(
+        let descriptor = crate::test_support::namespace_store(
             &store,
             &NamespaceId::parse("lookup-readahead").expect("namespace"),
-            FAMILY,
-            built,
         )
+        .write_manifest_segment(FAMILY, built)
         .await
         .expect("write segment");
         assert_eq!(

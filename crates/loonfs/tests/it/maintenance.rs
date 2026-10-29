@@ -401,10 +401,10 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     assert_eq!(status.wal_tail_objects, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let root = block_on(loonfs_core::control::load_namespace_current_manifest(
-        &raw_store,
-        &namespace_id,
-    ))
+    let root = block_on(
+        loonfs_core::test_support::namespace_store(&raw_store, &namespace_id)
+            .load_current_manifest(),
+    )
     .expect("metadata root");
     let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest().manifest_no);
     let manifest_bytes = block_on(raw_store.get(&manifest_key, None))
@@ -530,10 +530,10 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
             MetadataCompactionOutcome::Published { .. }
         );
     }
-    let before =
-        loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
-            .await
-            .expect("manifest before fencing");
+    let before = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest before fencing");
     assert_eq!(
         before.state.compactor_epoch(),
         loonfs_types::CompactorEpoch(2)
@@ -548,10 +548,10 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
             .compaction,
         MetadataCompactionOutcome::Fenced
     );
-    let fenced =
-        loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
-            .await
-            .expect("manifest after fencing");
+    let fenced = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest after fencing");
     assert_eq!(fenced.state.manifest(), before.state.manifest());
 
     assert_matches!(
@@ -563,10 +563,10 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
             .compaction,
         MetadataCompactionOutcome::Published { .. }
     );
-    let published =
-        loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
-            .await
-            .expect("manifest after publication");
+    let published = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest after publication");
     assert_eq!(
         published.state.compactor_epoch(),
         loonfs_types::CompactorEpoch(3)
@@ -651,10 +651,10 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
                 .compaction,
             MetadataCompactionOutcome::Published { .. }
         );
-        let current =
-            loonfs_core::control::load_namespace_current_manifest(shared.as_ref(), &namespace_id)
-                .await
-                .expect("new claim");
+        let current = loonfs_core::test_support::namespace_store(shared.as_ref(), &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("new claim");
         assert_eq!(
             current.state.compactor_epoch(),
             loonfs_types::CompactorEpoch(3)
@@ -677,10 +677,10 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
         .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("use the current claim");
-    let current =
-        loonfs_core::control::load_namespace_current_manifest(shared.as_ref(), &namespace_id)
-            .await
-            .expect("current epoch");
+    let current = loonfs_core::test_support::namespace_store(shared.as_ref(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("current epoch");
     assert_eq!(
         current.state.compactor_epoch(),
         loonfs_types::CompactorEpoch(3),

@@ -3,9 +3,7 @@
 use super::*;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::manifest::row::manifest_rows_for_family;
-use crate::namespace::control::load_current_manifest;
-use crate::namespace::writer_epoch::acquire_writer_epoch;
-use crate::test_support::ops::{create, write_file_bytes};
+use crate::manifest::runs::MetadataRunPolicy;
 use crate::time::StdMonotonicTimer;
 use crate::MutationContext;
 use loonfs_objectstore::keys::{
@@ -35,23 +33,19 @@ async fn seed_tail(store: &LocalFsStore, namespace_id: &NamespaceId) {
         writer_id: WriterId::parse("segment-writes").expect("writer id"),
         now_ms: 1_000,
     };
-    create(store, namespace_id, &context)
+    crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
+        .create()
         .await
         .expect("namespace");
-    acquire_writer_epoch(store, namespace_id, &context)
+    crate::test_support::namespace_store(store, namespace_id)
+        .acquire_writer_epoch(&context)
         .await
         .expect("writer");
     for index in 0..36 {
-        write_file_bytes(
-            store,
-            namespace_id,
-            &format!("/file-{index:03}"),
-            b"content",
-            &context,
-            None,
-        )
-        .await
-        .expect("file");
+        crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
+            .write_file_bytes(&format!("/file-{index:03}"), b"content", None)
+            .await
+            .expect("file");
     }
 }
 
@@ -108,7 +102,6 @@ async fn verify_segments<S: ObjectStore>(
 
 #[tokio::test]
 async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_order() {
-    let content_writes = crate::test_support::content_writes();
     for rows_per_segment in [2, usize::MAX] {
         let directory = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("segment-wave").expect("namespace id");
@@ -135,14 +128,11 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                 }
             },
         );
-        let projection = load_manifest_projection(
-            &store,
-            &namespace_id,
-            None,
-            crate::test_support::observed_now(),
-        )
-        .await
-        .expect("projection");
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let projection = namespace
+            .load_manifest_projection(crate::test_support::observed_now())
+            .await
+            .expect("projection");
         let tail_rows = projection.tail_state.merged_rows();
         let expected = MetadataRowFamily::ALL
             .into_iter()
@@ -168,20 +158,15 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
         store.inner().inner().reset();
         store.block_next();
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-        let (result, verified_manifest) = tokio::try_join!(
-            fold_wal_tail(
-                &store,
-                None,
-                &namespace_id,
-                None,
-                &deadline,
-                MetadataRunPolicy {
-                    max_rows_per_segment: NonZeroUsize::new(rows_per_segment).expect("row limit"),
-                    ..MetadataRunPolicy::default()
-                },
-                &content_writes,
-            ),
-            async {
+        let namespace = crate::NamespaceStore {
+            run_policy: MetadataRunPolicy {
+                max_rows_per_segment: NonZeroUsize::new(rows_per_segment).expect("row limit"),
+                ..MetadataRunPolicy::default()
+            },
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        };
+        let (result, verified_manifest) =
+            tokio::try_join!(namespace.fold_wal_tail(None, &deadline), async {
                 store.wait_until_blocked().await;
                 let manifest = captured
                     .lock()
@@ -202,11 +187,11 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                 verify_segments(&store, descriptors, &expected).await;
                 store.release();
                 Ok(manifest)
-            }
-        )
-        .expect("fold");
+            })
+            .expect("fold");
         assert_eq!(result.response.outcome, FoldWalOutcome::Published);
-        let published = load_current_manifest(&store, &namespace_id)
+        let published = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("published manifest");
         assert_eq!(
@@ -227,12 +212,12 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
 
 #[tokio::test]
 async fn a_failed_segment_put_prevents_fold_publication() {
-    let content_writes = crate::test_support::content_writes();
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("failed-segment-wave").expect("namespace id");
     let local = LocalFsStore::new(directory.path()).expect("store");
     seed_tail(&local, &namespace_id).await;
-    let before = load_current_manifest(&local, &namespace_id)
+    let before = crate::test_support::namespace_store(&local, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest");
     let segment_prefix = metadata_segment_prefix(&namespace_id);
@@ -251,17 +236,16 @@ async fn a_failed_segment_put_prevents_fold_publication() {
         ConcurrencyWatchStore::new(failing, KeyPredicate::metadata_segment()),
         KeyPredicate::any(),
     );
-    let result = fold_wal_tail(
-        &store,
-        None,
-        &namespace_id,
-        None,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        MetadataRunPolicy {
+    let result = crate::NamespaceStore {
+        run_policy: MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(2).expect("row limit"),
             ..MetadataRunPolicy::default()
         },
-        &content_writes,
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .fold_wal_tail(
+        None,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
     )
     .await;
     assert!(matches!(
@@ -274,7 +258,8 @@ async fn a_failed_segment_put_prevents_fold_publication() {
     assert_eq!(store.inner().inner().remaining(), 0);
     assert!(store.inner().puts().total > STORE_WRITES_IN_FLIGHT);
     assert!(!store.snapshot().iter().any(|operation| matches!(operation, RecordedOperation::Put { key, .. } if !key.starts_with(&metadata_segment_prefix(&namespace_id)))));
-    let after = load_current_manifest(&store, &namespace_id)
+    let after = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("unchanged manifest");
     assert_eq!(

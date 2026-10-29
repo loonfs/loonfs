@@ -194,11 +194,9 @@ async fn resume_stack<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use crate::authorize::Authorizer;
-    use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
+    use crate::commit_engine::CommitCandidate;
     use crate::metadata::LeafRevisionPreload;
-    use crate::path::read::load_current_metadata_view;
     use crate::path::write::{CommitIntent, FilesystemOperation};
-    use crate::test_support::ops::create;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::page_limit;
     use loonfs_types::{AbsolutePath, CommitId, NamespaceId};
@@ -216,7 +214,8 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let context = crate::test_support::mutation_context("tree-listing-tests", 1);
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
         let directory = |path: String| FilesystemOperation::CreateDirectory {
@@ -244,19 +243,13 @@ mod tests {
             operations.remove(0),
         );
         intent.operations.append(&mut operations);
-        publish_namespace_commits_batch(
-            &store,
-            &namespace_id,
-            vec![CommitCandidate::new(intent)],
-            &context,
-            std::sync::Arc::new(crate::test_support::content_writes()),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .into_iter()
-        .next()
-        .expect("one result")
-        .expect("commit is published");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .publish_candidates(vec![CommitCandidate::new(intent)])
+            .await
+            .into_iter()
+            .next()
+            .expect("one result")
+            .expect("commit is published");
         (temp_dir, store, namespace_id)
     }
 
@@ -266,7 +259,9 @@ mod tests {
     #[tokio::test]
     async fn a_page_over_a_deep_wide_tree_reads_children_bounded_by_its_limit_and_depth() {
         let (_temp_dir, store, namespace_id) = namespace_with_deep_wide_tree().await;
-        let view = load_current_metadata_view(&store, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
             .await
             .expect("load view");
         let mut session = view.metadata_view().session();

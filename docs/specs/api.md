@@ -1337,7 +1337,7 @@ Why can't the maximum staleness exceed the revalidation bound? Garbage collectio
 
 #### Namespace statistics
 
-The embedded `load_namespace_statistics` and `load_checkpoint_statistics` loaders return `NamespaceStatistics` as of one manifest's folded head, so newer WAL commits aren't included. The observation includes the manifest reference, the creation time, the lifecycle status, the folded WAL number, the activity counters, the referenced inode and metadata totals, and any fork basis. Counters start at zero, and comparing two observations is valid only within the same namespace. Activity counters are integers from zero through 9007199254740991. [Statistics](format.md#74-statistics) defines the counters and the footprint calculations.
+The embedded `NamespaceStore::load_statistics` and `NamespaceStore::load_checkpoint_statistics` loaders return `NamespaceStatistics` as of one manifest's folded head, so newer WAL commits aren't included. The observation includes the manifest reference, the creation time, the lifecycle status, the folded WAL number, the activity counters, the referenced inode and metadata totals, and any fork basis. Counters start at zero, and comparing two observations is valid only within the same namespace. Activity counters are integers from zero through 9007199254740991. [Statistics](format.md#74-statistics) defines the counters and the footprint calculations.
 
 ### 6.3 `DELETE /v0/namespaces/{ns}`
 

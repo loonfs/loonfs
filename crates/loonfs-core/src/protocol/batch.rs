@@ -23,7 +23,6 @@ use loonfs_types::format::wal::{
     WalCommitPayload, MAX_WAL_OBJECT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
     WAL_OBJECT_OVERHEAD_BYTES,
 };
-use loonfs_types::NamespaceId;
 use tracing::Instrument;
 
 #[derive(Debug, Clone)]
@@ -90,7 +89,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
     store: &S,
-    namespace_id: &NamespaceId,
     candidates: &[CommitCandidate],
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
@@ -101,11 +99,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         return PublishBatchReport::unchanged(Vec::new());
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
-    assert_eq!(
-        view.head().namespace_id,
-        *namespace_id,
-        "a batch should publish against its own namespace's view"
-    );
+    let namespace_id = &view.head().namespace_id;
     let elapsed_before_attempt_ms = clock.batch.elapsed_at(&clock.attempt);
     let admission_now_ms = context
         .now_ms
@@ -128,9 +122,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     async {
         for (index, candidate) in candidates.iter().enumerate() {
             let admission = prepare_candidate_request(
-                store,
                 content_writes,
-                namespace_id,
                 view,
                 &session,
                 candidate,
@@ -355,15 +347,12 @@ fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<Commit>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::namespace::writer_epoch::acquire_writer_epoch;
     use crate::path::write::{CommitIntent, FilesystemOperation};
-    use crate::protocol::load_publish_metadata_view;
-    use crate::test_support::ops::create;
     use crate::time::StdMonotonicTimer;
     use loonfs_objectstore::keys::{hint, wal_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
-    use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, MAX_PUBLIC_INTEGER};
+    use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, NamespaceId, MAX_PUBLIC_INTEGER};
     use std::assert_matches;
     use tempfile::tempdir;
 
@@ -383,23 +372,19 @@ mod tests {
             writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
-        let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
+        let acquired = crate::test_support::namespace_store(&store, &namespace_id)
+            .acquire_writer_epoch(&context)
             .await
             .expect("acquire writer");
-        let view = load_publish_metadata_view(
-            &store,
-            None,
-            &namespace_id,
-            acquired,
-            None,
-            None,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("publish view");
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_publish_metadata_view(acquired, None, None)
+            .await
+            .expect("publish view");
         let candidates = [("expired", 1_001), ("valid", 2_000)].map(|(name, expires_at_ms)| {
             let content_ref = PreparedContent::inline(
                 namespace_id.clone(),
@@ -434,8 +419,7 @@ mod tests {
         let attempt = batch.observe();
         timer.advance_ms(1);
         let result = publish_namespace_commits_batch_against_publish_view(
-            &store,
-            &namespace_id,
+            view.store(),
             &candidates,
             &context,
             &view,
@@ -473,23 +457,19 @@ mod tests {
             writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap namespace");
-        let acquired_writer = acquire_writer_epoch(&store, &namespace_id, &context)
+        let acquired_writer = crate::test_support::namespace_store(&store, &namespace_id)
+            .acquire_writer_epoch(&context)
             .await
             .expect("acquire writer");
-        let mut view = load_publish_metadata_view(
-            &store,
-            None,
-            &namespace_id,
-            acquired_writer,
-            None,
-            None,
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("load publish view");
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let mut view = namespace
+            .load_publish_metadata_view(acquired_writer, None, None)
+            .await
+            .expect("load publish view");
 
         let hint_key = hint(&namespace_id);
         let hint_before = store
@@ -516,8 +496,7 @@ mod tests {
         ));
         let batch = Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default()));
         let result = publish_namespace_commits_batch_against_publish_view(
-            &store,
-            &namespace_id,
+            view.store(),
             &[candidate],
             &context,
             &view,

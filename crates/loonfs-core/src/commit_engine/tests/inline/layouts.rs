@@ -15,7 +15,8 @@ async fn layout(
     store: &RecordingStore<LocalFsStore>,
     reference: &ContentRef,
 ) -> ContentLayoutRecord {
-    load_current_metadata_view(store, &reference.owner_namespace_id)
+    crate::test_support::namespace_store(store, &reference.owner_namespace_id)
+        .load_current_metadata_view()
         .await
         .expect("view")
         .projected_metadata_view()
@@ -36,8 +37,9 @@ fn content_operations(store: &RecordingStore<LocalFsStore>) -> Vec<RecordedOpera
 #[tokio::test]
 async fn upload_evidence_carries_a_layout_on_every_reference() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
-    let stored = store_bytes_as_content(&store, &namespace_id, b"uploaded")
+    let namespace_id = engine.namespace.namespace_id.clone();
+    let stored = crate::test_support::namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"uploaded")
         .await
         .expect("upload");
     for (commit_id, paths) in [("first", vec!["/one", "/two"]), ("again", vec!["/three"])] {
@@ -54,7 +56,6 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
         };
         publish(
             &mut engine,
-            &store,
             &context,
             CommitCandidate::prepared(
                 request,
@@ -66,21 +67,23 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
         .await
         .expect("commit");
     }
-    let anchor = crate::namespace::read_anchor::load_read_anchor(
+    let anchor = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
+        .await
+        .expect("anchor");
+    let tail = crate::namespace::read_anchor::project_anchor_tail(
         &store,
-        &namespace_id,
-        crate::test_support::observed_now(),
+        &crate::cache::MetadataSegmentCache::unshared(0),
+        &anchor,
     )
-    .await
-    .expect("anchor");
-    let tail =
-        crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor).expect("tail");
+    .expect("tail");
     assert_eq!(tail.revisions().count(), 3);
     let rows: Vec<_> = tail.content_layouts().collect();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].layout.extents[0].object, ExtentObject::Whole);
     assert_eq!(rows[0].size_bytes, 8);
-    fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold upload layout");
 }
@@ -88,7 +91,7 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
 #[tokio::test]
 async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     let first = layout(&store, &original).await;
@@ -112,7 +115,10 @@ async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
         )
         .await;
         store.reset();
-        fold_wal(&store, &namespace_id).await.expect("fold");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold");
         let operations = content_operations(&store);
         assert_eq!(
             operations
@@ -158,7 +164,7 @@ async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
 #[tokio::test]
 async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     let mut reference = original.clone();
@@ -175,11 +181,13 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
             None,
         )
         .await;
-        fold_wal(&store, &namespace_id).await.expect("fold");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold");
     }
-    let view = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     let location = view
         .resolve_content_location(&reference)
         .await
@@ -225,7 +233,7 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
 #[tokio::test]
 async fn a_merged_span_must_match_its_objects_stored_checksum() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     bytes.resize(103, b'b');
@@ -239,7 +247,10 @@ async fn a_merged_span_must_match_its_objects_stored_checksum() {
         None,
     )
     .await;
-    fold_wal(&store, &namespace_id).await.expect("span fold");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("span fold");
     let key = content_span(&namespace_id, &original.content_id, 100, 103);
     let incorrect = MetadataMapStore::new(
         store.clone(),
@@ -261,7 +272,8 @@ async fn a_merged_span_must_match_its_objects_stored_checksum() {
     )
     .await;
     store.reset();
-    let error = fold_wal(&incorrect, &namespace_id)
+    let error = crate::test_support::namespace_store(&incorrect, &namespace_id)
+        .fold_wal()
         .await
         .expect_err("stored checksum mismatch");
     assert_matches!(error, CoreError::NamespaceCorrupt(message) if message.contains(&key));
@@ -271,7 +283,7 @@ async fn a_merged_span_must_match_its_objects_stored_checksum() {
 #[tokio::test]
 async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing_it() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     bytes.resize(110, b'b');
@@ -285,18 +297,18 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
         None,
     )
     .await;
-    let view = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
+    let anchor = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
         .await
-        .expect("view");
-    let anchor = crate::namespace::read_anchor::load_read_anchor(
+        .expect("anchor");
+    let tail = crate::namespace::read_anchor::project_anchor_tail(
         &store,
-        &namespace_id,
-        crate::test_support::observed_now(),
+        &crate::cache::MetadataSegmentCache::unshared(0),
+        &anchor,
     )
-    .await
-    .expect("anchor");
-    let tail =
-        crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor).expect("tail");
+    .expect("tail");
     let content = tail.content(&reference).expect("pieces");
     let first = write_tail_content(
         &store,
@@ -309,7 +321,8 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
     .expect("first write");
     let key = content_span(&namespace_id, &original.content_id, 100, 110);
     let before = store.head(&key).await.expect("head").expect("span");
-    fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("retry publishes");
     assert_eq!(layout(&store, &reference).await, first);
@@ -319,28 +332,27 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
 #[tokio::test]
 async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let original = inline(&namespace_id, Bytes::from_static(b"first"));
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("file", vec![original.clone()]),
     )
     .await
     .expect("first commit");
-    let anchor = crate::namespace::read_anchor::load_read_anchor(
-        &store,
-        &namespace_id,
-        crate::test_support::observed_now(),
-    )
-    .await
-    .expect("anchor");
-    let tail =
-        crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor).expect("tail");
-    let view = load_current_metadata_view(&store, &namespace_id)
+    let anchor = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_anchor(crate::test_support::observed_now())
         .await
-        .expect("view");
+        .expect("anchor");
+    let tail = crate::namespace::read_anchor::project_anchor_tail(
+        &store,
+        &crate::cache::MetadataSegmentCache::unshared(0),
+        &anchor,
+    )
+    .expect("tail");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     let content = tail.content(original.content_ref()).expect("content");
     write_tail_content(
         &store,
@@ -377,7 +389,9 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
         None,
     )
     .await;
-    let view = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("view after append");
     for (revision, expected) in [
@@ -407,7 +421,8 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
             .expect("object");
         assert_eq!(bytes, expected);
     }
-    fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("retry after append");
     let row = layout(&store, &reference).await;
@@ -433,7 +448,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
 #[tokio::test]
 async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     for (revision_no, size, offset) in [(2, 105, 100), (3, 110, 105)] {
@@ -449,7 +464,8 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
         )
         .await;
     }
-    fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold base span");
     engine.invalidate_projection();
@@ -473,7 +489,6 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
     ] {
         publish(
             &mut engine,
-            &store,
             &context,
             CommitCandidate::new(CommitIntent::single(
                 CommitId::parse(commit_id).expect("commit"),
@@ -485,9 +500,8 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
         .await
         .expect("publish");
     }
-    let view = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     let revision = view
         .projected_metadata_view()
         .latest_revision_head(inode_id)
@@ -510,7 +524,8 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
     bytes.truncate(105);
     bytes.push(b'!');
     store.reset();
-    fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold shared base");
     let span = content_span(&namespace_id, &fresh.content_id, 105, 106);
@@ -531,7 +546,7 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
 #[tokio::test]
 async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_objects() {
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     for (revision, added) in [(2_u8, 10), (3, 3)] {
@@ -547,12 +562,14 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
             None,
         )
         .await;
-        fold_wal(&store, &namespace_id).await.expect("fold extent");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold extent");
     }
     let access = ReadAccess::live(Authorizer::Unrestricted);
-    let view = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     let content_writes = crate::test_support::content_writes();
     store.reset();
     let target = view
@@ -590,15 +607,13 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     engine.invalidate_projection();
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("empty", vec![empty.clone()]),
     )
     .await
     .expect("empty commit");
-    let view = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     let target = view
         .direct_download_target(
             "/empty-0",
@@ -629,9 +644,9 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
 
 #[tokio::test]
 async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() {
-    use crate::gc::{gc_namespace, GcOptions};
+    use crate::gc::GcOptions;
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let value = InlineContent::new(
         namespace_id.clone(),
         ContentId::parse("con_10000000000000000000000000").expect("base id"),
@@ -640,14 +655,17 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
     );
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("file", vec![value.clone()]),
     )
     .await
     .expect("base file");
-    fold_wal(&store, &namespace_id).await.expect("fold base");
-    let inode_id = load_current_metadata_view(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold base");
+    let inode_id = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_metadata_view()
         .await
         .expect("view")
         .resolve_path(
@@ -670,7 +688,10 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         Some(layout(&store, &original).await.layout),
     )
     .await;
-    fold_wal(&store, &namespace_id).await.expect("fold");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     let other = crate::storage::content::stage_bytes_under_content_id(
         &store,
         namespace_id.clone(),
@@ -690,19 +711,14 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
             other.content_ref().clone(),
         )],
     );
-    crate::commit_engine::publish_namespace_commits_batch(
-        &store,
-        &namespace_id,
-        vec![candidate],
-        &context,
-        std::sync::Arc::new(crate::test_support::content_writes()),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .pop()
-    .expect("one outcome")
-    .expect("other file");
-    fold_wal(&store, &namespace_id)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .publish_candidates(vec![candidate])
+        .await
+        .pop()
+        .expect("one outcome")
+        .expect("other file");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold other shard");
     prune_revisions(&store, &namespace_id).await;
@@ -729,20 +745,17 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         ..Default::default()
     };
     store.reset();
-    let report = gc_namespace(
-        &aged,
-        None,
-        None,
-        &namespace_id,
-        &options,
-        &MutationContext {
-            now_ms: options.grace_window_ms + 1,
-            ..context.clone()
-        },
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect");
+    let report = crate::test_support::namespace_store(&aged, &namespace_id)
+        .gc(
+            None,
+            &options,
+            &MutationContext {
+                now_ms: options.grace_window_ms + 1,
+                ..context.clone()
+            },
+        )
+        .await
+        .expect("collect");
     assert_eq!(report.deleted.content_objects, 3);
     let prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
     let listed: Vec<_> = store
@@ -790,24 +803,22 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         None,
     )
     .await;
-    fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold replacement");
     prune_revisions(&store, &namespace_id).await;
-    let report = gc_namespace(
-        &aged,
-        None,
-        None,
-        &namespace_id,
-        &options,
-        &MutationContext {
-            now_ms: options.grace_window_ms + 1,
-            ..context
-        },
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect pruned chains");
+    let report = crate::test_support::namespace_store(&aged, &namespace_id)
+        .gc(
+            None,
+            &options,
+            &MutationContext {
+                now_ms: options.grace_window_ms + 1,
+                ..context
+            },
+        )
+        .await
+        .expect("collect pruned chains");
     assert_eq!(report.deleted.content_objects, shared_keys.len() as u64);
     for key in shared_keys {
         assert!(store.head(&key).await.expect("head").is_none(), "{key}");
@@ -815,32 +826,33 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
 }
 
 async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
-    use crate::manifest::{
-        advance_retention_floor, compact_unit, MetadataCompactionPolicy, RetentionTarget,
-    };
-    advance_retention_floor(
+    use crate::manifest::{MetadataCompactionPolicy, RetentionTarget};
+    crate::test_support::NamespaceFixture::new(
         store,
-        None,
         namespace_id,
-        RetentionTarget::Head,
-        crate::test_support::grace_elapsed_after(1_000),
-        crate::test_support::std_timer(),
+        &crate::test_support::mutation_context(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(1_000),
+        ),
     )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("floor");
     for _ in 0..16 {
         if matches!(
-            compact_unit(
+            crate::test_support::NamespaceFixture::new(
                 store,
-                None,
                 namespace_id,
+                &crate::test_support::mutation_context("test-writer", 0)
+            )
+            .engine()
+            .compact_metadata_unit(
                 None,
-                loonfs_types::CompactorEpoch(0),
-                Default::default(),
                 MetadataCompactionPolicy::CompactImmediately,
                 crate::manifest::CompactionAdmission::AnySize,
-                &crate::manifest::MetadataCompactionCancellation::default(),
-                crate::test_support::std_timer(),
+                loonfs_types::CompactorEpoch(0),
+                &crate::manifest::MetadataCompactionCancellation::default()
             )
             .await
             .expect("compact"),
@@ -853,18 +865,16 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
 
 #[tokio::test]
 async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
-    use crate::gc::{gc_namespace, GcOptions};
+    use crate::gc::GcOptions;
     use crate::manifest::metadata_basis_from_manifest;
-    use crate::namespace::control::load_current_manifest;
     use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily};
 
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
     engine.invalidate_projection();
     publish(
         &mut engine,
-        &store,
         &context,
         CommitCandidate::new(CommitIntent::single(
             CommitId::parse("copy").expect("commit"),
@@ -889,7 +899,8 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         Some(layout(&store, &original).await.layout),
     )
     .await;
-    fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold shared chain");
     let shared_layout = layout(&store, &shared).await;
@@ -903,34 +914,25 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         None,
     )
     .await;
-    crate::test_support::ops::write_file_bytes(
-        &store,
-        &namespace_id,
-        "/b",
-        b"replacement-b",
-        &context,
-        None,
-    )
-    .await
-    .expect("replace the other reference");
-    crate::test_support::ops::delete_path(&store, &namespace_id, "/b", &context, None)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/b", b"replacement-b", None)
+        .await
+        .expect("replace the other reference");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/b", None)
         .await
         .expect("delete the other file");
-    fold_wal(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
         .await
         .expect("fold replacements");
-    let restored = crate::test_support::ops::restore_file_revision(
-        &store,
-        &namespace_id,
-        "/file-0",
-        RevisionNo(2),
-        &context,
-        None,
-    )
-    .await
-    .expect("unfolded restore");
+    let restored = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .restore_file_revision("/file-0", RevisionNo(2), None)
+        .await
+        .expect("unfolded restore");
     prune_revisions(&store, &namespace_id).await;
-    let manifest = load_current_manifest(&store, &namespace_id)
+    let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("manifest");
     assert!(manifest.state.envelope.payload().head_seq < restored.committed_seq);
@@ -950,7 +952,9 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         row,
         MetadataRow::FileRevision(row) if row.content_ref.content_id != original.content_id && row.content_ref.content_id != shared.content_id
     )));
-    let view = load_current_metadata_view(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
         .await
         .expect("restored view");
     assert_eq!(
@@ -964,20 +968,17 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
     );
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
     let options = GcOptions::default();
-    let report = gc_namespace(
-        &aged,
-        None,
-        None,
-        &namespace_id,
-        &options,
-        &MutationContext {
-            now_ms: options.grace_window_ms + 1,
-            ..context
-        },
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect after grace");
+    let report = crate::test_support::namespace_store(&aged, &namespace_id)
+        .gc(
+            None,
+            &options,
+            &MutationContext {
+                now_ms: options.grace_window_ms + 1,
+                ..context
+            },
+        )
+        .await
+        .expect("collect after grace");
     assert_eq!(report.deleted.content_objects, 0);
     for extent in &shared_layout.layout.extents {
         let key = crate::storage::content_location::extent_object_key(extent);
@@ -987,7 +988,10 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         read_file(&store, &namespace_id, RevisionNo(4)).await,
         b"hello!"
     );
-    fold_wal(&store, &namespace_id).await.expect("fold restore");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold restore");
     assert_eq!(
         read_file(&store, &namespace_id, RevisionNo(4)).await,
         b"hello!"
@@ -1001,11 +1005,10 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         [RevisionNo(1), RevisionNo(2)],
     ] {
         let (_directory, store, mut engine, context) = setup().await;
-        let namespace_id = engine.namespace_id.clone();
+        let namespace_id = engine.namespace.namespace_id.clone();
         let original = inline(&namespace_id, Bytes::from_static(b"first"));
         publish(
             &mut engine,
-            &store,
             &context,
             candidate("file", vec![original.clone()]),
         )
@@ -1013,7 +1016,6 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         .expect("put");
         publish(
             &mut engine,
-            &store,
             &context,
             CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("append").expect("commit"),
@@ -1034,9 +1036,8 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
             KeyPredicate::content_blob(),
             loonfs_test_support::stores::OperationSelector::Put,
         );
-        let view = load_current_metadata_view(&blocked, &namespace_id)
-            .await
-            .expect("view");
+        let namespace = crate::test_support::namespace_store(&blocked, &namespace_id);
+        let view = namespace.load_current_metadata_view().await.expect("view");
         let access = ReadAccess::live(Authorizer::Unrestricted);
         for revision in revisions {
             let key = content_span(&namespace_id, &original.content_ref().content_id, 0, 10);
@@ -1087,7 +1088,8 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         }
         let key = content_span(&namespace_id, &original.content_ref().content_id, 0, 10);
         let before = store.head(&key).await.expect("head").expect("span");
-        fold_wal(&store, &namespace_id)
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
             .await
             .expect("fold after downloads");
         assert_eq!(store.head(&key).await.expect("head").expect("span"), before);
@@ -1098,12 +1100,12 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
 async fn two_chains_in_one_fold_share_one_write_permit() {
     use loonfs_test_support::stores::{BlockingStore, ConcurrencyWatchStore, OperationSelector};
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let values = vec![
         inline(&namespace_id, Bytes::from_static(b"first")),
         inline(&namespace_id, Bytes::from_static(b"second")),
     ];
-    publish(&mut engine, &store, &context, candidate("files", values))
+    publish(&mut engine, &context, candidate("files", values))
         .await
         .expect("publish");
     let blocked = ConcurrencyWatchStore::new(
@@ -1116,17 +1118,13 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
     );
     blocked.inner().block_next();
     store.reset();
-    let pool = crate::PermitPool::new(std::num::NonZeroUsize::MIN, None);
+    let pool = Arc::new(crate::PermitPool::new(std::num::NonZeroUsize::MIN, None));
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-    let mut fold = std::pin::pin!(fold_wal_tail(
-        &blocked,
-        None,
-        &namespace_id,
-        None,
-        &deadline,
-        crate::manifest::MetadataRunPolicy::default(),
-        &pool,
-    ));
+    let namespace = crate::NamespaceStore {
+        content_writes: Arc::clone(&pool),
+        ..crate::test_support::namespace_store(&blocked, &namespace_id)
+    };
+    let mut fold = std::pin::pin!(namespace.fold_wal_tail(None, &deadline));
     tokio::select! {
         () = blocked.inner().wait_until_blocked() => {}
         _ = &mut fold => panic!("fold finished before the content write"),
@@ -1153,22 +1151,16 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     use crate::path::write::PublishPlanningSession;
 
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
     engine.invalidate_projection();
     let target = inline(&namespace_id, Bytes::from_static(b"target"));
-    publish(
-        &mut engine,
-        &store,
-        &context,
-        candidate("target", vec![target]),
-    )
-    .await
-    .expect("target");
-    let stale_layout = layout(&store, &original).await.layout;
-    let view = load_current_metadata_view(&store, &namespace_id)
+    publish(&mut engine, &context, candidate("target", vec![target]))
         .await
-        .expect("view");
+        .expect("target");
+    let stale_layout = layout(&store, &original).await.layout;
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     let candidate = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("copy").expect("commit"),
         loonfs_test_support::test_actor(),
@@ -1185,7 +1177,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     let session = PublishPlanningSession::new(view.head(), view.wal_tail());
     let plan = session
         .prepare_commit(
-            &store,
+            &namespace.store,
             &crate::test_support::content_writes(),
             &candidate,
             candidate.semantic_identity(&namespace_id),
@@ -1208,25 +1200,26 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
         None,
     )
     .await;
-    fold_wal(&store, &namespace_id).await.expect("fold append");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold append");
     let longer = layout(&store, &extended).await;
-    crate::test_support::ops::append_wal_commit(
-        &store,
-        &namespace_id,
-        plan.deltas.into_iter().map(|delta| delta.delta).collect(),
-        Vec::new(),
-    )
-    .await
-    .expect("stale copy");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .append_wal_commit(
+            plan.deltas.into_iter().map(|delta| delta.delta).collect(),
+            Vec::new(),
+        )
+        .await
+        .expect("stale copy");
     for _ in 0..2 {
         assert_eq!(layout(&store, &original).await, longer);
         assert_eq!(
             read_file(&store, &namespace_id, RevisionNo(2)).await,
             b"hello!"
         );
-        let view = load_current_metadata_view(&store, &namespace_id)
-            .await
-            .expect("view");
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace.load_current_metadata_view().await.expect("view");
         let read = view
             .read_file_revision_bytes(
                 "/target-0",
@@ -1237,7 +1230,10 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
             .await
             .expect("copy bytes");
         assert_eq!(read.bytes, b"hello");
-        fold_wal(&store, &namespace_id).await.expect("fold copy");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold copy");
     }
 }
 
@@ -1246,10 +1242,9 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
     use loonfs_test_support::stores::{FailStore, InjectedError, OperationKind};
 
     let (_directory, store, mut engine, context) = setup().await;
-    let namespace_id = engine.namespace_id.clone();
+    let namespace_id = engine.namespace.namespace_id.clone();
     publish(
         &mut engine,
-        &store,
         &context,
         candidate(
             "file",
@@ -1272,9 +1267,8 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
         InjectedError::PermissionDenied("read-only store".to_owned()),
     );
     denied.fail_all();
-    let view = load_current_metadata_view(&denied, &namespace_id)
-        .await
-        .expect("view");
+    let namespace = crate::test_support::namespace_store(&denied, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
     let access = ReadAccess::live(Authorizer::Unrestricted);
     let content_writes = crate::test_support::content_writes();
     let store = denied.inner();
@@ -1300,18 +1294,16 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
 
 #[tokio::test]
 async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
-    use crate::gc::{gc_namespace, GcOptions};
-    use crate::manifest::{fold_wal_tail, metadata_basis_from_manifest};
-    use crate::namespace::control::load_current_manifest;
+    use crate::gc::GcOptions;
+    use crate::manifest::metadata_basis_from_manifest;
     use crate::path::write::PublishPlanningSession;
     use loonfs_types::format::manifest::MetadataRowFamily;
 
     for restore in [true, false] {
         let (_directory, store, mut engine, context) = setup().await;
-        let namespace_id = engine.namespace_id.clone();
+        let namespace_id = engine.namespace.namespace_id.clone();
         publish(
             &mut engine,
-            &store,
             &context,
             candidate(
                 "target",
@@ -1325,7 +1317,10 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         )
         .await
         .expect("target");
-        fold_wal(&store, &namespace_id).await.expect("fold target");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold target");
         engine.invalidate_projection();
         let original = InlineContent::new(
             namespace_id.clone(),
@@ -1333,17 +1328,11 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             Bytes::from_static(b"hello"),
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
+        publish(&mut engine, &context, candidate("file", vec![original]))
+            .await
+            .expect("file");
         publish(
             &mut engine,
-            &store,
-            &context,
-            candidate("file", vec![original]),
-        )
-        .await
-        .expect("file");
-        publish(
-            &mut engine,
-            &store,
             &context,
             CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("append").expect("commit"),
@@ -1359,9 +1348,8 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         )
         .await
         .expect("append");
-        let view = load_current_metadata_view(&store, &namespace_id)
-            .await
-            .expect("view");
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace.load_current_metadata_view().await.expect("view");
         let candidate = CommitCandidate::new(CommitIntent::single(
             CommitId::parse("reference").expect("commit"),
             loonfs_test_support::test_actor(),
@@ -1386,7 +1374,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         let content_writes = crate::test_support::content_writes();
         let mut plan = session
             .prepare_commit(
-                &store,
+                &namespace.store,
                 &content_writes,
                 &candidate,
                 candidate.semantic_identity(&namespace_id),
@@ -1433,7 +1421,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             Vec::new(),
             vec![replacement],
         );
-        publish(&mut engine, &store, &context, replacement)
+        publish(&mut engine, &context, replacement)
             .await
             .expect("replace source");
         let fold = engine.wal_fold_input().expect("fold input");
@@ -1444,27 +1432,23 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 }
             }
         }
-        crate::test_support::ops::append_wal_commit(
-            &store,
-            &namespace_id,
-            plan.deltas.into_iter().map(|delta| delta.delta).collect(),
-            Vec::new(),
-        )
-        .await
-        .expect("commit reference");
-        fold_wal_tail(
-            &store,
-            None,
-            &namespace_id,
-            Some(fold),
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            crate::manifest::MetadataRunPolicy::default(),
-            &content_writes,
-        )
-        .await
-        .expect("fold captured source");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .append_wal_commit(
+                plan.deltas.into_iter().map(|delta| delta.delta).collect(),
+                Vec::new(),
+            )
+            .await
+            .expect("commit reference");
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal_tail(
+                Some(fold),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
+            .await
+            .expect("fold captured source");
         prune_revisions(&store, &namespace_id).await;
-        let manifest = load_current_manifest(&store, &namespace_id)
+        let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("manifest");
         let basis = metadata_basis_from_manifest(&store, None, &manifest);
@@ -1481,33 +1465,30 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         assert!(rows.is_empty(), "the basis no longer names this chain");
         let options = GcOptions::default();
         let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
-        gc_namespace(
-            &aged,
-            None,
-            None,
-            &namespace_id,
-            &options,
-            &MutationContext {
-                now_ms: options.grace_window_ms + 1,
-                ..context
-            },
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("collect");
+        crate::test_support::namespace_store(&aged, &namespace_id)
+            .gc(
+                None,
+                &options,
+                &MutationContext {
+                    now_ms: options.grace_window_ms + 1,
+                    ..context
+                },
+            )
+            .await
+            .expect("collect");
         for extent in &carried.extents {
             let key = crate::storage::content_location::extent_object_key(extent);
             assert!(store.head(&key).await.expect("head").is_some(), "{key}");
         }
         for folded in [false, true] {
             if folded {
-                fold_wal(&store, &namespace_id)
+                crate::test_support::namespace_store(&store, &namespace_id)
+                    .fold_wal()
                     .await
                     .expect("fold reference");
             }
-            let view = load_current_metadata_view(&store, &namespace_id)
-                .await
-                .expect("view");
+            let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+            let view = namespace.load_current_metadata_view().await.expect("view");
             let bytes = view
                 .read_file_revision_bytes(
                     if restore { "/file-0" } else { "/target-0" },

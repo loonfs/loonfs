@@ -1,7 +1,6 @@
 //! Inline materialization ordering, failure, and concurrent fold contracts.
 
 use super::*;
-use crate::namespace::control::load_current_manifest;
 use crate::storage::content::content_object_key_for_ref;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::PutMode;
@@ -33,42 +32,43 @@ fn content_assemblies(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
 /// fold, and a retried commit finds its receipt there without reading the WAL.
 #[tokio::test]
 async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
-    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
-        vec![inline(&engine.namespace_id, Bytes::from_static(b"before"))],
+        vec![inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"before"),
+        )],
     );
-    publish(&mut engine, &store, &context, before)
+    publish(&mut engine, &context, before)
         .await
         .expect("before");
     let input = engine.wal_fold_input().expect("fold input");
     engine.invalidate_projection();
     let during = candidate(
         "during",
-        vec![inline(&engine.namespace_id, Bytes::from_static(b"during"))],
+        vec![inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"during"),
+        )],
     );
-    publish(&mut engine, &store, &context, during.clone())
+    publish(&mut engine, &context, during.clone())
         .await
         .expect("during");
-    let folded = fold_wal_tail(
-        &store,
-        None,
-        &engine.namespace_id,
-        Some(input.clone()),
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    )
-    .await
-    .expect("fold");
+    let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .fold_wal_tail(
+            Some(input.clone()),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("fold");
     engine.record_manifest_published(folded.manifest.clone());
     let moved = engine.wal_fold_input().expect("the position moved");
     assert_eq!(moved.basis.0, folded.manifest.manifest);
     assert_eq!(moved.head.folded_wal_no, input.head.wal_no);
     assert_eq!(moved.wal_tail_objects, 1);
     store.reset();
-    publish(&mut engine, &store, &context, during)
+    publish(&mut engine, &context, during)
         .await
         .expect("retained receipt");
     let operations = store.take();
@@ -77,7 +77,7 @@ async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
             matches!(operation, RecordedOperation::Put { .. })
                 || operation
                     .key()
-                    .starts_with(&wal_prefix(&engine.namespace_id))
+                    .starts_with(&wal_prefix(&engine.namespace.namespace_id))
         }),
         "{operations:?}"
     );
@@ -85,7 +85,6 @@ async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
 
 #[tokio::test]
 async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
-    let content_writes = crate::test_support::content_writes();
     // A receipt replay does not land a put, so it also tests that discovery
     // itself refreshes the tip and basis observations.
     for replay_receipt in [false, true] {
@@ -101,41 +100,31 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
                 },
             ))
         };
-        publish(&mut engine, &store, &context, directory("/before"))
+        publish(&mut engine, &context, directory("/before"))
             .await
             .expect("before fold");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        engine = engine.monotonic_timer(timer.clone());
+        engine.namespace.timer = timer.clone();
         let input = engine.wal_fold_input().expect("fold input");
         let during = directory("/during");
         engine
-            .publish_batch(
-                &store,
-                [during.clone()],
-                &context,
-                &Deadline::start(timer.clone()),
-            )
+            .publish_batch([during.clone()], &context, &Deadline::start(timer.clone()))
             .await
             .results
             .pop()
             .expect("result")
             .expect("during fold");
         engine.invalidate_projection();
-        let folded = fold_wal_tail(
-            &store,
-            None,
-            &engine.namespace_id,
-            Some(input.clone()),
-            &Deadline::start(timer.clone()),
-            crate::manifest::MetadataRunPolicy::default(),
-            &content_writes,
-        )
-        .await
-        .expect("fold");
+        let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .fold_wal_tail(Some(input.clone()), &Deadline::start(timer.clone()))
+            .await
+            .expect("fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
         engine.record_manifest_published(folded.manifest);
         // The runtime that published the fold raises the hint.
-        crate::test_support::raise_hint_to_current_manifest(&store, &engine.namespace_id).await;
+        crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .raise_hint_to_current_manifest()
+            .await;
         timer.advance_ms(100);
         store.reset();
 
@@ -145,12 +134,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             directory("/during/child")
         };
         engine
-            .publish_batch(
-                &store,
-                [candidate],
-                &context,
-                &Deadline::start(timer.clone()),
-            )
+            .publish_batch([candidate], &context, &Deadline::start(timer.clone()))
             .await
             .results
             .pop()
@@ -205,57 +189,65 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
                 .any(|operation| matches!(operation, RecordedOperation::Put { .. })));
         }
         assert_eq!(
-            engine.projection_observed.as_ref().expect("tip").age_ms(),
+            engine
+                .position
+                .projection_observed
+                .as_ref()
+                .expect("tip")
+                .age_ms(),
             0
         );
-        assert_eq!(engine.basis_checked.as_ref().expect("basis").age_ms(), 0);
+        assert_eq!(
+            engine
+                .position
+                .basis_checked
+                .as_ref()
+                .expect("basis")
+                .age_ms(),
+            0
+        );
     }
 }
 
 #[tokio::test]
 async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
-    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
-        vec![inline(&engine.namespace_id, Bytes::from_static(b"before"))],
+        vec![inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"before"),
+        )],
     );
-    publish(&mut engine, &store, &context, before)
+    publish(&mut engine, &context, before)
         .await
         .expect("before fold");
     let input = engine.wal_fold_input().expect("fold input");
     engine.invalidate_projection();
-    let folded = fold_wal_tail(
-        &store,
-        None,
-        &engine.namespace_id,
-        Some(input),
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    )
-    .await
-    .expect("fold");
+    let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .fold_wal_tail(
+            Some(input),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     engine.record_manifest_published(folded.manifest);
-    NamespaceCommitEngine::new(
-        engine.namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .session_writer_epoch(
-        &store,
-        &MutationContext {
+    crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .acquire_writer(&MutationContext {
             writer_id: WriterId::parse("successor").expect("writer"),
             now_ms: 1_000,
-        },
-    )
-    .await
-    .expect("claim and fence");
+        })
+        .await
+        .expect("claim and fence");
     let after = candidate(
         "after",
-        vec![inline(&engine.namespace_id, Bytes::from_static(b"after"))],
+        vec![inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"after"),
+        )],
     );
-    let error = publish(&mut engine, &store, &context, after)
+    let error = publish(&mut engine, &context, after)
         .await
         .expect_err("fenced");
     assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
@@ -288,15 +280,16 @@ pub(super) fn assert_content_before_metadata(store: &RecordingStore<LocalFsStore
 
 #[tokio::test]
 async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
-    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let values = vec![
-        inline(&engine.namespace_id, Bytes::from_static(b"retained")),
-        inline(&engine.namespace_id, Bytes::new()),
+        inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"retained"),
+        ),
+        inline(&engine.namespace.namespace_id, Bytes::new()),
     ];
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("retry-fold", values.clone()),
     )
@@ -305,23 +298,19 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     let input = engine.wal_fold_input().expect("tail");
     let failing = FailStore::new(
         store.clone(),
-        KeyPredicate::manifest(&engine.namespace_id),
+        KeyPredicate::manifest(&engine.namespace.namespace_id),
         OperationSelector::Put,
         InjectedError::PermissionDenied("manifest failure".to_owned()),
     );
     failing.fail_all();
     store.reset();
     assert!(matches!(
-        fold_wal_tail(
-            &failing,
-            None,
-            &engine.namespace_id,
-            Some(input.clone()),
-            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            crate::manifest::MetadataRunPolicy::default(),
-            &content_writes,
-        )
-        .await,
+        crate::test_support::namespace_store(&failing, &engine.namespace.namespace_id)
+            .fold_wal_tail(
+                Some(input.clone()),
+                &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default()))
+            )
+            .await,
         Err(CoreError::Store {
             kind: loonfs_objectstore::ObjectStoreErrorKind::PermissionDenied,
             ..
@@ -330,7 +319,8 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     assert_content_before_metadata(&store, values.len());
     let keys = content_assemblies(&store);
     assert_eq!(
-        load_current_manifest(&store, &engine.namespace_id)
+        crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .load_current_manifest()
             .await
             .expect("manifest")
             .state
@@ -352,23 +342,20 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     store.reset();
     let timer = Arc::new(ManualClock::stepping(20 * 60 * 1000));
     assert!(matches!(
-        fold_wal_tail(
-            &store,
-            None,
-            &engine.namespace_id,
-            Some(input.clone()),
-            &crate::time::Deadline::start(timer.clone()),
-            crate::manifest::MetadataRunPolicy::default(),
-            &content_writes,
-        )
-        .await,
+        crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .fold_wal_tail(
+                Some(input.clone()),
+                &crate::time::Deadline::start(timer.clone())
+            )
+            .await,
         Err(CoreError::MetadataPublicationBudgetExceeded { .. })
     ));
     assert_eq!(store.counts().puts, values.len());
     assert_eq!(store.counts().deletes, 0);
     assert_eq!(content_assemblies(&store).len(), values.len());
     assert_eq!(
-        load_current_manifest(&store, &engine.namespace_id)
+        crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .load_current_manifest()
             .await
             .expect("manifest")
             .state
@@ -376,17 +363,13 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         *input.basis.manifest()
     );
     store.reset();
-    let folded = fold_wal_tail(
-        &store,
-        None,
-        &engine.namespace_id,
-        Some(input),
-        &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    )
-    .await
-    .expect("retry");
+    let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .fold_wal_tail(
+            Some(input),
+            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("retry");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     assert_content_before_metadata(&store, values.len());
     let mut retry_keys = content_assemblies(&store);
@@ -401,18 +384,20 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
 /// finds the tail folded after the second session's epoch claim.
 #[tokio::test]
 async fn competing_engines_materialize_identical_objects_and_publish_one_manifest() {
-    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut first, context) = setup().await;
-    let values = vec![inline(&first.namespace_id, Bytes::from_static(b"shared"))];
+    let values = vec![inline(
+        &first.namespace.namespace_id,
+        Bytes::from_static(b"shared"),
+    )];
     let candidate = candidate("race", values);
-    publish(&mut first, &store, &context, candidate.clone())
+    publish(&mut first, &context, candidate.clone())
         .await
         .expect("publish");
-    let mut second = NamespaceCommitEngine::new(
-        first.namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    );
-    publish(&mut second, &store, &context, candidate)
+    let mut second = NamespaceCommitEngine::new(crate::test_support::namespace_store(
+        &store,
+        &first.namespace.namespace_id,
+    ));
+    publish(&mut second, &context, candidate)
         .await
         .expect("replay");
     let first_input = first.wal_fold_input().expect("first tail");
@@ -428,27 +413,16 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     store.reset();
     let first_timer = Arc::new(StdMonotonicTimer::default());
     let deadline = crate::time::Deadline::start(first_timer);
-    let first_fold = fold_wal_tail(
-        &blocked,
-        None,
-        &first.namespace_id,
-        Some(first_input),
-        &deadline,
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    );
+    let namespace = crate::test_support::namespace_store(&blocked, &first.namespace.namespace_id);
+    let first_fold = namespace.fold_wal_tail(Some(first_input), &deadline);
     let second_fold = async {
         blocked.wait_until_blocked().await;
-        let result = fold_wal_tail(
-            &store,
-            None,
-            &second.namespace_id,
-            Some(second_input),
-            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            crate::manifest::MetadataRunPolicy::default(),
-            &content_writes,
-        )
-        .await;
+        let result = crate::test_support::namespace_store(&store, &second.namespace.namespace_id)
+            .fold_wal_tail(
+                Some(second_input),
+                &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
+            .await;
         blocked.release();
         result
     };
@@ -478,7 +452,8 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         2
     );
     assert_eq!(
-        crate::namespace::control::load_current_manifest(&store, &first.namespace_id)
+        crate::test_support::namespace_store(&store, &first.namespace.namespace_id)
+            .load_current_manifest()
             .await
             .expect("current manifest")
             .state
@@ -491,10 +466,9 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
 #[tokio::test]
 async fn an_existing_different_object_is_corruption_and_stops_manifest_publication() {
     let (_directory, store, mut engine, context) = setup().await;
-    let value = inline(&engine.namespace_id, Bytes::from_static(b"right"));
+    let value = inline(&engine.namespace.namespace_id, Bytes::from_static(b"right"));
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("conflict", vec![value.clone()]),
     )
@@ -507,7 +481,8 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
         .await
         .expect("conflicting object");
     store.reset();
-    let error = fold_wal(&store, &engine.namespace_id)
+    let error = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .fold_wal()
         .await
         .expect_err("different object");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
@@ -515,7 +490,8 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
     assert_eq!(store.counts().puts, 1);
     assert_eq!(content_assemblies(&store), vec![key.clone()]);
     assert_eq!(
-        load_current_manifest(&store, &engine.namespace_id)
+        crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .load_current_manifest()
             .await
             .expect("manifest")
             .state
@@ -536,10 +512,9 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
 #[tokio::test]
 async fn a_materialization_transport_failure_remains_retryable() {
     let (_directory, store, mut engine, context) = setup().await;
-    let value = inline(&engine.namespace_id, Bytes::from_static(b"right"));
+    let value = inline(&engine.namespace.namespace_id, Bytes::from_static(b"right"));
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("transport", vec![value.clone()]),
     )
@@ -560,7 +535,8 @@ async fn a_materialization_transport_failure_remains_retryable() {
     .apply_then_fail();
     failing.fail_all();
     store.reset();
-    let error = fold_wal(&failing, &engine.namespace_id)
+    let error = crate::test_support::namespace_store(&failing, &engine.namespace.namespace_id)
+        .fold_wal()
         .await
         .expect_err("assembly failure");
     assert_matches!(
@@ -573,7 +549,8 @@ async fn a_materialization_transport_failure_remains_retryable() {
     assert_eq!(store.counts().puts, 1);
     assert_eq!(content_assemblies(&store), vec![key]);
     assert_eq!(
-        load_current_manifest(&store, &engine.namespace_id)
+        crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+            .load_current_manifest()
             .await
             .expect("manifest")
             .state
@@ -584,34 +561,34 @@ async fn a_materialization_transport_failure_remains_retryable() {
 
 #[tokio::test]
 async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
-    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
-        vec![inline(&engine.namespace_id, Bytes::from_static(b"before"))],
+        vec![inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"before"),
+        )],
     );
-    publish(&mut engine, &store, &context, before)
+    publish(&mut engine, &context, before)
         .await
         .expect("before fold");
     let input = engine.wal_fold_input().expect("fold input");
     let mut expected = crate::wal::ProjectedWalTail::default();
     for name in ["during-one", "during-two"] {
-        let value = inline(&engine.namespace_id, Bytes::from_static(b"during"));
-        publish(
-            &mut engine,
-            &store,
-            &context,
-            candidate(name, vec![value.clone()]),
-        )
-        .await
-        .expect("during fold");
+        let value = inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"during"),
+        );
+        publish(&mut engine, &context, candidate(name, vec![value.clone()]))
+            .await
+            .expect("during fold");
         let key = store
             .snapshot()
             .into_iter()
             .rev()
             .find_map(|operation| match operation {
                 RecordedOperation::Put { key, .. }
-                    if key.starts_with(&wal_prefix(&engine.namespace_id)) =>
+                    if key.starts_with(&wal_prefix(&engine.namespace.namespace_id)) =>
                 {
                     Some(key)
                 }
@@ -625,28 +602,31 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
             .expect("WAL object");
         let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("WAL decode");
         expected
-            .push_object(&engine.namespace_id, &wal_object.payload().records)
+            .push_object(
+                &engine.namespace.namespace_id,
+                &wal_object.payload().records,
+            )
             .expect("later rows");
     }
     let cached = engine
         .wal_fold_input()
         .expect("the tail with the commits since the fold began")
         .tail_state;
-    let folded = fold_wal_tail(
-        &store,
-        None,
-        &engine.namespace_id,
-        Some(input.clone()),
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    )
-    .await
-    .expect("fold");
+    let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .fold_wal_tail(
+            Some(input.clone()),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    let observed = engine.projection_observed.clone();
+    let observed = engine.position.projection_observed.clone();
     engine.record_manifest_published(folded.manifest.clone());
-    let position = engine.publish_tail.as_ref().expect("retained position");
+    let position = engine
+        .position
+        .publish_tail
+        .as_ref()
+        .expect("retained position");
     assert_eq!(position.basis().0, folded.manifest.manifest);
     assert_eq!(position.head.unfolded_wal_objects(), 2);
     assert_eq!(position.head.folded_wal_no, input.head.wal_no);
@@ -665,21 +645,28 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
                 .all(|(folded, cached)| Arc::ptr_eq(folded, cached)),
         "the fold tail shares the cached tail's chunks for the commits since the fold began"
     );
-    let retained = engine.projection_observed.as_ref().expect("observation");
+    let retained = engine
+        .position
+        .projection_observed
+        .as_ref()
+        .expect("observation");
     let observed = observed.expect("tip observation before the fold");
     assert_eq!(retained.age_at(&observed), 0);
     assert_eq!(observed.age_at(retained), 0);
     store.reset();
     let after = candidate(
         "after",
-        vec![inline(&engine.namespace_id, Bytes::from_static(b"after"))],
+        vec![inline(
+            &engine.namespace.namespace_id,
+            Bytes::from_static(b"after"),
+        )],
     );
-    publish(&mut engine, &store, &context, after)
+    publish(&mut engine, &context, after)
         .await
         .expect("after fold");
     assert!(store.snapshot().iter().all(|operation| !matches!(operation,
         RecordedOperation::Get { key, .. } | RecordedOperation::GetWithMetadata { key, .. }
-        if key.ends_with("hint.json") || key.starts_with(&wal_prefix(&engine.namespace_id))
+        if key.ends_with("hint.json") || key.starts_with(&wal_prefix(&engine.namespace.namespace_id))
     )));
 }
 
@@ -689,38 +676,30 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
 /// come from that tail, and reads and folds take the same tail.
 #[tokio::test]
 async fn a_published_fold_moves_the_position_with_its_tail() {
-    let content_writes = crate::test_support::content_writes();
     let (_directory, store, mut engine, context) = setup().await;
-    let folded_value = inline(&engine.namespace_id, Bytes::from_static(b"folded"));
+    let folded_value = inline(
+        &engine.namespace.namespace_id,
+        Bytes::from_static(b"folded"),
+    );
     publish(
         &mut engine,
-        &store,
         &context,
         candidate("folded", vec![folded_value]),
     )
     .await
     .expect("commit before the fold");
-    let folded = fold_wal_tail(
-        &store,
-        None,
-        &engine.namespace_id,
-        None,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        crate::manifest::MetadataRunPolicy::default(),
-        &content_writes,
-    )
-    .await
-    .expect("a maintenance fold");
+    let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .fold_wal_tail(
+            None,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("a maintenance fold");
     let published = folded.published().expect("the fold publishes a manifest");
-    let kept = inline(&engine.namespace_id, Bytes::from_static(b"kept"));
-    publish(
-        &mut engine,
-        &store,
-        &context,
-        candidate("kept", vec![kept.clone()]),
-    )
-    .await
-    .expect("commit after the fold");
+    let kept = inline(&engine.namespace.namespace_id, Bytes::from_static(b"kept"));
+    publish(&mut engine, &context, candidate("kept", vec![kept.clone()]))
+        .await
+        .expect("commit after the fold");
 
     engine.record_manifest_published(published.clone());
     let moved = engine.read_position().expect("the position moved");

@@ -284,8 +284,6 @@ mod tests {
     use crate::context::MutationContext;
     use crate::error::CoreError;
     use crate::manifest::{HeadAndWalTailCache, MetadataSegmentCache};
-    use crate::namespace::read_anchor::load_read_anchor;
-    use crate::test_support::ops::create;
     use crate::{NamespaceEngine, RuntimeReadContext};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::api::v0::FilesystemChange;
@@ -325,7 +323,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = namespace_id();
-        create(
+        crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
             &MutationContext {
@@ -333,10 +331,12 @@ mod tests {
                 now_ms: 1,
             },
         )
+        .create()
         .await
         .expect("bootstrap");
         let limit = EffectiveLimit::new(NonZeroU32::MIN);
-        let loaded = load_read_anchor(&store, &namespace_id, crate::test_support::observed_now())
+        let loaded = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_read_anchor(crate::test_support::observed_now())
             .await
             .expect("load read basis");
         let context = RuntimeReadContext {
@@ -347,11 +347,8 @@ mod tests {
             object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
             tail: None,
         };
-        let engine = NamespaceEngine::reader(
-            &store,
-            namespace_id,
-            std::sync::Arc::new(crate::test_support::content_writes()),
-        );
+        let engine =
+            NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
 
         let caught_up = engine
             .list_changes_after(ChangeSeq(0), limit, &context)
@@ -369,10 +366,9 @@ mod tests {
 
     #[tokio::test]
     async fn large_commits_page_by_event_bytes_without_splitting_or_skipping() {
-        use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
+        use crate::commit_engine::CommitCandidate;
         use crate::heap_bytes::HeapBytes;
         use crate::limits::{CHANGE_FEED_PAGE_BYTES, MAX_COMMIT_OPERATIONS};
-        use crate::path::read::load_current_metadata_view;
         use crate::publish::{CommitIntent, FilesystemOperation};
         use loonfs_types::{AbsolutePath, CommitId};
 
@@ -383,7 +379,8 @@ mod tests {
             writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1,
         };
-        create(&store, &namespace_id, &context)
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
             .expect("bootstrap");
         let mut expected = Vec::new();
@@ -406,18 +403,13 @@ mod tests {
                     })
                     .collect(),
             };
-            let commit = publish_namespace_commits_batch(
-                &store,
-                &namespace_id,
-                vec![CommitCandidate::new(request)],
-                &context,
-                std::sync::Arc::new(crate::test_support::content_writes()),
-                crate::test_support::std_timer(),
-            )
-            .await
-            .pop()
-            .expect("one result")
-            .expect("publish commit");
+            let commit =
+                crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                    .publish_candidates(vec![CommitCandidate::new(request)])
+                    .await
+                    .pop()
+                    .expect("one result")
+                    .expect("publish commit");
             assert_eq!(commit.events.len(), MAX_COMMIT_OPERATIONS * depth);
             assert_eq!(
                 commit.events.heap_bytes() > CHANGE_FEED_PAGE_BYTES,
@@ -425,7 +417,8 @@ mod tests {
             );
             expected.push((commit.committed_seq, commit.commit_id, commit.events.len()));
             if number == 2 || number == 4 {
-                crate::manifest::fold_wal(&store, &namespace_id)
+                crate::test_support::namespace_store(&store, &namespace_id)
+                    .fold_wal()
                     .await
                     .expect("fold commits");
             }
@@ -433,11 +426,14 @@ mod tests {
 
         for fully_folded in [false, true] {
             if fully_folded {
-                crate::manifest::fold_wal(&store, &namespace_id)
+                crate::test_support::namespace_store(&store, &namespace_id)
+                    .fold_wal()
                     .await
                     .expect("fold tail");
             }
-            let view = load_current_metadata_view(&store, &namespace_id)
+            let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+            let view = namespace
+                .load_current_metadata_view()
                 .await
                 .expect("read view");
             for commit_limit in [1000, 1] {
@@ -480,7 +476,8 @@ mod tests {
                 assert_eq!(actual, expected);
             }
         }
-        let manifest = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+        let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("manifest");
         let basis = crate::manifest::metadata_basis_from_manifest(&store, None, &manifest);

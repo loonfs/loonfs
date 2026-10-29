@@ -175,19 +175,19 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
                 loonfs_test_support::stores::RecordedOperation::Put { .. }
             );
         }
-        let usage =
-            loonfs_core::cache::load_namespace_wal_tail_usage(recording.as_ref(), &namespace_id)
-                .await
-                .expect("tail usage");
+        let usage = loonfs_core::test_support::namespace_store(recording.as_ref(), &namespace_id)
+            .load_wal_tail_usage()
+            .await
+            .expect("tail usage");
         assert_eq!(usage.wal_tail_objects, tail_objects);
     }
     recording.inner().release();
     namespace.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("drain");
-    let manifest =
-        loonfs_core::control::load_namespace_current_manifest(recording.as_ref(), &namespace_id)
-            .await
-            .expect("folded manifest");
+    let manifest = loonfs_core::test_support::namespace_store(recording.as_ref(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("folded manifest");
     let manifest_key = loonfs_objectstore::keys::metadata_manifest_object(
         &namespace_id,
         &manifest.state.manifest().manifest_no,
@@ -222,10 +222,10 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
     }
     assert!(manifest_gets <= 1, "{operations:?}");
     assert_eq!(wal_puts, 1);
-    let usage =
-        loonfs_core::cache::load_namespace_wal_tail_usage(recording.as_ref(), &namespace_id)
-            .await
-            .expect("tail usage after fold");
+    let usage = loonfs_core::test_support::namespace_store(recording.as_ref(), &namespace_id)
+        .load_wal_tail_usage()
+        .await
+        .expect("tail usage after fold");
     assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS);
     writer.shutdown().await.expect("shutdown");
 }

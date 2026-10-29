@@ -134,10 +134,10 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .expect_err("WAL acknowledgement and recovery reads lost")
     };
     assert!(unreadable.load(Ordering::SeqCst));
-    let durable =
-        loonfs_core::cache::load_namespace_wal_tail_usage(store.inner().inner(), &namespace)
-            .await
-            .expect("raw durable tail");
+    let durable = loonfs_core::test_support::namespace_store(store.inner().inner(), &namespace)
+        .load_wal_tail_usage()
+        .await
+        .expect("raw durable tail");
     assert_eq!(durable.wal_tail_inline_bytes, 4);
     // The unknown outcome dropped the position, so the tail stays unknown
     // until the replay's publish reads it.
@@ -180,10 +180,10 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         )
         .await
         .expect("full known tail stages next value");
-    let recovered =
-        loonfs_core::cache::load_namespace_wal_tail_usage(store.inner().inner(), &namespace)
-            .await
-            .expect("recovered usage");
+    let recovered = loonfs_core::test_support::namespace_store(store.inner().inner(), &namespace)
+        .load_wal_tail_usage()
+        .await
+        .expect("recovered usage");
     assert_eq!(recovered.wal_tail_inline_bytes, 4);
     assert_eq!(writer.mode.publisher.shared.admission.used_requests(), 0);
     assert_eq!(
@@ -262,7 +262,8 @@ async fn the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome()
     assert!(publisher_state(&publisher).fold.is_some());
     drop(folds);
     namespace_writer.wait_for_fold().await.expect("fold");
-    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+    let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+        .load_wal_tail_usage()
         .await
         .expect("tail usage after the fold");
     assert_eq!(
@@ -1226,7 +1227,8 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
     store.release();
     namespace_writer.wait_for_fold().await.expect("fold twice");
     assert_eq!(counter(&recorder, "loonfs.publisher.wal_folds"), 2);
-    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+    let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+        .load_wal_tail_usage()
         .await
         .expect("tail usage after the second fold");
     assert_eq!(
@@ -1244,7 +1246,8 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
 
     let fold_permits = hold_every_fold_permit(&writer).await;
     commit_two_values(&writer, &namespace, "after-fold").await;
-    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+    let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+        .load_wal_tail_usage()
         .await
         .expect("tail usage");
     assert_eq!(usage.wal_tail_inline_bytes, 8);
@@ -1257,7 +1260,8 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
         Some(8)
     );
     commit_two_values(&writer, &namespace, "recovered").await;
-    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+    let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+        .load_wal_tail_usage()
         .await
         .expect("tail usage after recovery");
     assert_eq!(usage.wal_tail_inline_bytes, 8);
@@ -1321,7 +1325,8 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             )
             .await
             .expect("put");
-        let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+        let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+            .load_wal_tail_usage()
             .await
             .expect("usage");
         assert_eq!(usage.wal_tail_inline_bytes, 4);
@@ -1384,7 +1389,8 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .await
             .expect("pass after the fold");
         assert_eq!(again.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
-        let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+        let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+            .load_wal_tail_usage()
             .await
             .expect("usage after fold");
         assert_eq!(usage.wal_tail_objects, 0);
@@ -1503,7 +1509,8 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
             .await
             .expect("fold reached its manifest put");
         // The immutable manifest is durable, and the answer to its put is held.
-        let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+        let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+            .load_wal_tail_usage()
             .await
             .expect("observe the completed fold");
         assert_eq!(usage.wal_tail_inline_bytes, 0);
@@ -1567,7 +1574,8 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
         .commit_candidate(CommitCandidate::prepared(request, prepared))
         .await
         .expect("publish with only four inline bytes available");
-    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+    let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+        .load_wal_tail_usage()
         .await
         .expect("actual tail usage");
     assert_eq!(usage.wal_tail_inline_bytes, 8);

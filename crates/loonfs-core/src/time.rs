@@ -6,7 +6,9 @@ use loonfs_types::NamespaceId;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer};
+pub(crate) use loonfs_types::MonotonicTimer;
+#[cfg(test)]
+pub(crate) use loonfs_types::StdMonotonicTimer;
 pub use loonfs_types::{SystemWallClock, WallClock};
 
 /// The start of one bounded publication, measured on a monotonic timer.

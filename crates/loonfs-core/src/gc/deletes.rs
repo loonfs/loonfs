@@ -3,7 +3,7 @@
 use super::sweep::Decision;
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
-use crate::upload_records::delete_upload_session_records;
+use crate::namespace::store::NamespaceStore;
 use futures::{Stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::GcResponse;
@@ -11,34 +11,36 @@ use std::pin::pin;
 
 pub(super) type DeletedCounter = fn(&mut GcResponse) -> &mut u64;
 
-/// Runs the decisions with at most `STORE_WRITES_IN_FLIGHT` deletes in flight and
-/// records each outcome in `report`. A delete decision reaches `record` only
-/// after its deletes succeeded.
-pub(super) async fn apply_decisions<S: ObjectStore + ?Sized>(
-    store: &S,
-    decisions: impl Stream<Item = Result<Decision>>,
-    report: &mut GcResponse,
-) -> Result<()> {
-    let mut outcomes = pin!(decisions
-        .map_ok(|decision| async move {
-            match &decision {
-                Decision::Delete { key, .. } => store
-                    .delete(key)
-                    .await
-                    .map_err(|error| CoreError::store(key, &error))?,
-                Decision::DeleteUploadSession {
-                    namespace_id,
-                    upload_id,
-                } => delete_upload_session_records(store, namespace_id, upload_id).await?,
-                Decision::Retain { .. } | Decision::Gone => {}
-            }
-            Ok(decision)
-        })
-        .try_buffer_unordered(STORE_WRITES_IN_FLIGHT));
-    while let Some(decision) = outcomes.try_next().await? {
-        record(decision, report);
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Runs the decisions with at most `STORE_WRITES_IN_FLIGHT` deletes in flight and
+    /// records each outcome in `report`. A delete decision reaches `record` only
+    /// after its deletes succeeded.
+    pub(super) async fn apply_decisions(
+        &self,
+        decisions: impl Stream<Item = Result<Decision>>,
+        report: &mut GcResponse,
+    ) -> Result<()> {
+        let mut outcomes = pin!(decisions
+            .map_ok(|decision| async move {
+                match &decision {
+                    Decision::Delete { key, .. } => self
+                        .store
+                        .delete(key)
+                        .await
+                        .map_err(|error| CoreError::store(key, &error))?,
+                    Decision::DeleteUploadSession { upload_id } => {
+                        self.delete_upload_session_records(upload_id).await?
+                    }
+                    Decision::Retain { .. } | Decision::Gone => {}
+                }
+                Ok(decision)
+            })
+            .try_buffer_unordered(STORE_WRITES_IN_FLIGHT));
+        while let Some(decision) = outcomes.try_next().await? {
+            record(decision, report);
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn record(decision: Decision, report: &mut GcResponse) {

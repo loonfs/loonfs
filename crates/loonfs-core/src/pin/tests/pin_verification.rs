@@ -24,12 +24,17 @@ async fn pin_creation_retries_after_compaction_and_collection() {
             .await
             .expect("bootstrap");
         for path in ["/one", "/two"] {
-            write_file_bytes(&store, &namespace_id, path, b"data", &context, None)
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                .write_file_bytes(path, b"data", None)
                 .await
                 .expect("write");
-            fold_wal(&store, &namespace_id).await.expect("fold");
+            crate::test_support::namespace_store(&store, &namespace_id)
+                .fold_wal()
+                .await
+                .expect("fold");
         }
-        let selected = load_current_manifest(&store, &namespace_id)
+        let selected = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
             .await
             .expect("selected manifest");
         store.block_next();
@@ -37,10 +42,12 @@ async fn pin_creation_retries_after_compaction_and_collection() {
             tokio::join!(create_checkpoint(&store, &namespace_id, &context), async {
                 store.wait_until_blocked().await;
                 if advance_head {
-                    write_file_bytes(&store, &namespace_id, "/three", b"data", &context, None)
+                    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                        .write_file_bytes("/three", b"data", None)
                         .await
                         .expect("advance head");
-                    fold_wal(&store, &namespace_id)
+                    crate::test_support::namespace_store(&store, &namespace_id)
+                        .fold_wal()
                         .await
                         .expect("fold newer head");
                 }
@@ -54,26 +61,18 @@ async fn pin_creation_retries_after_compaction_and_collection() {
                 current
             });
         let checkpoint = created.expect("retry against the current manifest");
-        let page = crate::pin::list_checkpoint_files_page(
-            &store,
-            None,
-            &crate::namespace::control::load_namespace_read_state(
-                &store,
-                &namespace_id,
-                crate::test_support::std_timer(),
+        let page = crate::test_support::namespace_store(&store, &namespace_id)
+            .list_checkpoint_files_page(
+                &checkpoint.checkpoint_id,
+                loonfs_types::PageRequest {
+                    cursor: None,
+                    limit: loonfs_test_support::ids::page_limit(10),
+                },
+                crate::pin::ListCheckpointFilesOptions::default(),
+                context.now_ms,
             )
             .await
-            .expect("head"),
-            &checkpoint.checkpoint_id,
-            loonfs_types::PageRequest {
-                cursor: None,
-                limit: loonfs_test_support::ids::page_limit(10),
-            },
-            crate::pin::ListCheckpointFilesOptions::default(),
-            context.now_ms,
-        )
-        .await
-        .expect("acknowledged checkpoint remains readable");
+            .expect("acknowledged checkpoint remains readable");
         assert_eq!(page.files.len(), if advance_head { 3 } else { 2 });
         assert_eq!(checkpoint.manifest_no, current.manifest_no);
         assert_eq!(checkpoint.captured_seq, current.head_seq);
@@ -95,24 +94,28 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     namespace_id: &NamespaceId,
     selected: &crate::namespace::control::LoadedManifest,
 ) -> loonfs_types::format::control::ManifestRef {
-    let report = compact_unit(
+    let report = crate::test_support::NamespaceFixture::new(
         store,
-        None,
         namespace_id,
+        &crate::test_support::mutation_context("test-writer", 0),
+    )
+    .engine()
+    .compact_metadata_unit(
         None,
-        selected.state.compactor_epoch(),
-        MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
         crate::manifest::CompactionAdmission::AnySize,
+        selected.state.compactor_epoch(),
         &crate::manifest::MetadataCompactionCancellation::default(),
-        crate::test_support::std_timer(),
     )
     .await
     .expect("compact");
     assert_matches!(report, CompactionUnitOutcome::Published { .. });
     // The runtime that published the compaction raises the hint.
-    crate::test_support::raise_hint_to_current_manifest(store, namespace_id).await;
-    let current = load_current_manifest(store, namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
+        .raise_hint_to_current_manifest()
+        .await;
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest");
     assert_ne!(selected.state.manifest(), current.state.manifest());
@@ -151,21 +154,18 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .expect("successor exists")
         .last_modified_at_ms
         .expect("test store provides a timestamp");
-    let collection = crate::gc::gc_namespace(
-        store,
-        None,
-        None,
-        namespace_id,
-        &options,
-        &mutation_context(
-            "collector",
-            (successor_modified_ms + options.grace_window_ms + 1)
-                .max(crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
-        ),
-        crate::test_support::std_timer(),
-    )
-    .await
-    .expect("collect before pin write");
+    let collection = crate::test_support::namespace_store(store, namespace_id)
+        .gc(
+            None,
+            &options,
+            &mutation_context(
+                "collector",
+                (successor_modified_ms + options.grace_window_ms + 1)
+                    .max(crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
+            ),
+        )
+        .await
+        .expect("collect before pin write");
     assert!(collection.deleted.metadata_segments >= replaced.len() as u64);
     for key in replaced {
         assert!(store.head(&key).await.expect("replaced segment").is_none());
@@ -186,23 +186,24 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let writer = acquire_writer_epoch(&store, &namespace_id, &context)
+    let writer = crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer_epoch(&context)
         .await
         .expect("writer");
-    let current = load_current_manifest(&store, &namespace_id)
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest");
     store.block_next();
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let (result, ()) = tokio::join!(
-        create::create_pin_at_basis(
-            &store,
-            &namespace_id,
+        namespace.create_pin_at_basis(
             PinOwner::User {
                 name: "racing".to_owned(),
                 expires_at_ms: None
             },
             current.state.manifest(),
-            &context,
+            &context
         ),
         async {
             store.wait_until_blocked().await;
@@ -215,20 +216,18 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                     .len(),
                 1
             );
-            crate::namespace::delete::delete_namespace(
-                store.inner(),
-                &namespace_id,
-                Default::default(),
-                writer,
-                None,
-                &context,
-                &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
-                MetadataRunPolicy::default(),
-                None,
-                &crate::test_support::content_writes(),
-            )
-            .await
-            .expect("delete namespace during verification");
+            crate::test_support::namespace_store(store.inner(), &namespace_id)
+                .delete_namespace(
+                    Default::default(),
+                    writer,
+                    None,
+                    &context,
+                    &crate::time::Deadline::start(Arc::new(
+                        crate::time::StdMonotonicTimer::default(),
+                    )),
+                )
+                .await
+                .expect("delete namespace during verification");
             store.release();
         }
     );
@@ -255,13 +254,15 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint");
-    let record = load_pin(&store, &namespace_id, &checkpoint.checkpoint_id)
+    let record = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_pin(&checkpoint.checkpoint_id)
         .await
         .expect("load pin")
         .expect("pin exists")
         .state;
     store.reset();
-    load_current_manifest(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("current manifest");
     let mut expected = store.take();
@@ -282,7 +283,8 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
         (changed_checksum, record::PinBasisVerification::Invalid),
     ] {
         assert_eq!(
-            record::verify_pin_basis(&store, &record)
+            crate::test_support::namespace_store(&store, &record.namespace_id)
+                .verify_pin_basis(&record)
                 .await
                 .expect("verification"),
             expected_verification
@@ -330,7 +332,8 @@ async fn a_fork_pin_id_is_refused_by_every_snapshot_operation() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = mutation_context("gc-test", 1_000);
-    create(&store, &namespace_id, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
@@ -348,29 +351,22 @@ async fn a_fork_pin_id_is_refused_by_every_snapshot_operation() {
             target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
         },
     ] {
-        let pin = crate::pin::create_pin(
-            &store,
-            &namespace_id,
-            owner,
-            &setup,
-            Default::default(),
-            None,
-            &crate::test_support::content_writes(),
-            crate::test_support::std_timer(),
-        )
-        .await
-        .expect("pin")
-        .response;
+        let pin = crate::test_support::namespace_store(&store, &namespace_id)
+            .create_pin(owner, &setup)
+            .await
+            .expect("pin")
+            .response;
         pins.push(pin.pin_id);
     }
     let [user, snapshot, fork] = &pins[..] else {
         panic!("expected three pins, got {pins:?}");
     };
-    let head = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+    let head = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
         .await
         .expect("head");
-    let snapshot_read =
-        |id| crate::pin::load_snapshot_read_basis(&store, None, &head, id, setup.now_ms);
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let snapshot_read = |id| namespace.load_snapshot_read_basis(&head, id, setup.now_ms);
     snapshot_read(user)
         .await
         .expect("read a pin without an expiry");
@@ -381,15 +377,25 @@ async fn a_fork_pin_id_is_refused_by_every_snapshot_operation() {
         ("read of a fork pin", snapshot_read(fork).await.map(drop)),
         (
             "retrieve of a fork pin",
-            crate::pin::get_snapshot(&store, &namespace_id, fork)
-                .await
-                .map(drop),
+            crate::NamespaceEngine::reader(crate::test_support::namespace_store(
+                &store,
+                &namespace_id,
+            ))
+            .get_snapshot(fork)
+            .await
+            .map(drop),
         ),
         (
             "delete of a fork pin",
-            crate::pin::delete_snapshot(&store, &namespace_id, fork)
-                .await
-                .map(drop),
+            crate::test_support::NamespaceFixture::new(
+                &store,
+                &namespace_id,
+                &crate::test_support::mutation_context("test-writer", 0),
+            )
+            .engine()
+            .delete_snapshot(fork)
+            .await
+            .map(drop),
         ),
     ];
     for (label, result) in cases {
