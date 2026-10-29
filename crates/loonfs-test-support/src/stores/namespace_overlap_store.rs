@@ -6,7 +6,7 @@
 //! is held for a moment before it is forwarded, so a second holder has time
 //! to arrive and be counted.
 
-use super::{Intercept, InterceptStore, Interceptor, OperationContext, Outcome};
+use super::{Intercept, InterceptStore, Interceptor, OperationContext};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -16,6 +16,8 @@ use std::time::Duration;
 
 type NamespaceOf = dyn for<'a> Fn(&OperationContext<'a>) -> Option<String> + Send + Sync;
 
+type InFlight = Mutex<BTreeMap<String, usize>>;
+
 /// How long a selected request is held before it is forwarded.
 const HOLD: Duration = Duration::from_millis(5);
 
@@ -23,7 +25,7 @@ const HOLD: Duration = Duration::from_millis(5);
 /// flight at the same time.
 pub struct NamespaceOverlapInterceptor {
     namespace_of: Arc<NamespaceOf>,
-    in_flight: Mutex<BTreeMap<String, usize>>,
+    in_flight: Arc<InFlight>,
     peak_namespaces: AtomicUsize,
 }
 
@@ -34,6 +36,27 @@ impl fmt::Debug for NamespaceOverlapInterceptor {
             .field("in_flight", &self.in_flight)
             .field("peak_namespaces", &self.peak_namespaces)
             .finish_non_exhaustive()
+    }
+}
+
+/// Removes one selected request from its namespace's in-flight count when
+/// the request finishes, fails, or is dropped.
+#[derive(Debug)]
+pub struct NamespaceInFlightGuard {
+    in_flight: Arc<InFlight>,
+    namespace: String,
+}
+
+impl Drop for NamespaceInFlightGuard {
+    fn drop(&mut self) {
+        let mut in_flight = self.in_flight.lock().expect("in-flight lock");
+        let count = in_flight
+            .get_mut(&self.namespace)
+            .expect("a watched namespace is in flight");
+        *count -= 1;
+        if *count == 0 {
+            in_flight.remove(&self.namespace);
+        }
     }
 }
 
@@ -50,7 +73,7 @@ impl<S> InterceptStore<S, NamespaceOverlapInterceptor> {
             inner,
             NamespaceOverlapInterceptor {
                 namespace_of: Arc::new(namespace_of),
-                in_flight: Mutex::default(),
+                in_flight: Arc::default(),
                 peak_namespaces: AtomicUsize::new(0),
             },
         )
@@ -80,31 +103,23 @@ async fn hold() {
 
 #[async_trait]
 impl Interceptor for NamespaceOverlapInterceptor {
-    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
+    type Guard = Option<NamespaceInFlightGuard>;
+
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, Self::Guard) {
         let Some(namespace) = (self.namespace_of)(context) else {
-            return Intercept::Continue;
+            return (Intercept::Continue, None);
         };
         {
             let mut in_flight = self.in_flight.lock().expect("in-flight lock");
-            *in_flight.entry(namespace).or_default() += 1;
+            *in_flight.entry(namespace.clone()).or_default() += 1;
             self.peak_namespaces
                 .fetch_max(in_flight.len(), Ordering::SeqCst);
         }
-        hold().await;
-        Intercept::ContinueWithAfter
-    }
-
-    fn after(&self, context: &OperationContext<'_>, _outcome: &Outcome) {
-        let Some(namespace) = (self.namespace_of)(context) else {
-            return;
+        let guard = NamespaceInFlightGuard {
+            in_flight: Arc::clone(&self.in_flight),
+            namespace,
         };
-        let mut in_flight = self.in_flight.lock().expect("in-flight lock");
-        let count = in_flight
-            .get_mut(&namespace)
-            .expect("a watched namespace is in flight");
-        *count -= 1;
-        if *count == 0 {
-            in_flight.remove(&namespace);
-        }
+        hold().await;
+        (Intercept::Continue, Some(guard))
     }
 }

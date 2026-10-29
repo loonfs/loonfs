@@ -159,14 +159,13 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     store: &S,
-    cache: &GrepBlockCache,
+    cache: Option<&GrepBlockCache>,
     object_key: &str,
     descriptor: &GrepSegmentRef,
 ) -> Result<Arc<SegmentFilter>> {
     let handle = &descriptor.filter_block;
-    let key = cache_key(&descriptor.segment_id, SegmentBlockKind::Filter, handle);
-    let decoded = cache
-        .get_or_load(&key, || async {
+    let load = || async {
+        if let Some(cache) = cache {
             let object_bytes = segment_object_bytes(object_key, descriptor)?;
             if object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES {
                 let whole = load_and_publish_segment_sections(
@@ -193,17 +192,24 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
                     decoded_bytes: handle.decoded_bytes as usize,
                 });
             }
-            let bytes = load_index_section_bytes(store, object_key, handle).await?;
-            let filter = Arc::new(
-                decode_filter_block(&bytes, handle)
-                    .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
-            );
-            Ok::<_, GrepError>(DecodedGrepBlock::Filter {
-                filter,
-                decoded_bytes: handle.decoded_bytes as usize,
-            })
+        }
+        let bytes = load_index_section_bytes(store, object_key, handle).await?;
+        let filter = Arc::new(
+            decode_filter_block(&bytes, handle)
+                .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
+        );
+        Ok::<_, GrepError>(DecodedGrepBlock::Filter {
+            filter,
+            decoded_bytes: handle.decoded_bytes as usize,
         })
-        .await?;
+    };
+    let decoded = match cache {
+        Some(cache) => {
+            let key = cache_key(&descriptor.segment_id, SegmentBlockKind::Filter, handle);
+            cache.get_or_load(&key, load).await?
+        }
+        None => load().await?,
+    };
     decoded
         .filter()
         .ok_or_else(|| cache_kind_corrupt(object_key, "filter"))
@@ -269,18 +275,22 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
     store: &S,
-    cache: &GrepBlockCache,
+    cache: Option<&GrepBlockCache>,
     object_key: &str,
     segment_id: &IndexSegmentId,
     handle: &BlockHandle,
 ) -> Result<Arc<DecodedDataBlock<IndexRow>>> {
-    let key = cache_key(segment_id, SegmentBlockKind::Data, handle);
-    let decoded = cache
-        .get_or_load(&key, || async {
-            let bytes = load_index_section_bytes(store, object_key, handle).await?;
-            decode_data_cache_block(object_key, &bytes, handle)
-        })
-        .await?;
+    let load = || async {
+        let bytes = load_index_section_bytes(store, object_key, handle).await?;
+        decode_data_cache_block(object_key, &bytes, handle)
+    };
+    let decoded = match cache {
+        Some(cache) => {
+            let key = cache_key(segment_id, SegmentBlockKind::Data, handle);
+            cache.get_or_load(&key, load).await?
+        }
+        None => load().await?,
+    };
     decoded
         .data()
         .ok_or_else(|| cache_kind_corrupt(object_key, "data"))

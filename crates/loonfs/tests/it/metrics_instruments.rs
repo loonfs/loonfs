@@ -4,6 +4,7 @@
 
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
+use loonfs::test_support::writer;
 use loonfs::{LoonFs, MaintainMetadataOptions};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;

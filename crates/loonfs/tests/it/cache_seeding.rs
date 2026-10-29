@@ -733,13 +733,16 @@ fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
-    let object_store = raw_store.store();
-    let reader = open_runtime_with(object_store.clone(), "control-cache-reader", |builder| {
+    let reader = open_runtime_with(raw_store.store(), "control-cache-reader", |builder| {
         builder
             .manifest_revalidation_interval_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS)
             .max_staleness_ms(0)
     });
-    let writer = open_runtime(object_store, "control-cache-writer");
+    // The writer's first commit publishes the claim of its writer epoch, and
+    // the writer raises the hint after that publication in a background task
+    // that reads the hint. The writer uses a store of its own, so the probe
+    // counts only the reader's requests, wherever that task runs.
+    let writer = open_runtime(store(temp_dir.path()), "control-cache-writer");
 
     writer
         .create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())

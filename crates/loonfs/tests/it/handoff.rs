@@ -1,6 +1,7 @@
 //! Multi-node handoff and durable reconstruction.
 
-use crate::common::{collect_path_entries, expect_code, writer};
+use crate::common::{collect_path_entries, expect_code};
+use loonfs::test_support::{fresh_reader, writer};
 use loonfs::{
     ErrorCode, LoonFs, MaintainMetadataOptions, ManifestNo, Namespace, NamespaceId,
     NamespaceSessionStatus, ReadOnly, SharedObjectStore, Writable,
@@ -12,14 +13,6 @@ use loonfs_test_support::stores::{
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {
-    LoonFs::builder_with_store(store)
-        .read_only()
-        .build()
-        .await
-        .expect("build fresh reader")
-}
 
 async fn assert_root_paths(
     reader: &LoonFs<ReadOnly>,

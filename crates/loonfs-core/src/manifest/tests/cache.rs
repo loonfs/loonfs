@@ -4,7 +4,7 @@ use super::super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
 use super::super::segment_block_cache::{SegmentBlockCache, SegmentBlockLoad};
 use super::*;
 use crate::block_cache::DecodedBlockCacheStats;
-use loonfs_test_support::stores::replace_object;
+use loonfs_test_support::stores::{replace_object, ConcurrencyWatchStore, MemoryStore};
 use std::assert_matches;
 use std::sync::Mutex;
 
@@ -161,9 +161,15 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
 
 #[tokio::test]
 async fn concurrent_scans_share_one_fetch_per_segment() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store =
-        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+    // The local-filesystem store finishes reads on blocking threads, so the
+    // two scans below would interleave differently on every run. Here each
+    // segment read yields once and then finishes, so the scans interleave the
+    // same way every time, and each one still finds the other's reads in
+    // flight.
+    let store = RecordingStore::metadata_segments(ConcurrencyWatchStore::new(
+        MemoryStore::new(loonfs_types::ChecksumAlgorithm::Crc64nvme),
+        KeyPredicate::metadata_segment(),
+    ));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
@@ -293,7 +299,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
 /// row, and loads the manifest again. Returns the number of GETs for the
 /// manifest that the second load sent.
 async fn scan_between_manifest_loads(
-    store: &RecordingStore<LocalFsStore>,
+    store: &RecordingStore<MemoryStore>,
     cache: &MetadataSegmentCache,
     namespace_id: &NamespaceId,
     manifest_no: &ManifestNo,
@@ -326,9 +332,12 @@ async fn scan_between_manifest_loads(
 /// the same blocks as before.
 #[tokio::test]
 async fn manifests_and_blocks_are_charged_to_budgets_of_their_own() {
-    let temp_dir = tempdir().expect("tempdir");
+    // The scan loads its blocks with several loads in flight, and the
+    // evictions depend on the order in which the loads finish. An in-memory
+    // store finishes each load the first time it is polled, so both scans
+    // below load their blocks in the same order.
     let store = RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
+        MemoryStore::new(loonfs_types::ChecksumAlgorithm::Crc64nvme),
         KeyPredicate::any(),
     );
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

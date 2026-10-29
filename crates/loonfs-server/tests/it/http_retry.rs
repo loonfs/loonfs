@@ -1,7 +1,8 @@
 //! HTTP idempotency, replay, and writer fencing behavior.
 
 use crate::common::http_split_support::*;
-use crate::common::{advance_retention_past_the_grace_window, start_server};
+use crate::common::start_server;
+use loonfs::test_support::maintenance_past_the_grace_window;
 use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath,
     PutFileOptions,
@@ -759,7 +760,11 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         .create_snapshot(&namespace, "trimmed", None)
         .await
         .expect("create checkpoint");
-    let advanced = advance_retention_past_the_grace_window(&harness, &namespace).await;
+    let advanced = maintenance_past_the_grace_window(harness.store.clone())
+        .await
+        .advance_retention_floor(&namespace)
+        .await
+        .expect("advance the retention floor");
     assert!(
         advanced.retention_floor_seq >= first.committed_seq,
         "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",

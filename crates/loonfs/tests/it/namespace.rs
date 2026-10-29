@@ -1,7 +1,8 @@
 //! The per-namespace handle: opening, sharing, closing, dropping, epochs,
 //! and the read-only mode.
 
-use crate::common::{data_wal_put_for, expect_code, writer, writer_epoch};
+use crate::common::{data_wal_put_for, expect_code, writer_epoch};
+use loonfs::test_support::writer;
 use loonfs::{ErrorCode, LoonFs, NamespaceId, NamespaceSessionStatus, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, RecordingStore};

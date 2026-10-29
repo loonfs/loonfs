@@ -6,7 +6,7 @@ use crate::{
 };
 use loonfs::{InlineContentPolicy, LoonFs, SharedObjectStore, TraceMode};
 use loonfs_grep::{
-    new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    GrepBlockCache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_objectstore::{
     local_fs_store::LocalFsStore, presign::DirectTransferIssuers, ConfiguredObjectStoreKind,
@@ -115,7 +115,9 @@ pub(super) async fn test_app(
         )
     };
     let grep_service = || {
-        let cache = Arc::new(new_grep_block_cache(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES));
+        let cache = Arc::new(GrepBlockCache::new(
+            loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
+        ));
         Arc::new(GrepService::new(cache, runtime.monotonic_timer()))
     };
     let grep = match config.grep {

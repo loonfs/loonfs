@@ -12,7 +12,7 @@ use axum::response::Response;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{LoonFs, Maintenance, SharedObjectStore, TraceMode, Writable, WriterId};
-use loonfs_grep::{new_grep_block_cache, GrepBlockCache, GrepService, GrepWorker};
+use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
 use loonfs_http::{AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, Namespaces};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
@@ -193,11 +193,11 @@ pub async fn app(
             ),
         )
     };
-    let grep_block_cache = config
-        .grep
-        .mode
-        .serves()
-        .then(|| Arc::new(new_grep_block_cache(memory.grep.bytes)));
+    let grep_block_cache = config.grep.mode.serves().then(|| {
+        Arc::new(GrepBlockCache::new(
+            loonfs::engine::DecodedBlockCacheConfig::new(memory.grep.bytes),
+        ))
+    });
     let grep_service = || {
         let block_cache = grep_block_cache
             .as_ref()

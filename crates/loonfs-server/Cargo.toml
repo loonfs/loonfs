@@ -38,6 +38,7 @@ async-trait.workspace = true
 bytes.workspace = true
 form_urlencoded.workspace = true
 http-body-util.workspace = true
+loonfs = { workspace = true, features = ["test-support"] }
 loonfs-client.workspace = true
 loonfs-core.workspace = true
 loonfs-test-support.workspace = true

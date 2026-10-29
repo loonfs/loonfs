@@ -12,7 +12,7 @@ pub use codec::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest,
     GrepManifestEnvelope,
 };
-pub use error::{GrepEnvelopeCodecError, GrepManifestError, GrepManifestStateError};
+pub use error::{GrepEnvelopeCodecError, GrepManifestStateError};
 pub use state::{
     ChangeFeedResume, GrepHint, GrepIndexState, GrepIndexStatus, GrepManifestState,
     GrepReorganizeState, GrepSegmentRef,

@@ -20,7 +20,7 @@ pub struct StoreCounts {
     pub gets: usize,
     /// Full-object `get_with_metadata` calls.
     pub gets_with_metadata: usize,
-    /// All put calls, including CAS-mode puts and assemblies.
+    /// Put calls of every mode, assemblies, and compare-and-swap calls.
     pub puts: usize,
     /// Create-if-absent puts.
     pub create_if_absent_puts: usize,
@@ -40,7 +40,14 @@ pub struct StoreCounts {
 #[derive(Debug)]
 pub struct RecordingInterceptor {
     keys: KeyPredicate,
-    operations: Mutex<Vec<RecordedOperation>>,
+    operations: Mutex<Vec<LogEntry>>,
+}
+
+/// One logged operation and the selectors that its live operation matched.
+#[derive(Debug)]
+struct LogEntry {
+    operation: RecordedOperation,
+    selectors: Vec<OperationSelector>,
 }
 
 /// Records selected object-store operations.
@@ -69,7 +76,9 @@ impl<S> InterceptStore<S, RecordingInterceptor> {
             .operations
             .lock()
             .expect("operation log lock should not be poisoned")
-            .clone()
+            .iter()
+            .map(|entry| entry.operation.clone())
+            .collect()
     }
 
     /// Returns counts derived from the operation log.
@@ -79,6 +88,7 @@ impl<S> InterceptStore<S, RecordingInterceptor> {
             .lock()
             .expect("operation log lock should not be poisoned")
             .iter()
+            .map(|entry| &entry.operation)
             .fold(StoreCounts::default(), fold_count)
     }
 
@@ -89,7 +99,7 @@ impl<S> InterceptStore<S, RecordingInterceptor> {
             .lock()
             .expect("operation log lock should not be poisoned")
             .iter()
-            .filter(|recorded| recorded.matches(operation))
+            .filter(|entry| entry.selectors.contains(&operation))
             .count()
     }
 
@@ -102,6 +112,9 @@ impl<S> InterceptStore<S, RecordingInterceptor> {
                 .lock()
                 .expect("operation log lock should not be poisoned"),
         )
+        .into_iter()
+        .map(|entry| entry.operation)
+        .collect()
     }
 
     /// Takes all operations and returns only byte-read records.
@@ -136,17 +149,27 @@ impl<S> InterceptStore<S, RecordingInterceptor> {
 
 #[async_trait]
 impl Interceptor for RecordingInterceptor {
-    async fn before(&self, _context: &OperationContext<'_>) -> Intercept {
-        Intercept::ContinueWithAfter
+    type Guard = ();
+
+    async fn before(&self, _context: &OperationContext<'_>) -> (Intercept, ()) {
+        (Intercept::ContinueWithAfter, ())
     }
 
     fn after(&self, context: &OperationContext<'_>, outcome: &Outcome) {
-        if self.keys.matches(context.key()) {
-            self.operations
-                .lock()
-                .expect("operation log lock should not be poisoned")
-                .push(context.to_owned(outcome));
+        if !self.keys.matches(context.key()) {
+            return;
         }
+        let entry = LogEntry {
+            operation: context.to_owned(outcome),
+            selectors: OperationSelector::ALL
+                .into_iter()
+                .filter(|selector| selector.matches(context.kind()))
+                .collect(),
+        };
+        self.operations
+            .lock()
+            .expect("operation log lock should not be poisoned")
+            .push(entry);
     }
 }
 

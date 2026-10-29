@@ -1,6 +1,7 @@
 //! Directory and revision pagination cursor behavior.
 
 use crate::common::*;
+use loonfs::test_support::fresh_reader;
 use loonfs::{
     AdvanceRetentionFloorOptions, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior,
     ErrorCode, InodeId, ListFileRevisionsResponse, PathEntry, PutFileOptions, RetentionTarget,

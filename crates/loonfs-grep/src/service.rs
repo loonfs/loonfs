@@ -1,37 +1,28 @@
 //! [`GrepService`]: query planning and execution over grep index state.
 
-use crate::cache::{
-    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-};
-use crate::codec::{lookup, Gram, IndexRow, MAX_INDEX_GRAMS_FILE_BYTES};
-use crate::index_read::{
-    index_segment_corrupt, load_data_block, load_filter_block, load_index_block,
-};
-use crate::keyspace::{manifest_key, segment_key};
+mod candidates;
+mod page_walk;
+
+use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey};
+use crate::keyspace::manifest_key;
 use crate::manifest::{
     load_current_grep_manifest, ChangeFeedResume, GrepIndexStatus, GrepManifestState,
-    GrepSegmentRef,
 };
-use crate::query::{compile_pattern, CompiledPattern, GramPlanOutcome, GramQueryPlan};
-use crate::reads::{effective_batch_size, published_revision, NamespaceReadView, NamespaceReads};
+use crate::query::{compile_pattern, CompiledPattern, GramPlanOutcome};
+use crate::reads::{NamespaceReadView, NamespaceReads};
+use crate::segments::GrepSegments;
 use crate::{GrepError, Result};
-use futures::future::join_all;
-use futures::{stream, StreamExt, TryStreamExt};
+use candidates::{scan_candidate_inodes, tail_revisions, GrepCandidates, TailScan};
 use loonfs::engine::{Observation, SegmentBlockKind};
-use loonfs::{CoreError, CurrentFile, CurrentFileState};
+use loonfs::CoreError;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::hex::hex_decode_bytes;
-use loonfs_types::format::segment_blocks::{
-    decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
-    string_prefix_upper_bound,
-};
+use loonfs_types::MonotonicTimer;
 use loonfs_types::{
-    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EntryInodeKind, ErrorCode,
-    GrepCursorPosition, GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, GrepScope, InodeId,
-    NamespaceId, PageRequest, PathEntry, RevisionNo, MAX_PAGE_LIMIT, ROOT_INODE_ID,
+    decode_cursor, ChangeSeq, GrepPageCursor, GrepRequest, GrepResponse, GrepScope, NamespaceId,
+    PageRequest, PathEntry, MAX_PAGE_LIMIT,
 };
-use loonfs_types::{MonotonicTimer, StdMonotonicTimer};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use page_walk::{walk_page, GrepResume};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 
 /// Unindexed-tail revisions one query will scan exhaustively before
@@ -51,10 +42,12 @@ pub(crate) const MAX_GREP_VERIFIED_FILES_PER_PAGE: usize = 256;
 /// when scope filters reject most candidates. The cursor advances past
 /// rejected candidates so the next page does not examine them again.
 pub(crate) const MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE: usize = 4096;
-/// Maximum concurrent `(gram, segment)` posting probes.
+/// Maximum concurrent `(gram, segment)` posting probes, and the data-block
+/// reads that one probe keeps in flight.
 ///
 /// Each probe may issue several small ranged reads, so this limit is lower
-/// than the whole-content read limit.
+/// than the whole-content read limit. A query's index lookup keeps at most
+/// 16 probes times 16 data-block reads, or 256 reads, in flight.
 pub(crate) const GREP_READS_IN_FLIGHT: usize = 16;
 /// Commits one unindexed-tail page asks the change feed for. The tail is
 /// measured in files, not commits, so this is a transfer size rather than a
@@ -75,7 +68,7 @@ const _: () = assert!(
 /// Indexed files are size-limited, so content reads may use more concurrency
 /// than posting probes. The per-page verification budget still caps the total
 /// number of content reads.
-pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
+pub(crate) const GREP_CONTENT_READS_IN_FLIGHT: usize = 32;
 
 /// Namespace-independent grep execution over a decoded-block cache.
 #[derive(Debug)]
@@ -224,17 +217,7 @@ impl GrepService {
         namespace_reads: &'a NamespaceReads,
         store: &S,
     ) -> Result<QueryPlan<'a>> {
-        const MAX_GREP_PATTERN_BYTES: usize = 1024;
-        if request.pattern.len() > MAX_GREP_PATTERN_BYTES {
-            return Err(loonfs::Error::InvalidRequest {
-                message: format!(
-                    "grep pattern is {} bytes; the maximum is {MAX_GREP_PATTERN_BYTES} bytes",
-                    request.pattern.len()
-                ),
-                param: "pattern",
-            }
-            .into());
-        }
+        validate_grep_request(request)?;
         let mut reads = namespace_reads.read_view().await?;
         let snapshot = self
             .load_index_snapshot(store, reads.namespace_id())
@@ -271,21 +254,21 @@ impl GrepService {
             plan: gram_plan,
         } = compile_pattern(request)?;
         let scope = match &request.scope {
-            GrepScope::Namespace => None,
             GrepScope::PathPrefix(prefix) => Some(reads.resolve_path(prefix).await?),
             GrepScope::Inode(inode_id) => Some(reads.resolve_inode(*inode_id).await?),
+            GrepScope::Namespace => None,
         };
         let mut candidates = GrepCandidates::default();
         let tail_resume = match gram_plan {
             GramPlanOutcome::Indexable(plan) => {
-                candidates.indexed = indexed_candidates(
+                let segments = GrepSegments {
                     store,
-                    &self.block_cache,
-                    reads.namespace_id(),
-                    snapshot.state.segments(),
-                    &plan,
-                )
-                .await?;
+                    namespace_id: reads.namespace_id(),
+                    block_cache: Some(&self.block_cache),
+                };
+                candidates.indexed = segments
+                    .indexed_candidates(snapshot.state.segments(), &plan)
+                    .await?;
                 Some(snapshot.resume)
             }
             GramPlanOutcome::Unindexable => {
@@ -350,34 +333,32 @@ impl GrepService {
         let plan = self
             .plan_query(request, page.cursor.as_deref(), reads, store)
             .await?;
-        let mut walk = PageWalk::new(&plan, page.limit.as_usize());
-        'page: while let Some(batch) = walk.next_batch().await? {
-            let contents = join_all(
-                batch
-                    .candidates
-                    .iter()
-                    .map(|candidate| candidate_content(&plan.reads, candidate)),
-            )
-            .await;
-            for (candidate, content) in batch.candidates.iter().zip(contents) {
-                if walk.record(candidate, content)? {
-                    break 'page;
-                }
-            }
-            if walk.finish_batch(batch.exhausts_page) {
-                break;
-            }
-        }
-        let next_cursor = walk.next_cursor();
+        let page = walk_page(&plan, page.limit.as_usize()).await?;
         Ok(GrepResponse {
             namespace_id: plan.reads.namespace_id().clone(),
             head_seq: plan.head_seq,
             built_through_seq: plan.built_through_seq,
             tail_scanned: plan.tail_scanned,
-            matches: walk.matches,
-            next_cursor,
+            matches: page.matches,
+            next_cursor: page.next_cursor,
         })
     }
+}
+
+/// Checks the shape of a grep request: the pattern length and the scope fields.
+fn validate_grep_request(request: &GrepRequest) -> Result<()> {
+    const MAX_GREP_PATTERN_BYTES: usize = 1024;
+    if request.pattern.len() > MAX_GREP_PATTERN_BYTES {
+        return Err(loonfs::Error::InvalidRequest {
+            message: format!(
+                "grep pattern is {} bytes; the maximum is {MAX_GREP_PATTERN_BYTES} bytes",
+                request.pattern.len()
+            ),
+            param: "pattern",
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn materialized_snapshot_from_state(
@@ -396,475 +377,6 @@ fn materialized_snapshot_from_state(
     Ok(MaterializedGrepIndexSnapshot { resume, state })
 }
 
-impl Default for GrepService {
-    fn default() -> Self {
-        Self::new(
-            Arc::new(GrepBlockCache::new(
-                loonfs::engine::DecodedBlockCacheConfig::new(
-                    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-                ),
-            )),
-            Arc::new(StdMonotonicTimer::default()),
-        )
-    }
-}
-
-/// The revisions a query must examine, keyed by durable inode identity.
-#[derive(Debug, Default)]
-struct GrepCandidates {
-    /// Index-supplied candidates: the revisions whose content contained
-    /// every required gram. A candidate survives only if the inode's
-    /// newest visible revision is in its set.
-    indexed: BTreeMap<InodeId, BTreeSet<RevisionNo>>,
-    /// Tail- or scan-supplied candidates: examined whatever their newest
-    /// visible revision is, because no gram filter applies to them.
-    unfiltered: BTreeSet<InodeId>,
-}
-
-impl GrepCandidates {
-    fn inodes(&self) -> impl Iterator<Item = InodeId> + '_ {
-        let mut merged: BTreeSet<InodeId> = self.indexed.keys().copied().collect();
-        merged.extend(self.unfiltered.iter().copied());
-        merged.into_iter()
-    }
-
-    /// Whether the inode's newest visible revision should be verified.
-    fn admits(&self, inode_id: InodeId, revision_no: RevisionNo) -> bool {
-        if self.unfiltered.contains(&inode_id) {
-            return true;
-        }
-        self.indexed
-            .get(&inode_id)
-            .is_some_and(|revisions| revisions.contains(&revision_no))
-    }
-}
-
-/// Evaluates the gram plan against all index segments.
-///
-/// For each required set, postings for alternative grams are unioned; the
-/// results of required sets are intersected. Independent probes run in
-/// bounded concurrent batches. Evaluation stops when the intersection is
-/// empty or small enough to verify within the page budget. Stopping early
-/// may widen the candidate set, but final byte-level pattern verification
-/// preserves exact results.
-async fn indexed_candidates<S: ObjectStore + ?Sized>(
-    store: &S,
-    block_cache: &GrepBlockCache,
-    namespace_id: &NamespaceId,
-    segments: &[GrepSegmentRef],
-    plan: &GramQueryPlan,
-) -> Result<BTreeMap<InodeId, BTreeSet<RevisionNo>>> {
-    let mut intersection: Option<BTreeSet<(InodeId, RevisionNo)>> = None;
-    for or_set in &plan.required {
-        // Lookup keys derive once per gram; the key-range prune is free
-        // (already in the descriptor), so only surviving probes fan out.
-        let lookups: Vec<GramLookup> = or_set.iter().map(|gram| GramLookup::new(*gram)).collect();
-        let mut probes: Vec<(&GramLookup, &GrepSegmentRef)> = Vec::new();
-        for gram_lookup in &lookups {
-            for descriptor in segments {
-                if !key_range_may_intersect(
-                    &descriptor.min_row_key,
-                    &descriptor.max_row_key,
-                    descriptor.row_count,
-                    &gram_lookup.probe,
-                    gram_lookup.upper.as_deref(),
-                ) {
-                    continue;
-                }
-                probes.push((gram_lookup, descriptor));
-            }
-        }
-        // This union is the query's largest temporary allocation. In the worst
-        // case it holds one `(inode, revision)` pair per indexed revision. A
-        // streaming intersection would reduce memory but add probe-ordering
-        // complexity.
-        let mut set_postings = BTreeSet::new();
-        let mut batches = stream::iter(0..probes.len())
-            .map(|index| {
-                let (gram_lookup, descriptor) = probes[index];
-                segment_postings_for_gram(store, block_cache, namespace_id, descriptor, gram_lookup)
-            })
-            .buffered(GREP_READS_IN_FLIGHT);
-        while let Some(batch) = batches.try_next().await? {
-            set_postings.extend(batch);
-        }
-        intersection = Some(match intersection {
-            None => set_postings,
-            Some(current) => current.intersection(&set_postings).copied().collect(),
-        });
-        if intersection.as_ref().is_some_and(BTreeSet::is_empty) {
-            break;
-        }
-        // The budget stop: the intersection holds (inode, revision) pairs,
-        // an upper bound on the files a page could ever verify from it, so
-        // once it fits the per-page verification budget the remaining AND
-        // sets are constraints the page cannot use.
-        if intersection
-            .as_ref()
-            .is_some_and(|candidates| candidates.len() <= MAX_GREP_VERIFIED_FILES_PER_PAGE)
-        {
-            break;
-        }
-    }
-    let mut candidates: BTreeMap<InodeId, BTreeSet<RevisionNo>> = BTreeMap::new();
-    for (inode_id, revision_no) in intersection.unwrap_or_default() {
-        candidates.entry(inode_id).or_default().insert(revision_no);
-    }
-    Ok(candidates)
-}
-
-/// One gram's derived lookup keys: the exact filter probe, the row-key
-/// prefix its postings share, and that prefix's exclusive upper bound.
-struct GramLookup {
-    gram: Gram,
-    probe: String,
-    prefix: String,
-    upper: Option<String>,
-}
-
-impl GramLookup {
-    fn new(gram: Gram) -> Self {
-        let probe = lookup::gram_probe(gram);
-        let prefix = lookup::gram_prefix(gram);
-        let upper = string_prefix_upper_bound(&prefix);
-        Self {
-            gram,
-            probe,
-            prefix,
-            upper,
-        }
-    }
-}
-
-/// One gram's postings from one segment: bloom filter first (the inline
-/// copy when the descriptor carries one — no fetch at all — otherwise the
-/// cached filter block), then only the data blocks the segment index
-/// names for the gram's key range, loaded with at most
-/// [`GREP_READS_IN_FLIGHT`] in flight (the cap applies per probe). Every fetched
-/// section resolves through the grep-private decoded-block cache.
-async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
-    store: &S,
-    block_cache: &GrepBlockCache,
-    namespace_id: &NamespaceId,
-    descriptor: &GrepSegmentRef,
-    gram_lookup: &GramLookup,
-) -> Result<BTreeSet<(InodeId, RevisionNo)>> {
-    let object_key = segment_key(namespace_id, &descriptor.segment_id);
-    let mut postings = BTreeSet::new();
-    let admitted = match &descriptor.filter_inline {
-        Some(inline) => {
-            let filter_bytes =
-                hex_decode_bytes(inline).map_err(|error| GrepError::IndexCorrupt {
-                    message: format!(
-                        "index segment `{}` carries undecodable inline filter hex: {error}",
-                        object_key
-                    ),
-                })?;
-            let filter = decode_filter_block(&filter_bytes, &descriptor.filter_block)
-                .map_err(|error| index_segment_corrupt(&object_key, "filter block", &error))?;
-            filter.may_contain(&gram_lookup.probe)
-        }
-        None => {
-            let filter = load_filter_block(store, block_cache, &object_key, descriptor).await?;
-            filter.may_contain(&gram_lookup.probe)
-        }
-    };
-    if !admitted {
-        return Ok(postings);
-    }
-    let entries = load_index_block(store, Some(block_cache), &object_key, descriptor).await?;
-    let range =
-        index_blocks_for_key_range(&entries, &gram_lookup.prefix, gram_lookup.upper.as_deref());
-    // The range's blocks are independent ranged GETs, so they fan out
-    // instead of paying one round trip each; `buffered` returns them
-    // in entry order and rows fold in that order, so assembly stays
-    // deterministic even though the posting union is order-independent.
-    let mut blocks = stream::iter(range)
-        .map(|index| {
-            load_data_block(
-                store,
-                block_cache,
-                &object_key,
-                &descriptor.segment_id,
-                &entries[index].block,
-            )
-        })
-        .buffered(GREP_READS_IN_FLIGHT);
-    while let Some(block) = blocks.try_next().await? {
-        for row in &block.rows {
-            let IndexRow::GramPostings { gram: row_gram, .. } = row;
-            if *row_gram != gram_lookup.gram {
-                continue;
-            }
-            let batch = row
-                .postings()
-                .map_err(|error| index_segment_corrupt(&object_key, "posting batch", &error))?;
-            postings.extend(
-                batch
-                    .into_iter()
-                    .map(|posting| (posting.inode_id, posting.revision_no)),
-            );
-        }
-    }
-    Ok(postings)
-}
-
-/// The files whose content changed after the index cursor: the unindexed
-/// tail a query scans exhaustively. A cursor inside its watermark commit
-/// includes only that commit's remaining event suffix.
-///
-/// Paging stops as soon as the tail exceeds the query's tail budget: past
-/// that the query either fails as lagging or serves the index's cut, and
-/// neither needs the rest of the feed enumerated.
-async fn tail_revisions(
-    reads: &NamespaceReadView<'_>,
-    resume: ChangeFeedResume,
-) -> Result<TailScan> {
-    let mut inodes = BTreeSet::new();
-    let mut after_seq = resume.after_seq();
-    loop {
-        let feed = reads
-            .list_changes_after(after_seq, TAIL_FEED_PAGE_COMMITS)
-            .await?;
-        for change in &feed.changes {
-            let start_event_index = resume.start_event_index(change.committed_seq);
-            let events = &change.events;
-            if start_event_index > events.len() {
-                let next_event_index = resume.next_event_index();
-                return Err(GrepError::IndexCorrupt {
-                    message: format!(
-                        "grep event cursor `{next_event_index}` exceeds commit `{}` length `{}`",
-                        change.committed_seq,
-                        events.len()
-                    ),
-                });
-            }
-            for event in events.iter().skip(start_event_index) {
-                if let Some(revision) = published_revision(event) {
-                    inodes.insert(revision.inode_id);
-                }
-            }
-        }
-        if inodes.len() > MAX_GREP_TAIL_FILES {
-            return Ok(TailScan::OverBudget);
-        }
-        match feed.next_after_seq {
-            Some(next_after_seq) => after_seq = next_after_seq,
-            None => return Ok(TailScan::Within(inodes)),
-        }
-    }
-}
-
-/// The unindexed tail, or the fact that it is larger than one query scans.
-enum TailScan {
-    /// Every file whose content changed after the index watermark.
-    Within(BTreeSet<InodeId>),
-    /// More files changed after the watermark than the tail budget allows;
-    /// enumeration stopped there, so no set is carried.
-    OverBudget,
-}
-
-/// One verified line match inside a file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LineMatch {
-    line_number: u64,
-    byte_offset: u64,
-    line: String,
-    line_truncated: bool,
-}
-
-/// Runs the pattern over content, one match per line, in offset order.
-/// One forward pass: matches arrive in offset order, so the current line's
-/// bounds and number advance monotonically — a file full of matches costs
-/// one scan of its bytes, never a repeated scan per match.
-fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec<LineMatch> {
-    let mut matches = Vec::new();
-    let mut line_start = 0usize;
-    let mut line_number = 1u64;
-    let mut emitted_line_start = usize::MAX;
-    for found in pattern.find_iter(content) {
-        // Advance the line window forward to the one holding this match.
-        while let Some(newline) = content[line_start..found.start()]
-            .iter()
-            .position(|byte| *byte == b'\n')
-        {
-            line_start += newline + 1;
-            line_number += 1;
-        }
-        if line_start == emitted_line_start {
-            continue;
-        }
-        emitted_line_start = line_start;
-        let line_end = content[found.start()..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(content.len(), |newline| found.start() + newline);
-        let line_bytes = &content[line_start..line_end];
-        let line_truncated = line_bytes.len() > GREP_LINE_CAP_BYTES;
-        let line_bytes = &line_bytes[..line_bytes.len().min(GREP_LINE_CAP_BYTES)];
-        matches.push(LineMatch {
-            line_number,
-            byte_offset: found.start() as u64,
-            line: String::from_utf8_lossy(line_bytes).into_owned(),
-            line_truncated,
-        });
-    }
-    matches
-}
-
-/// Whether a file's current path lies inside the requested scope.
-///
-/// Both spellings are rendered from the same stored display names — the
-/// candidate's by the current-state resolution, the scope's by resolving
-/// the requested prefix — so this compares durable names rather than caller
-/// input, and name-policy folding applies exactly as it does to every other
-/// read.
-fn path_within_scope(path: &AbsolutePath, scope: &AbsolutePath) -> bool {
-    if scope.is_root() {
-        return true;
-    }
-    let (path, scope) = (path.as_str(), scope.as_str());
-    path == scope
-        || (path.len() > scope.len()
-            && path.starts_with(scope)
-            && path.as_bytes()[scope.len()] == b'/')
-}
-
-/// Folds the page's highest examined-and-rejected candidate into the resume
-/// cursor on a budget exit. Sound only when every examined candidate is
-/// resolved — rejected, or scanned by a fully-walked batch — which the
-/// budget exits guarantee. Never sound on a mid-file page fill: there,
-/// later batch members were examined but their fetched contents discarded,
-/// and the cursor must stay at the last emitted match.
-fn fold_rejected_frontier(
-    resume_cursor: &mut Option<GrepResume>,
-    rejected_frontier: Option<InodeId>,
-) {
-    let Some(frontier) = rejected_frontier else {
-        return;
-    };
-    let behind = resume_cursor.is_none_or(|cursor| match cursor {
-        GrepResume::InFile { inode_id, .. } => inode_id <= frontier,
-        GrepResume::AfterFile { inode_id } => inode_id < frontier,
-    });
-    if behind {
-        *resume_cursor = Some(GrepResume::AfterFile { inode_id: frontier });
-    }
-}
-
-/// Where a grep page resumes in candidate order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GrepResume {
-    /// After the match at `after_offset` in this file.
-    InFile {
-        inode_id: InodeId,
-        after_offset: u64,
-    },
-    /// After the whole file.
-    AfterFile { inode_id: InodeId },
-}
-
-impl GrepResume {
-    fn from_cursor(cursor: &GrepPageCursor) -> Self {
-        match cursor.resume {
-            GrepCursorPosition::AfterMatch { byte_offset } => Self::InFile {
-                inode_id: cursor.last_inode_id,
-                after_offset: byte_offset,
-            },
-            GrepCursorPosition::AfterFile {} => Self::AfterFile {
-                inode_id: cursor.last_inode_id,
-            },
-        }
-    }
-
-    /// Returns the position as the encoded cursor spells it: the inode, and
-    /// where the next page resumes in that inode.
-    fn cursor_position(self) -> (InodeId, GrepCursorPosition) {
-        match self {
-            Self::InFile {
-                inode_id,
-                after_offset,
-            } => (
-                inode_id,
-                GrepCursorPosition::AfterMatch {
-                    byte_offset: after_offset,
-                },
-            ),
-            Self::AfterFile { inode_id } => (inode_id, GrepCursorPosition::AfterFile {}),
-        }
-    }
-}
-
-/// How far a page walk has got.
-enum PageProgress {
-    /// The walk is still scanning, and has got past this position, if any.
-    Scanning(Option<GrepResume>),
-    /// The page stopped before the last candidate, and the next page resumes
-    /// after this position.
-    Truncated(GrepResume),
-}
-
-/// One grep candidate that survived the current-state checks and awaits its
-/// content read, carrying everything match emission needs so the fetched
-/// batch is processed without further metadata lookups.
-struct GrepContentCandidate {
-    inode_id: InodeId,
-    revision_no: RevisionNo,
-    path: AbsolutePath,
-}
-
-/// What one candidate's content fetch produced.
-enum CandidateContent {
-    /// A second read of the candidate's inode at the view's head disagrees
-    /// with its derived path or revision. Treated as a rejection, never as a
-    /// match.
-    Superseded,
-    /// The declared content size exceeds the index eligibility cap, so no
-    /// read was issued: the file could never pass the post-read text check,
-    /// and the walk counts it as fully scanned.
-    Oversized,
-    /// The content read's result, surfaced at this candidate's position in
-    /// the ordered walk rather than where the fan-out produced it.
-    Fetched(Result<Vec<u8>>),
-}
-
-/// Reads the candidate's inode again, then the bytes its revision publishes.
-///
-/// The second read proves the inode still has the candidate's path and
-/// revision. It is by inode because a derived path may exceed the request
-/// path limits. It also supplies the content reference, so the oversized
-/// skip stays a decision on declared size, before any fetch.
-async fn candidate_content(
-    reads: &NamespaceReadView<'_>,
-    candidate: &GrepContentCandidate,
-) -> CandidateContent {
-    let entry = match reads.resolve_inode(candidate.inode_id).await {
-        Ok(entry) => entry,
-        Err(error) if error.code() == ErrorCode::InodeNotFound => {
-            return CandidateContent::Superseded
-        }
-        Err(error) => return CandidateContent::Fetched(Err(error)),
-    };
-    if entry.path != candidate.path || entry.revision_no() != Some(candidate.revision_no) {
-        return CandidateContent::Superseded;
-    }
-    let Some(content_ref) = entry.content_ref() else {
-        return CandidateContent::Superseded;
-    };
-    if content_ref.size_bytes > MAX_INDEX_GRAMS_FILE_BYTES {
-        return CandidateContent::Oversized;
-    }
-    CandidateContent::Fetched(
-        reads
-            .read_file_revision_by_inode(
-                candidate.inode_id,
-                candidate.revision_no,
-                MAX_INDEX_GRAMS_FILE_BYTES,
-            )
-            .await,
-    )
-}
-
 struct QueryPlan<'a> {
     reads: NamespaceReadView<'a>,
     head_seq: ChangeSeq,
@@ -877,364 +389,9 @@ struct QueryPlan<'a> {
     tail_scanned: bool,
 }
 
-struct PageBatch {
-    candidates: Vec<GrepContentCandidate>,
-    exhausts_page: bool,
-}
-
-struct PageWalk<'plan, 'reads> {
-    plan: &'plan QueryPlan<'reads>,
-    limit: usize,
-    matches: Vec<GrepMatch>,
-    verified_files: usize,
-    examined_candidates: usize,
-    progress: PageProgress,
-    rejected_frontier: Option<InodeId>,
-    ordered_candidates: Vec<InodeId>,
-    next_candidate: usize,
-    resolved: VecDeque<CurrentFileState>,
-}
-
-impl<'plan, 'reads> PageWalk<'plan, 'reads> {
-    fn new(plan: &'plan QueryPlan<'reads>, limit: usize) -> Self {
-        let ordered_candidates = plan
-            .candidates
-            .inodes()
-            .filter(|inode_id| match plan.resume {
-                Some(GrepResume::InFile {
-                    inode_id: last_inode,
-                    ..
-                }) => *inode_id >= last_inode,
-                Some(GrepResume::AfterFile {
-                    inode_id: last_inode,
-                }) => *inode_id > last_inode,
-                None => true,
-            })
-            .collect();
-        Self {
-            plan,
-            limit,
-            matches: Vec::new(),
-            verified_files: 0,
-            examined_candidates: 0,
-            progress: PageProgress::Scanning(plan.resume),
-            rejected_frontier: None,
-            ordered_candidates,
-            next_candidate: 0,
-            resolved: VecDeque::new(),
-        }
-    }
-
-    async fn next_batch(&mut self) -> Result<Option<PageBatch>> {
-        let mut candidates = Vec::new();
-        let mut budget_exhausted = false;
-        while candidates.len() < MAX_GREP_CONTENT_IO {
-            if self.resolved.is_empty() {
-                if self.next_candidate == self.ordered_candidates.len() {
-                    break;
-                }
-                let examinable =
-                    MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE.saturating_sub(self.examined_candidates);
-                if examinable == 0 {
-                    budget_exhausted = true;
-                    break;
-                }
-                let wanted = effective_batch_size(
-                    examinable.min(self.ordered_candidates.len() - self.next_candidate),
-                );
-                let chunk =
-                    &self.ordered_candidates[self.next_candidate..self.next_candidate + wanted];
-                self.resolved
-                    .extend(self.plan.reads.stat_current_files_by_inode(chunk).await?);
-                self.next_candidate += wanted;
-            }
-            let Some(state) = self.resolved.pop_front() else {
-                continue;
-            };
-            let inode_id = state.inode_id;
-            self.examined_candidates += 1;
-            let CurrentFile::Visible {
-                path,
-                revision_no: Some(revision_no),
-            } = state.file
-            else {
-                self.rejected_frontier = Some(inode_id);
-                continue;
-            };
-            if !self.plan.candidates.admits(inode_id, revision_no) {
-                self.rejected_frontier = Some(inode_id);
-                continue;
-            }
-            if self
-                .plan
-                .scope
-                .as_ref()
-                .is_some_and(|scope| !path_within_scope(&path, &scope.path))
-            {
-                self.rejected_frontier = Some(inode_id);
-                continue;
-            }
-            if self.verified_files == MAX_GREP_VERIFIED_FILES_PER_PAGE {
-                budget_exhausted = true;
-                break;
-            }
-            self.verified_files += 1;
-            candidates.push(GrepContentCandidate {
-                inode_id,
-                revision_no,
-                path,
-            });
-        }
-        if candidates.is_empty() {
-            if budget_exhausted {
-                self.truncate_after_rejected_frontier();
-            }
-            return Ok(None);
-        }
-        Ok(Some(PageBatch {
-            candidates,
-            exhausts_page: budget_exhausted,
-        }))
-    }
-
-    fn record(
-        &mut self,
-        candidate: &GrepContentCandidate,
-        content: CandidateContent,
-    ) -> Result<bool> {
-        let inode_id = candidate.inode_id;
-        let content = match content {
-            CandidateContent::Oversized | CandidateContent::Superseded => {
-                self.advance(GrepResume::AfterFile { inode_id });
-                return Ok(false);
-            }
-            CandidateContent::Fetched(content) => content?,
-        };
-        if !is_indexable_text_content(&content) {
-            self.advance(GrepResume::AfterFile { inode_id });
-            return Ok(false);
-        }
-        for found in line_matches(&content, &self.plan.pattern) {
-            if matches!(
-                self.plan.resume,
-                Some(GrepResume::InFile { inode_id: last_inode, after_offset })
-                    if inode_id == last_inode && found.byte_offset <= after_offset
-            ) {
-                continue;
-            }
-            if self.matches.len() == self.limit {
-                self.truncate();
-                return Ok(true);
-            }
-            self.advance(GrepResume::InFile {
-                inode_id,
-                after_offset: found.byte_offset,
-            });
-            self.matches.push(GrepMatch {
-                path: candidate.path.clone(),
-                inode_id,
-                revision_no: candidate.revision_no,
-                line_number: found.line_number,
-                byte_offset: found.byte_offset,
-                line: found.line,
-                line_truncated: found.line_truncated,
-            });
-        }
-        self.advance(GrepResume::AfterFile { inode_id });
-        Ok(false)
-    }
-
-    fn finish_batch(&mut self, exhausts_page: bool) -> bool {
-        if !exhausts_page {
-            return false;
-        }
-        self.truncate_after_rejected_frontier();
-        true
-    }
-
-    fn advance(&mut self, position: GrepResume) {
-        self.progress = PageProgress::Scanning(Some(position));
-    }
-
-    /// Stops the page on a budget exit, past every candidate it rejected.
-    fn truncate_after_rejected_frontier(&mut self) {
-        if let PageProgress::Scanning(position) = &mut self.progress {
-            fold_rejected_frontier(position, self.rejected_frontier);
-        }
-        self.truncate();
-    }
-
-    fn truncate(&mut self) {
-        let position = match self.progress {
-            PageProgress::Scanning(position) => {
-                position.expect("a truncated page should have scanned at least one candidate")
-            }
-            PageProgress::Truncated(position) => position,
-        };
-        self.progress = PageProgress::Truncated(position);
-    }
-
-    fn next_cursor(&self) -> Option<String> {
-        let PageProgress::Truncated(position) = self.progress else {
-            return None;
-        };
-        let (last_inode_id, resume) = position.cursor_position();
-        Some(
-            encode_cursor(&GrepPageCursor {
-                head_seq: self.plan.head_seq,
-                last_inode_id,
-                resume,
-                fingerprint: self.plan.fingerprint,
-            })
-            .expect("a grep page cursor should encode"),
-        )
-    }
-}
-
-/// Collects visible files in the query scope for a full scan.
-///
-/// The bounded walk starts at the scope's inode, or at the root inode when
-/// the request names no scope. It lists directories by inode because a
-/// derived path may exceed the request path limits. The directory limit
-/// bounds the work and prevents a binding cycle from running forever.
-async fn scan_candidate_inodes(
-    reads: &NamespaceReadView<'_>,
-    scope: Option<&PathEntry>,
-) -> Result<BTreeSet<InodeId>> {
-    let mut inodes = BTreeSet::new();
-    let root = match scope {
-        Some(entry) if entry.inode_kind() == EntryInodeKind::File => {
-            // A file scope contains only that file.
-            inodes.insert(entry.inode_id);
-            return Ok(inodes);
-        }
-        Some(entry) => entry.inode_id,
-        None => ROOT_INODE_ID,
-    };
-    let mut directories = vec![root];
-    let mut walked_directories = 0usize;
-    while let Some(directory) = directories.pop() {
-        walked_directories += 1;
-        let mut cursor = None;
-        loop {
-            let page = match reads
-                .list_inode_children_page(directory, cursor, SCAN_DIRECTORY_PAGE_ENTRIES)
-                .await
-            {
-                Ok(page) => page,
-                Err(error)
-                    if matches!(
-                        error.code(),
-                        ErrorCode::InodeNotFound | ErrorCode::Forbidden
-                    ) =>
-                {
-                    break;
-                }
-                Err(error) => return Err(error),
-            };
-            for entry in page.items {
-                match entry.inode_kind() {
-                    EntryInodeKind::Directory => directories.push(entry.inode_id),
-                    EntryInodeKind::File => {
-                        inodes.insert(entry.inode_id);
-                    }
-                    EntryInodeKind::Unknown => {}
-                }
-            }
-            if inodes.len() + directories.len() > MAX_GREP_SCAN_FILES
-                || walked_directories > MAX_GREP_SCAN_FILES
-            {
-                return Err(GrepError::QueryUnindexable(format!(
-                    "the namespace exceeds the {MAX_GREP_SCAN_FILES}-file scan budget; \
-                     give the pattern a run of at least 3 literal bytes so the \
-                     trigram index can narrow candidates"
-                )));
-            }
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-    }
-    Ok(inodes)
-}
-
-/// True when content participates in the gram index: within the size cap
-/// and text by the grep-family sniff (no NUL byte and valid UTF-8 in the
-/// leading sample; a sample that ends inside a multi-byte character still
-/// counts as valid).
-pub(crate) fn is_indexable_text_content(content: &[u8]) -> bool {
-    const ELIGIBILITY_SAMPLE_BYTES: usize = 8 * 1024;
-
-    if content.len() as u64 > MAX_INDEX_GRAMS_FILE_BYTES {
-        return false;
-    }
-    let sample = &content[..content.len().min(ELIGIBILITY_SAMPLE_BYTES)];
-    if sample.contains(&0) {
-        return false;
-    }
-    match std::str::from_utf8(sample) {
-        Ok(_) => true,
-        Err(error) => error.error_len().is_none() && error.valid_up_to() > 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn pattern(text: &str) -> regex::bytes::Regex {
-        regex::bytes::Regex::new(text).expect("pattern")
-    }
-
-    #[test]
-    fn line_matches_report_positions_once_per_line() {
-        let content = b"alpha\nneedle one needle\nomega needle\n";
-        let matches = line_matches(content, &pattern("needle"));
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].line_number, 2);
-        assert_eq!(matches[0].byte_offset, 6);
-        assert_eq!(matches[0].line, "needle one needle");
-        assert_eq!(matches[1].line_number, 3);
-        assert_eq!(matches[1].line, "omega needle");
-    }
-
-    #[test]
-    fn rejected_frontier_folds_forward_only() {
-        let mut cursor = None;
-        fold_rejected_frontier(&mut cursor, Some(InodeId(9)));
-        assert_eq!(
-            cursor,
-            Some(GrepResume::AfterFile {
-                inode_id: InodeId(9)
-            })
-        );
-        let ahead = GrepResume::InFile {
-            inode_id: InodeId(12),
-            after_offset: 40,
-        };
-        cursor = Some(ahead);
-        fold_rejected_frontier(&mut cursor, Some(InodeId(9)));
-        assert_eq!(cursor, Some(ahead));
-    }
-
-    #[test]
-    fn scope_containment_stops_at_component_boundaries() {
-        let path = |value: &str| AbsolutePath::parse(value).expect("valid path");
-        let scope = path("/docs");
-        assert!(path_within_scope(&scope, &scope), "the scope itself");
-        assert!(path_within_scope(&path("/docs/a.txt"), &scope));
-        assert!(path_within_scope(&path("/docs/deep/a.txt"), &scope));
-        assert!(
-            !path_within_scope(&path("/docsy/a.txt"), &scope),
-            "a longer sibling name is not inside the scope"
-        );
-        assert!(!path_within_scope(&path("/other/a.txt"), &scope));
-        assert!(
-            path_within_scope(&path("/anything"), &AbsolutePath::root()),
-            "the root scope holds everything"
-        );
-    }
 
     #[tokio::test]
     async fn a_cached_manifest_checked_longer_ago_than_the_bound_is_discovered_again() {
@@ -1242,6 +399,7 @@ mod tests {
         use loonfs::engine::READ_REVALIDATION_BOUND_MS;
         use loonfs_objectstore::local_fs_store::LocalFsStore;
         use loonfs_test_support::clock::ManualClock;
+        use loonfs_types::StdMonotonicTimer;
         use loonfs_types::{ManifestNo, RunNo};
 
         let directory = tempfile::tempdir().expect("directory");
@@ -1267,7 +425,14 @@ mod tests {
         let mut current = publish_grep_manifest(&store, None, &manifest(1), &deadline)
             .await
             .expect("publish");
-        let service = GrepService::default();
+        let service = GrepService::new(
+            Arc::new(GrepBlockCache::new(
+                loonfs::engine::DecodedBlockCacheConfig::new(
+                    crate::DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+                ),
+            )),
+            Arc::new(StdMonotonicTimer::default()),
+        );
         let snapshot = || async {
             service
                 .load_index_snapshot(&store, &namespace_id)

@@ -4,9 +4,9 @@ use super::codec::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest,
     GrepManifestEnvelope,
 };
-use super::error::GrepManifestError;
 use super::state::{GrepHint, GrepManifestState};
 use crate::keyspace::{hint_key, manifest_key};
+use crate::{GrepError, Result};
 use bytes::Bytes;
 use loonfs::engine::{Deadline, Observation, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs::CoreError;
@@ -38,23 +38,23 @@ impl LoadedGrepManifest {
 pub(crate) async fn load_grep_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<Option<LoadedGrepHint>, GrepManifestError> {
+) -> Result<Option<LoadedGrepHint>> {
     let object_key = hint_key(namespace_id);
     let Some(body) = store
         .get_with_metadata(&object_key)
         .await
-        .map_err(|error| store_error(&object_key, &error))?
+        .map_err(|error| GrepError::store(&object_key, &error))?
     else {
         return Ok(None);
     };
     let envelope = decode_grep_hint(&body.bytes).map_err(|error| corrupt(&object_key, error))?;
     let state = envelope.payload();
     if &state.namespace_id != namespace_id {
-        return Err(GrepManifestError::IdentityMismatch {
-            object_key,
-            expected_namespace_id: namespace_id.clone(),
-            actual_namespace_id: state.namespace_id.clone(),
-        });
+        return Err(identity_mismatch(
+            &object_key,
+            namespace_id,
+            &state.namespace_id,
+        ));
     }
     if state.manifest_no == ManifestNo(0) {
         return Err(corrupt(&object_key, "manifest hint must be at least one"));
@@ -62,7 +62,7 @@ pub(crate) async fn load_grep_hint<S: ObjectStore + ?Sized>(
     Ok(Some(LoadedGrepHint {
         state: state.clone(),
         etag: loonfs_objectstore::required_etag(&object_key, body.metadata.etag)
-            .map_err(|error| store_error(&object_key, &error))?,
+            .map_err(|error| GrepError::store(&object_key, &error))?,
     }))
 }
 
@@ -70,22 +70,22 @@ pub async fn load_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
-) -> Result<Option<GrepManifestEnvelope>, GrepManifestError> {
+) -> Result<Option<GrepManifestEnvelope>> {
     let object_key = manifest_key(namespace_id, &manifest_no);
     let Some(bytes) = store
         .get(&object_key, None)
         .await
-        .map_err(|error| store_error(&object_key, &error))?
+        .map_err(|error| GrepError::store(&object_key, &error))?
     else {
         return Ok(None);
     };
     let envelope = decode_grep_manifest(&bytes).map_err(|error| corrupt(&object_key, error))?;
     if envelope.payload().namespace_id() != namespace_id {
-        return Err(GrepManifestError::IdentityMismatch {
-            object_key,
-            expected_namespace_id: namespace_id.clone(),
-            actual_namespace_id: envelope.payload().namespace_id().clone(),
-        });
+        return Err(identity_mismatch(
+            &object_key,
+            namespace_id,
+            envelope.payload().namespace_id(),
+        ));
     }
     if envelope.payload().manifest_no() != manifest_no {
         return Err(corrupt(
@@ -105,7 +105,7 @@ pub async fn load_current_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     mut observed: Observation,
-) -> Result<Option<LoadedGrepManifest>, GrepManifestError> {
+) -> Result<Option<LoadedGrepManifest>> {
     let Some(mut hint) = load_grep_hint(store, namespace_id).await? else {
         return Ok(None);
     };
@@ -155,18 +155,17 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
     current: Option<&LoadedGrepManifest>,
     next: &GrepManifestState,
     deadline: &Deadline,
-) -> crate::Result<LoadedGrepManifest> {
+) -> Result<LoadedGrepManifest> {
     let namespace_id = next.namespace_id();
     let object_key = manifest_key(namespace_id, &next.manifest_no());
     let expected_manifest_no = match current {
         Some(current) => {
             if current.manifest_state().namespace_id() != namespace_id {
-                return Err(GrepManifestError::IdentityMismatch {
-                    object_key,
-                    expected_namespace_id: current.manifest_state().namespace_id().clone(),
-                    actual_namespace_id: namespace_id.clone(),
-                }
-                .into());
+                return Err(identity_mismatch(
+                    &object_key,
+                    current.manifest_state().namespace_id(),
+                    namespace_id,
+                ));
             }
             current
                 .manifest_no()
@@ -182,8 +181,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
                 "expected manifest number `{expected_manifest_no}`, actual `{}`",
                 next.manifest_no()
             ),
-        )
-        .into());
+        ));
     }
     if let Some(current) = current {
         current
@@ -203,7 +201,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
     match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
         Ok(_) => {}
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            return Err(GrepManifestError::Conflict { object_key }.into())
+            return Err(GrepError::PublicationConflict { object_key })
         }
         Err(error @ ObjectStoreError::Transport { .. }) => {
             // New segments and backfill pins have fresh ids, so an identical payload
@@ -211,7 +209,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
             // encode identical changes to shared inputs.
             match load_grep_manifest(store, namespace_id, next.manifest_no()).await? {
                 Some(landed) if landed.payload() == next => {}
-                Some(_) => return Err(GrepManifestError::Conflict { object_key }.into()),
+                Some(_) => return Err(GrepError::PublicationConflict { object_key }),
                 None => {
                     return Err(CoreError::OutcomeUnknown {
                         object_key,
@@ -221,7 +219,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
                 }
             }
         }
-        Err(error) => return Err(store_error(&object_key, &error).into()),
+        Err(error) => return Err(GrepError::store(&object_key, &error)),
     }
     let elapsed_ms = deadline.elapsed_ms();
     if elapsed_ms > METADATA_PUBLICATION_BUDGET_MS {
@@ -254,7 +252,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
 async fn create_grep_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<LoadedGrepHint, GrepManifestError> {
+) -> Result<LoadedGrepHint> {
     let object_key = hint_key(namespace_id);
     let state = GrepHint {
         namespace_id: namespace_id.clone(),
@@ -268,12 +266,12 @@ async fn create_grep_hint<S: ObjectStore + ?Sized>(
         Ok(metadata) => Ok(LoadedGrepHint {
             state,
             etag: loonfs_objectstore::required_etag(&object_key, metadata.etag)
-                .map_err(|error| store_error(&object_key, &error))?,
+                .map_err(|error| GrepError::store(&object_key, &error))?,
         }),
         Err(ObjectStoreError::PreconditionFailed { .. }) => load_grep_hint(store, namespace_id)
             .await?
             .ok_or_else(|| corrupt(&object_key, "grep hint disappeared during creation")),
-        Err(error) => Err(store_error(&object_key, &error)),
+        Err(error) => Err(GrepError::store(&object_key, &error)),
     }
 }
 
@@ -283,7 +281,7 @@ pub async fn raise_grep_hint<S: ObjectStore + ?Sized>(
     manifest_no: ManifestNo,
     mut current: LoadedGrepHint,
     deadline: &Deadline,
-) -> Result<LoadedGrepHint, GrepManifestError> {
+) -> Result<LoadedGrepHint> {
     let object_key = hint_key(namespace_id);
     while deadline.elapsed_ms() <= METADATA_PUBLICATION_BUDGET_MS {
         let raised = GrepHint {
@@ -305,7 +303,7 @@ pub async fn raise_grep_hint<S: ObjectStore + ?Sized>(
                 return Ok(LoadedGrepHint {
                     state: raised,
                     etag: loonfs_objectstore::required_etag(&object_key, metadata.etag)
-                        .map_err(|error| store_error(&object_key, &error))?,
+                        .map_err(|error| GrepError::store(&object_key, &error))?,
                 })
             }
             Err(ObjectStoreError::PreconditionFailed { .. }) => {
@@ -313,23 +311,27 @@ pub async fn raise_grep_hint<S: ObjectStore + ?Sized>(
                     corrupt(&object_key, "grep hint disappeared during publication")
                 })?;
             }
-            Err(error) => return Err(store_error(&object_key, &error)),
+            Err(error) => return Err(GrepError::store(&object_key, &error)),
         }
     }
     Ok(current)
 }
 
-fn corrupt(object_key: &str, error: impl ToString) -> GrepManifestError {
-    GrepManifestError::Corrupt {
-        object_key: object_key.to_owned(),
-        message: error.to_string(),
+fn corrupt(object_key: &str, error: impl std::fmt::Display) -> GrepError {
+    GrepError::IndexCorrupt {
+        message: format!("grep state `{object_key}` is corrupt: {error}"),
     }
 }
 
-fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepManifestError {
-    GrepManifestError::Store {
-        object_key: object_key.to_owned(),
-        message: error.public_message().into_owned(),
-        kind: error.kind(),
+fn identity_mismatch(
+    object_key: &str,
+    expected_namespace_id: &NamespaceId,
+    actual_namespace_id: &NamespaceId,
+) -> GrepError {
+    GrepError::IndexCorrupt {
+        message: format!(
+            "grep state `{object_key}` names namespace `{actual_namespace_id}` instead of \
+             requested namespace `{expected_namespace_id}`"
+        ),
     }
 }

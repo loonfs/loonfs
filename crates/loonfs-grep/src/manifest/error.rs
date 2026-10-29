@@ -1,8 +1,7 @@
-//! Typed failures for grep manifest state, encoding, loading, and publication.
+//! Typed failures for grep manifest state and encoding.
 
-use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::format::envelope::EnvelopeCodecError;
-use loonfs_types::{IndexSegmentId, NamespaceId, RunNo};
+use loonfs_types::{IndexSegmentId, RunNo};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -53,29 +52,4 @@ pub enum GrepEnvelopeCodecError {
     Envelope(#[from] EnvelopeCodecError),
     #[error("invalid grep manifest state: {0}")]
     InvalidState(#[from] GrepManifestStateError),
-}
-
-/// Failure to load or publish a grep manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[non_exhaustive]
-pub enum GrepManifestError {
-    #[error("object-store operation failed for grep state `{object_key}`: {message}")]
-    Store {
-        object_key: String,
-        message: String,
-        kind: ObjectStoreErrorKind,
-    },
-    #[error("grep state `{object_key}` is corrupt: {message}")]
-    Corrupt { object_key: String, message: String },
-    #[error(
-        "grep state `{object_key}` names namespace `{actual_namespace_id}` instead of requested namespace \
-         `{expected_namespace_id}`"
-    )]
-    IdentityMismatch {
-        object_key: String,
-        expected_namespace_id: NamespaceId,
-        actual_namespace_id: NamespaceId,
-    },
-    #[error("grep manifest publication conflict for `{object_key}`")]
-    Conflict { object_key: String },
 }

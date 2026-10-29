@@ -53,11 +53,13 @@ struct StoreDelay {
 
 #[async_trait::async_trait]
 impl Interceptor for StoreDelay {
+    type Guard = ();
+
     #[expect(
         clippy::disallowed_methods,
         reason = "the delay stands in for provider latency on the paused test clock"
     )]
-    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
         let wal_put =
             context.key().contains("/wal/") && matches!(context.kind(), OperationKind::Put { .. });
         let elapsed_ms = if wal_put {
@@ -66,7 +68,7 @@ impl Interceptor for StoreDelay {
             self.request_elapsed_ms
         };
         tokio::time::sleep(Duration::from_millis(elapsed_ms)).await;
-        Intercept::Continue
+        (Intercept::Continue, ())
     }
 }
 

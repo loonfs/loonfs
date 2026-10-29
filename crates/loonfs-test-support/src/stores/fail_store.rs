@@ -157,7 +157,15 @@ impl<S> InterceptStore<S, FailInterceptor> {
 
 #[async_trait]
 impl Interceptor for FailInterceptor {
-    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
+    type Guard = ();
+
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
+        (self.intercept(context), ())
+    }
+}
+
+impl FailInterceptor {
+    fn intercept(&self, context: &OperationContext<'_>) -> Intercept {
         if !(self.predicate)(context) {
             return Intercept::Continue;
         }

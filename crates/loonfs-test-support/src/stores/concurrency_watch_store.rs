@@ -12,14 +12,12 @@
 //! task has all of its members inside the wrapper before the first of them
 //! can finish, whatever the wrapped store does.
 
-use super::KeyPredicate;
-use async_trait::async_trait;
-use bytes::Bytes;
-use loonfs_objectstore::{
-    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+use super::{
+    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationContext, OperationSelector,
 };
-use loonfs_types::Checksum;
+use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Concurrent requests observed for one operation class.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -37,144 +35,99 @@ struct InFlight {
     total: AtomicUsize,
 }
 
-/// Cancellation and failure release the count.
-struct InFlightGuard<'a>(&'a InFlight);
+impl InFlight {
+    fn snapshot(&self) -> StoreConcurrency {
+        StoreConcurrency {
+            peak_in_flight: self.peak.load(Ordering::SeqCst),
+            total: self.total.load(Ordering::SeqCst),
+        }
+    }
+}
 
-impl Drop for InFlightGuard<'_> {
+/// Releases one in-flight count when the watched request finishes, fails, or
+/// is dropped.
+#[derive(Debug)]
+pub struct InFlightGuard(Arc<InFlight>);
+
+impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.0.current.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
-/// Measures concurrency separately for reads, puts, and deletes.
+/// Counts reads, puts, and deletes separately as they enter and leave.
 #[derive(Debug)]
-pub struct ConcurrencyWatchStore<S> {
-    inner: S,
+pub struct ConcurrencyWatchInterceptor {
     keys: KeyPredicate,
-    reads: InFlight,
-    puts: InFlight,
-    deletes: InFlight,
+    reads: Arc<InFlight>,
+    puts: Arc<InFlight>,
+    deletes: Arc<InFlight>,
 }
 
-impl<S> ConcurrencyWatchStore<S> {
+impl ConcurrencyWatchInterceptor {
+    fn requests(&self, context: &OperationContext<'_>) -> Option<&Arc<InFlight>> {
+        if !self.keys.matches(context.key()) {
+            return None;
+        }
+        let kind = context.kind();
+        if OperationSelector::Head.matches(kind) || OperationSelector::Read.matches(kind) {
+            Some(&self.reads)
+        } else if OperationSelector::Put.matches(kind) {
+            Some(&self.puts)
+        } else if OperationSelector::Delete.matches(kind) {
+            Some(&self.deletes)
+        } else {
+            None
+        }
+    }
+}
+
+/// Measures concurrency separately for reads, puts, and deletes.
+pub type ConcurrencyWatchStore<S> = InterceptStore<S, ConcurrencyWatchInterceptor>;
+
+impl<S> InterceptStore<S, ConcurrencyWatchInterceptor> {
     /// Watches requests for keys selected by `keys`.
     pub fn new(inner: S, keys: KeyPredicate) -> Self {
-        Self {
+        Self::with_interceptor(
             inner,
-            keys,
-            reads: InFlight::default(),
-            puts: InFlight::default(),
-            deletes: InFlight::default(),
-        }
+            ConcurrencyWatchInterceptor {
+                keys,
+                reads: Arc::default(),
+                puts: Arc::default(),
+                deletes: Arc::default(),
+            },
+        )
     }
 
     /// What has been observed so far.
     pub fn reads(&self) -> StoreConcurrency {
-        StoreConcurrency {
-            peak_in_flight: self.reads.peak.load(Ordering::SeqCst),
-            total: self.reads.total.load(Ordering::SeqCst),
-        }
+        self.interceptor().reads.snapshot()
     }
 
     /// Includes cancelled and failed puts in `total`.
     pub fn puts(&self) -> StoreConcurrency {
-        StoreConcurrency {
-            peak_in_flight: self.puts.peak.load(Ordering::SeqCst),
-            total: self.puts.total.load(Ordering::SeqCst),
-        }
+        self.interceptor().puts.snapshot()
     }
 
     /// Includes cancelled and failed deletes in `total`.
     pub fn deletes(&self) -> StoreConcurrency {
-        StoreConcurrency {
-            peak_in_flight: self.deletes.peak.load(Ordering::SeqCst),
-            total: self.deletes.total.load(Ordering::SeqCst),
-        }
-    }
-
-    /// Returns a reference to the wrapped store.
-    pub fn inner(&self) -> &S {
-        &self.inner
-    }
-
-    async fn enter<'a>(&self, key: &str, requests: &'a InFlight) -> Option<InFlightGuard<'a>> {
-        if !self.keys.matches(key) {
-            return None;
-        }
-        requests.total.fetch_add(1, Ordering::SeqCst);
-        let current = requests.current.fetch_add(1, Ordering::SeqCst) + 1;
-        requests.peak.fetch_max(current, Ordering::SeqCst);
-        let guard = InFlightGuard(requests);
-        tokio::task::yield_now().await;
-        Some(guard)
+        self.interceptor().deletes.snapshot()
     }
 }
 
 #[async_trait]
-impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
-    crate::delegate_object_store!(self => self.inner;
-        checksum_algorithm,
-        identity,
-        create_multipart_upload,
-        complete_multipart_upload,
-        abort_multipart_upload,
-        compare_and_swap,
-        list_entries_from_stream,
-        list_child_prefixes,
-    );
+impl Interceptor for ConcurrencyWatchInterceptor {
+    type Guard = Option<InFlightGuard>;
 
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        let _in_flight = self.enter(key, &self.reads).await;
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        let _in_flight = self.enter(key, &self.reads).await;
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        let _in_flight = self.enter(key, &self.reads).await;
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let _in_flight = self.enter(key, &self.puts).await;
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn put_streamed(
-        &self,
-        key: &str,
-        body: ByteStream,
-        mode: PutMode,
-    ) -> Result<u64, ObjectStoreError> {
-        let _in_flight = self.enter(key, &self.puts).await;
-        self.inner.put_streamed(key, body, mode).await
-    }
-
-    async fn assemble(
-        &self,
-        key: &str,
-        sources: &[loonfs_objectstore::AssemblySource],
-        tail: Vec<Bytes>,
-        expected: &Checksum,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let _guard = self.enter(key, &self.puts).await;
-        self.inner.assemble(key, sources, tail, expected).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        let _in_flight = self.enter(key, &self.deletes).await;
-        self.inner.delete(key).await
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, Self::Guard) {
+        let Some(requests) = self.requests(context) else {
+            return (Intercept::Continue, None);
+        };
+        requests.total.fetch_add(1, Ordering::SeqCst);
+        let current = requests.current.fetch_add(1, Ordering::SeqCst) + 1;
+        requests.peak.fetch_max(current, Ordering::SeqCst);
+        let guard = InFlightGuard(Arc::clone(requests));
+        tokio::task::yield_now().await;
+        (Intercept::Continue, Some(guard))
     }
 }

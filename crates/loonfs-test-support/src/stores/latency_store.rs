@@ -43,11 +43,13 @@ impl<S> InterceptStore<S, LatencyInterceptor> {
 
 #[async_trait]
 impl Interceptor for LatencyInterceptor {
+    type Guard = ();
+
     #[allow(
         clippy::disallowed_methods,
         reason = "the test store delay models provider latency without changing protocol time"
     )]
-    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
         if self.keys.matches(context.key()) && OperationSelector::Read.matches(context.kind()) {
             self.read_started_at_ms
                 .lock()
@@ -55,6 +57,6 @@ impl Interceptor for LatencyInterceptor {
                 .push(self.timer.monotonic_now_ms());
             tokio::time::sleep(self.latency).await;
         }
-        Intercept::Continue
+        (Intercept::Continue, ())
     }
 }

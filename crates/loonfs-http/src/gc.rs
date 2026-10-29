@@ -22,9 +22,7 @@ pub async fn gc_namespace(
     let Some(worker) = grep_worker else {
         return Ok(core?);
     };
-    let grep = worker
-        .gc_namespace(namespace_id, maintenance.now_ms())
-        .await;
+    let grep = worker.gc_namespace(namespace_id).await;
     let mut response = core?;
     response.extensions.grep = Some(grep?);
     Ok(response)

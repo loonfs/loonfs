@@ -30,7 +30,7 @@ use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
     Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId, ContentId, ContentRef,
-    DisplayName, InodeId, InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
+    DisplayName, InodeId, InodeKind, NameKey, PageRequest, RevisionNo, ROOT_INODE_ID,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -1240,6 +1240,356 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         ]
     );
     assert_attributed_commits_match_model(&["/log"], &commits);
+}
+
+/// One commit of the retention scenario.
+#[derive(Debug, Clone, Copy)]
+enum RetentionStep {
+    Directory(&'static str),
+    File(&'static str),
+    Delete(&'static str),
+    Move(&'static str, &'static str),
+}
+
+/// The retention scenario's commits, at sequences 1 to 9.
+const RETENTION_HISTORY: [RetentionStep; 9] = [
+    RetentionStep::Directory("/a"),
+    RetentionStep::File("/a/one.txt"),
+    RetentionStep::Directory("/b"),
+    RetentionStep::File("/b/two.txt"),
+    RetentionStep::Delete("/a"),
+    RetentionStep::Directory("/a"),
+    RetentionStep::Delete("/b"),
+    RetentionStep::Move("/a", "/c"),
+    RetentionStep::File("/c/three.txt"),
+];
+
+/// The scenario's retention floor, at the deletion of `/a`, so that deletion
+/// expires and the later deletion of `/b` stays recoverable.
+const RETENTION_FLOOR: ChangeSeq = ChangeSeq(5);
+
+/// The rows of `/a` and `/a/one.txt`, which compaction removes once a commit
+/// after the floor advance acknowledges the floor.
+const EXPIRED_INODE_ROWS: u64 = 2;
+
+const RETENTION_PATHS: [&str; 6] = ["/a", "/a/one.txt", "/b", "/b/two.txt", "/c", "/c/three.txt"];
+
+/// Checks that compaction at an advanced retention floor keeps every answer
+/// at or above the floor.
+///
+/// Core reads only at a namespace's head, so the check builds one namespace
+/// for each head from the floor to the end of the history, compacts it at
+/// the floor, and compares its reads at the head with the model's answers
+/// from the namespace's uncompacted WAL.
+#[tokio::test]
+async fn reads_at_or_above_the_retention_floor_match_the_model_after_compaction() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let last_seq = u64::try_from(RETENTION_HISTORY.len()).expect("seq");
+    for head_seq in RETENTION_FLOOR.0..=last_seq {
+        let namespace_id =
+            loonfs_types::NamespaceId::parse(format!("floor-head-{head_seq}")).expect("namespace");
+        let steps = &RETENTION_HISTORY[..usize::try_from(head_seq).expect("index")];
+        commit_and_compact_at_the_floor(&store, &namespace_id, steps).await;
+        let created_inodes = steps
+            .iter()
+            .filter(|step| matches!(step, RetentionStep::Directory(_) | RetentionStep::File(_)))
+            .count();
+        let expired_inodes = if head_seq > RETENTION_FLOOR.0 {
+            EXPIRED_INODE_ROWS
+        } else {
+            0
+        };
+        let statistics = loonfs_core::control::load_namespace_statistics(&store, &namespace_id)
+            .await
+            .expect("statistics");
+        assert_eq!(
+            statistics.inode_record_count,
+            1 + u64::try_from(created_inodes).expect("count") - expired_inodes,
+            "inode rows at head {head_seq}"
+        );
+        assert_head_reads_match_model(&store, &namespace_id, ChangeSeq(head_seq)).await;
+    }
+}
+
+/// Commits `steps`, advances the retention floor to [`RETENTION_FLOOR`] once
+/// the head reaches it, and compacts until no family group is due.
+///
+/// The commit after the advance records the floor, and the fold of that
+/// commit acknowledges the floor, so the compactions remove the rows that the
+/// expired deletion hides.
+async fn commit_and_compact_at_the_floor(
+    store: &LocalFsStore,
+    namespace_id: &loonfs_types::NamespaceId,
+    steps: &[RetentionStep],
+) {
+    let context = crate::common::commit_split_support::mutation_context();
+    crate::common::commit_split_support::bootstrap_namespace(store, namespace_id, &context)
+        .await
+        .expect("namespace");
+    // The floor passes a commit once the commit is one grace window old.
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(
+        context.now_ms + loonfs_core::limits::GC_DEFAULT_GRACE_WINDOW_MS,
+    ));
+    let maintenance =
+        crate::common::namespace_engine(store, namespace_id, &context).with_wall_clock(clock);
+    for (index, step) in steps.iter().enumerate() {
+        commit_retention_step(store, namespace_id, *step, &context).await;
+        if ChangeSeq(u64::try_from(index + 1).expect("seq")) == RETENTION_FLOOR {
+            maintenance.fold_wal().await.expect("fold to the floor");
+            let advanced = maintenance
+                .advance_retention_floor(loonfs_core::RetentionTarget::Seq(RETENTION_FLOOR))
+                .await
+                .expect("advance the floor")
+                .response;
+            assert_eq!(advanced.retention_floor_seq, RETENTION_FLOOR);
+        }
+    }
+    maintenance.fold_wal().await.expect("fold the history");
+    for _ in 0..16 {
+        let outcome = maintenance
+            .compact_metadata_unit(
+                None,
+                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                loonfs_core::CompactionAdmission::AnySize,
+                loonfs_types::CompactorEpoch(0),
+                &loonfs_core::MetadataCompactionCancellation::default(),
+            )
+            .await
+            .expect("compact");
+        if matches!(outcome, loonfs_core::CompactionUnitOutcome::NotNeeded) {
+            return;
+        }
+    }
+    panic!("compaction did not drain within the family-group bound");
+}
+
+async fn commit_retention_step(
+    store: &LocalFsStore,
+    namespace_id: &loonfs_types::NamespaceId,
+    step: RetentionStep,
+    context: &loonfs_core::MutationContext,
+) {
+    use crate::common::commit_split_support::{
+        create_directory_path, submit_operation, test_commit_id, write_file_bytes,
+    };
+    let path = |value: &str| AbsolutePath::parse(value).expect("path");
+    let committed = match step {
+        RetentionStep::Directory(target) => {
+            create_directory_path(store, namespace_id, target, context, None).await
+        }
+        RetentionStep::File(target) => {
+            write_file_bytes(store, namespace_id, target, b"body", context, None).await
+        }
+        RetentionStep::Delete(target) => {
+            let operation = FilesystemOperation::DeletePath {
+                path: path(target),
+                behavior: loonfs_types::DeleteDirectoryBehavior::Recursive,
+                expected_inode_id: None,
+            };
+            submit_operation(
+                store,
+                namespace_id,
+                test_commit_id(None),
+                operation,
+                context,
+            )
+            .await
+        }
+        RetentionStep::Move(source, destination) => {
+            let operation = FilesystemOperation::MovePath {
+                source_path: path(source),
+                destination_path: path(destination),
+                precondition: loonfs_types::DestinationPrecondition::default(),
+            };
+            submit_operation(
+                store,
+                namespace_id,
+                test_commit_id(None),
+                operation,
+                context,
+            )
+            .await
+        }
+    };
+    committed.expect("commit a retention step");
+}
+
+/// One visible entry as a read reports it.
+#[derive(Debug, PartialEq, Eq)]
+struct EntryAnswer {
+    absolute_path: String,
+    inode_id: InodeId,
+    is_directory: bool,
+    created_by: ActorId,
+    created_at_ms: u64,
+    parent_inode_id: Option<InodeId>,
+    display_name: Option<String>,
+}
+
+/// Asks core every question of the retention scenario at the namespace's
+/// head, and requires the answers of the model that replays the namespace's
+/// WAL.
+async fn assert_head_reads_match_model(
+    store: &LocalFsStore,
+    namespace_id: &loonfs_types::NamespaceId,
+    head_seq: ChangeSeq,
+) {
+    const ACCEPTED: &str = "the model should answer for a state it accepted";
+    let context = crate::common::read_context(store, namespace_id).await;
+    assert_eq!(context.head.seq, head_seq);
+    let commits = wal_commits(store, namespace_id).await;
+    let mut model = loonfs_model::bootstrap_metadata_state(context.head.created_at_ms);
+    for commit in &commits {
+        let deltas: Vec<_> = commit
+            .deltas
+            .iter()
+            .map(|delta| delta.delta.clone())
+            .collect();
+        model = model
+            .apply_committed_wal_deltas(
+                commit.committed_seq,
+                &commit.commit_id,
+                &commit.committed_by,
+                commit.committed_at_ms,
+                &deltas,
+            )
+            .expect("the scenario should keep the model's binding rules");
+    }
+    let questions = Questions::new(
+        &RETENTION_PATHS,
+        commits
+            .iter()
+            .flat_map(|commit| commit.deltas.iter().map(|delta| &delta.delta)),
+    );
+    let engine = crate::common::namespace_engine(
+        store,
+        namespace_id,
+        &crate::common::commit_split_support::mutation_context(),
+    );
+    let stat = loonfs_types::options::StatOptions::default;
+    for path in &questions.paths {
+        let read = engine.resolve_path(path.as_str(), stat(), &context).await;
+        let expected = match model.resolve_path(path, head_seq).expect(ACCEPTED) {
+            ResolvedPath::Found { inode, .. } => {
+                Ok(model_entry(&model, inode.inode_id, head_seq).expect(ACCEPTED))
+            }
+            ResolvedPath::NotFound { .. } => Err(loonfs_core::ErrorCode::PathNotFound),
+            ResolvedPath::NotADirectory { .. } => panic!("the scenario's paths cross no file"),
+        };
+        assert_eq!(
+            read.map(durable_entry).map_err(|error| error.code()),
+            expected,
+            "path `{path}` at seq {head_seq}"
+        );
+    }
+    for &inode_id in &questions.inodes {
+        let read = engine.stat_inode(inode_id, stat(), &context).await;
+        assert_eq!(
+            visible_entry(read).map(durable_entry),
+            model_entry(&model, inode_id, head_seq),
+            "inode `{inode_id}` at seq {head_seq}"
+        );
+    }
+    for &directory in &questions.directories {
+        let page = PageRequest {
+            limit: loonfs_test_support::ids::page_limit(1_000),
+            cursor: None,
+        };
+        let read = engine
+            .list_inode_children_page(directory, page, Default::default(), &context)
+            .await;
+        let expected = model_entry(&model, directory, head_seq).map(|_| {
+            model
+                .list_directory(directory, head_seq)
+                .expect(ACCEPTED)
+                .into_iter()
+                .map(|entry| model_entry(&model, entry.child.inode_id, head_seq).expect(ACCEPTED))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            visible_entry(read.map(|page| page.items))
+                .map(|items| items.into_iter().map(durable_entry).collect::<Vec<_>>()),
+            expected,
+            "listing of inode `{directory}` at seq {head_seq}"
+        );
+    }
+}
+
+/// Returns the WAL records of `namespace_id`, in sequence order.
+async fn wal_commits(
+    store: &LocalFsStore,
+    namespace_id: &loonfs_types::NamespaceId,
+) -> Vec<loonfs_types::format::wal::WalCommitPayload> {
+    let mut commits = Vec::new();
+    for key in store
+        .list_prefix(&wal_prefix(namespace_id))
+        .await
+        .expect("list WAL")
+    {
+        let bytes = store.get(&key, None).await.expect("get").expect("WAL");
+        let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
+        commits.extend(wal.payload().records.iter().cloned());
+    }
+    commits
+}
+
+/// Returns the value of a read of a visible entry, or `None` when the read
+/// finds that the inode isn't visible.
+fn visible_entry<T>(read: Result<T, loonfs_core::CoreError>) -> Option<T> {
+    match read {
+        Ok(value) => Some(value),
+        Err(error) if error.code() == loonfs_core::ErrorCode::InodeNotFound => None,
+        Err(error) => panic!("expected a read or a missing inode, got {error:?}"),
+    }
+}
+
+fn durable_entry(entry: loonfs_types::PathEntry) -> EntryAnswer {
+    EntryAnswer {
+        absolute_path: entry.path.to_string(),
+        inode_id: entry.inode_id,
+        is_directory: entry.inode_kind() == loonfs_types::EntryInodeKind::Directory,
+        created_by: entry.created_by,
+        created_at_ms: entry.created_at_ms,
+        parent_inode_id: entry.parent_inode_id,
+        display_name: entry.display_name.map(|name| name.to_string()),
+    }
+}
+
+/// Returns the model's entry for a visible inode, with the path that its
+/// parent bindings spell, or `None` when the inode isn't visible at `seq`.
+fn model_entry(
+    model: &ModelMetadataState,
+    inode_id: InodeId,
+    seq: ChangeSeq,
+) -> Option<EntryAnswer> {
+    let inode = model
+        .visible_inode(inode_id, seq)
+        .expect("the model should answer for a state it accepted")?;
+    let binding = model.parent_binding(inode_id, seq).map(model_binding);
+    let mut names = Vec::new();
+    let mut ancestor = inode_id;
+    while let Some(parent) = model.parent_binding(ancestor, seq).map(model_binding) {
+        names.push(
+            parent
+                .display_name
+                .expect("a visible inode's binding has a display name")
+                .to_string(),
+        );
+        ancestor = parent.parent_inode_id;
+    }
+    names.reverse();
+    Some(EntryAnswer {
+        absolute_path: format!("/{}", names.join("/")),
+        inode_id,
+        is_directory: inode.inode_kind == InodeKind::Directory,
+        created_by: inode.committed_by.clone(),
+        created_at_ms: inode.committed_at_ms,
+        parent_inode_id: binding.as_ref().map(|binding| binding.parent_inode_id),
+        display_name: binding
+            .and_then(|binding| binding.display_name)
+            .map(|name| name.to_string()),
+    })
 }
 
 fn core_bootstrap_state() -> CoreMetadataState {

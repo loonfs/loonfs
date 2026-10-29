@@ -1,6 +1,6 @@
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
-use crate::common::{control, grep_with, page_request, GrepHost};
+use crate::common::{control, default_block_cache, grep_with, page_request, GrepHost};
 use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::{
     CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
@@ -43,10 +43,10 @@ impl ServiceHarness {
             .await
             .expect("build query reader");
         Self {
+            service: GrepService::new(default_block_cache(), reader.monotonic_timer()),
             store,
             namespace_id,
             reader,
-            service: GrepService::default(),
         }
     }
 

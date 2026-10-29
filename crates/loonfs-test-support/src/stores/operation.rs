@@ -19,7 +19,7 @@ pub enum OperationSelector {
     GetWithMetadata,
     /// Either byte-read form.
     Read,
-    /// Any `put` mode.
+    /// Any `put` mode, assemblies, and compare-and-swap calls.
     Put,
     /// Create-if-absent puts.
     PutCreateIfAbsent,
@@ -32,6 +32,20 @@ pub enum OperationSelector {
 }
 
 impl OperationSelector {
+    /// Every selector, in declaration order.
+    pub const ALL: [Self; 10] = [
+        Self::Any,
+        Self::Head,
+        Self::Get,
+        Self::GetWithMetadata,
+        Self::Read,
+        Self::Put,
+        Self::PutCreateIfAbsent,
+        Self::CompareAndSwap,
+        Self::Delete,
+        Self::List,
+    ];
+
     /// Reports whether `kind` is one of the operations this selector names.
     pub fn matches(self, kind: &OperationKind<'_>) -> bool {
         match self {
@@ -48,6 +62,7 @@ impl OperationSelector {
                 OperationKind::Put { .. }
                     | OperationKind::PutStreamed { .. }
                     | OperationKind::Assemble { .. }
+                    | OperationKind::CompareAndSwap { .. }
             ),
             Self::PutCreateIfAbsent => matches!(
                 kind,
@@ -258,49 +273,6 @@ impl RecordedOperation {
             | Self::CompareAndSwap { key, .. }
             | Self::Delete { key } => key,
             Self::List { prefix } => prefix,
-        }
-    }
-
-    pub(crate) fn matches(&self, selector: OperationSelector) -> bool {
-        match selector {
-            OperationSelector::Any => true,
-            OperationSelector::Head => matches!(self, Self::Head { .. }),
-            OperationSelector::Get => matches!(self, Self::Get { .. }),
-            OperationSelector::GetWithMetadata => matches!(self, Self::GetWithMetadata { .. }),
-            OperationSelector::Read => {
-                matches!(self, Self::Get { .. } | Self::GetWithMetadata { .. })
-            }
-            OperationSelector::Put => matches!(
-                self,
-                Self::Put { .. }
-                    | Self::PutStreamed { .. }
-                    | Self::Assemble { .. }
-                    | Self::CompareAndSwap { .. }
-            ),
-            OperationSelector::PutCreateIfAbsent => matches!(
-                self,
-                Self::Put {
-                    mode: PutMode::CreateIfAbsent,
-                    ..
-                } | Self::PutStreamed {
-                    mode: PutMode::CreateIfAbsent,
-                    ..
-                } | Self::Assemble { .. }
-            ),
-            OperationSelector::CompareAndSwap => matches!(
-                self,
-                Self::CompareAndSwap { .. }
-                    | Self::Put {
-                        mode: PutMode::CompareAndSwap { .. },
-                        ..
-                    }
-                    | Self::PutStreamed {
-                        mode: PutMode::CompareAndSwap { .. },
-                        ..
-                    }
-            ),
-            OperationSelector::Delete => matches!(self, Self::Delete { .. }),
-            OperationSelector::List => matches!(self, Self::List { .. }),
         }
     }
 }

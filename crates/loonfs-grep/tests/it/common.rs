@@ -12,6 +12,7 @@ use loonfs_grep::{
     GrepError, GrepPassBudget, GrepService, GrepWorker, NamespaceReads,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
+use loonfs_test_support::clock::ManualClock;
 use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
 use std::sync::Arc;
@@ -48,9 +49,7 @@ impl GrepHost {
             .await
             .expect("build maintenance");
         let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(actor));
-        let block_cache = Arc::new(GrepBlockCache::new(
-            loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
-        ));
+        let block_cache = default_block_cache();
         Self {
             store: store.clone(),
             reader: reader.clone(),
@@ -222,6 +221,33 @@ pub(crate) mod control {
                 .into_payload(),
         )
     }
+}
+
+/// Returns a worker over `store` whose writer reads `clock` as its wall
+/// clock, so a collection pass measures object ages at the clock's reading.
+pub(crate) async fn collector_at(
+    store: &SharedObjectStore,
+    clock: Arc<ManualClock>,
+) -> GrepWorker<SharedObjectStore> {
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
+        .build()
+        .await
+        .expect("build the collector's reader");
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("grep-collector"))
+        .wall_clock(clock)
+        .build()
+        .await
+        .expect("build the collector's writer");
+    GrepWorker::new(store.clone(), reader, writer, GrepPassBudget::default())
+}
+
+/// Returns an empty grep block cache with the default budget.
+pub(crate) fn default_block_cache() -> Arc<GrepBlockCache> {
+    Arc::new(GrepBlockCache::new(
+        loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
+    ))
 }
 
 /// One composed query over caller-chosen parts, for tests that want a cold
