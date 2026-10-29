@@ -9,12 +9,12 @@ use loonfs::{LoonFs, Maintenance, ReadOnly, SharedObjectStore, Writable};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
-    GrepError, GrepService, GrepStepBudget, GrepWorker, NamespaceReads,
+    GrepError, GrepPassBudget, GrepService, GrepWorker, NamespaceReads,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::{
-    ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest, PaginationPolicy, RunNo,
+    ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest, PaginationPolicy,
 };
 use std::sync::Arc;
 
@@ -62,7 +62,7 @@ impl GrepHost {
                 store.clone(),
                 reader,
                 writer.clone(),
-                GrepStepBudget::default(),
+                GrepPassBudget::default(),
             ),
             writer,
             block_cache,
@@ -121,7 +121,7 @@ impl GrepHost {
         if let Some(captured_seq) = captured_seq {
             self.catch_up_grep_index(namespace_id, captured_seq).await?;
         }
-        self.get_grep_index(namespace_id).await
+        self.worker.get_grep_index(namespace_id).await
     }
 
     /// Runs bounded build steps until the index has built through
@@ -159,33 +159,12 @@ impl GrepHost {
     ) -> Result<GrepIndex, GrepError> {
         match self.worker.disable(namespace_id).await? {
             GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
-                self.get_grep_index(namespace_id).await
+                self.worker.get_grep_index(namespace_id).await
             }
             GrepDisableOutcome::Superseded => Err(GrepError::PublicationConflict {
                 object_key: loonfs_grep::keyspace::hint_key(namespace_id),
             }),
         }
-    }
-
-    pub(crate) async fn get_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<GrepIndex, GrepError> {
-        let manifest = self.worker.manifest_state(namespace_id).await?;
-        let (status, next_run_no, reorganize_pending) = match &manifest {
-            Some(manifest) => (
-                v0::GrepIndexStatus::from(manifest.status()),
-                manifest.index().next_run_no,
-                manifest.index().reorganize.is_some(),
-            ),
-            None => (v0::GrepIndexStatus::Disabled, RunNo(0), false),
-        };
-        Ok(GrepIndex {
-            namespace_id: namespace_id.clone(),
-            status,
-            next_run_no,
-            reorganize_pending,
-        })
     }
 }
 

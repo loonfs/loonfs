@@ -2,7 +2,7 @@
 //! consistent at every applied sequence (`docs/specs/format.md` section 1.3).
 
 use crate::metadata::{DeltaPosition, DirentryBindingRecord, DirentryBindingState, MetadataState};
-use crate::{Error, Result};
+use crate::{ModelError, Result};
 use loonfs_types::{ChangeSeq, InodeId, NameKey};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -60,7 +60,7 @@ impl MetadataState {
         while let Some(binding) = self.parent_binding(current, seq) {
             current = binding.parent_inode_id;
             if ancestry.contains(&current) {
-                return Err(Error::AncestorCycle {
+                return Err(ModelError::AncestorCycle {
                     seq,
                     inode_id: current,
                 });
@@ -92,7 +92,7 @@ impl MetadataState {
         let mut slot_of_child = BTreeMap::new();
         for value in by_slot.values() {
             if let Some(other) = slot_of_child.insert(value.child_inode_id, value.position()) {
-                return Err(Error::ChildHasTwoParents {
+                return Err(ModelError::ChildHasTwoParents {
                     seq,
                     child_inode_id: value.child_inode_id,
                     bindings: [other, value.position()],
@@ -103,7 +103,7 @@ impl MetadataState {
         for value in by_child.values() {
             let slot = (value.parent_inode_id, &value.name_key);
             if let Some(other) = child_of_slot.insert(slot, value.position()) {
-                return Err(Error::SlotHasTwoChildren {
+                return Err(ModelError::SlotHasTwoChildren {
                     seq,
                     parent_inode_id: value.parent_inode_id,
                     name_key: value.name_key.clone(),
@@ -115,7 +115,7 @@ impl MetadataState {
         let slot_order: BTreeSet<_> = by_slot.values().map(|value| value.position()).collect();
         let child_order: BTreeSet<_> = by_child.values().map(|value| value.position()).collect();
         if let Some(binding) = slot_order.symmetric_difference(&child_order).next() {
-            return Err(Error::BindingIndexesDisagree {
+            return Err(ModelError::BindingIndexesDisagree {
                 seq,
                 binding: *binding,
             });
@@ -131,7 +131,7 @@ impl MetadataState {
 #[cfg(test)]
 mod tests {
     use crate::metadata::DeltaPosition;
-    use crate::{bootstrap_metadata_state, Error};
+    use crate::{bootstrap_metadata_state, ModelError};
     use loonfs_types::format::wal::WalDelta;
     use loonfs_types::{ActorId, ChangeSeq, CommitId, DisplayName, InodeId, InodeKind, NameKey};
 
@@ -190,7 +190,7 @@ mod tests {
         ]
     }
 
-    fn first_violation(commits: &[Vec<WalDelta>]) -> Option<Error> {
+    fn first_violation(commits: &[Vec<WalDelta>]) -> Option<ModelError> {
         let commit_id = CommitId::parse("c_model_bindings").expect("valid commit id");
         let mut state = bootstrap_metadata_state(0);
         for (seq, deltas) in (1..).zip(commits) {
@@ -215,7 +215,7 @@ mod tests {
         // The first child's own value still names the slot the second took.
         assert_eq!(
             first_violation(&[create(2, File, 1, "a"), create(3, File, 1, "a")]),
-            Some(Error::SlotHasTwoChildren {
+            Some(ModelError::SlotHasTwoChildren {
                 seq: ChangeSeq(2),
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("a").expect("valid name key"),
@@ -224,7 +224,7 @@ mod tests {
         );
         assert_eq!(
             first_violation(&[create(2, File, 1, "a"), vec![bind(0, 2, File, 1, "b")]]),
-            Some(Error::ChildHasTwoParents {
+            Some(ModelError::ChildHasTwoParents {
                 seq: ChangeSeq(2),
                 child_inode_id: InodeId(2),
                 bindings: [position(1, 1), position(2, 0)],
@@ -237,7 +237,7 @@ mod tests {
                 create(2, File, 1, "a"),
                 vec![unbind(0, 3, File, 1, "a", position(1, 1))],
             ]),
-            Some(Error::BindingIndexesDisagree {
+            Some(ModelError::BindingIndexesDisagree {
                 seq: ChangeSeq(2),
                 binding: position(1, 1),
             })
@@ -251,7 +251,7 @@ mod tests {
                     bind(1, 2, Directory, 3, "c"),
                 ],
             ]),
-            Some(Error::AncestorCycle {
+            Some(ModelError::AncestorCycle {
                 seq: ChangeSeq(3),
                 inode_id: InodeId(2),
             })

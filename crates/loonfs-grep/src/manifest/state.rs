@@ -75,6 +75,14 @@ impl GrepIndexStatus {
             Self::Backfilling { .. } | Self::Disabled {} => None,
         }
     }
+
+    /// Returns the pin a backfilling status walks.
+    pub fn backfill_pin_id(&self) -> Option<&PinId> {
+        match self {
+            Self::Backfilling { pin_id, .. } => Some(pin_id),
+            Self::Active { .. } | Self::Disabled {} => None,
+        }
+    }
 }
 
 impl From<&GrepIndexStatus> for loonfs_types::api::v0::GrepIndexStatus {

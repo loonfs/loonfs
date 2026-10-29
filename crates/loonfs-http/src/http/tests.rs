@@ -2618,7 +2618,7 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         store.clone(),
         reader,
         writer,
-        loonfs_grep::GrepStepBudget::default(),
+        loonfs_grep::GrepPassBudget::default(),
     )
 }
 

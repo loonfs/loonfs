@@ -1,6 +1,7 @@
 //! Grep worker step budgets, and how many steps hold file content at once.
 
 use crate::{GramIndexBuildPolicy, DEFAULT_MAX_CONCURRENT_GREP_STEPS};
+use loonfs_types::DEFAULT_MAX_PAGE_LIMIT;
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
@@ -13,12 +14,13 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GrepWorkerConfig {
-    /// Revisions examined per build step.
+    /// Revisions examined per build step, at most one page of
+    /// [`DEFAULT_MAX_PAGE_LIMIT`] items.
     pub max_files_per_step: usize,
     /// Content bytes read per build step.
     pub max_content_bytes_per_step: u64,
     /// Build and reorganize steps that hold file content or index segments
-    /// at once. A host builds one `GrepStepBudget` from it and passes that
+    /// at once. A host builds one `GrepPassBudget` from it and passes that
     /// budget to every worker it runs.
     pub max_concurrent_steps: usize,
 }
@@ -26,8 +28,19 @@ pub struct GrepWorkerConfig {
 impl GrepWorkerConfig {
     /// Returns the bounded build/reorganize policy represented by this config.
     pub fn build_policy(self) -> Result<GramIndexBuildPolicy, GrepWorkerConfigError> {
+        let max_files_per_step = nonzero_usize("max_files_per_step", self.max_files_per_step)?;
+        if !u32::try_from(self.max_files_per_step)
+            .is_ok_and(|files| files <= DEFAULT_MAX_PAGE_LIMIT)
+        {
+            return Err(GrepWorkerConfigError::InvalidField {
+                field: "max_files_per_step",
+                reason: format!(
+                    "must be at most {DEFAULT_MAX_PAGE_LIMIT}, the largest page a build step reads"
+                ),
+            });
+        }
         Ok(GramIndexBuildPolicy {
-            max_files_per_step: nonzero_usize("max_files_per_step", self.max_files_per_step)?,
+            max_files_per_step,
             max_content_bytes_per_step: nonzero_u64(
                 "max_content_bytes_per_step",
                 self.max_content_bytes_per_step,
@@ -36,7 +49,8 @@ impl GrepWorkerConfig {
         })
     }
 
-    /// Rejects zero step budgets and a zero step limit.
+    /// Rejects zero step budgets, a file budget larger than one page, and a
+    /// zero step limit.
     pub fn validate(self) -> Result<(), GrepWorkerConfigError> {
         self.build_policy()?;
         nonzero_usize("max_concurrent_steps", self.max_concurrent_steps)?;

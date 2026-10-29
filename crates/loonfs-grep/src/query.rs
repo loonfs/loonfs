@@ -1,4 +1,5 @@
-//! Converts a search pattern into grams that every match must contain.
+//! Compiles a search pattern and converts it into grams that every match
+//! must contain.
 //!
 //! The plan contains required sets of alternative, case-folded grams. The
 //! index may omit a constraint when it cannot prove that every match contains
@@ -6,6 +7,9 @@
 //! proven grams are unindexable.
 
 use crate::codec::{extract_grams, Gram, GRAM_LEN};
+use crate::{GrepError, Result};
+use loonfs_types::GrepRequest;
+use regex::bytes::{Regex, RegexBuilder};
 use regex_syntax::hir::{Class, Hir, HirKind, Look, Repetition};
 use std::collections::BTreeSet;
 
@@ -35,22 +39,32 @@ const MAX_OR_SET_GRAMS: usize = 64;
 /// recursion in `analyze` over the parsed pattern.
 const MAX_PATTERN_NEST_DEPTH: u32 = 250;
 
-/// Plans a pattern. `Err` is a pattern-syntax problem; `Unindexable` is a
-/// valid pattern with no required bytes.
-pub(crate) fn plan_pattern(
-    pattern: &str,
-    case_insensitive: bool,
-) -> Result<GramPlanOutcome, String> {
+/// A request's pattern compiled for verification, with the grams every match
+/// contains.
+pub(crate) struct CompiledPattern {
+    pub(crate) regex: Regex,
+    pub(crate) plan: GramPlanOutcome,
+}
+
+/// Compiles a request's pattern for verification and plans its grams.
+///
+/// The verifier and the planner parse the pattern with the same case and
+/// line settings, so the plan describes the pattern the verifier runs.
+/// `Unindexable` is a valid pattern with no required bytes.
+pub(crate) fn compile_pattern(request: &GrepRequest) -> Result<CompiledPattern> {
+    let regex = RegexBuilder::new(&request.pattern)
+        .case_insensitive(request.case_insensitive)
+        .multi_line(true)
+        .build()
+        .map_err(|error| GrepError::InvalidPattern(error.to_string()))?;
     let hir = regex_syntax::ParserBuilder::new()
         .nest_limit(MAX_PATTERN_NEST_DEPTH)
         .utf8(false)
-        .case_insensitive(case_insensitive)
-        // Matches the executor's line-anchored compilation; the analysis
-        // must see the same pattern the verifier runs.
+        .case_insensitive(request.case_insensitive)
         .multi_line(true)
         .build()
-        .parse(pattern)
-        .map_err(|error| error.to_string())?;
+        .parse(&request.pattern)
+        .map_err(|error| GrepError::InvalidPattern(error.to_string()))?;
     let analysis = analyze(&hir);
     let mut required = analysis.sets;
     if let Some(run) = analysis.run {
@@ -60,11 +74,12 @@ pub(crate) fn plan_pattern(
     required.sort();
     required.dedup();
     required.truncate(MAX_REQUIRED_SETS);
-    if required.is_empty() {
-        Ok(GramPlanOutcome::Unindexable)
+    let plan = if required.is_empty() {
+        GramPlanOutcome::Unindexable
     } else {
-        Ok(GramPlanOutcome::Indexable(GramQueryPlan { required }))
-    }
+        GramPlanOutcome::Indexable(GramQueryPlan { required })
+    };
+    Ok(CompiledPattern { regex, plan })
 }
 
 /// What one subexpression guarantees about any text it matches.
@@ -263,6 +278,18 @@ fn single_folded_byte(class: &Class) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan_pattern(pattern: &str, case_insensitive: bool) -> Result<GramPlanOutcome> {
+        let request = GrepRequest {
+            pattern: pattern.to_owned(),
+            case_insensitive,
+            path_prefix: None,
+            inode_id: None,
+            allow_stale: false,
+            allow_scan: false,
+        };
+        compile_pattern(&request).map(|compiled| compiled.plan)
+    }
 
     fn grams(plan: &GramPlanOutcome) -> Vec<Vec<String>> {
         let GramPlanOutcome::Indexable(plan) = plan else {

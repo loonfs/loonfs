@@ -17,34 +17,34 @@ pub const DEFAULT_MAX_CONCURRENT_GREP_STEPS: NonZeroUsize = NonZeroUsize::new(2)
 /// to every grep worker keeps one ceiling for all of them, however many
 /// runtimes or stores those workers serve.
 #[derive(Debug, Clone)]
-pub struct GrepStepBudget {
-    inner: Arc<GrepStepBudgetInner>,
+pub struct GrepPassBudget {
+    inner: Arc<GrepPassBudgetInner>,
 }
 
 #[derive(Debug)]
-struct GrepStepBudgetInner {
+struct GrepPassBudgetInner {
     permits: Semaphore,
     max_concurrent_steps: usize,
     waiting: AtomicUsize,
 }
 
-/// Steps that hold a permit of a [`GrepStepBudget`], and steps that wait for
+/// Steps that hold a permit of a [`GrepPassBudget`], and steps that wait for
 /// one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GrepStepBudgetStats {
+pub struct GrepPassBudgetStats {
     /// Steps that hold a permit.
     pub running: usize,
     /// Steps that found work and wait for a permit.
     pub waiting: usize,
 }
 
-impl GrepStepBudget {
+impl GrepPassBudget {
     /// Creates a budget that lets `max_concurrent_steps` steps hold file
     /// content or index segments at once.
     pub fn new(max_concurrent_steps: NonZeroUsize) -> Self {
         let max_concurrent_steps = max_concurrent_steps.get().min(Semaphore::MAX_PERMITS);
         Self {
-            inner: Arc::new(GrepStepBudgetInner {
+            inner: Arc::new(GrepPassBudgetInner {
                 permits: Semaphore::new(max_concurrent_steps),
                 max_concurrent_steps,
                 waiting: AtomicUsize::new(0),
@@ -53,8 +53,8 @@ impl GrepStepBudget {
     }
 
     /// Reports the steps running and waiting right now.
-    pub fn stats(&self) -> GrepStepBudgetStats {
-        GrepStepBudgetStats {
+    pub fn stats(&self) -> GrepPassBudgetStats {
+        GrepPassBudgetStats {
             running: self.inner.max_concurrent_steps - self.inner.permits.available_permits(),
             waiting: self.inner.waiting.load(Ordering::Relaxed),
         }
@@ -72,7 +72,7 @@ impl GrepStepBudget {
     }
 }
 
-impl Default for GrepStepBudget {
+impl Default for GrepPassBudget {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_CONCURRENT_GREP_STEPS)
     }

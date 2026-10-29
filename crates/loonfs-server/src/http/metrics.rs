@@ -4,7 +4,7 @@ use super::AppState;
 use loonfs::engine::DecodedBlockCacheStats;
 use loonfs::metrics::{MetricEntry, MetricValue, MetricsSnapshot, RESULT_HIT, RESULT_MISS};
 use loonfs::{MetadataCacheStats, SsdSegmentBlocksStats};
-use loonfs_grep::GrepStepBudgetStats;
+use loonfs_grep::GrepPassBudgetStats;
 use loonfs_http::RequestLimit;
 use std::fmt::Write as _;
 
@@ -113,12 +113,12 @@ fn write_entry(rendered: &mut String, name: &str, entry: &MetricEntry) {
 /// process RSS, and available transfer slots.
 fn render_scrape_gauges(
     rendered: &mut String,
-    grep_steps: Option<GrepStepBudgetStats>,
+    grep_steps: Option<GrepPassBudgetStats>,
     upload_permits: usize,
     download_permits: usize,
     in_flight_requests: usize,
 ) {
-    if let Some(GrepStepBudgetStats { running, waiting }) = grep_steps {
+    if let Some(GrepPassBudgetStats { running, waiting }) = grep_steps {
         for (name, description, value) in [
             (
                 "loonfs_grep_steps_running",

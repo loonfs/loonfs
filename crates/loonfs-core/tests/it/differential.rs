@@ -19,7 +19,7 @@ use loonfs_model::metadata::{
     InodeRecord as ModelInodeRecord, MetadataState as ModelMetadataState,
     SubtreeTombstoneAction as ModelTombstoneAction,
 };
-use loonfs_model::visibility::PathLookup;
+use loonfs_model::visibility::ResolvedPath;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -859,8 +859,8 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
             .resolve_path(&path, ChangeSeq(seq))
             .expect("the model should answer for a state it accepted")
         {
-            PathLookup::Found { inode, .. } => Some(inode.inode_id),
-            PathLookup::NotFound { .. } | PathLookup::NotADirectory { .. } => None,
+            ResolvedPath::Found { inode, .. } => Some(inode.inode_id),
+            ResolvedPath::NotFound { .. } | ResolvedPath::NotADirectory { .. } => None,
         }
     };
     assert_eq!(resolved("/docs/final.txt", 4), Some(InodeId(3)));
@@ -1473,9 +1473,9 @@ fn core_path_answer(answer: Result<ResolvedVisiblePath, VisiblePathError>) -> Pa
     }
 }
 
-fn model_path_answer(lookup: PathLookup<'_>) -> PathAnswer {
+fn model_path_answer(lookup: ResolvedPath<'_>) -> PathAnswer {
     match lookup {
-        PathLookup::Found {
+        ResolvedPath::Found {
             absolute_path,
             inode,
             binding,
@@ -1496,8 +1496,8 @@ fn model_path_answer(lookup: PathLookup<'_>) -> PathAnswer {
                 binding_version: binding.map(|binding| binding.position),
             }
         }
-        PathLookup::NotFound { absolute_path } => PathAnswer::NotFound { absolute_path },
-        PathLookup::NotADirectory {
+        ResolvedPath::NotFound { absolute_path } => PathAnswer::NotFound { absolute_path },
+        ResolvedPath::NotADirectory {
             absolute_path,
             inode,
         } => PathAnswer::NotADirectory {

@@ -111,7 +111,7 @@ pub(super) async fn test_app(
             runtime.object_store(),
             runtime.read_only(),
             runtime.clone(),
-            loonfs_grep::GrepStepBudget::default(),
+            loonfs_grep::GrepPassBudget::default(),
         )
     };
     let grep_service = || {

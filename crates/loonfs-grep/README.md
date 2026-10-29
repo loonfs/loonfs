@@ -32,7 +32,7 @@ max_content_bytes_per_step = 67108864
 max_concurrent_steps = 2
 ```
 
-Every value must be greater than zero. The host builds one `GrepStepBudget` from `max_concurrent_steps` and passes it to `GrepWorker::new`. When a build or reorganize step finds work to do, it waits for one of the budget's permits before it reads file content or index segments, and it keeps the permit until it publishes. A step that finds the index up to date, or finds nothing to merge, doesn't take a permit. `GrepStepBudget::stats` reports how many steps are running and how many are waiting.
+Every value must be greater than zero, and `max_files_per_step` can be at most 1,000, the largest page a build step reads. The host builds one `GrepPassBudget` from `max_concurrent_steps` and passes it to `GrepWorker::new`. When a build or reorganize step finds work to do, it waits for one of the budget's permits before it reads file content or index segments, and it keeps the permit until it publishes. A step that finds the index up to date, or finds nothing to merge, doesn't take a permit. `GrepPassBudget::stats` reports how many steps are running and how many are waiting.
 
 The server's `max_concurrent_maintenance` limits how many namespaces its sweep visits at once. Separately, `max_concurrent_steps` limits how many steps read and process content at once, no matter how many visits are running.
 

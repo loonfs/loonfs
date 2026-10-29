@@ -169,7 +169,8 @@ memory_limit_bytes = 4294967296
 # turns both off again.
 #[grep]
 #mode = "serve_and_maintain"
-# Bounded indexing input budgets; every value must be greater than zero.
+# Bounded indexing input budgets; every value must be greater than zero,
+# and `max_files_per_step` can be at most 1000.
 #max_files_per_step = 256
 #max_content_bytes_per_step = 67108864
 # How many index build and reorganize steps hold file content or index

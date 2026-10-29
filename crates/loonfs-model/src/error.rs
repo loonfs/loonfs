@@ -5,7 +5,7 @@ use loonfs_types::{ChangeSeq, InodeId, NameKey};
 
 /// A history or state that breaks a rule the model checks.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum Error {
+pub enum ModelError {
     #[error("inode `{child_inode_id}` has two parent bindings at seq {seq}")]
     ChildHasTwoParents {
         seq: ChangeSeq,
@@ -31,4 +31,4 @@ pub enum Error {
     AncestorCycle { seq: ChangeSeq, inode_id: InodeId },
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, ModelError>;
