@@ -38,6 +38,16 @@ pub enum WalObjectError {
     },
     #[error("WAL object summary does not match its records")]
     SummaryMismatch,
+    #[error(
+        "WAL object `{wal_no}` lowers the basis floor to `{basis_floor_seq}` from \
+         `{prior_basis_floor_seq}` at WAL number `{prior_wal_no}`"
+    )]
+    BasisFloorDecrease {
+        wal_no: WalNo,
+        basis_floor_seq: ChangeSeq,
+        prior_wal_no: WalNo,
+        prior_basis_floor_seq: ChangeSeq,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +56,7 @@ pub(super) struct WalTailLoadRequest<'a> {
     pub(crate) base_seq: ChangeSeq,
     pub(crate) head_seq: ChangeSeq,
     pub(crate) base_wal_no: WalNo,
+    pub(crate) base_basis_floor_seq: ChangeSeq,
     pub(crate) tip_wal_no: WalNo,
     pub(crate) writer_epoch: WriterEpoch,
 }

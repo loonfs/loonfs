@@ -238,6 +238,66 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
         .retention_floor_seq()
 }
 
+/// The current manifest's acknowledged floor.
+async fn read_acknowledged_floor_seq<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> ChangeSeq {
+    load_current_manifest(store, namespace_id)
+        .await
+        .expect("load the current manifest")
+        .state
+        .envelope
+        .payload()
+        .acknowledged_floor_seq
+}
+
+/// Folds the WAL tail and advances the retention floor to `deletion_seq`,
+/// which expires the deletion committed at that sequence and every older
+/// one, at a time when every commit is a grace window old.
+async fn advance_floor_through<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    deletion_seq: ChangeSeq,
+    context: &MutationContext,
+) {
+    fold::fold_wal(store, namespace_id)
+        .await
+        .expect("fold the deletion");
+    let advanced = advance_retention_floor(
+        store,
+        None,
+        namespace_id,
+        RetentionTarget::Seq(deletion_seq),
+        crate::test_support::grace_elapsed_after(context.now_ms),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance the floor to the deletion");
+    assert_eq!(advanced.response.retention_floor_seq, deletion_seq);
+}
+
+/// Acknowledges the current retention floor the way a maintainer does for a
+/// namespace that nobody writes to: acquires the writer epoch, whose fence
+/// records the floor, and folds the fence.
+async fn acknowledge_floor<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) {
+    acquire_writer_epoch(store, namespace_id, context)
+        .await
+        .expect("write a fence");
+    fold::fold_wal(store, namespace_id)
+        .await
+        .expect("fold the fence");
+    assert_eq!(
+        read_acknowledged_floor_seq(store, namespace_id).await,
+        read_floor_seq(store, namespace_id).await,
+        "the fold of the fence acknowledges the floor"
+    );
+}
+
 /// Checkpoints, then compacts every delta run into the base through
 /// compaction units, returning the resulting current manifest number. The
 /// old synchronous rebuild produced this shape in one checkpoint call;
@@ -268,6 +328,7 @@ fn merge_rows_with_retention(
     group: MetadataFamilyGroup,
     rows_by_family: &mut BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
     floor_seq: ChangeSeq,
+    acknowledged_floor_seq: ChangeSeq,
 ) -> crate::error::Result<()> {
     for cluster in retention_clusters(group) {
         // The stream a merge sees: the cluster's rows by locality, then family,
@@ -290,7 +351,7 @@ fn merge_rows_with_retention(
             .iter()
             .map(|family| (*family, Vec::new()))
             .collect();
-        let mut operator = cluster.rule.operator();
+        let mut operator = cluster.rule.operator(acknowledged_floor_seq);
         let mut locality: Option<String> = None;
         for (family, row_key, row) in merged {
             let row_locality = locality_of(family, &row_key, cluster.locality);
@@ -431,21 +492,18 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<CurrentFileState> {
-    let manifest_no = load_current_manifest(store, namespace_id)
+    // Every inode the current manifest has allocated, including one whose
+    // rows a base compaction removed because an expired deletion hides it,
+    // which a read reports as hidden before the removal and after it.
+    let next_inode_id = load_current_manifest(store, namespace_id)
         .await
         .expect("read metadata manifest")
         .state
-        .manifest()
-        .manifest_no;
-    let materialized =
-        load_manifest_materialization_for_inspection(store, namespace_id, manifest_no)
-            .await
-            .expect("materialize the manifest");
-    let inode_ids: Vec<InodeId> = materialized
-        .metadata_state
-        .inodes()
-        .iter()
-        .map(|inode| inode.inode_id)
+        .envelope
+        .payload()
+        .next_inode_id;
+    let inode_ids: Vec<InodeId> = (loonfs_types::ROOT_INODE_ID.0..next_inode_id.0)
+        .map(InodeId)
         .collect();
     let view = load_current_metadata_view(store, namespace_id)
         .await
@@ -872,6 +930,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         next_inode_id: head.next_inode_id,
         next_run_no,
         retention_floor_seq: source.retention_floor_seq,
+        acknowledged_floor_seq: head.basis_floor_seq,
         runs,
     })
     .map(|encoded| encoded.into_envelope())
@@ -980,6 +1039,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         next_inode_id: InodeId(64),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
+        acknowledged_floor_seq: ChangeSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
             run_seq: head_seq,

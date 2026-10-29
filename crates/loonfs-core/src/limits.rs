@@ -26,14 +26,12 @@ pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
 /// Most levels of the walk that builds a base compaction's kept inode filter.
 ///
 /// The walk's stack holds at most this many directories, counting the one
-/// the walk starts at, and the walk follows at most this many ancestors up
-/// from a recoverable deletion. Each level of the stack keeps a directory's
+/// the walk starts at. Each level of the stack keeps a directory's
 /// inode ID and the row key where the walk resumes that directory, which is
 /// at most about 1.6 KiB for a name key of `MAX_NAME_KEY_BYTES`, so the stack
 /// takes at most about 7 MiB. A move can nest a tree deeper than any request
 /// path, and a compaction that meets a deeper tree keeps every row it would
-/// have tested, as it does when the filter would be larger than
-/// `MAX_BLOOM_FILTER_BYTES`.
+/// have tested.
 pub const MAX_KEPT_INODE_WALK_DEPTH: usize = 4_096;
 
 /// Most encoded segment bytes that one fold or compaction keeps in memory
@@ -77,30 +75,6 @@ pub const READAHEAD_WINDOW_BYTES: usize = 1024 * 1024;
 /// request can occupy the serialized publisher during planning and
 /// materialization.
 pub const MAX_COMMIT_OPERATIONS: usize = 4096;
-
-/// Most deletions that one of the writer's expiry commits expires, and so
-/// the most `listed` rows that one scan of the writer's expiry returns.
-///
-/// The writer admits no other commit between such a scan and the commit that
-/// expires what it found, and validating each expire event reads its
-/// deletion's tombstone, so this bounds how long one step of the expiry
-/// delays the namespace's other writes. A thousand expire deltas are well
-/// under a megabyte of WAL record. A fork's first writer session expires
-/// every inherited deletion before it admits a request, so that request
-/// waits for one commit for each thousand inherited deletions.
-pub const MAX_EXPIRED_DELETIONS_PER_COMMIT: usize = 1_000;
-
-const _: () = assert!(MAX_EXPIRED_DELETIONS_PER_COMMIT <= MAX_COMMIT_OPERATIONS);
-
-/// Most successful publications of its own that a writer session waits for
-/// before it tries an expiry step again after consecutive failed steps. The
-/// wait doubles from one publication with each failure.
-///
-/// A step that keeps failing, for example against a store that refuses the
-/// put, then costs at most one failed WAL put for every 64 of the session's
-/// publications, while a step that failed once is tried again after the
-/// session's next publication.
-pub const MAX_EXPIRY_RETRY_PUBLICATIONS: usize = 64;
 
 /// Four MiB of event heap keeps ordinary change pages small while allowing several large commits per page.
 pub const CHANGE_FEED_PAGE_BYTES: usize = 4 * 1024 * 1024;

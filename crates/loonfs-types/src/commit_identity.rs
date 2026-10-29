@@ -203,26 +203,6 @@ enum OperationFingerprintInput<'a> {
         grants: BTreeMap<&'a str, Vec<&'static str>>,
         expected_access_revision_no: Option<AccessRevisionNo>,
     },
-    // The writer's own operation. No request can contain it, so it has no
-    // `FilesystemOperation` spelling.
-    ExpireDeletion {
-        inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-    },
-}
-
-/// One deletion that a namespace's writer expires, identified the way an
-/// undelete identifies it: by its root inode and the sequence of the commit
-/// that deleted it.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, serde::Deserialize,
-)]
-#[serde(deny_unknown_fields)]
-pub struct ExpiredDeletion {
-    /// The root inode of the deletion.
-    pub inode_id: InodeId,
-    /// The sequence of the commit that deleted the root.
-    pub deletion_seq: ChangeSeq,
 }
 
 #[derive(Serialize)]
@@ -704,54 +684,6 @@ pub fn semantic_commit_fingerprint(
     )?))
 }
 
-/// Computes the semantic fingerprint of the commit in which a namespace's
-/// writer expires `deletions`, in order.
-///
-/// The commit has no subject, message, or preconditions, so its actor and
-/// the deletions are its whole identity.
-pub fn expiry_commit_fingerprint(
-    namespace_id: &NamespaceId,
-    actor: &ActorId,
-    deletions: &[ExpiredDeletion],
-) -> CommitFingerprint {
-    fingerprint_bytes(&canonical_expiry_bytes(namespace_id, actor, deletions))
-}
-
-/// The preimage in the member order Appendix B specifies.
-#[derive(Serialize)]
-struct CanonicalCommit<'a> {
-    domain: &'static str,
-    namespace_id: &'a str,
-    actor_id: &'a str,
-    subject_id: Option<&'a str>,
-    operations: Vec<OperationFingerprintInput<'a>>,
-    message: Option<&'a str>,
-    preconditions: Vec<PreconditionFingerprintInput<'a>>,
-}
-
-fn canonical_expiry_bytes(
-    namespace_id: &NamespaceId,
-    actor: &ActorId,
-    deletions: &[ExpiredDeletion],
-) -> Vec<u8> {
-    serde_json::to_vec(&CanonicalCommit {
-        domain: COMMIT_FINGERPRINT_DOMAIN,
-        namespace_id: namespace_id.as_str(),
-        actor_id: actor.as_str(),
-        subject_id: None,
-        operations: deletions
-            .iter()
-            .map(|deletion| OperationFingerprintInput::ExpireDeletion {
-                inode_id: deletion.inode_id,
-                deletion_seq: deletion.deletion_seq,
-            })
-            .collect(),
-        message: None,
-        preconditions: Vec::new(),
-    })
-    .expect("an expiry preimage of integers and fixed strings should encode")
-}
-
 fn canonical_commit_bytes(
     namespace_id: &NamespaceId,
     actor: &ActorId,
@@ -761,6 +693,18 @@ fn canonical_commit_bytes(
     preconditions: &[CommitPrecondition],
     inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> Result<Vec<u8>, SemanticFingerprintError> {
+    /// The preimage in the member order Appendix B specifies.
+    #[derive(Serialize)]
+    struct CanonicalCommit<'a> {
+        domain: &'static str,
+        namespace_id: &'a str,
+        actor_id: &'a str,
+        subject_id: Option<&'a str>,
+        operations: Vec<OperationFingerprintInput<'a>>,
+        message: Option<&'a str>,
+        preconditions: Vec<PreconditionFingerprintInput<'a>>,
+    }
+
     Ok(serde_json::to_vec(&CanonicalCommit {
         domain: COMMIT_FINGERPRINT_DOMAIN,
         namespace_id: namespace_id.as_str(),
@@ -793,26 +737,13 @@ mod tests {
             name: String,
             #[serde(default, skip_serializing_if = "Option::is_none")]
             subject_id: Option<SubjectId>,
-            #[serde(flatten)]
-            request: VectorRequest,
+            operation: FilesystemOperation,
             #[serde(default)]
             preconditions: Vec<crate::CommitPrecondition>,
             #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
             inline_content_ids: BTreeSet<ContentId>,
             canonical_json: String,
             fingerprint: String,
-        }
-        /// A request's one operation, or the deletions a writer's expiry
-        /// commit expires.
-        #[derive(Serialize, serde::Deserialize)]
-        #[serde(untagged)]
-        enum VectorRequest {
-            Operation {
-                operation: FilesystemOperation,
-            },
-            Expiry {
-                expired_deletions: Vec<ExpiredDeletion>,
-            },
         }
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/golden/commit_fingerprints_v1.json");
@@ -823,43 +754,7 @@ mod tests {
         let update = std::env::var_os("UPDATE_GOLDEN").is_some();
         for vector in &mut vectors {
             let namespace = NamespaceId::parse("demo").expect("namespace");
-            let operations = match &vector.request {
-                VectorRequest::Operation { operation } => [operation.clone()],
-                VectorRequest::Expiry { expired_deletions } => {
-                    assert!(
-                        vector.subject_id.is_none()
-                            && vector.preconditions.is_empty()
-                            && vector.inline_content_ids.is_empty(),
-                        "{}: an expiry commit has no subject, preconditions, or content",
-                        vector.name
-                    );
-                    let bytes =
-                        canonical_expiry_bytes(&namespace, &ActorId::loonfs(), expired_deletions);
-                    if update {
-                        vector.canonical_json =
-                            String::from_utf8(bytes.clone()).expect("canonical UTF-8");
-                        vector.fingerprint = fingerprint_bytes(&bytes).as_str().to_owned();
-                    }
-                    assert_eq!(
-                        bytes,
-                        vector.canonical_json.as_bytes(),
-                        "{} canonical bytes",
-                        vector.name
-                    );
-                    assert_eq!(
-                        expiry_commit_fingerprint(
-                            &namespace,
-                            &ActorId::loonfs(),
-                            expired_deletions
-                        )
-                        .as_str(),
-                        vector.fingerprint,
-                        "{} digest",
-                        vector.name
-                    );
-                    continue;
-                }
-            };
+            let operations = [vector.operation.clone()];
             let identities = vector
                 .inline_content_ids
                 .iter()

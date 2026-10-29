@@ -94,6 +94,15 @@ pub enum GarbageCollection {
 /// compaction, and skipping the day's advance would make the window a day
 /// longer for exactly the namespaces that are busiest.
 ///
+/// Before each advance, the visit acknowledges the floor that the previous
+/// pass set, with [`Maintenance::acknowledge_retention_floor`]. A namespace
+/// whose writer committed since the previous pass has acknowledged that
+/// floor, or acknowledges it when the visit folds its tail, and a namespace
+/// that nobody wrote to gets a fence. A writer session that the fence fences
+/// returns `writer_fenced` to its next request, like after any takeover. A
+/// failed acknowledgment keeps no retry state either, and the next pass
+/// tries it again.
+///
 /// The pass and the ticks share `max_concurrent_maintenance` visit slots and
 /// never visit the same namespace concurrently. Listing failures stop new
 /// visits; already started visits finish before returning. Hosts can call
@@ -186,10 +195,19 @@ enum SweepCall {
     /// The retention advance, which the full pass makes, or leaves to a
     /// visit that has the namespace when the pass reaches it.
     Retention,
+    /// The acknowledgment of the retention floor, which the visit that
+    /// makes the retention advance makes first.
+    RetentionAcknowledgment,
 }
 
 impl SweepCall {
-    const ALL: [Self; 4] = [Self::Metadata, Self::GrepIndex, Self::Gc, Self::Retention];
+    const ALL: [Self; 5] = [
+        Self::Metadata,
+        Self::GrepIndex,
+        Self::Gc,
+        Self::Retention,
+        Self::RetentionAcknowledgment,
+    ];
 
     fn as_str(self) -> &'static str {
         match self {
@@ -197,18 +215,20 @@ impl SweepCall {
             Self::GrepIndex => "grep_index",
             Self::Gc => "gc",
             Self::Retention => "retention",
+            Self::RetentionAcknowledgment => "retention_acknowledgment",
         }
     }
 
-    /// The call's retry state on a held entry. The retention advance keeps
-    /// none, because ticks never retry it, so a failed advance waits for the
-    /// next full pass like a call on a namespace without a held entry.
+    /// The call's retry state on a held entry. The retention advance and
+    /// the acknowledgment keep none, because ticks never retry them, so a
+    /// failed one waits for the next full pass like a call on a namespace
+    /// without a held entry.
     fn retry(self, held: &HeldNamespace) -> Option<SweepRetry> {
         match self {
             Self::Metadata => Some(held.metadata_retry),
             Self::GrepIndex => Some(held.index_retry),
             Self::Gc => Some(held.gc_retry),
-            Self::Retention => None,
+            Self::Retention | Self::RetentionAcknowledgment => None,
         }
     }
 
@@ -217,7 +237,7 @@ impl SweepCall {
             Self::Metadata => Some(&mut held.metadata_retry),
             Self::GrepIndex => Some(&mut held.index_retry),
             Self::Gc => Some(&mut held.gc_retry),
-            Self::Retention => None,
+            Self::Retention | Self::RetentionAcknowledgment => None,
         }
     }
 }
@@ -286,8 +306,9 @@ impl Sweep {
 
     /// Visits every namespace the store lists once. With
     /// [`GarbageCollection::Collect`], each visit also collects the
-    /// namespace's garbage and its grep garbage. Each visit also advances the
-    /// namespace's retention floor under its retention window.
+    /// namespace's garbage and its grep garbage. Each visit also acknowledges
+    /// the namespace's retention floor and then advances it under its
+    /// retention window.
     ///
     /// Returns how many namespaces the pass listed, or the listing failure
     /// that ended it once the visits it had started returned. A failed call
@@ -555,14 +576,20 @@ impl Sweep {
         }
     }
 
-    /// Advances the namespace's retention floor to the last commit at or
-    /// before the current time minus the namespace's retention window, or
-    /// minus `retention_window_ms` for a namespace that has no window of its
-    /// own, with the same
-    /// advance as the `retention` job. A namespace with neither window keeps
-    /// its floor. A deleted namespace returns `namespace_deleted`, which isn't
-    /// a failure. For when the deletions below the new floor expire, see
-    /// [Advancing the floor on a
+    /// Acknowledges the namespace's current retention floor, and then
+    /// advances the floor to the last commit at or before the current time
+    /// minus the namespace's retention window, or minus `retention_window_ms`
+    /// for a namespace that has no window of its own, with the same advance
+    /// as the `retention` job. A namespace with neither window keeps its
+    /// floor. A deleted namespace returns `namespace_deleted`, which isn't a
+    /// failure. A failed acknowledgment doesn't stop the advance.
+    ///
+    /// The acknowledgment comes first, so the floor it acknowledges is the
+    /// one that the previous full pass set, and a namespace whose writer
+    /// committed since then has acknowledged that floor already. Only a
+    /// namespace that nobody wrote to since the previous pass gets a fence.
+    /// For when the deletions below the new floor expire, and when their
+    /// rows are removed, see [Advancing the floor on a
     /// schedule](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#advancing-the-floor-on-a-schedule).
     async fn advance_retention(
         &self,
@@ -573,13 +600,31 @@ impl Sweep {
         if inner.stop.is_cancelled() {
             return;
         }
+        // Boxed so the spawned sweep's `Send` check does not recurse through
+        // every engine future the acknowledgment and the advance await.
+        let acknowledged = contain(
+            inner
+                .maintenance
+                .acknowledge_retention_floor(namespace_id)
+                .boxed()
+                .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+        )
+        .await;
+        self.record_call(
+            namespace_id,
+            entry,
+            SweepCall::RetentionAcknowledgment,
+            acknowledged,
+            0,
+        );
+        if inner.stop.is_cancelled() {
+            return;
+        }
         let options = AdvanceRetentionFloorOptions {
             target: RetentionTarget::Window {
                 default_window_ms: inner.retention_window_ms,
             },
         };
-        // Boxed so the spawned sweep's `Send` check does not recurse through
-        // every engine future the advance awaits.
         let result = contain(
             inner
                 .maintenance
@@ -698,9 +743,9 @@ impl Sweep {
     /// On a held namespace, the first failure in a row logs at error level
     /// and later ones at warning level, and the doubling backoff limits how
     /// often they repeat. A namespace that no host holds keeps no retry
-    /// state, and neither does the retention advance, because the next full
-    /// pass is their retry. Each full pass that finds one failing logs one
-    /// error line, so the namespace logs once per
+    /// state, and neither do the retention advance and its acknowledgment,
+    /// because the next full pass is their retry. Each full pass that finds
+    /// one failing logs one error line, so the namespace logs once per
     /// `full_sweep_interval_ms` (a day by default). The rule of logging a
     /// repeating failure once allows one line per interval, so a failure
     /// that's retried once a day can log on every retry. Every panic logs

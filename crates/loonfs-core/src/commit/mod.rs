@@ -4,14 +4,12 @@
 //! commit plan containing WAL deltas. The result is framed for publication.
 //! `ops` defines the inode-level operations produced by path planning.
 
-mod expiry;
 mod inode_allocator;
 mod ops;
 mod plan;
 mod validate;
 mod wal_payload;
 
-pub(crate) use self::expiry::DeletionExpiry;
 pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation, InodeAllocator};
 pub(crate) use self::ops::CommitOperation;
 pub(crate) use self::plan::{

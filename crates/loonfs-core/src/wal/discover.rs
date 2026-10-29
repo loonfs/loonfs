@@ -39,7 +39,13 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
             tail: ValidatedWalTail::new(objects),
         });
     }
-    let mut walk = WalWalk::after(namespace_id, head.wal_no, head.seq, head.writer_epoch);
+    let mut walk = WalWalk::after(
+        namespace_id,
+        head.wal_no,
+        head.seq,
+        head.writer_epoch,
+        head.basis_floor_seq,
+    );
     // Replay needs every object above the folded boundary, so discovery keeps the bodies.
     let outcome = read_wal_after(store, namespace_id, head.wal_no, |object_key, envelope| {
         let object = walk.validate(object_key, envelope).map_err(wal_error)?;
@@ -185,7 +191,13 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     let mut tail = None;
     let mut extended = false;
     let namespace_id = state.namespace_id.clone();
-    let mut walk = WalWalk::after(&namespace_id, state.wal_no, state.seq, state.writer_epoch);
+    let mut walk = WalWalk::after(
+        &namespace_id,
+        state.wal_no,
+        state.seq,
+        state.writer_epoch,
+        state.basis_floor_seq,
+    );
     let mut other_epoch = false;
     let visit = |object_key: String,
                  envelope: Arc<WalObjectEnvelope>|

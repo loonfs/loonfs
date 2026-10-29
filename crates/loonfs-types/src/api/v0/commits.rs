@@ -152,16 +152,6 @@ pub enum FilesystemChange {
         /// The binding that this event created. The value is opaque.
         binding_version: BindingVersion,
     },
-    /// A deletion stopped being recoverable. The deleted subtree stays hidden, and an undelete of
-    /// the deletion returns `not_deleted`.
-    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeletionExpired"))]
-    DeletionExpired {
-        /// The inode at the root of the deleted subtree.
-        #[serde(with = "crate::public_inode_id")]
-        inode_id: InodeId,
-        /// The sequence of the commit that deleted the subtree.
-        deletion_seq: ChangeSeq,
-    },
     /// An inode's attributes changed.
     #[cfg_attr(
         feature = "openapi",
@@ -429,22 +419,6 @@ mod tests {
             format!(
                 r#"{{"kind":"undeleted","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","binding_version":"{version}"}}"#
             )
-        );
-
-        let deletion_expired = FilesystemChange::DeletionExpired {
-            inode_id: InodeId(2),
-            deletion_seq: crate::ChangeSeq(40),
-        };
-        let deletion_expired_json =
-            r#"{"kind":"deletion_expired","inode_id":"ino_2","deletion_seq":40}"#;
-        assert_eq!(
-            serde_json::to_string(&deletion_expired).expect("serialize deletion-expired event"),
-            deletion_expired_json
-        );
-        assert_eq!(
-            serde_json::from_str::<FilesystemChange>(deletion_expired_json)
-                .expect("decode deletion-expired event"),
-            deletion_expired
         );
 
         let attributes_changed = FilesystemChange::AttributesChanged {

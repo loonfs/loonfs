@@ -21,7 +21,7 @@ use super::session::PublishPlanningSession;
 use crate::authorize::Authorizer;
 use crate::commit::{
     validate_operations, AppendedContent, CandidateAllocation, CommitFingerprint, CommitNumbering,
-    DeletionExpiry, PublishValidationSession, ValidatedCommitPlan,
+    PublishValidationSession, ValidatedCommitPlan,
 };
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
@@ -80,7 +80,6 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     store: &S,
     content_writes: &crate::PermitPool,
     candidate: &CommitCandidate,
-    request: &CommitIntent,
     semantic_identity: CommitFingerprint,
     session: &PublishPlanningSession<'_>,
     base_view: MetadataView<'_, '_, S>,
@@ -88,7 +87,16 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     allocation: &mut CandidateAllocation,
 ) -> Result<ValidatedCommitPlan> {
     let head = session.head();
-    let committed_seq = next_commit_seq(head.seq)?;
+    let request = candidate.intent();
+    let committed_seq = next_public_ordinal(head.seq.0)
+        .map(ChangeSeq)
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "the namespace head is at sequence {}, the largest sequence number, so no \
+                 commit can follow it",
+                head.seq
+            ))
+        })?;
 
     let authorizer =
         Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
@@ -176,67 +184,6 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     )
     .await?;
     Ok(plan)
-}
-
-/// Validates the writer's expiry of deletions into one commit.
-///
-/// Each deletion is one operation, validated against the view that includes
-/// the expire events before it, so a request that names one deletion twice
-/// fails at its second operation. An expiry allocates no inode and carries
-/// no content, and it has no subject to authorize.
-pub(crate) async fn prepare_expiry_against_publish_view<S: ObjectStore + ?Sized>(
-    expiry: &DeletionExpiry,
-    semantic_identity: CommitFingerprint,
-    session: &PublishPlanningSession<'_>,
-    base_view: MetadataView<'_, '_, S>,
-    committed_at_ms: u64,
-) -> Result<ValidatedCommitPlan> {
-    let head = session.head();
-    let committed_seq = next_commit_seq(head.seq)?;
-    let actor_id = DeletionExpiry::actor_id();
-    let mut resolved =
-        PublishValidationSession::new(base_view, session.accepted_rows(), committed_seq);
-    let mut numbering = CommitNumbering::default();
-    let mut deltas = Vec::new();
-    for (index, operation) in expiry.operations().enumerate() {
-        deltas.extend(
-            validate_operations(
-                std::slice::from_ref(&operation),
-                &mut resolved,
-                &mut numbering,
-                expiry.commit_id(),
-                &actor_id,
-                committed_at_ms,
-                |_| None,
-            )
-            .await
-            .map_err(|error| error.at_operation(index))?,
-        );
-    }
-    Ok(ValidatedCommitPlan {
-        namespace_id: head.namespace_id.clone(),
-        commit_id: expiry.commit_id().clone(),
-        actor_id,
-        writer_epoch: head.writer_epoch,
-        message: None,
-        semantic_identity,
-        apply_after_seq: head.seq,
-        assigned_seq: committed_seq,
-        deltas,
-        appended: Vec::new(),
-    })
-}
-
-/// The sequence of the commit that follows `head_seq`.
-fn next_commit_seq(head_seq: ChangeSeq) -> Result<ChangeSeq> {
-    next_public_ordinal(head_seq.0)
-        .map(ChangeSeq)
-        .ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "the namespace head is at sequence {head_seq}, the largest sequence number, so \
-                 no commit can follow it"
-            ))
-        })
 }
 
 async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
@@ -734,7 +681,6 @@ mod tests {
             store,
             &crate::test_support::content_writes(),
             &CommitCandidate::prepared(request.clone(), content),
-            request,
             serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
             &session,
             view.projected_metadata_view(),

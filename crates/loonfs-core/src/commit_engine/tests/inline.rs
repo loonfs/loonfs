@@ -355,13 +355,8 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let inline_candidate = candidate("forms", vec![inline]);
-    let staged_candidate = CommitCandidate::prepared(
-        inline_candidate
-            .intent()
-            .expect("a filesystem request")
-            .clone(),
-        vec![proof],
-    );
+    let staged_candidate =
+        CommitCandidate::prepared(inline_candidate.intent().clone(), vec![proof]);
     publish(&mut engine, &store, &context, inline_candidate)
         .await
         .expect("inline publish");

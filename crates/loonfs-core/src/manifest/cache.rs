@@ -886,6 +886,7 @@ mod tests {
                 next_inode_id: InodeId(2),
                 wal_no: WalNo(seq),
                 folded_wal_no: WalNo(0),
+                basis_floor_seq: ChangeSeq(0),
             },
             basis: MetadataBasis(ManifestRef {
                 owner_namespace_id: namespace_id,

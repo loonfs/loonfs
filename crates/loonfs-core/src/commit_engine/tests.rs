@@ -3,8 +3,8 @@
 
 mod content;
 mod deletion;
-mod expiry;
 mod inline;
+mod retention_floor;
 
 use super::*;
 use crate::error::ErrorCode;

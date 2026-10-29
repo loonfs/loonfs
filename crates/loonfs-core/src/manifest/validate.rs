@@ -45,10 +45,12 @@ pub(super) fn validate_manifest(
     if payload.fork_basis.as_ref().is_some_and(|basis| {
         basis.manifest.owner_namespace_id == payload.namespace_id
             || basis.manifest.head_seq > payload.retention_floor_seq
+            || basis.manifest.head_seq > payload.acknowledged_floor_seq
     }) {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
-            message: "fork provenance disagrees with namespace identity or retention floor"
+            message: "fork provenance disagrees with namespace identity, retention floor, or \
+                      acknowledged floor"
                 .to_owned(),
         });
     }
@@ -69,6 +71,15 @@ pub(super) fn validate_manifest_materialization_ranges(
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: "retention floor is beyond the manifest head sequence".to_owned(),
+        });
+    }
+    if payload.acknowledged_floor_seq > payload.retention_floor_seq {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: format!(
+                "acknowledged floor `{}` is above the retention floor `{}`",
+                payload.acknowledged_floor_seq, payload.retention_floor_seq
+            ),
         });
     }
 

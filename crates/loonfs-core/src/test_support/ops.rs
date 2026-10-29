@@ -288,6 +288,7 @@ pub(crate) async fn append_wal_commit<S: ObjectStore + ?Sized>(
         writer_epoch: head.writer_epoch,
         head_seq: committed_seq,
         next_inode_id: head.next_inode_id,
+        basis_floor_seq: head.basis_floor_seq,
         records: vec![WalCommitPayload {
             committed_seq,
             commit_id: CommitId::generate(),

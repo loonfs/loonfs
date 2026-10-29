@@ -1,31 +1,31 @@
 //! The kept inode filter, which tells a base compaction which inodes keep
 //! their rows.
 //!
-//! The tombstone of an expired deletion hides its subtree at every sequence
-//! that a compaction preserves, so a base compaction of a group that stores
-//! rows by inode removes every row of the inodes that the deletion hides
+//! A deletion has expired in a compaction's basis when its latest tombstone
+//! event is a `set` and its deletion sequence is at or below the basis
+//! manifest's acknowledged floor. Its tombstone hides its subtree at every
+//! sequence that a compaction preserves, and no undelete of it can be
+//! committed, so a base compaction of a group that stores rows by inode
+//! removes every row of the inodes that the deletion hides
 //! ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 //! The filter contains every inode that's visible at the basis's head or
-//! under a recoverable deletion, and the ancestors that a recoverable
-//! deletion's authorization is judged on. A walk of the basis's directory
-//! tree finds them.
+//! under a recoverable deletion. A walk of the basis's directory tree finds
+//! them.
 
 use super::compaction_step::{group_run_descriptors, CompactionUnitOutcome, MergePlacement};
 use super::runs::MetadataFamilyGroup;
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::MetadataCompactionCancellation;
 use crate::bloom_filter::BloomFilter;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::limits::MAX_KEPT_INODE_WALK_DEPTH;
 use crate::metadata::row_decode::{
     active_deletion_from_manifest_row, direntry_binding_from_manifest_row,
-    tombstone_from_manifest_row,
 };
-use crate::metadata::{DirentryBindingRecord, DIRECTORY_PAGE_RAW_SCAN_LIMIT};
+use crate::metadata::{ActiveDeletionRecord, DirentryBindingRecord, DIRECTORY_PAGE_RAW_SCAN_LIMIT};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
-    lookup_keys, ActiveDeletionRowAction, DeltaPosition, MetadataRow, MetadataRowFamily,
-    TombstoneRowAction,
+    lookup_keys, ActiveDeletionRowAction, MetadataRow, MetadataRowFamily,
 };
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, ROOT_INODE_ID};
@@ -39,8 +39,8 @@ const KEPT_INODE_SCAN_ROWS: usize = DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 /// The inodes whose rows a base merge keeps.
 pub(super) enum KeptInodeFilter {
     /// The merge keeps every row, because it isn't a base merge of a group
-    /// that stores rows by inode, because the basis's retention floor is 0,
-    /// or because the filter or the walk would be over a limit.
+    /// that stores rows by inode, because the basis manifest's acknowledged
+    /// floor is 0, or because the walk would exceed its depth limit.
     EveryInode,
     /// The inodes that the walk reached. The filter can also match an inode
     /// that the walk didn't reach, which keeps that inode's rows for one
@@ -97,16 +97,19 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
 /// Builds the kept inode filter for a merge of `group` at `placement` over
 /// `basis`, or returns the outcome that stopped the walk.
 ///
-/// A basis whose manifest has a retention floor of 0 keeps every row without
-/// a walk. Validation accepts an `expire` only against a floor at or above
-/// its deletion, and the floor never decreases, so such a basis holds no
-/// expired deletion.
+/// A basis whose manifest has an acknowledged floor of 0 keeps every row
+/// without building the filter. Every deletion's sequence is at least 1, so
+/// no deletion in that basis is at or below the acknowledged floor, and the
+/// acknowledged floor never decreases, so no earlier compaction treated a
+/// deletion in it as expired either. Any other basis builds the filter,
+/// because a base compaction of `active_deletions` removes an expired
+/// deletion's `listed` row on its own schedule, so the other groups can't
+/// tell from that family whether they still store rows that the deletion
+/// hides.
 ///
-/// The filter is sized for the basis's `inodes` rows at ten bits each, and
-/// its seed is the output run number, so the next compaction of the group
-/// uses another seed. A filter that would be larger than
-/// `MAX_BLOOM_FILTER_BYTES`, or a walk that would need more than
-/// `MAX_KEPT_INODE_WALK_DEPTH` frames or ancestors, keeps every row.
+/// The filter uses ten bits per expected inode, capped at
+/// `MAX_BLOOM_FILTER_BYTES`. Its seed is the output run number. A walk
+/// deeper than `MAX_KEPT_INODE_WALK_DEPTH` keeps every row.
 pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     basis: &VerifiedMetadataSegments<'_, S>,
     namespace_id: &NamespaceId,
@@ -122,7 +125,8 @@ pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
         .as_ref()
         .expect("a base compaction should have a manifest basis")
         .payload();
-    if manifest.retention_floor_seq == ChangeSeq(0) {
+    let acknowledged_floor_seq = manifest.acknowledged_floor_seq;
+    if acknowledged_floor_seq == ChangeSeq(0) {
         return Ok(Ok(KeptInodeFilter::EveryInode));
     }
     let expected_inodes = basis
@@ -132,25 +136,16 @@ pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
         .fold(0_u64, |count, segment| {
             count.saturating_add(segment.row_count)
         });
-    let seed = manifest.next_run_no.0;
-    let Some(filter) = BloomFilter::new(expected_inodes, seed) else {
-        tracing::info!(namespace_id = %namespace_id, expected_inodes,
-            "kept inode filter exceeded its byte limit; kept every row");
-        return Ok(Ok(KeptInodeFilter::EveryInode));
-    };
+    let filter = BloomFilter::new(expected_inodes, manifest.next_run_no.0);
     let mut walk = KeptInodeWalk {
         segments: basis.with_empty_block_memo(),
         filter,
+        acknowledged_floor_seq,
         cancellation,
     };
     match walk.reach_kept_inodes().await? {
         ControlFlow::Continue(()) => Ok(Ok(KeptInodeFilter::Reached(walk.filter))),
         ControlFlow::Break(WalkStop::Cancelled) => Ok(Err(CompactionUnitOutcome::Cancelled)),
-        ControlFlow::Break(WalkStop::FilterFull) => {
-            tracing::info!(namespace_id = %namespace_id, expected_inodes,
-                "kept inode filter exceeded its byte limit; kept every row");
-            Ok(Ok(KeptInodeFilter::EveryInode))
-        }
         ControlFlow::Break(WalkStop::TooDeep) => {
             tracing::info!(namespace_id = %namespace_id, max_depth = MAX_KEPT_INODE_WALK_DEPTH,
                 "kept inode walk exceeded its depth limit; kept every row");
@@ -162,10 +157,7 @@ pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
 /// Why a walk stopped before it reached every inode it keeps.
 enum WalkStop {
     Cancelled,
-    /// The filter would grow past `MAX_BLOOM_FILTER_BYTES`.
-    FilterFull,
-    /// The walk would hold more than `MAX_KEPT_INODE_WALK_DEPTH` directories,
-    /// or follow more ancestors than that up from a recoverable deletion.
+    /// The walk would hold more than `MAX_KEPT_INODE_WALK_DEPTH` directories.
     TooDeep,
 }
 
@@ -186,21 +178,104 @@ impl WalkFrame {
     }
 }
 
+/// Reads the deletions in a range of the basis's `active_deletions` that
+/// have a `listed` row and no `removed` row, a page at a time.
+struct ListedDeletions {
+    lower_bound: String,
+    /// `None` reads to the end of the family.
+    upper_bound: Option<String>,
+    /// The rows of the last page that the reader hasn't returned yet.
+    unread: VecDeque<ActiveDeletionRecord>,
+    /// Whether the last page reached the end of the range.
+    scanned_to_end: bool,
+    /// The last removal read. A removal sorts just before the listed row it
+    /// cancels, so a listed row can only match the last removal read.
+    removed: Option<(ChangeSeq, InodeId)>,
+}
+
+impl ListedDeletions {
+    /// The deletions above `after_seq`.
+    fn above(after_seq: ChangeSeq) -> Self {
+        Self {
+            lower_bound: lookup_keys::active_deletion_key_after_seq(after_seq),
+            upper_bound: string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX),
+            unread: VecDeque::new(),
+            scanned_to_end: false,
+            removed: None,
+        }
+    }
+
+    /// Returns the next deletion's root and kind, or `None` at the end of the
+    /// range. Checks `cancellation` before it reads each page.
+    async fn next<S: ObjectStore + ?Sized>(
+        &mut self,
+        segments: &VerifiedMetadataSegments<'_, S>,
+        cancellation: &MetadataCompactionCancellation,
+    ) -> Result<ControlFlow<WalkStop, Option<(InodeId, InodeKind)>>> {
+        loop {
+            while let Some(deletion) = self.unread.pop_front() {
+                let identity = (deletion.deletion_seq, deletion.root_inode_id);
+                match deletion.action {
+                    ActiveDeletionRowAction::Removed { .. } => self.removed = Some(identity),
+                    ActiveDeletionRowAction::Listed { inode_kind, .. }
+                        if self.removed != Some(identity) =>
+                    {
+                        return Ok(ControlFlow::Continue(Some((
+                            deletion.root_inode_id,
+                            inode_kind,
+                        ))));
+                    }
+                    ActiveDeletionRowAction::Listed { .. } => {}
+                }
+            }
+            if self.scanned_to_end {
+                return Ok(ControlFlow::Continue(None));
+            }
+            if cancellation.is_cancelled() {
+                return Ok(ControlFlow::Break(WalkStop::Cancelled));
+            }
+            let rows = segments
+                .scan_range_page_with_keys(
+                    MetadataRowFamily::ActiveDeletions,
+                    &self.lower_bound,
+                    self.upper_bound.as_deref(),
+                    KEPT_INODE_SCAN_ROWS,
+                )
+                .await?;
+            self.scanned_to_end = rows.len() < KEPT_INODE_SCAN_ROWS;
+            if let Some((row_key, _)) = rows.last() {
+                self.lower_bound = lookup_keys::after_row_key(row_key);
+            }
+            for (_, row) in rows {
+                self.unread
+                    .push_back(active_deletion_from_manifest_row(row)?);
+            }
+        }
+    }
+}
+
 struct KeptInodeWalk<'a, 'c, S: ObjectStore + ?Sized> {
     /// The basis, with a block memo that the walk drops before the merge
     /// reads its input.
     segments: VerifiedMetadataSegments<'a, S>,
     filter: BloomFilter,
+    /// The basis manifest's acknowledged floor. A deletion at or below it
+    /// that no undelete cancelled has expired.
+    acknowledged_floor_seq: ChangeSeq,
     cancellation: &'c MetadataCompactionCancellation,
 }
 
 impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
     /// Inserts every inode that's visible at the basis's head, and then every
-    /// inode under a recoverable deletion, with that deletion's ancestors.
+    /// inode under a recoverable deletion.
     ///
     /// Deleting an item unbinds it, so the walk from the root inode doesn't
     /// reach a deleted subtree. An expired deletion isn't a starting point,
-    /// and its root is unbound, so no walk reaches the inodes it hides.
+    /// and its root is unbound, so no walk reaches the inodes it hides. An
+    /// inner deletion is older than the deletion around it, so no recoverable
+    /// deletion is inside an expired one, and the two walks reach every
+    /// ancestor through which the rights on an item under a recoverable
+    /// deletion are evaluated.
     async fn reach_kept_inodes(&mut self) -> Result<ControlFlow<WalkStop>> {
         if let ControlFlow::Break(stop) = self.reach(ROOT_INODE_ID, InodeKind::Directory).await? {
             return Ok(ControlFlow::Break(stop));
@@ -208,180 +283,38 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
         self.reach_recoverable_deletions().await
     }
 
-    /// Reaches the root and the ancestors of every deletion that has a
+    /// Reaches every deletion above the acknowledged floor that has a
     /// `listed` row and no `removed` row in the basis's `active_deletions`.
     async fn reach_recoverable_deletions(&mut self) -> Result<ControlFlow<WalkStop>> {
-        let upper_bound = string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX);
-        let mut lower_bound = lookup_keys::ACTIVE_DELETION_ROW_PREFIX.to_owned();
-        // A removal sorts just before the listed row it cancels, so a listed
-        // row can only match the last removal the scan read.
-        let mut removed: Option<(ChangeSeq, InodeId)> = None;
+        let mut recoverable = ListedDeletions::above(self.acknowledged_floor_seq);
         loop {
-            if self.cancellation.is_cancelled() {
-                return Ok(ControlFlow::Break(WalkStop::Cancelled));
-            }
-            let rows = self
-                .segments
-                .scan_range_page_with_keys(
-                    MetadataRowFamily::ActiveDeletions,
-                    &lower_bound,
-                    upper_bound.as_deref(),
-                    KEPT_INODE_SCAN_ROWS,
-                )
-                .await?;
-            let scanned_to_end = rows.len() < KEPT_INODE_SCAN_ROWS;
-            for (row_key, row) in rows {
-                let deletion = active_deletion_from_manifest_row(row)?;
-                let identity = (deletion.deletion_seq, deletion.root_inode_id);
-                match deletion.action {
-                    ActiveDeletionRowAction::Removed { .. } => removed = Some(identity),
-                    ActiveDeletionRowAction::Listed {
-                        inode_kind,
-                        deleted_binding,
-                        ..
-                    } => {
-                        if removed != Some(identity) {
-                            if let ControlFlow::Break(stop) =
-                                self.reach(deletion.root_inode_id, inode_kind).await?
-                            {
-                                return Ok(ControlFlow::Break(stop));
-                            }
-                            if let ControlFlow::Break(stop) = self
-                                .reach_ancestors(deleted_binding.parent_inode_id)
-                                .await?
-                            {
-                                return Ok(ControlFlow::Break(stop));
-                            }
-                        }
-                    }
-                }
-                lower_bound = lookup_keys::after_row_key(&row_key);
-            }
-            if scanned_to_end {
-                return Ok(ControlFlow::Continue(()));
+            let (root_inode_id, inode_kind) =
+                match recoverable.next(&self.segments, self.cancellation).await? {
+                    ControlFlow::Break(stop) => return Ok(ControlFlow::Break(stop)),
+                    ControlFlow::Continue(None) => return Ok(ControlFlow::Continue(())),
+                    ControlFlow::Continue(Some(deletion)) => deletion,
+                };
+            if let ControlFlow::Break(stop) = self.reach(root_inode_id, inode_kind).await? {
+                return Ok(ControlFlow::Break(stop));
             }
         }
     }
 
     /// Inserts `inode_id` unless the filter already matches it, because
     /// inserting a key that the filter matches only grows the filter.
-    fn insert(&mut self, inode_id: InodeId) -> ControlFlow<WalkStop> {
+    ///
+    /// The filter is sized for the basis's `inodes` rows, and every inode the
+    /// walk reaches has such a row, so a filter that refuses the insert has
+    /// found a basis with more reachable inodes than inode rows, which is
+    /// corruption.
+    fn insert(&mut self, inode_id: InodeId) -> Result<()> {
         let key = filter_key(inode_id);
         if self.filter.may_contain(&key) || self.filter.insert(&key).is_some() {
-            ControlFlow::Continue(())
-        } else {
-            ControlFlow::Break(WalkStop::FilterFull)
+            return Ok(());
         }
-    }
-
-    /// Inserts the ancestry that a recoverable deletion's authorization is
-    /// judged on: `saved_parent` from the deletion's tombstone, then each
-    /// inode's current bound parent or, at a deletion root, its saved parent,
-    /// up to the root inode.
-    ///
-    /// The authorization of a read of a recoverably deleted item walks its
-    /// saved ancestry (format spec, "Access rows"). When a deletion above the
-    /// item has expired, those ancestors are hidden, and their access rows,
-    /// such as a boundary that excludes a principal, have to outlive the
-    /// expired subtree around them, or the walk would grant the item to a
-    /// principal the boundary excludes. So the ancestors keep their rows in
-    /// every family while the inner deletion is recoverable. The walk can't
-    /// stop at an ancestor that the filter already matches, because the
-    /// match can be a false positive.
-    async fn reach_ancestors(&mut self, saved_parent: InodeId) -> Result<ControlFlow<WalkStop>> {
-        let mut ancestor = saved_parent;
-        for _ in 0..MAX_KEPT_INODE_WALK_DEPTH {
-            if self.cancellation.is_cancelled() {
-                return Ok(ControlFlow::Break(WalkStop::Cancelled));
-            }
-            if let ControlFlow::Break(stop) = self.insert(ancestor) {
-                return Ok(ControlFlow::Break(stop));
-            }
-            if ancestor == ROOT_INODE_ID {
-                return Ok(ControlFlow::Continue(()));
-            }
-            let Some(parent) = self.authorization_parent(ancestor).await? else {
-                return Ok(ControlFlow::Continue(()));
-            };
-            ancestor = parent;
-        }
-        Ok(ControlFlow::Break(WalkStop::TooDeep))
-    }
-
-    /// The parent that the authorization walk moves to from `inode_id`: the
-    /// parent of its newest edge when that edge is bound, and otherwise the
-    /// parent saved in its newest `set` event.
-    async fn authorization_parent(&self, inode_id: InodeId) -> Result<Option<InodeId>> {
-        let mut newest_edge: Option<DirentryBindingRecord> = None;
-        self.visit_prefix(
-            MetadataRowFamily::DirentryChildBinds,
-            lookup_keys::direntry_child_prefix(inode_id),
-            &lookup_keys::direntry_child_probe(inode_id),
-            |row| {
-                let edge = direntry_binding_from_manifest_row(row)?;
-                if newest_edge
-                    .as_ref()
-                    .is_none_or(|newest| edge.position() > newest.position())
-                {
-                    newest_edge = Some(edge);
-                }
-                Ok(())
-            },
-        )
-        .await?;
-        if let Some(edge) = newest_edge.filter(DirentryBindingRecord::is_bound) {
-            return Ok(Some(edge.parent_inode_id));
-        }
-        let mut newest_set: Option<(DeltaPosition, InodeId)> = None;
-        self.visit_prefix(
-            MetadataRowFamily::Tombstones,
-            lookup_keys::tombstone_prefix(inode_id),
-            &lookup_keys::tombstone_probe(inode_id),
-            |row| {
-                let event = tombstone_from_manifest_row(row)?;
-                if let TombstoneRowAction::Set { deleted_binding } = &event.action {
-                    if newest_set.is_none_or(|(position, _)| event.position() > position) {
-                        newest_set = Some((event.position(), deleted_binding.parent_inode_id));
-                    }
-                }
-                Ok(())
-            },
-        )
-        .await?;
-        Ok(newest_set.map(|(_, parent_inode_id)| parent_inode_id))
-    }
-
-    /// Visits every row of `family` under `prefix`, a page at a time,
-    /// skipping the segments whose filter block rules out `probe`.
-    async fn visit_prefix(
-        &self,
-        family: MetadataRowFamily,
-        prefix: String,
-        probe: &str,
-        mut visit: impl FnMut(MetadataRow) -> Result<()>,
-    ) -> Result<()> {
-        let upper_bound = string_prefix_upper_bound(&prefix);
-        let mut lower_bound = prefix;
-        loop {
-            let rows = self
-                .segments
-                .scan_range_page_with_keys_for_lookup(
-                    family,
-                    &lower_bound,
-                    upper_bound.as_deref(),
-                    KEPT_INODE_SCAN_ROWS,
-                    probe,
-                )
-                .await?;
-            let scanned_to_end = rows.len() < KEPT_INODE_SCAN_ROWS;
-            for (row_key, row) in rows {
-                lower_bound = lookup_keys::after_row_key(&row_key);
-                visit(row)?;
-            }
-            if scanned_to_end {
-                return Ok(());
-            }
-        }
+        Err(CoreError::NamespaceCorrupt(format!(
+            "the kept inode walk reached inode {inode_id} beyond the basis's `inodes` row count"
+        )))
     }
 
     /// Inserts `inode_id`, and every inode below it when it's a directory.
@@ -390,9 +323,7 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
         inode_id: InodeId,
         inode_kind: InodeKind,
     ) -> Result<ControlFlow<WalkStop>> {
-        if let ControlFlow::Break(stop) = self.insert(inode_id) {
-            return Ok(ControlFlow::Break(stop));
-        }
+        self.insert(inode_id)?;
         if inode_kind != InodeKind::Directory {
             return Ok(ControlFlow::Continue(()));
         }
@@ -452,9 +383,7 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
             if !last.is_bound() {
                 continue;
             }
-            if let ControlFlow::Break(stop) = self.insert(last.child_inode_id) {
-                return Ok(ControlFlow::Break(stop));
-            }
+            self.insert(last.child_inode_id)?;
             if last.child_kind != InodeKind::Directory {
                 continue;
             }

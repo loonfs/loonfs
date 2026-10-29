@@ -101,6 +101,7 @@ fn the_merge_keeps_every_revision_above_the_floor_and_the_newest_at_it() {
         MetadataFamilyGroup::Attributes,
         &mut rows_by_family,
         ChangeSeq(6),
+        ChangeSeq(0),
     )
     .expect("merge attributes");
 
@@ -133,6 +134,7 @@ fn the_merge_keeps_a_latest_empty_revision() {
         MetadataFamilyGroup::Attributes,
         &mut rows_by_family,
         ChangeSeq(9),
+        ChangeSeq(0),
     )
     .expect("merge attributes");
 

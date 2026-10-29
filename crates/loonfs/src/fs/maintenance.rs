@@ -27,8 +27,13 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use tracing::Instrument;
 
+mod floor_acknowledgment;
 #[cfg(test)]
 mod tests;
+
+pub use floor_acknowledgment::{
+    AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorResponse, RetentionFloors,
+};
 
 /// Abandoned compaction units in a row after which
 /// [`Maintenance::maintain_metadata_while_due`] stops, so a loop whose units
@@ -186,6 +191,7 @@ impl Maintenance {
             fork_basis: diagnostics.fork_basis,
             head_seq: diagnostics.head_seq,
             retention_floor_seq: diagnostics.retention_floor_seq,
+            acknowledged_floor_seq: diagnostics.acknowledged_floor_seq,
             current_manifest_no: Some(diagnostics.current_manifest_no),
             wal_tail_objects: diagnostics.wal_tail_objects,
             live_snapshots,

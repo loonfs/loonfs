@@ -76,6 +76,172 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
     }
 }
 
+/// Rewrites the WAL object at `wal_no` so that it records `basis_floor_seq`.
+async fn rewrite_basis_floor(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    wal_no: WalNo,
+    basis_floor_seq: ChangeSeq,
+) {
+    let key = wal_object(namespace_id, &wal_no);
+    let bytes = store
+        .get(&key, None)
+        .await
+        .expect("get")
+        .expect("WAL object");
+    let mut payload = decode_wal_object_envelope_zstd(&bytes)
+        .expect("decode")
+        .into_payload();
+    payload.basis_floor_seq = basis_floor_seq;
+    let bytes = encode_wal_object_envelope_zstd(payload)
+        .expect("encode")
+        .into_bytes();
+    replace_object(store, &key, bytes.into())
+        .await
+        .expect("rewrite the WAL object");
+}
+
+#[tokio::test]
+async fn a_wal_object_that_lowers_the_basis_floor_is_corrupt() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let setup = context(1_000);
+
+    // Two fences follow the manifest, and the first one is rewritten to
+    // record a higher floor than the second.
+    let fences = NamespaceId::parse("fences").expect("namespace");
+    create(&store, &fences, &setup).await.expect("create");
+    for _ in 0..2 {
+        acquire_writer_epoch(&store, &fences, &setup)
+            .await
+            .expect("fence");
+    }
+    rewrite_basis_floor(&store, &fences, WalNo(1), ChangeSeq(1)).await;
+
+    // A fold acknowledges floor 1 through WAL object 3, and the fence after
+    // it is rewritten to record floor 0.
+    let folded = NamespaceId::parse("folded").expect("namespace");
+    create(&store, &folded, &setup).await.expect("create");
+    let mut engine = NamespaceCommitEngine::new(
+        folded.clone(),
+        std::sync::Arc::new(crate::test_support::content_writes()),
+    );
+    publish(&mut engine, &store, "first").await.expect("commit");
+    crate::manifest::fold_wal(&store, &folded)
+        .await
+        .expect("fold");
+    crate::manifest::advance_retention_floor(
+        &store,
+        None,
+        &folded,
+        crate::manifest::RetentionTarget::Head,
+        crate::test_support::grace_elapsed_after(1_000),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance");
+    acquire_writer_epoch(&store, &folded, &setup)
+        .await
+        .expect("fence");
+    crate::manifest::fold_wal(&store, &folded)
+        .await
+        .expect("fold");
+    acquire_writer_epoch(&store, &folded, &setup)
+        .await
+        .expect("fence");
+    rewrite_basis_floor(&store, &folded, WalNo(4), ChangeSeq(0)).await;
+
+    for (namespace_id, expected) in [
+        (
+            &fences,
+            "WAL object `2` lowers the basis floor to `0` from `1` at WAL number `1`",
+        ),
+        (
+            &folded,
+            "WAL object `4` lowers the basis floor to `0` from `1` at WAL number `3`",
+        ),
+    ] {
+        let error = load_current_metadata_view(&store, namespace_id)
+            .await
+            .err()
+            .expect("corruption");
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error}");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+/// Checks that a fence records the floor of the manifest that the
+/// acquisition discovered, which is a retention advance published after the
+/// claim, not the claim itself.
+#[tokio::test]
+async fn a_fence_records_the_floor_of_an_advance_published_after_the_claim() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("advanced-claim").expect("namespace");
+    // The claim's manifest folds WAL object 2, so the acquisition's first
+    // read after the claim is WAL object 3.
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
+        OperationSelector::Read,
+    );
+    let setup = context(1_000);
+    create(&store, &namespace_id, &setup).await.expect("create");
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(crate::test_support::content_writes()),
+    );
+    publish(&mut engine, &store, "first").await.expect("commit");
+    crate::manifest::fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold");
+    store.block_next();
+    let (acquired, advanced) = futures::join!(
+        acquire_writer(
+            &store,
+            &namespace_id,
+            &setup,
+            crate::test_support::std_timer()
+        ),
+        async {
+            store.wait_until_blocked().await;
+            let advanced = crate::manifest::advance_retention_floor(
+                store.inner(),
+                None,
+                &namespace_id,
+                crate::manifest::RetentionTarget::Head,
+                crate::test_support::grace_elapsed_after(1_000),
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("advance");
+            store.release();
+            advanced.response.retention_floor_seq
+        }
+    );
+    assert_eq!(advanced, ChangeSeq(1));
+    let acquisition = acquired.expect("acquire");
+    let claim = crate::namespace::control::load_manifest_by_no(
+        store.inner(),
+        &namespace_id,
+        acquisition.claim.manifest.manifest_no,
+    )
+    .await
+    .expect("load the claim")
+    .expect("the claim exists");
+    assert_eq!(claim.state.retention_floor_seq(), ChangeSeq(0));
+    assert_eq!(acquisition.anchor.retention_floor_seq(), ChangeSeq(1));
+    let fence = acquisition
+        .anchor
+        .tail
+        .objects()
+        .last()
+        .expect("the fence")
+        .envelope()
+        .payload();
+    assert!(fence.records.is_empty());
+    assert_eq!(fence.basis_floor_seq, ChangeSeq(1));
+}
+
 #[tokio::test]
 async fn a_cold_anchor_reads_each_wal_object_once() {
     let directory = tempdir().expect("directory");
@@ -569,7 +735,13 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
             .await
             .expect("publish");
     }
-    let mut walk = WalWalk::after(&namespace_id, WalNo(0), ChangeSeq(0), WriterEpoch(1));
+    let mut walk = WalWalk::after(
+        &namespace_id,
+        WalNo(0),
+        ChangeSeq(0),
+        WriterEpoch(1),
+        ChangeSeq(0),
+    );
     let mut sequential = Vec::new();
     for number in 1..=20 {
         let loaded = load_wal_object(&store, &namespace_id, WalNo(number)).await;
@@ -591,6 +763,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
             base_seq: ChangeSeq(0),
             head_seq: ChangeSeq(19),
             base_wal_no: WalNo(0),
+            base_basis_floor_seq: ChangeSeq(0),
             tip_wal_no: WalNo(20),
             writer_epoch: WriterEpoch(1),
         },
@@ -636,6 +809,7 @@ async fn a_bounded_tail_load_names_the_missing_wal_object() {
             base_seq: ChangeSeq(0),
             head_seq: ChangeSeq(3),
             base_wal_no: WalNo(0),
+            base_basis_floor_seq: ChangeSeq(0),
             tip_wal_no: WalNo(4),
             writer_epoch: WriterEpoch(1),
         },
@@ -954,7 +1128,8 @@ async fn fence_publication_enforces_the_wal_budget_before_the_put() {
         1_000,
         loonfs_test_support::test_actor(),
     );
-    let fence = super::prepare_wal_object(namespace_id, WriterEpoch(1), &head, &[]).expect("fence");
+    let fence = super::prepare_wal_object(namespace_id, WriterEpoch(1), &head, ChangeSeq(0), &[])
+        .expect("fence");
     let timer = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let expired = crate::time::Observation::now(timer.clone());
     timer.advance_ms(1);
@@ -993,8 +1168,14 @@ async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
         1_000,
         loonfs_test_support::test_actor(),
     );
-    let fence =
-        super::prepare_wal_object(namespace_id.clone(), WriterEpoch(1), &head, &[]).expect("fence");
+    let fence = super::prepare_wal_object(
+        namespace_id.clone(),
+        WriterEpoch(1),
+        &head,
+        ChangeSeq(0),
+        &[],
+    )
+    .expect("fence");
     let error = super::publish_wal_object(&store, &fence, &tip)
         .await
         .expect_err("late put must not acknowledge publication");

@@ -126,8 +126,8 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         MetadataRow::DirentryBinding(record) => record.committed_seq,
         MetadataRow::FileRevision(record) => record.committed_seq,
         MetadataRow::Tombstone(record) => record.committed_seq,
-        // A removal marker belongs to the run of the undelete or expiry that
-        // produced it, not to the run of the deletion whose key it repeats.
+        // A removal marker belongs to the run of the undelete that produced
+        // it, not to the run of the deletion whose key it repeats.
         MetadataRow::ActiveDeletion(record) => match &record.action {
             ActiveDeletionRowAction::Listed { .. } => record.deletion_seq,
             ActiveDeletionRowAction::Removed { removed_seq } => *removed_seq,

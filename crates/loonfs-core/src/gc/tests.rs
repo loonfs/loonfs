@@ -1455,10 +1455,11 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     assert_eq!(error.code(), crate::error::ErrorCode::PathNotFound);
 }
 
-/// Checks that once a base compaction of each group removes the rows that
-/// an expired deletion hides, and a later layout compaction drops their
-/// chains, a pass past the grace deletes the hidden file's content and keeps
-/// the content of a visible file.
+/// Checks that once a later commit acknowledges the floor that expired a
+/// deletion, a base compaction of each group removes the rows that the
+/// deletion hides, and a later layout compaction drops their chains, a pass
+/// past the grace deletes the hidden file's content and keeps the content
+/// of a visible file.
 #[tokio::test]
 async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1470,22 +1471,9 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
         .expect("bootstrap");
     let hidden = put_file_content(&store, &namespace_id, "/old/file", b"hidden").await;
     let kept = put_file_content(&store, &namespace_id, "/kept", b"kept").await;
-    let old = load_current_metadata_view(&store, &namespace_id)
+    crate::test_support::ops::delete_path(&store, &namespace_id, "/old", &setup, None)
         .await
-        .expect("load view")
-        .resolve_path(
-            "/old",
-            AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
-        )
-        .await
-        .expect("resolve /old")
-        .inode_id;
-    let deletion_seq =
-        crate::test_support::ops::delete_path(&store, &namespace_id, "/old", &setup, None)
-            .await
-            .expect("delete /old")
-            .committed_seq;
+        .expect("delete /old");
     crate::manifest::fold_wal(&store, &namespace_id)
         .await
         .expect("fold the deletion");
@@ -1499,26 +1487,8 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
     )
     .await
     .expect("move the floor past the deletion");
-    NamespaceCommitEngine::new(
-        namespace_id.clone(),
-        std::sync::Arc::new(crate::test_support::content_writes()),
-    )
-    .publish_expiry(
-        &store,
-        loonfs_types::CommitId::generate(),
-        vec![loonfs_types::ExpiredDeletion {
-            inode_id: old,
-            deletion_seq,
-        }],
-        &setup,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-    )
-    .await
-    .results
-    .pop()
-    .expect("one result")
-    .expect("expire the deletion");
-    // Each pass merges every group that a new file gave a delta run. The
+    // Each new file's WAL object records the advanced floor, and each pass
+    // folds it and merges every group that the file gave a delta run. The
     // first pass removes the hidden revision, but its layout merge can run
     // before its revisions merge, so the second pass drops the chain.
     for path in ["/later-1", "/later-2"] {

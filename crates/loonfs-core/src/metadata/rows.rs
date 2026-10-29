@@ -47,15 +47,16 @@ impl Default for MetadataState {
 
 /// The newest-event-wins tombstone rule, shared by every aggregation site:
 /// among records at or below `visible_seq`, the newest position speaks for
-/// the root. A `Set` or an `Expire` newest means the root's subtree is
-/// hidden, and a `Revoke` newest means it isn't. Only a `Set` newest is a
-/// recoverable deletion ([`TombstoneRowAction::is_recoverable`]).
+/// the root. A `Set` newest means the root's subtree is hidden, and a
+/// `Revoke` newest means it isn't. Whether a hidden subtree's deletion is
+/// recoverable depends on the view's retention floor, which this rule
+/// doesn't read.
 /// The newest event is authoritative WITHOUT consulting the target of a
-/// revoke or an expire: commit validation guarantees either one only ever
-/// lands against the position that was recoverable, so for valid histories
-/// the two rules agree, and the recorded target serves as audit metadata and
-/// the projection contract (change-feed consumers reduce with it and can flag
-/// a mismatch as corruption). Keep every reader on this helper — a site
+/// revoke: commit validation guarantees a revoke only ever lands against the
+/// position that was recoverable, so for valid histories the two rules
+/// agree, and the recorded target serves as audit metadata and the
+/// projection contract (change-feed consumers reduce with it and can flag a
+/// mismatch as corruption). Keep every reader on this helper — a site
 /// with its own copy of the rule is how visibility splits from the durable
 /// truth.
 pub(crate) fn hiding_tombstone_from_records(
@@ -70,15 +71,14 @@ pub(crate) fn hiding_tombstone_from_records(
 }
 
 /// Converts a tombstone event into its derived `ActiveDeletions` row. A `set`
-/// adds a deletion to the listing, and a `revoke` or an `expire` removes that
-/// position.
+/// adds a deletion to the listing, and a `revoke` removes that position.
 ///
 /// It reduces target-aware where the newest-event-wins rule in
 /// [`hiding_tombstone_from_records`] reduces target-blind. Commit validation
-/// only ever lands a revoke or an expire against the position that was
-/// recoverable, so the two agree on every history a writer can produce; the
-/// target is what lets a removal be derived one event at a time instead of by
-/// re-reading a root's whole history.
+/// only ever lands a revoke against the position that was recoverable, so
+/// the two agree on every history a writer can produce; the target is what
+/// lets a removal be derived one event at a time instead of by re-reading a
+/// root's whole history.
 pub(crate) fn active_deletion_from_tombstone(
     tombstone: &SubtreeTombstoneRecord,
     inode_kind: InodeKind,
@@ -94,15 +94,13 @@ pub(crate) fn active_deletion_from_tombstone(
                 deleted_binding: deleted_binding.clone(),
             },
         },
-        TombstoneRowAction::Revoke { target } | TombstoneRowAction::Expire { target } => {
-            ActiveDeletionRecord {
-                root_inode_id: tombstone.root_inode_id,
-                deletion_seq: target.seq,
-                action: ActiveDeletionRowAction::Removed {
-                    removed_seq: tombstone.committed_seq,
-                },
-            }
-        }
+        TombstoneRowAction::Revoke { target } => ActiveDeletionRecord {
+            root_inode_id: tombstone.root_inode_id,
+            deletion_seq: target.seq,
+            action: ActiveDeletionRowAction::Removed {
+                removed_seq: tombstone.committed_seq,
+            },
+        },
     }
 }
 
@@ -169,14 +167,6 @@ impl ActiveDeletionRange {
             lower_bound: self
                 .lower_bound
                 .max(lookup_keys::active_deletion_key_after_seq(after_seq)),
-            ..self
-        }
-    }
-
-    /// Ends the range at `through_seq`, leaving out every deletion above it.
-    pub(crate) fn through(self, through_seq: ChangeSeq) -> Self {
-        Self {
-            upper_bound: Some(lookup_keys::active_deletion_key_after_seq(through_seq)),
             ..self
         }
     }

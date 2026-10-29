@@ -699,13 +699,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// family.
     ///
     /// The materializer keeps that family in step with the tombstone family
-    /// (a delete adds the row, and an undelete or an expiry removes it), so
-    /// the page reads only the deletions it returns, never the namespace's
-    /// whole deletion history. In a fork, the scan starts above the fork
-    /// point, so a deletion the fork inherited is never listed
+    /// (a delete adds the row, and an undelete removes it). The scan starts
+    /// above the view's retention floor, so an expired deletion is never
+    /// listed, and the page reads only the deletions it returns, never the
+    /// namespace's whole deletion history. A fork's floor starts at its fork
+    /// point, so a fork never lists a deletion it inherited
     /// ([API section 6.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#66-get-filesystemtrash)).
-    /// A deletion after the fork point and at or below the retention floor
-    /// stays listed until the writer expires it.
     pub(crate) async fn list_trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
@@ -719,11 +718,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .cursor
             .as_ref()
             .map(|cursor| (cursor.last_deletion_seq, cursor.last_root_inode_id));
-        let fork_seq = self
-            .head
-            .fork_basis
-            .as_ref()
-            .map_or(ChangeSeq(0), |basis| basis.manifest.head_seq);
+        let retention_floor_seq = self.retention_floor_seq();
         let mut session = self.metadata_view().session();
         let cursor = |seq: ChangeSeq, inode_id: InodeId| TrashPageCursor {
             head_seq: self.head.seq,
@@ -733,7 +728,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let (deletions, next_cursor) = if access.is_unrestricted() {
             let mut deletions = session
                 .active_deletions_page(
-                    &ActiveDeletionRange::after(start_after).above_seq(fork_seq),
+                    &ActiveDeletionRange::after(start_after).above_seq(retention_floor_seq),
                     request.limit.limit_plus_one(),
                 )
                 .await?;
@@ -752,7 +747,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 let wanted = (limit - kept.len()).min(MAX_TRASH_ROWS_SCANNED_PER_PAGE - scanned);
                 let batch = session
                     .active_deletions_page(
-                        &ActiveDeletionRange::after(start_after).above_seq(fork_seq),
+                        &ActiveDeletionRange::after(start_after).above_seq(retention_floor_seq),
                         wanted,
                     )
                     .await?;
@@ -1324,9 +1319,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 }
 
-/// Refuses a read by inode ID of an inode that an expired deletion hides, or
-/// whose ancestry is disconnected, with the error of an unknown inode and
-/// before any access decision. See [`ancestry_allows_read`] for the walk.
+/// Refuses a read by inode ID of an inode that an expired deletion hides (a
+/// deletion at or below the view's retention floor), or whose ancestry is
+/// disconnected, with the error of an unknown inode and before any access
+/// decision. See [`ancestry_allows_read`] for the walk.
 ///
 /// A read that requires a visible inode doesn't need this check, because its
 /// path walk already requires bound edges up to the root.

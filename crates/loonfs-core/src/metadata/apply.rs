@@ -185,21 +185,6 @@ impl MetadataState {
                     action: TombstoneRowAction::Revoke { target: *target },
                 });
             }
-            WalDelta::ExpireSubtreeTombstone {
-                delta_index,
-                root_inode_id,
-                target,
-            } => {
-                self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
-                    root_inode_id: *root_inode_id,
-                    committed_seq,
-                    delta_index: *delta_index,
-                    commit_id: commit_id.clone(),
-                    committed_at_ms,
-                    committed_by: actor.clone(),
-                    action: TombstoneRowAction::Expire { target: *target },
-                });
-            }
             WalDelta::AppendAttributesRevision {
                 delta_index,
                 inode_id,

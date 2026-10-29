@@ -21,7 +21,6 @@ pub enum CommitOperand {
     AttributeTarget,
     AccessTarget,
     UndeleteTarget,
-    ExpireTarget,
     EmptyDirectoryTarget,
 }
 
@@ -38,7 +37,6 @@ impl fmt::Display for CommitOperand {
             Self::AttributeTarget => "attribute update target",
             Self::AccessTarget => "access update target",
             Self::UndeleteTarget => "undelete target",
-            Self::ExpireTarget => "expire target",
             Self::EmptyDirectoryTarget => "empty directory target",
         })
     }
@@ -119,35 +117,19 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
     },
-    #[error("{operand} inode `{inode_id}` is not the root of a recoverable deletion")]
-    TargetNotDeleted {
-        operand: CommitOperand,
-        inode_id: InodeId,
-    },
+    #[error("undelete target inode `{inode_id}` is not the root of a recoverable deletion")]
+    UndeleteTargetNotDeleted { inode_id: InodeId },
     #[error(
-        "{operand} inode `{inode_id}` targets a deletion made in the same commit, not an earlier one"
+        "undelete of inode `{inode_id}` targets a deletion made in the same commit, not an earlier one"
     )]
-    TargetDeletedInCurrentCommit {
-        operand: CommitOperand,
-        inode_id: InodeId,
-    },
+    UndeleteTargetsCurrentCommit { inode_id: InodeId },
     #[error(
-        "{operand} inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the recoverable deletion is at seq `{active_seq}`"
+        "undelete of inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the recoverable deletion is at seq `{active_seq}`"
     )]
-    DeletionSequenceMismatch {
-        operand: CommitOperand,
+    UndeleteSequenceMismatch {
         inode_id: InodeId,
         requested_seq: ChangeSeq,
         active_seq: ChangeSeq,
-    },
-    #[error(
-        "{operand} inode `{inode_id}` targets the deletion at seq `{deletion_seq}`, which is above the retention floor `{retention_floor_seq}`"
-    )]
-    DeletionAboveRetentionFloor {
-        operand: CommitOperand,
-        inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-        retention_floor_seq: ChangeSeq,
     },
     #[error(
         "cannot restore inode `{inode_id}` because revision `{base_revision_no}` is already at the maximum 9007199254740991"
@@ -217,14 +199,11 @@ impl CommitValidationError {
             | Self::BindingPreconditionMismatch { .. } => ErrorCode::PathConflict,
             Self::DirectoryNotEmpty { .. } => ErrorCode::DirectoryNotEmpty,
             Self::InodeMissing { .. } => ErrorCode::PathNotFound,
-            Self::TargetNotDeleted { .. }
-            | Self::TargetDeletedInCurrentCommit { .. }
-            | Self::DeletionSequenceMismatch { .. } => ErrorCode::NotDeleted,
+            Self::UndeleteTargetNotDeleted { .. }
+            | Self::UndeleteTargetsCurrentCommit { .. }
+            | Self::UndeleteSequenceMismatch { .. } => ErrorCode::NotDeleted,
             Self::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
-            // Only the namespace's writer commits an expiry, so an expiry
-            // above the floor is a fault in the writer, not in a request.
-            Self::DeletionAboveRetentionFloor { .. }
-            | Self::RestoreRevisionOverflow { .. }
+            Self::RestoreRevisionOverflow { .. }
             | Self::ReplaceFileRevisionOverflow { .. }
             | Self::OperationIndexOverflow
             | Self::DeltaIndexOverflow => ErrorCode::ServerError,
@@ -260,16 +239,15 @@ impl CommitValidationError {
                 operand: CommitOperand::UndeleteTarget,
                 inode_id,
             }
-            | Self::TargetNotDeleted { inode_id, .. }
-            | Self::TargetDeletedInCurrentCommit { inode_id, .. } => Some(ErrorDetails {
+            | Self::UndeleteTargetNotDeleted { inode_id }
+            | Self::UndeleteTargetsCurrentCommit { inode_id } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 ..ErrorDetails::default()
             }),
-            Self::DeletionSequenceMismatch {
+            Self::UndeleteSequenceMismatch {
                 inode_id,
                 requested_seq,
                 active_seq,
-                ..
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 expected_deletion_seq: Some(*requested_seq),

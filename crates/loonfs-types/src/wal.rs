@@ -192,18 +192,6 @@ pub enum WalDelta {
         /// The exact tombstone position this delta compensates.
         target: DeltaPosition,
     },
-    /// Ends the recoverability of exactly one deletion, the `set` event
-    /// recorded at `target`. The tombstone keeps hiding the subtree, but an
-    /// undelete can no longer restore it
-    /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
-    ExpireSubtreeTombstone {
-        /// Stable position of this delta within its commit.
-        delta_index: u32,
-        /// Root inode of the deletion being expired.
-        root_inode_id: InodeId,
-        /// The exact `set` event this delta expires.
-        target: DeltaPosition,
-    },
     /// Publishes the next attribute revision of one inode, as complete state.
     ///
     /// The delta carries the whole resulting map rather than the changes that
@@ -358,6 +346,10 @@ pub struct WalObjectPayload {
     pub head_seq: ChangeSeq,
     /// Allocation high-water mark after this WAL object.
     pub next_inode_id: InodeId,
+    /// Retention floor of the manifest that the writer validated this
+    /// object's commits against, or that a fence was planned against (see
+    /// [Advancing the retention floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
+    pub basis_floor_seq: ChangeSeq,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
 }
@@ -684,6 +676,7 @@ mod tests {
             writer_epoch: WriterEpoch(1),
             head_seq: ChangeSeq(lengths.len() as u64),
             next_inode_id: InodeId(3),
+            basis_floor_seq: ChangeSeq(0),
             records,
         }
     }
@@ -884,6 +877,7 @@ mod tests {
             writer_epoch: WriterEpoch(1),
             head_seq: ChangeSeq(0),
             next_inode_id: InodeId(2),
+            basis_floor_seq: ChangeSeq(0),
             records: Vec::new(),
         })
         .expect("encode");
