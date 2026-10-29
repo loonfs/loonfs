@@ -68,7 +68,7 @@ const GREP_MAX_MID_RUNS: usize = 8;
 /// Writer-side budgets for one grep build or reorganize step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GramIndexBuildPolicy {
-    /// Revisions examined per step, at most `DEFAULT_MAX_PAGE_LIMIT`, because a
+    /// Revisions examined per step, at most `MAX_PAGE_LIMIT`, because a
     /// step reads them as one page of the change feed.
     pub max_files_per_step: NonZeroUsize,
     /// Content bytes read per step.

@@ -29,7 +29,7 @@ use loonfs_types::format::segment_blocks::{
 use loonfs_types::{
     decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EntryInodeKind, ErrorCode, GrepMatch,
     GrepPageCursor, GrepRequest, GrepResponse, InodeId, NamespaceId, PageRequest, PathEntry,
-    RevisionNo, DEFAULT_MAX_PAGE_LIMIT, ROOT_INODE_ID,
+    RevisionNo, MAX_PAGE_LIMIT, ROOT_INODE_ID,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -66,9 +66,9 @@ pub(crate) const TAIL_FEED_PAGE_COMMITS: usize = 256;
 pub(crate) const SCAN_DIRECTORY_PAGE_ENTRIES: usize = 1000;
 const _: () = assert!(
     0 < TAIL_FEED_PAGE_COMMITS
-        && TAIL_FEED_PAGE_COMMITS <= DEFAULT_MAX_PAGE_LIMIT as usize
+        && TAIL_FEED_PAGE_COMMITS <= MAX_PAGE_LIMIT as usize
         && 0 < SCAN_DIRECTORY_PAGE_ENTRIES
-        && SCAN_DIRECTORY_PAGE_ENTRIES <= DEFAULT_MAX_PAGE_LIMIT as usize
+        && SCAN_DIRECTORY_PAGE_ENTRIES <= MAX_PAGE_LIMIT as usize
 );
 /// Maximum concurrent content reads while verifying grep candidates.
 ///
