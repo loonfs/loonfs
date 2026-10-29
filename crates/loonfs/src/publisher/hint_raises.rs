@@ -327,6 +327,18 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
             _ => current,
         };
         writer.drain().await.expect("drain");
+        // A deletion removes its session from the runtime's table before the
+        // session's worker raises the hint, so the drain doesn't wait for
+        // that raise, and the test waits for the hint instead.
+        if matches!(publication, Publication::Deletion) {
+            let raise = bounded(Duration::from_secs(10), async {
+                while hint_manifest_no(store.as_ref(), &namespace_id).await < raised {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            assert!(raise.is_ok(), "the deletion's hint raise finishes");
+        }
         assert_eq!(
             hint_manifest_no(store.as_ref(), &namespace_id).await,
             raised,
