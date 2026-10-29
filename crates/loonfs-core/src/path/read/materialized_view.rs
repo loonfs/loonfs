@@ -109,14 +109,7 @@ pub(crate) async fn load_metadata_view_for_authorization<'a, S: ObjectStore + ?S
     namespace_id: &NamespaceId,
     context: ReadLoadContext<'_, 'a>,
 ) -> Result<LoadedMetadataView<'a, S>> {
-    LoadedMetadataView::load_at_head(
-        store,
-        namespace_id,
-        context.head.clone(),
-        context.basis,
-        context,
-    )
-    .await
+    LoadedMetadataView::load_at_head(store, namespace_id, context).await
 }
 
 #[cfg(test)]
@@ -139,6 +132,15 @@ pub struct FileBytes {
     pub entry: PathEntry,
     /// Validated file bytes.
     pub bytes: Vec<u8>,
+}
+
+/// One page of a file's retained revisions, with the file's inode ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRevisionsPage {
+    /// The file inode that the path resolved to.
+    pub inode_id: InodeId,
+    /// Retained revisions, newest first.
+    pub page: Page<FileRevision, FileRevisionsPageCursor>,
 }
 
 /// Immutable object ranges for a selected revision.
@@ -190,7 +192,6 @@ pub struct GrantedRange {
 /// these; the view is crate-internal, and consumers reach it through the
 /// engine's read methods.
 pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
-    pub(super) namespace_id: NamespaceId,
     pub(super) head: NamespaceReadState,
     pub(super) segments: VerifiedMetadataSegments<'a, S>,
     wal_tail: Arc<ProjectedWalTail>,
@@ -221,16 +222,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     async fn load_at_head(
         store: &'a S,
         namespace_id: &NamespaceId,
-        head: NamespaceReadState,
-        basis: &MetadataBasis,
         load_context: ReadLoadContext<'_, 'a>,
     ) -> Result<Self> {
-        if &head.namespace_id != namespace_id {
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "head namespace `{}` does not match requested namespace `{}`",
-                head.namespace_id, namespace_id
-            )));
-        }
+        crate::namespace::control::ensure_head_identity(load_context.head, namespace_id)?;
+        let head = load_context.head.clone();
+        let basis = load_context.basis;
         let manifest_no = basis.manifest_no();
         let loaded_basis =
             load_basis_metadata_segments(store, load_context.segment_cache, basis).await?;
@@ -243,7 +239,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         };
         if let Some(wal_tail) = load_context.tail {
             return Ok(Self {
-                namespace_id: namespace_id.clone(),
                 head,
                 segments,
                 wal_tail: Arc::clone(wal_tail),
@@ -267,7 +262,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             None => replay().await?,
         };
         Ok(Self {
-            namespace_id: namespace_id.clone(),
             head,
             segments,
             wal_tail,
@@ -339,25 +333,23 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await
     }
 
-    pub(crate) async fn get_file_bytes(
+    pub(crate) async fn read_file_bytes(
         &self,
-        store: &S,
         absolute_path: &str,
         max_content_bytes: Option<u64>,
         access: &ReadAccess<'_, S>,
     ) -> Result<FileBytes> {
-        let (entry, content_ref) = self
+        let entry = self
             .resolve_file_content(absolute_path, None, access)
             .await?;
-        self.file_bytes(store, entry, content_ref, max_content_bytes)
-            .await
+        let content_ref = file_content_ref(&entry)?;
+        self.file_bytes(entry, content_ref, max_content_bytes).await
     }
 
     /// Reads the current content of a visible file inode, wherever it is
     /// bound, with its entry.
-    pub(crate) async fn get_file_bytes_by_inode(
+    pub(crate) async fn read_file_bytes_by_inode(
         &self,
-        store: &S,
         inode_id: InodeId,
         max_content_bytes: Option<u64>,
         access: &ReadAccess<'_, S>,
@@ -366,13 +358,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .stat_inode(inode_id, AttributeInclusion::Omit, access)
             .await?;
         let content_ref = file_content_ref(&entry)?;
-        self.file_bytes(store, entry, content_ref, max_content_bytes)
-            .await
+        self.file_bytes(entry, content_ref, max_content_bytes).await
     }
 
     async fn file_bytes(
         &self,
-        store: &S,
         entry: PathEntry,
         content_ref: ContentRef,
         max_content_bytes: Option<u64>,
@@ -381,13 +371,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .read_bytes(store, self.object_cache, &content_ref)
+            .read_bytes(self.segments.store(), self.object_cache, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
 
-    /// Resolves a path to the file it names and the content reference its
-    /// current revision points at: the metadata half both the buffered read
+    /// Resolves a path to the entry of the file it names, with the selected
+    /// revision in the entry's kind: the metadata half both the buffered read
     /// and the streaming one run, so neither can resolve a path the other
     /// would refuse.
     pub(crate) async fn resolve_file_content(
@@ -395,11 +385,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
         access: &ReadAccess<'_, S>,
-    ) -> Result<(PathEntry, ContentRef)> {
+    ) -> Result<PathEntry> {
         let mut entry = self
             .resolve_path(absolute_path, AttributeInclusion::Omit, access)
             .await?;
-        let content_ref = file_content_ref(&entry)?;
+        // A directory fails here, before the history check.
+        file_content_ref(&entry)?;
         if let Some(revision_no) = revision_no {
             if !matches!(entry.kind, PathEntryKind::File { revision_no: current, .. } if current == revision_no)
             {
@@ -416,13 +407,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             entry.kind = PathEntryKind::File {
                 revision_no: revision.revision_no,
                 size_bytes: revision.content_ref.size_bytes,
-                content_ref: revision.content_ref.clone(),
+                content_ref: revision.content_ref,
                 revision_committed_by: revision.committed_by,
                 revision_committed_at_ms: revision.committed_at_ms,
             };
-            return Ok((entry, revision.content_ref));
         }
-        Ok((entry, content_ref))
+        Ok(entry)
     }
 
     pub(crate) async fn resolve_content_location(
@@ -435,11 +425,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
     async fn download_ranges(
         &self,
-        store: &S,
         content_ref: &ContentRef,
         start_offset: u64,
         content_writes: &PermitPool,
     ) -> Result<Vec<GrantedRange>> {
+        let store = self.segments.store();
         if start_offset != 0 && start_offset >= content_ref.size_bytes {
             return Err(CoreError::ResumeOffsetOutOfRange {
                 start_offset,
@@ -537,24 +527,28 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
     pub(crate) async fn direct_download_target(
         &self,
-        store: &S,
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
         start_offset: u64,
         access: &ReadAccess<'_, S>,
         content_writes: &PermitPool,
     ) -> Result<DirectDownloadTarget> {
-        let (entry, content_ref) = self
+        let entry = self
             .resolve_file_content(absolute_path, revision_no, access)
             .await?;
-        let PathEntryKind::File { revision_no, .. } = entry.kind else {
+        let PathEntryKind::File {
+            revision_no,
+            content_ref,
+            ..
+        } = entry.kind
+        else {
             return Err(CoreError::ExpectedFile {
                 target: entry.path.to_string(),
                 kind: InodeKind::Directory,
             });
         };
         let ranges = self
-            .download_ranges(store, &content_ref, start_offset, content_writes)
+            .download_ranges(&content_ref, start_offset, content_writes)
             .await?;
 
         Ok(DirectDownloadTarget {
@@ -641,7 +635,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// visible file.
     pub(crate) async fn direct_download_target_by_inode(
         &self,
-        store: &S,
         inode_id: InodeId,
         revision_no: Option<RevisionNo>,
         start_offset: u64,
@@ -656,7 +649,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             None => self.current_revision_by_inode(inode_id, access).await?,
         };
         let ranges = self
-            .download_ranges(store, &revision.content_ref, start_offset, content_writes)
+            .download_ranges(&revision.content_ref, start_offset, content_writes)
             .await?;
         Ok(DirectDownloadByInodeTarget {
             inode_id,
@@ -672,7 +665,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
         access: &ReadAccess<'_, S>,
-    ) -> Result<(InodeId, Page<FileRevision, FileRevisionsPageCursor>)> {
+    ) -> Result<FileRevisionsPage> {
         let entry = self
             .resolve_path(absolute_path, AttributeInclusion::Omit, access)
             .await?;
@@ -691,7 +684,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             )
             .await?;
         let page = self.file_revisions_page(entry.inode_id, request).await?;
-        Ok((entry.inode_id, page))
+        Ok(FileRevisionsPage {
+            inode_id: entry.inode_id,
+            page,
+        })
     }
 
     /// One page of the namespace's recoverable deletions, oldest deletion
@@ -884,27 +880,26 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
     pub(crate) async fn read_file_revision_bytes(
         &self,
-        store: &S,
         absolute_path: &str,
         revision_no: RevisionNo,
         max_content_bytes: Option<u64>,
         access: &ReadAccess<'_, S>,
     ) -> Result<FileBytes> {
-        let (entry, content_ref) = self
+        let entry = self
             .resolve_file_content(absolute_path, Some(revision_no), access)
             .await?;
+        let content_ref = file_content_ref(&entry)?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .read_bytes(store, self.object_cache, &content_ref)
+            .read_bytes(self.segments.store(), self.object_cache, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
 
     pub(crate) async fn read_file_revision_bytes_by_inode(
         &self,
-        store: &S,
         inode_id: InodeId,
         revision_no: RevisionNo,
         max_content_bytes: Option<u64>,
@@ -917,7 +912,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(self
             .resolve_content_location(&revision.content_ref)
             .await?
-            .read_bytes(store, self.object_cache, &revision.content_ref)
+            .read_bytes(
+                self.segments.store(),
+                self.object_cache,
+                &revision.content_ref,
+            )
             .await?)
     }
 
@@ -1288,9 +1287,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .transpose()?;
         let binding_version = resolved
             .binding_version
-            .map(|position| crate::binding_version::encode(position, &self.namespace_id));
+            .map(|position| crate::binding_version::encode(position, &self.head.namespace_id));
         Ok(PathEntry {
-            namespace_id: self.namespace_id.clone(),
+            namespace_id: self.head.namespace_id.clone(),
             path: resolved.absolute_path.clone(),
             inode_id: resolved.inode_id,
             created_by: resolved.created_by.clone(),
@@ -1395,7 +1394,7 @@ pub(super) fn resolve_visible_child(
     }
 }
 
-fn file_content_ref(entry: &PathEntry) -> Result<ContentRef> {
+pub(crate) fn file_content_ref(entry: &PathEntry) -> Result<ContentRef> {
     match &entry.kind {
         PathEntryKind::File { content_ref, .. } => Ok(content_ref.clone()),
         // Core builds entries from stored kinds, so an unknown kind never reaches here.

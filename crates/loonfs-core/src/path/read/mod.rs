@@ -13,9 +13,9 @@ pub use current_files::{CurrentFile, CurrentFileState, MAX_CURRENT_FILES_PER_STA
 #[cfg(test)]
 pub(crate) use materialized_view::load_current_metadata_view;
 pub(crate) use materialized_view::{
-    ensure_within_read_limit, load_metadata_view, load_metadata_view_for_authorization,
-    LoadedMetadataView, ReadLoadContext,
+    ensure_within_read_limit, file_content_ref, load_metadata_view,
+    load_metadata_view_for_authorization, LoadedMetadataView, ReadLoadContext,
 };
 pub use materialized_view::{
-    DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes, GrantedRange,
+    DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes, FileRevisionsPage, GrantedRange,
 };

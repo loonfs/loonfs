@@ -44,8 +44,7 @@ async fn assert_files_readable(
         .expect("fresh view");
     for (index, value) in values.iter().enumerate() {
         let file = view
-            .get_file_bytes(
-                store,
+            .read_file_bytes(
                 &format!("/{commit_id}-{index}"),
                 None,
                 &ReadAccess::live(Authorizer::Unrestricted),

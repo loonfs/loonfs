@@ -246,7 +246,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine()
-            .get_upload_status(upload_id, self.core.subject.as_ref())
+            .get_upload(upload_id, self.core.subject.as_ref())
             .await?)
     }
 }

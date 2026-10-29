@@ -206,7 +206,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
     let access = ReadAccess::live(Authorizer::Unrestricted);
     for path in ["/one", "/two"] {
         let file = view
-            .get_file_bytes(&fixture.store, path, None, &access)
+            .read_file_bytes(path, None, &access)
             .await
             .expect("snapshot bytes through fork");
         assert_eq!(file.bytes.as_slice(), b"snapshot bytes");

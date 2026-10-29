@@ -128,7 +128,11 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         }
     }
 
-    pub(crate) async fn get_for_lookup(
+    pub(crate) fn store(&self) -> &S {
+        self.store
+    }
+
+    pub(crate) async fn find_row(
         &self,
         family: MetadataRowFamily,
         key: &str,

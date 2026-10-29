@@ -1,5 +1,5 @@
 //! [`MetadataView`]: seq-scoped metadata lookups over manifest segments
-//! merged with the WAL tail, plus the caching session wide reads use.
+//! merged with the WAL tail.
 
 use super::durable_cache::{
     DurableVisibilityCache, DurableVisibilityCacheInner, ParentNameCacheKey, SharedRows,

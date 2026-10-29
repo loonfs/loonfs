@@ -2,7 +2,7 @@
 
 use super::preconditions::ensure_expected_inode;
 use super::publish_path_planning::{
-    resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
+    resolve_visible_inode, AccessStateRef, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::Absence;
 use crate::commit::{CommitOperation, CommitValidationError};
@@ -49,13 +49,10 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
         .view
         .latest_access_revision(authorized_inode_id)
         .await?;
-    let empty = AccessGrants::default();
     view.authorize_access_update(
         authorized_inode_id,
-        current
-            .as_ref()
-            .map_or((false, &empty), |row| (row.boundary, &row.grants)),
-        (boundary, grants),
+        AccessStateRef::from_row(current.as_ref()),
+        AccessStateRef { boundary, grants },
         Absence::Path(absolute_path.as_str()),
     )
     .await?;
@@ -99,13 +96,10 @@ pub(super) async fn plan_update_access_by_inode<S: ObjectStore + ?Sized>(
     }
     let target = resolve_visible_inode(view, inode_id).await?;
     let current = view.view.latest_access_revision(inode_id).await?;
-    let empty = AccessGrants::default();
     view.authorize_access_update(
         inode_id,
-        current
-            .as_ref()
-            .map_or((false, &empty), |row| (row.boundary, &row.grants)),
-        (boundary, grants),
+        AccessStateRef::from_row(current.as_ref()),
+        AccessStateRef { boundary, grants },
         Absence::Inode,
     )
     .await?;

@@ -215,7 +215,7 @@ pub use manifest::{
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
-    GrantedRange, MAX_CURRENT_FILES_PER_STAT,
+    FileRevisionsPage, GrantedRange, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use permit_pool::{BudgetPermit, PermitPool, PermitPoolObserver, PoolCounts};
 pub use pin::{

@@ -4,6 +4,7 @@ use super::core::{
     decode_list_page_request, decode_page_request, encode_next_cursor, encode_next_list_cursor,
     file_revisions_page_response,
 };
+use crate::cache::PinnedRead;
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::execution_budget::BudgetPermit;
 use crate::Result;
@@ -696,7 +697,7 @@ impl<M: crate::Mode> Namespace<M> {
     pub async fn read_view(&self) -> Result<ReadView> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, context) = self
+        let PinnedRead { engine, context } = self
             .core
             .pinned_read(&self.namespace_id, Consistency::Strong)
             .await?;
@@ -730,7 +731,7 @@ impl<M: crate::Mode> Namespace<M> {
         _permit: &BudgetPermit<'_>,
     ) -> Result<ReadView> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, context) = self
+        let PinnedRead { engine, context } = self
             .core
             .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
             .await?;
@@ -801,11 +802,12 @@ impl<M: crate::Mode> Namespace<M> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         self.core
-            .read(&self.namespace_id, consistency, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |pinned| {
                 let options = options.clone();
                 async move {
-                    let entry = engine
-                        .resolve_path(absolute_path, options, &read_context)
+                    let entry = pinned
+                        .engine
+                        .resolve_path(absolute_path, options, &pinned.context)
                         .await?;
                     Ok(entry)
                 }
@@ -852,10 +854,13 @@ impl<M: crate::Mode> Namespace<M> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         self.core
-            .read(&self.namespace_id, consistency, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |pinned| {
                 let options = options.clone();
                 async move {
-                    let entry = engine.stat_inode(inode_id, options, &read_context).await?;
+                    let entry = pinned
+                        .engine
+                        .stat_inode(inode_id, options, &pinned.context)
+                        .await?;
                     Ok(entry)
                 }
             })
@@ -927,7 +932,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
         self.core
-            .read(&self.namespace_id, consistency, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |pinned| {
                 let request = request.clone();
                 let options = options.clone();
                 let listed_path = listed_path.clone();
@@ -935,13 +940,14 @@ impl<M: crate::Mode> Namespace<M> {
                     // Give awakened validation waiters a turn before synchronous page work.
                     // The head is already captured and the validation guard has been released.
                     tokio::task::yield_now().await;
-                    let page = engine
-                        .list_path_page(listed_path.as_str(), request, options, &read_context)
+                    let page = pinned
+                        .engine
+                        .list_path_page(listed_path.as_str(), request, options, &pinned.context)
                         .await?;
                     Ok(ListPathEntriesResponse {
                         namespace_id: self.namespace_id.clone(),
                         path: listed_path,
-                        head_seq: read_context.head.seq,
+                        head_seq: pinned.context.head.seq,
                         entries: page.items,
                         next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
                     })
@@ -1011,17 +1017,18 @@ impl<M: crate::Mode> Namespace<M> {
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(&self.namespace_id, consistency, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |pinned| {
                 let request = request.clone();
                 let options = options.clone();
                 async move {
                     // Give awakened validation waiters a turn before synchronous page work.
                     // The head is already captured and the validation guard has been released.
                     tokio::task::yield_now().await;
-                    let page = engine
-                        .list_inode_children_page(inode_id, request, options, &read_context)
+                    let page = pinned
+                        .engine
+                        .list_inode_children_page(inode_id, request, options, &pinned.context)
                         .await?;
-                    let head_seq = read_context.head.seq;
+                    let head_seq = pinned.context.head.seq;
                     let next_cursor = encode_next_list_cursor(page.next_cursor.as_ref())?;
                     Ok(ListInodeChildrenResponse {
                         namespace_id: self.namespace_id.clone(),
@@ -1073,19 +1080,16 @@ impl<M: crate::Mode> Namespace<M> {
         };
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                consistency,
-                |engine, context| async move {
-                    Ok(engine
-                        .read_file(
-                            absolute_path,
-                            &context,
-                            Some(self.core.inner.config.max_read_content_bytes),
-                        )
-                        .await?)
-                },
-            )
+            .read(&self.namespace_id, consistency, |pinned| async move {
+                Ok(pinned
+                    .engine
+                    .read_file(
+                        absolute_path,
+                        &pinned.context,
+                        Some(self.core.inner.config.max_read_content_bytes),
+                    )
+                    .await?)
+            })
             .await
     }
 
@@ -1145,11 +1149,12 @@ impl<M: crate::Mode> Namespace<M> {
             .read(
                 &self.namespace_id,
                 options.consistency,
-                |engine, read_context| async move {
-                    let stream = engine
+                |pinned| async move {
+                    let stream = pinned
+                        .engine
                         .read_file_stream(
                             absolute_path,
-                            &read_context,
+                            &pinned.context,
                             revision_no,
                             options.chunk_bytes,
                             options.range,
@@ -1256,21 +1261,18 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let start_offset = options.start_offset;
         self.core
-            .read(
-                &self.namespace_id,
-                consistency,
-                |engine, read_context| async move {
-                    let target = engine
-                        .direct_download_target(
-                            absolute_path,
-                            revision_no,
-                            start_offset,
-                            &read_context,
-                        )
-                        .await?;
-                    Ok(target)
-                },
-            )
+            .read(&self.namespace_id, consistency, |pinned| async move {
+                let target = pinned
+                    .engine
+                    .direct_download_target(
+                        absolute_path,
+                        revision_no,
+                        start_offset,
+                        &pinned.context,
+                    )
+                    .await?;
+                Ok(target)
+            })
             .await
     }
 
@@ -1369,21 +1371,18 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let start_offset = options.start_offset;
         self.core
-            .read(
-                &self.namespace_id,
-                consistency,
-                |engine, read_context| async move {
-                    let target = engine
-                        .direct_download_target_by_inode(
-                            inode_id,
-                            revision_no,
-                            start_offset,
-                            &read_context,
-                        )
-                        .await?;
-                    Ok(target)
-                },
-            )
+            .read(&self.namespace_id, consistency, |pinned| async move {
+                let target = pinned
+                    .engine
+                    .direct_download_target_by_inode(
+                        inode_id,
+                        revision_no,
+                        start_offset,
+                        &pinned.context,
+                    )
+                    .await?;
+                Ok(target)
+            })
             .await
     }
 
@@ -1441,18 +1440,12 @@ impl<M: crate::Mode> Namespace<M> {
     ) -> Result<CheckpointFilesPage> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self
+        let PinnedRead { engine, context } = self
             .core
             .pinned_read(&self.namespace_id, Consistency::Strong)
             .await?;
         engine
-            .list_checkpoint_files_page(
-                checkpoint_id,
-                request,
-                options,
-                &read_context,
-                self.core.now_ms(),
-            )
+            .list_checkpoint_files_page(checkpoint_id, request, options, &context)
             .await
             .map_err(crate::Error::from)
     }
@@ -1484,16 +1477,13 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                None,
-                |engine, read_context| async move {
-                    let states = engine
-                        .stat_current_files_by_inode(inode_ids, &read_context)
-                        .await?;
-                    Ok(states)
-                },
-            )
+            .read(&self.namespace_id, None, |pinned| async move {
+                let states = pinned
+                    .engine
+                    .stat_current_files_by_inode(inode_ids, &pinned.context)
+                    .await?;
+                Ok(states)
+            })
             .await
     }
 
@@ -1524,15 +1514,12 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                None,
-                |engine, read_context| async move {
-                    Ok(engine
-                        .read_content_ref(content_ref, max_bytes, &read_context)
-                        .await?)
-                },
-            )
+            .read(&self.namespace_id, None, |pinned| async move {
+                Ok(pinned
+                    .engine
+                    .read_content_ref(content_ref, max_bytes, &pinned.context)
+                    .await?)
+            })
             .await
     }
 
@@ -1578,14 +1565,17 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(&self.namespace_id, consistency, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |pinned| {
                 let request = request.clone();
                 async move {
-                    let page = engine.list_trash_page(request, &read_context).await?;
+                    let page = pinned
+                        .engine
+                        .list_trash_page(request, &pinned.context)
+                        .await?;
                     let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
                     Ok(loonfs_types::ListTrashResponse {
                         namespace_id: self.namespace_id.clone(),
-                        head_seq: read_context.head.seq,
+                        head_seq: pinned.context.head.seq,
                         entries: page.items,
                         next_cursor,
                     })
@@ -1642,18 +1632,19 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let absolute_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
         self.core
-            .read(&self.namespace_id, consistency, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |pinned| {
                 let request = request.clone();
                 let absolute_path = absolute_path.clone();
                 async move {
-                    let (inode_id, page) = engine
-                        .list_file_revisions_page(absolute_path.as_str(), request, &read_context)
+                    let revisions = pinned
+                        .engine
+                        .list_file_revisions_page(absolute_path.as_str(), request, &pinned.context)
                         .await?;
                     Ok(file_revisions_page_response(
                         self.namespace_id.clone(),
-                        read_context.head.seq,
-                        page,
-                        inode_id,
+                        pinned.context.head.seq,
+                        revisions.page,
+                        revisions.inode_id,
                     )?)
                 }
             })
@@ -1712,15 +1703,16 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(&self.namespace_id, consistency, |engine, read_context| {
+            .read(&self.namespace_id, consistency, |pinned| {
                 let request = request.clone();
                 async move {
-                    let page = engine
-                        .list_file_revisions_by_inode_page(inode_id, request, &read_context)
+                    let page = pinned
+                        .engine
+                        .list_file_revisions_by_inode_page(inode_id, request, &pinned.context)
                         .await?;
                     Ok(file_revisions_page_response(
                         self.namespace_id.clone(),
-                        read_context.head.seq,
+                        pinned.context.head.seq,
                         page,
                         inode_id,
                     )?)
@@ -1750,21 +1742,18 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                None,
-                |engine, read_context| async move {
-                    let read = engine
-                        .read_file_revision(
-                            absolute_path,
-                            revision_no,
-                            &read_context,
-                            Some(self.core.inner.config.max_read_content_bytes),
-                        )
-                        .await?;
-                    Ok(read)
-                },
-            )
+            .read(&self.namespace_id, None, |pinned| async move {
+                let read = pinned
+                    .engine
+                    .read_file_revision(
+                        absolute_path,
+                        revision_no,
+                        &pinned.context,
+                        Some(self.core.inner.config.max_read_content_bytes),
+                    )
+                    .await?;
+                Ok(read)
+            })
             .await
     }
 
@@ -1849,20 +1838,17 @@ impl<M: crate::Mode> Namespace<M> {
         };
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                consistency,
-                |engine, read_context| async move {
-                    let read = engine
-                        .read_file_by_inode(
-                            inode_id,
-                            &read_context,
-                            Some(self.core.inner.config.max_read_content_bytes),
-                        )
-                        .await?;
-                    Ok(read)
-                },
-            )
+            .read(&self.namespace_id, consistency, |pinned| async move {
+                let read = pinned
+                    .engine
+                    .read_file_by_inode(
+                        inode_id,
+                        &pinned.context,
+                        Some(self.core.inner.config.max_read_content_bytes),
+                    )
+                    .await?;
+                Ok(read)
+            })
             .await
     }
 
@@ -1952,12 +1938,13 @@ impl<M: crate::Mode> Namespace<M> {
             .read(
                 &self.namespace_id,
                 options.consistency,
-                |engine, context| async move {
-                    Ok(engine
+                |pinned| async move {
+                    Ok(pinned
+                        .engine
                         .read_file_stream_by_inode(
                             inode_id,
                             revision_no,
-                            &context,
+                            &pinned.context,
                             options.chunk_bytes,
                             options.range,
                         )
@@ -1989,21 +1976,18 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                None,
-                |engine, read_context| async move {
-                    let bytes = engine
-                        .read_file_revision_by_inode(
-                            inode_id,
-                            revision_no,
-                            &read_context,
-                            Some(self.core.inner.config.max_read_content_bytes),
-                        )
-                        .await?;
-                    Ok(bytes)
-                },
-            )
+            .read(&self.namespace_id, None, |pinned| async move {
+                let bytes = pinned
+                    .engine
+                    .read_file_revision_by_inode(
+                        inode_id,
+                        revision_no,
+                        &pinned.context,
+                        Some(self.core.inner.config.max_read_content_bytes),
+                    )
+                    .await?;
+                Ok(bytes)
+            })
             .await
     }
 
@@ -2068,13 +2052,9 @@ impl<M: crate::Mode> Namespace<M> {
         };
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(
-                &self.namespace_id,
-                consistency,
-                |engine, context| async move {
-                    change_feed_page(&engine, &context, after_seq, limit).await
-                },
-            )
+            .read(&self.namespace_id, consistency, |pinned| async move {
+                change_feed_page(&pinned.engine, &pinned.context, after_seq, limit).await
+            })
             .await
     }
 }

@@ -270,6 +270,7 @@ impl RuntimeCore {
             namespace_id.clone(),
             self.inner.config.execution_budget.content_writes(),
         )
+        .with_wall_clock(self.inner.wall_clock.clone())
         .with_monotonic_timer(Arc::clone(&self.inner.timer));
         match &self.subject {
             Some(subject) => engine.with_subject(subject.clone()),

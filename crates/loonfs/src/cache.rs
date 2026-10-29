@@ -61,6 +61,12 @@ impl From<Consistency> for HeadConfirmation {
     }
 }
 
+/// A reader engine and the read context it reads at.
+pub(crate) struct PinnedRead {
+    pub(crate) engine: loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
+    pub(crate) context: RuntimeReadContext,
+}
+
 impl RuntimeCore {
     /// Records whether a load found the namespace's head in the read cache.
     fn record_head_lookup(&self, found: bool) {
@@ -317,14 +323,14 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
         confirmation: impl Into<HeadConfirmation>,
-    ) -> Result<(
-        loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
-        RuntimeReadContext,
-    )> {
-        let read_context = self
+    ) -> Result<PinnedRead> {
+        let context = self
             .current_read_context(namespace_id, confirmation)
             .await?;
-        Ok((self.reader_engine(namespace_id), read_context))
+        Ok(PinnedRead {
+            engine: self.reader_engine(namespace_id),
+            context,
+        })
     }
 
     /// Pins the metadata view an unexpired snapshot captured.
@@ -332,10 +338,7 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
         snapshot_id: &PinId,
-    ) -> Result<(
-        loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
-        RuntimeReadContext,
-    )> {
+    ) -> Result<PinnedRead> {
         let live = self
             .current_read_context(namespace_id, Consistency::Strong)
             .await?;
@@ -356,15 +359,13 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
         pinned: SnapshotReadBasis,
         live: RuntimeReadContext,
-    ) -> (
-        loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
-        RuntimeReadContext,
-    ) {
-        (
-            self.reader_engine(namespace_id)
+    ) -> PinnedRead {
+        PinnedRead {
+            engine: self
+                .reader_engine(namespace_id)
                 .with_authorization_head(live),
-            self.read_context(pinned.head, pinned.basis, None),
-        )
+            context: self.read_context(pinned.head, pinned.basis, None),
+        }
     }
 
     /// Returns the namespace's immutable identity, read off the namespace's

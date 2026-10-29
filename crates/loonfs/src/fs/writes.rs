@@ -426,7 +426,10 @@ impl Namespace<Writable> {
             .load_namespace_catalog_for_content_preparation()
             .await?;
         let engine = self.engine();
-        let (owner, context) = self
+        let crate::cache::PinnedRead {
+            engine: owner,
+            context,
+        } = self
             .core
             .pinned_read(&content_ref.owner_namespace_id, crate::Consistency::Strong)
             .await?;
@@ -477,14 +480,16 @@ impl Namespace<Writable> {
         &self,
         secret: &str,
         token: &crate::content_tokens::ContentToken,
-        now_ms: u64,
     ) -> Result<std::result::Result<PreparedContent, loonfs_core::content::ContentTokenError>> {
         self.core.record_trace_context(&tracing::Span::current());
         let catalog = self
             .load_namespace_catalog_for_content_preparation()
             .await?;
         Ok(loonfs_core::content::verify_content_token(
-            secret, &catalog, token, now_ms,
+            secret,
+            &catalog,
+            token,
+            self.core.now_ms(),
         ))
     }
 

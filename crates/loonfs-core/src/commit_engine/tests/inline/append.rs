@@ -58,7 +58,6 @@ async fn revision_bytes(
         .await
         .expect("view")
         .read_file_revision_bytes(
-            store,
             path,
             RevisionNo(revision_no),
             None,

@@ -552,7 +552,6 @@ async fn read_as<S: ObjectStore + ?Sized>(
         .await
         .expect("load the current view")
         .read_file_revision_bytes_by_inode(
-            store,
             inode_id,
             RevisionNo(1),
             None,

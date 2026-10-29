@@ -559,8 +559,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("load clone view");
     let bytes = clone_view
-        .get_file_bytes(
-            &store,
+        .read_file_bytes(
             "/docs/shared.txt",
             None,
             &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
@@ -1631,8 +1630,7 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_pin_exists() {
     let file = load_current_metadata_view(&store, &clone)
         .await
         .expect("clone view")
-        .get_file_bytes(
-            &store,
+        .read_file_bytes(
             "/file",
             None,
             &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
