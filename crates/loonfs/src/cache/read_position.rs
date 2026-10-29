@@ -2,11 +2,13 @@
 //! namespace with an open writer session start from.
 
 use crate::fs::RuntimeCore;
+use crate::trace::phase_span;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
 use loonfs_core::cache::{CachedHead, HeadAndWalTailCache, SharedCheck, WalTailCacheKey};
-use loonfs_core::publish::ReadPosition;
+use loonfs_core::publish::WriterPosition;
 use loonfs_core::time::Observation;
+use loonfs_core::Phase;
 use loonfs_core::PublishedManifest;
 use loonfs_core::{CoreError, MetadataProjectionLoadError};
 use loonfs_types::ManifestNo;
@@ -49,7 +51,7 @@ pub(crate) struct ReadPositionSlot {
     /// The runtime's read cache, where [`Self::clear`] installs the position
     /// as the namespace's cached head, with the position's tail.
     head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,
-    position: Mutex<Option<Arc<ReadPosition>>>,
+    position: Mutex<Option<Arc<WriterPosition>>>,
     /// The session's checks of the position, which the reads that need a
     /// check share.
     check: SharedCheck<Result<(), CoreError>>,
@@ -66,7 +68,7 @@ impl ReadPositionSlot {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Option<Arc<ReadPosition>>> {
+    fn lock(&self) -> MutexGuard<'_, Option<Arc<WriterPosition>>> {
         // A critical section under this lock only moves an `Arc`, so it can't
         // panic and poison the lock.
         self.position
@@ -76,7 +78,7 @@ impl ReadPositionSlot {
 
     /// Returns the position that reads start from, or `None` when reads take
     /// the read cache.
-    pub(crate) fn current(&self) -> Option<Arc<ReadPosition>> {
+    pub(crate) fn current(&self) -> Option<Arc<WriterPosition>> {
         self.lock().clone()
     }
 
@@ -86,7 +88,7 @@ impl ReadPositionSlot {
     /// engine's own check is older. A check that found no successor of a
     /// manifest also confirms every later manifest, because each later
     /// manifest was published after the check.
-    pub(crate) fn prepare(&self, position: Option<ReadPosition>) -> Option<Arc<ReadPosition>> {
+    pub(crate) fn prepare(&self, position: Option<WriterPosition>) -> Option<Arc<WriterPosition>> {
         let mut position = position?;
         if let Some(current) = self.current() {
             if current.basis_checked.age_ms() < position.basis_checked.age_ms() {
@@ -98,7 +100,7 @@ impl ReadPositionSlot {
 
     /// Stores a position that [`Self::prepare`] returned. Only
     /// [`Self::clear`] removes a position.
-    pub(crate) fn store(&self, position: Arc<ReadPosition>) {
+    pub(crate) fn store(&self, position: Arc<WriterPosition>) {
         *self.lock() = Some(position);
     }
 
@@ -128,15 +130,14 @@ impl ReadPositionSlot {
         };
         self.head_and_wal_tail_cache.insert_tail(
             WalTailCacheKey {
-                namespace_id: position.head.namespace_id.clone(),
-                manifest_no: position.basis.manifest_no(),
-                head_seq: position.head.seq,
+                namespace_id: position.read_basis.head.namespace_id.clone(),
+                manifest_no: position.read_basis.basis.manifest_no(),
+                head_seq: position.read_basis.head.seq,
             },
             Arc::clone(&position.tail),
         );
         self.head_and_wal_tail_cache.replace_head(CachedHead {
-            head: position.head.clone(),
-            basis: position.basis.clone(),
+            read_basis: position.read_basis.clone(),
             basis_checked: position.basis_checked.clone(),
             head_confirmed: position.basis_checked.clone(),
         });
@@ -155,14 +156,14 @@ impl ReadPositionSlot {
         let Some(current) = self.current() else {
             return;
         };
-        if current.basis.manifest_no() < manifest_no
+        if current.read_basis.basis.manifest_no() < manifest_no
             || current.basis_checked.age_ms() <= checked.age_ms()
         {
             return;
         }
-        let updated = Arc::new(ReadPosition {
+        let updated = Arc::new(WriterPosition {
             basis_checked: checked,
-            ..ReadPosition::clone(&current)
+            ..WriterPosition::clone(&current)
         });
         let mut slot = self.lock();
         if slot
@@ -195,7 +196,7 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
         max_staleness_ms: Option<u64>,
-    ) -> Result<Option<Arc<ReadPosition>>, CoreError> {
+    ) -> Result<Option<Arc<WriterPosition>>, CoreError> {
         let Some(positions) = self
             .inner
             .head_positions
@@ -214,7 +215,7 @@ impl RuntimeCore {
             positions.drop_position(namespace_id).await;
             return Ok(None);
         }
-        let fresh = |position: &ReadPosition| {
+        let fresh = |position: &WriterPosition| {
             max_staleness_ms
                 .is_some_and(|max_staleness_ms| position.basis_checked.age_ms() < max_staleness_ms)
         };
@@ -230,10 +231,10 @@ impl RuntimeCore {
                 },
                 || {
                     self.check_writer_position(namespace_id, positions.as_ref(), &slot)
-                        .instrument(tracing::debug_span!(
-                            target: "loonfs::page",
-                            "loonfs.phase",
-                            phase = "position_manifest_probe"
+                        .instrument(phase_span!(
+                            self,
+                            Phase::PositionManifestProbe,
+                            namespace_id
                         ))
                 },
             )
@@ -267,12 +268,15 @@ impl RuntimeCore {
         let observed = Observation::now(Arc::clone(&self.inner.timer));
         let namespace = self.namespace_store(namespace_id);
         let successor = namespace
-            .manifest_has_successor(position.basis.manifest_no())
+            .manifest_has_successor(position.read_basis.basis.manifest_no())
             .await
             .map_err(MetadataProjectionLoadError::LoadHead)?;
         let moves = if successor {
             namespace
-                .same_epoch_manifests_above(position.basis.manifest(), position.head.writer_epoch)
+                .same_epoch_manifests_above(
+                    position.read_basis.basis.manifest(),
+                    position.read_basis.head.writer_epoch,
+                )
                 .await
                 .map_err(MetadataProjectionLoadError::LoadHead)?
         } else {
@@ -287,9 +291,11 @@ impl RuntimeCore {
             self.invalidate_namespace_read_cache(namespace_id);
             return Ok(());
         };
-        let newest = moves.last().map_or(position.basis.manifest_no(), |moved| {
-            moved.manifest.manifest_no
-        });
+        let newest = moves
+            .last()
+            .map_or(position.read_basis.basis.manifest_no(), |moved| {
+                moved.manifest.manifest_no
+            });
         for published in moves {
             positions.move_position(namespace_id, published).await;
         }

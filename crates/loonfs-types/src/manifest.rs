@@ -323,6 +323,63 @@ impl NamespaceManifestPayload {
         }
     }
 
+    /// Constructs manifest 1 of a fork of `source` at `fork_basis`, which lists
+    /// the runs of `source` and starts its floors at the fork's head.
+    pub fn initial_fork(
+        namespace_id: NamespaceId,
+        created_at_ms: u64,
+        created_by: ActorId,
+        fork_basis: ForkBasis,
+        source: &Self,
+    ) -> Self {
+        let fork_seq = fork_basis.manifest.head_seq;
+        Self {
+            retention_window_ms: source.retention_window_ms,
+            fork_basis: Some(fork_basis),
+            head_seq: source.head_seq,
+            next_inode_id: source.next_inode_id,
+            next_run_no: source.next_run_no,
+            retention_floor_seq: fork_seq,
+            acknowledged_floor_seq: fork_seq,
+            runs: source.runs.clone(),
+            ..Self::initial(
+                namespace_id,
+                created_at_ms,
+                created_by,
+                source.access.clone(),
+            )
+        }
+    }
+
+    /// Returns the manifest after this one, which has the next manifest
+    /// number, lists `runs`, and copies every other field of this manifest.
+    pub fn successor(
+        &self,
+        runs: Vec<MetadataRunRef>,
+    ) -> Result<Self, crate::PublicOrdinalRangeError> {
+        Ok(Self {
+            namespace_id: self.namespace_id.clone(),
+            created_at_ms: self.created_at_ms,
+            created_by: self.created_by.clone(),
+            access: self.access.clone(),
+            retention_window_ms: self.retention_window_ms,
+            fork_basis: self.fork_basis.clone(),
+            status: self.status,
+            writer: self.writer.clone(),
+            folded_wal_no: self.folded_wal_no,
+            manifest_no: self.manifest_no.successor()?,
+            compactor_epoch: self.compactor_epoch,
+            head_seq: self.head_seq,
+            activity: self.activity,
+            writer_epoch: self.writer_epoch,
+            next_inode_id: self.next_inode_id,
+            next_run_no: self.next_run_no,
+            retention_floor_seq: self.retention_floor_seq,
+            acknowledged_floor_seq: self.acknowledged_floor_seq,
+            runs,
+        })
+    }
+
     /// Rejects an initial manifest with writer authority or prior activity.
     pub fn ensure_first_manifest(&self) -> Result<(), ManifestChainError> {
         let invalid = |field: &str| {

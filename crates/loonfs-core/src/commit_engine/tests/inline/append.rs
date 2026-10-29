@@ -672,11 +672,7 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
                 }
             } else {
                 let results = engine
-                    .publish_batch(
-                        candidates,
-                        &context,
-                        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                    )
+                    .publish_batch(candidates, &context.clock())
                     .await
                     .results;
                 for result in results {

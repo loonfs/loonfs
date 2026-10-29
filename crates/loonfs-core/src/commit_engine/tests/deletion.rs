@@ -1,6 +1,7 @@
 //! Writer fencing and deletion budgets.
 
 use super::*;
+use crate::test_support::WriterAt;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -9,8 +10,8 @@ use loonfs_types::AbsolutePath;
 use std::assert_matches;
 use tempfile::tempdir;
 
-fn context() -> MutationContext {
-    crate::test_support::mutation_context("writer", 1_000)
+fn context() -> WriterAt {
+    crate::test_support::writer_at("writer", 1_000)
 }
 
 #[tokio::test]
@@ -36,12 +37,15 @@ async fn deletion_budget_includes_writer_acquisition() {
         .await
         .expect("bootstrap");
     let clock = Arc::new(ManualClock::new(0));
-    let mut publisher = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: clock.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut publisher = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: clock.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        context.writer_id.clone(),
+    );
     store.block_next();
-    let delete = publisher.delete_namespace(Default::default(), &context);
+    let delete = publisher.delete_namespace(Default::default());
     let delay = async {
         store.wait_until_blocked().await;
         clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
@@ -56,11 +60,8 @@ async fn deletion_budget_includes_writer_acquisition() {
         .load_current_manifest()
         .await
         .expect("manifest");
-    assert!(!manifest.state.envelope.payload().status.is_deleted());
-    assert_eq!(
-        manifest.state.envelope.payload().manifest_no,
-        loonfs_types::ManifestNo(2)
-    );
+    assert!(!manifest.payload().status.is_deleted());
+    assert_eq!(manifest.payload().manifest_no, loonfs_types::ManifestNo(2));
 }
 
 #[tokio::test]
@@ -76,8 +77,10 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         .create()
         .await
         .expect("bootstrap");
-    let mut stale =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut stale = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
     stale
         .publish_batch(
             [CommitCandidate::new(CommitIntent::single(
@@ -89,17 +92,19 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
                     parents: false,
                 },
             ))],
-            &context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &context.clock(),
         )
         .await
         .results
         .remove(0)
         .expect("publish before deletion");
-    NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id))
-        .delete_namespace(Default::default(), &context)
-        .await
-        .expect("delete");
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    )
+    .delete_namespace(Default::default())
+    .await
+    .expect("delete");
     let candidate = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("after-delete").expect("commit"),
         loonfs_test_support::test_actor(),
@@ -112,11 +117,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     for attempt in 0..3 {
         store.reset();
         let error = stale
-            .publish_batch(
-                [candidate.clone()],
-                &context,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            )
+            .publish_batch([candidate.clone()], &context.clock())
             .await
             .results
             .remove(0)
@@ -148,10 +149,13 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .await
         .expect("bootstrap");
     let clock = Arc::new(ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: clock.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: clock.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        context.writer_id.clone(),
+    );
     let value = InlineContent::new(
         namespace_id.clone(),
         ContentId::generate(),
@@ -175,7 +179,10 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         vec![value],
     );
     engine
-        .publish_batch([candidate], &context, &Deadline::start(clock.clone()))
+        .publish_batch(
+            [candidate],
+            &OperationClock::start(context.now_ms, clock.clone()),
+        )
         .await
         .results
         .pop()
@@ -183,11 +190,11 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .expect("publish inline content");
     let acquired_writer = engine
         .position
-        .session_writer_epoch(&engine.namespace, &context)
+        .session_writer_epoch(&engine.namespace, &context.writer_id)
         .await
         .expect("acquired writer");
     for expected_head_seq in [ChangeSeq(0), ChangeSeq(1)] {
-        let deadline = Deadline::start(clock.clone());
+        let deadline = OperationClock::start(context.now_ms, clock.clone());
         if expected_head_seq == ChangeSeq(1) {
             clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
         }
@@ -199,7 +206,6 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
                 },
                 acquired_writer.clone(),
                 None,
-                &context,
                 &deadline,
             )
             .await

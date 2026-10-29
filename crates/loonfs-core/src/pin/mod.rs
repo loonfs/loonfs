@@ -18,7 +18,6 @@ pub use self::files::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, ListCheckpointFilesOptions,
 };
 pub use self::list::{CheckpointPageCursor, SnapshotPageCursor};
-pub use self::read_basis::SnapshotReadBasis;
 
 pub(crate) use self::read_basis::load_pin_basis;
 pub(crate) use self::snapshot::ensure_unexpired;

@@ -43,7 +43,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     name: &str,
     expires_at_ms: Option<u64>,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> PinId {
     crate::test_support::namespace_store(store, namespace_id)
         .create_pin(
@@ -51,7 +51,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
                 name: name.to_owned(),
                 expires_at_ms,
             },
-            context,
+            &context.clock(),
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -99,7 +99,7 @@ async fn two_pins_under_one_label_list_as_two_records() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .delete_snapshot(&first)
@@ -235,7 +235,7 @@ async fn deleted_pins_are_absent_from_later_pages() {
         crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
         .delete_snapshot(checkpoint_id)
@@ -498,7 +498,7 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
             .await,
         );
         crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(fork_owner.clone(), &context)
+            .create_pin(fork_owner.clone(), &context.clock())
             .await
             .expect("create fork pin");
     }
@@ -558,7 +558,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
     ];
     for owner in refused {
         let error = crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(owner.clone(), &context)
+            .create_pin(owner.clone(), &context.clock())
             .await
             .map(|report| crate::pin::checkpoint_summary(report.response))
             .expect_err("the owner is not creatable");
@@ -591,7 +591,7 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
             PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
             },
-            &context,
+            &context.clock(),
         )
         .await
         .expect("create fork pin")
@@ -623,7 +623,10 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
         result.expect_err("refused").code()
     }
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let read_at = |pin_id, now_ms| namespace.load_unexpired_snapshot(pin_id, now_ms);
+    let namespace = &namespace;
+    let read_at = |pin_id, now_ms| async move {
+        crate::pin::ensure_unexpired(namespace.load_user_pin(pin_id).await?, now_ms)
+    };
     read_at(&expiring, expires_at_ms - 1)
         .await
         .expect("an unexpired snapshot is readable");
@@ -683,7 +686,7 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
             PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
             },
-            &context,
+            &context.clock(),
         )
         .await
         .expect("create fork pin")
@@ -695,7 +698,7 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
         let deleted = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
         .delete_snapshot(&snapshot)
@@ -712,7 +715,7 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
     let error = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .delete_snapshot(&fork)

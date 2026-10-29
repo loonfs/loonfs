@@ -7,7 +7,7 @@
 //! retention, and a delta merge drops only superseded layouts.
 //! [`MetadataCompactionPolicy`] decides which runs a group merges, and when.
 
-use super::fold::{next_manifest_no_after, next_run_no_after};
+use super::fold::{next_run_no_after, no_manifest_after};
 use super::index_block_load::segment_object_bytes;
 use super::load::metadata_basis_from_manifest;
 use super::published::PublishedManifest;
@@ -22,17 +22,15 @@ use super::streaming_compaction::{
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_COMPACTION_INPUT_RUNS;
-use crate::namespace::control::{ensure_namespace_live, CurrentManifest};
-use crate::namespace::state::NamespaceReadState;
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::PublicationBasis;
-use crate::time::Deadline;
+use crate::phase::Phase;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
 };
 use loonfs_types::CompactorEpoch;
 use loonfs_types::{ChangeSeq, NamespaceId};
-use std::sync::Arc;
 
 /// A run joins a size tier when its stored bytes are at most this many times
 /// the smallest run already in the tier.
@@ -117,7 +115,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         name = "loonfs.phase",
         err(level = "warn"),
         skip_all,
-        fields(phase = "metadata_compaction_step", key_class = "manifest")
+        fields(phase = Phase::MetadataCompactionStep.as_str(), key_class = "manifest")
     )]
     pub async fn compact_metadata_unit(
         &self,
@@ -127,7 +125,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         compactor_epoch: CompactorEpoch,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<CompactionUnitOutcome> {
-        let compaction = Deadline::start(Arc::clone(&self.namespace.timer));
+        let compaction = self.namespace.start_clock();
         let basis = match basis {
             Some(basis) => basis,
             None => {
@@ -143,11 +141,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
         };
         let current = &basis.manifest;
-        let payload = current.state.envelope.payload();
+        let payload = current.payload();
         if payload.compactor_epoch != compactor_epoch {
             return Ok(CompactionUnitOutcome::Fenced);
         }
-        ensure_namespace_live(&NamespaceReadState::from(payload))?;
+        ensure_namespace_live(&payload.namespace_id, payload.status)?;
         // The unit reads its input runs without the cache, and the merge inserts
         // its output into the cache.
         let segments = metadata_basis_from_manifest(&self.namespace.store, None, current).segments;
@@ -207,7 +205,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                         &CompactionPublication {
                             compactor_epoch,
                             compaction,
-                            publication: Deadline::start(Arc::clone(&self.namespace.timer)),
+                            publication: self.namespace.start_clock(),
                         },
                     )
                     .await?
@@ -316,7 +314,7 @@ pub(super) fn plan_group(
 /// Checks a manifest's descriptors for compaction work without reading the
 /// store.
 pub fn metadata_compaction_due(
-    manifest: &CurrentManifest,
+    manifest: &LoadedManifest,
     compaction_policy: MetadataCompactionPolicy,
 ) -> bool {
     let manifest = manifest.envelope.payload();
@@ -610,19 +608,13 @@ pub(super) fn build_replacement_manifest(
             segments: output.segments,
         });
     }
-    let retention_floor_seq = previous.retention_floor_seq.max(floor_seq);
-    let manifest_no = next_manifest_no_after(previous.manifest_no)?;
     Ok(NamespaceManifestPayload {
-        compactor_epoch: previous.compactor_epoch,
         namespace_id: namespace_id.clone(),
-        manifest_no,
-        head_seq: previous.head_seq,
-        writer_epoch: previous.writer_epoch,
-        next_inode_id: previous.next_inode_id,
         next_run_no,
-        retention_floor_seq,
-        runs,
-        ..previous.clone()
+        retention_floor_seq: previous.retention_floor_seq.max(floor_seq),
+        ..previous
+            .successor(runs)
+            .map_err(|_| no_manifest_after(previous.manifest_no))?
     })
 }
 

@@ -17,7 +17,6 @@ use loonfs_types::format::manifest::{
 use loonfs_types::{AttributeInclusion, EntryInodeKind, InodeKind};
 use loonfs_types::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 use std::assert_matches;
-use std::sync::Arc;
 
 fn position(seq: u64) -> DeltaPosition {
     DeltaPosition {
@@ -248,27 +247,29 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     commit_id: &str,
     operation: FilesystemOperation,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> loonfs_types::Commit {
-    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
-        .publish_batch(
-            vec![CommitCandidate::prepared(
-                CommitIntent::single(
-                    CommitId::parse(commit_id).expect("commit id"),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    operation,
-                ),
-                Vec::new(),
-            )],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("commit accepted")
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        context.writer_id.clone(),
+    )
+    .publish_batch(
+        vec![CommitCandidate::prepared(
+            CommitIntent::single(
+                CommitId::parse(commit_id).expect("commit id"),
+                loonfs_test_support::test_actor(),
+                None,
+                operation,
+            ),
+            Vec::new(),
+        )],
+        &context.clock(),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("commit accepted")
 }
 
 async fn undelete<S: ObjectStore + ?Sized>(
@@ -278,7 +279,7 @@ async fn undelete<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
     absolute_path: &str,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> loonfs_types::Commit {
     submit_operation_for_test(
         store,
@@ -303,28 +304,30 @@ async fn refused_undelete<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> CoreError {
-    NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
-        .publish_batch(
-            vec![CommitCandidate::new(CommitIntent::single(
-                CommitId::generate(),
-                loonfs_test_support::test_actor(),
-                None,
-                FilesystemOperation::undelete(
-                    inode_id,
-                    deletion_seq,
-                    &loonfs_types::options::UndeleteDestination::Recorded,
-                ),
-            ))],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect_err("the undelete is refused")
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        context.writer_id.clone(),
+    )
+    .publish_batch(
+        vec![CommitCandidate::new(CommitIntent::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::undelete(
+                inode_id,
+                deletion_seq,
+                &loonfs_types::options::UndeleteDestination::Recorded,
+            ),
+        ))],
+        &context.clock(),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect_err("the undelete is refused")
 }
 
 async fn trash_page<S: ObjectStore + ?Sized>(
@@ -487,7 +490,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("differential-trash").expect("namespace id");
-    let mut context = mutation_context("writer-1", 5_000);
+    let mut context = writer_at("writer-1", 5_000);
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
@@ -528,7 +531,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
     let mut deletions: std::collections::HashMap<String, (InodeId, ChangeSeq)> =
         std::collections::HashMap::new();
     for (step, action) in script.into_iter().enumerate() {
-        context = mutation_context("writer-1", 5_000 + step as u64);
+        context = writer_at("writer-1", 5_000 + step as u64);
         let commit_id = format!("com_step{step:028}");
         match action {
             HistoryStep::Create(path) => {
@@ -601,7 +604,7 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-order").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
@@ -681,7 +684,7 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-paging").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
@@ -791,7 +794,7 @@ async fn stored_active_deletions<S: ObjectStore + ?Sized>(
 async fn delete_below_the_floor<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> (InodeId, loonfs_types::Commit) {
     write_test_file(
         store,
@@ -822,7 +825,7 @@ async fn delete_below_the_floor<S: ObjectStore>(
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -842,7 +845,7 @@ async fn a_deletion_below_the_floor_leaves_the_trash_before_its_row_is_removed()
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-below-floor").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
@@ -928,7 +931,7 @@ async fn a_trash_cursor_resumes_above_a_floor_that_passed_it() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-cursor-floor").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
@@ -987,7 +990,7 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
             LocalFsStore::new(temp.path()).expect("create local-fs store"),
         );
         let namespace_id = NamespaceId::parse("trash-bounded").expect("namespace id");
-        let context = mutation_context("writer-1", 5_000);
+        let context = writer_at("writer-1", 5_000);
         bootstrap_namespace(&store, &namespace_id, &context)
             .await
             .expect("bootstrap namespace");
@@ -1047,7 +1050,7 @@ async fn nested_deletions_each_keep_their_own_entry() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-nested").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
@@ -1105,7 +1108,7 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-wal-tail").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
@@ -1177,13 +1180,10 @@ async fn fresh_read_context<S: ObjectStore + ?Sized>(
         .await
         .expect("load read basis");
     RuntimeReadContext {
-        basis: loaded.basis(),
-        head: loaded.read_state,
-        segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
-        head_and_wal_tail_cache: Arc::new(crate::manifest::HeadAndWalTailCache::unshared(
-            usize::MAX,
-        )),
-        object_cache: Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        read_basis: crate::control::ReadBasis {
+            basis: loaded.basis(),
+            head: loaded.read_state,
+        },
         tail: None,
     }
 }
@@ -1197,7 +1197,7 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
             KeyPredicate::any(),
         );
         let namespace_id = NamespaceId::parse("changes-bounded").expect("namespace id");
-        let context = mutation_context("writer-1", 5_000);
+        let context = writer_at("writer-1", 5_000);
         bootstrap_namespace(&store, &namespace_id, &context)
             .await
             .expect("bootstrap namespace");
@@ -1261,7 +1261,7 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("changes-boundary").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
@@ -1337,7 +1337,7 @@ struct ExpiredDocs {
 async fn expire_docs<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> ExpiredDocs {
     bootstrap_namespace(store, namespace_id, context)
         .await
@@ -1374,7 +1374,7 @@ async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidd
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-expiry").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     let expired = expire_docs(&store, &namespace_id, &context).await;
 
     for compacted in [false, true] {
@@ -1446,7 +1446,7 @@ async fn an_expiry_commits_nothing_and_the_change_feed_reports_no_event() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("feed-expiry").expect("namespace id");
-    let context = mutation_context("writer-1", 5_000);
+    let context = writer_at("writer-1", 5_000);
     let expired = expire_docs(&store, &namespace_id, &context).await;
 
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);

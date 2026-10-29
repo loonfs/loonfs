@@ -4,8 +4,8 @@ use super::*;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::manifest::row::manifest_rows_for_family;
 use crate::manifest::runs::MetadataRunPolicy;
+use crate::test_support::WriterAt;
 use crate::time::StdMonotonicTimer;
-use crate::MutationContext;
 use loonfs_objectstore::keys::{
     metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
     metadata_segment_prefix,
@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use tempfile::tempdir;
 
 async fn seed_tail(store: &LocalFsStore, namespace_id: &NamespaceId) {
-    let context = MutationContext {
+    let context = WriterAt {
         writer_id: WriterId::parse("segment-writes").expect("writer id"),
         now_ms: 1_000,
     };
@@ -38,7 +38,7 @@ async fn seed_tail(store: &LocalFsStore, namespace_id: &NamespaceId) {
         .await
         .expect("namespace");
     crate::test_support::namespace_store(store, namespace_id)
-        .acquire_writer_epoch(&context)
+        .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("writer");
     for index in 0..36 {
@@ -157,7 +157,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
         }
         store.inner().inner().reset();
         store.block_next();
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
         let namespace = crate::NamespaceStore {
             run_policy: MetadataRunPolicy {
                 max_rows_per_segment: NonZeroUsize::new(rows_per_segment).expect("row limit"),
@@ -194,10 +194,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
             .load_current_manifest()
             .await
             .expect("published manifest");
-        assert_eq!(
-            published.state.envelope.payload(),
-            verified_manifest.payload()
-        );
+        assert_eq!(published.payload(), verified_manifest.payload());
         let operations = store.inner().inner().snapshot();
         let manifest_key =
             metadata_manifest_object(&namespace_id, &verified_manifest.payload().manifest_no);
@@ -245,7 +242,7 @@ async fn a_failed_segment_put_prevents_fold_publication() {
     }
     .fold_wal_tail(
         None,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
     )
     .await;
     assert!(matches!(
@@ -262,8 +259,5 @@ async fn a_failed_segment_put_prevents_fold_publication() {
         .load_current_manifest()
         .await
         .expect("unchanged manifest");
-    assert_eq!(
-        after.state.envelope.payload(),
-        before.state.envelope.payload()
-    );
+    assert_eq!(after.payload(), before.payload());
 }

@@ -77,7 +77,7 @@ impl<'a> ContentSweep<'a> {
         // The pass time seeds the filter, so a false match on an unreferenced
         // object in one pass is unlikely to repeat in the next pass.
         let mut shared =
-            BloomFilter::with_max_bytes(expected_entries, sweep.mutation.now_ms, max_bytes);
+            BloomFilter::with_max_bytes(expected_entries, sweep.clock.request_at_ms(), max_bytes);
         tracing::info!(namespace_id = %namespace_id, shard_width,
             layout_segments = segments.len(), "collecting namespace");
         let scanned = scan_layout_extents(sweep, &segments, "", |row, extent| {
@@ -154,7 +154,7 @@ fn distinct_layout_segments(live: &LiveSet) -> Result<(Vec<ScanDescriptor<'_>>, 
     for run in live
         .manifests
         .iter()
-        .flat_map(|manifest| &manifest.state.envelope.payload().runs)
+        .flat_map(|manifest| &manifest.payload().runs)
     {
         for descriptor in run
             .segments

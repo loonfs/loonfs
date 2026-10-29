@@ -6,7 +6,7 @@ use axum::{
 use serde::Serialize;
 
 pub(super) fn page_response<T: Serialize>(page: T) -> Response {
-    let span = tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "serialize", request_id = tracing::field::Empty);
+    let span = loonfs::phase_span!(loonfs::Phase::Serialize, request_id = tracing::field::Empty);
     if let Ok(request_id) = super::middleware::REQUEST_ID.try_with(|id| id.clone()) {
         span.record("request_id", request_id.as_str());
     }

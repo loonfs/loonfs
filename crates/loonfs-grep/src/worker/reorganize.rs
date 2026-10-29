@@ -14,7 +14,7 @@ use crate::manifest::{
 };
 use crate::segments::GrepSegments;
 use crate::{GrepError, GrepWorker, Result};
-use loonfs::engine::{refill_iterators, select_next_iterator, Deadline, SegmentRowIterator};
+use loonfs::engine::{refill_iterators, select_next_iterator, OperationClock, SegmentRowIterator};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES;
 use loonfs_types::{IndexSegmentId, NamespaceId, RunNo};
@@ -48,7 +48,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepReorganizeOutcome> {
-        let deadline = Deadline::start(self.timer());
+        let deadline = OperationClock::start(self.now_ms(), self.timer());
         let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
             return Ok(GrepReorganizeOutcome::NotEnabled);
         };

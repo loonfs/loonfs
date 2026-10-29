@@ -4,23 +4,19 @@
 
 use crate::authorize::CommitAuthority;
 use crate::commit::CommitFingerprint;
-use crate::context::MutationContext;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::PublishedManifest;
-use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
-use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
-use crate::protocol::{PublishTailPosition, PublishViewEffect};
+use crate::protocol::{PublishViewEffect, WriterPosition};
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
-use crate::time::{Deadline, Observation};
+use crate::time::{Observation, OperationClock};
 use crate::wal::settle_publish_attempt;
-use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
 use loonfs_types::format::wal::{
@@ -28,7 +24,7 @@ use loonfs_types::format::wal::{
 };
 use loonfs_types::{
     CommitId, ContentId, ContentRef, DeleteNamespaceResponse, FileContent, InlineContentIdentity,
-    ManifestNo, NamespaceId,
+    ManifestNo, NamespaceId, WriterId,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -618,50 +614,6 @@ pub enum TailSource {
     Store,
 }
 
-/// The tail a fold publishes: the head it was replayed against, the basis
-/// the manifest builds on, and the rows themselves. Cheap to take: an `Arc`
-/// clone and a few small clones.
-#[derive(Debug, Clone)]
-pub struct WalFoldInput {
-    pub head: NamespaceReadState,
-    pub basis: MetadataBasis,
-    /// When a store observation last confirmed `basis` current, as in
-    /// [`ReadPosition::basis_checked`].
-    pub basis_checked: Observation,
-    pub tail_state: Arc<ProjectedWalTail>,
-    pub wal_tail_objects: u64,
-    pub wal_tail_inline_bytes: usize,
-}
-
-/// The head that reads in a writer session's runtime start from, taken from
-/// the session's commit engine.
-#[derive(Debug, Clone)]
-pub struct ReadPosition {
-    pub head: NamespaceReadState,
-    pub basis: MetadataBasis,
-    /// The projected WAL tail above `basis` at `head`, which the engine
-    /// keeps with its position. Reads from the position start from this
-    /// tail without replaying the WAL.
-    pub tail: Arc<ProjectedWalTail>,
-    /// When a store observation last confirmed `basis` current: the
-    /// discovery that loaded it, or a HEAD that found no successor.
-    pub basis_checked: Observation,
-}
-
-impl ReadPosition {
-    /// Returns the position as the input of a fold of its tail.
-    pub fn wal_fold_input(&self) -> WalFoldInput {
-        WalFoldInput {
-            head: self.head.clone(),
-            basis: self.basis.clone(),
-            basis_checked: self.basis_checked.clone(),
-            tail_state: Arc::clone(&self.tail),
-            wal_tail_objects: self.head.unfolded_wal_objects(),
-            wal_tail_inline_bytes: self.tail.inline_bytes(),
-        }
-    }
-}
-
 /// Tracks writer state for one namespace session: unacquired, acquired, or
 /// permanently fenced.
 ///
@@ -694,6 +646,8 @@ pub struct NamespaceCommitEngine<S> {
     /// view borrows the store and the segment cache from here while the unit
     /// moves `position`.
     namespace: NamespaceStore<S>,
+    /// The writer that the session acquires its epoch for.
+    writer_id: WriterId,
     position: PositionState,
 }
 
@@ -701,12 +655,9 @@ pub struct NamespaceCommitEngine<S> {
 /// that the units publish under.
 #[derive(Debug)]
 struct PositionState {
-    publish_tail: Option<PublishTailPosition>,
+    current: Option<WriterPosition>,
     projection_observed: Option<Observation>,
     acquired_anchor: Option<NamespaceReadAnchor>,
-    /// When a store observation last confirmed the projection's basis manifest
-    /// current: the discovery that loaded it, or a HEAD that found no successor.
-    basis_checked: Option<Observation>,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionStatus`].
     session: SharedWriterSessionStatus,
@@ -717,16 +668,16 @@ struct PositionState {
 }
 
 impl<S: ObjectStore> NamespaceCommitEngine<S> {
-    /// Returns a commit engine over `namespace` whose writer session no
-    /// other engine shares.
-    pub fn new(namespace: NamespaceStore<S>) -> Self {
+    /// Returns a commit engine over `namespace` that commits as `writer_id`,
+    /// with a writer session that no other engine shares.
+    pub fn new(namespace: NamespaceStore<S>, writer_id: WriterId) -> Self {
         Self {
             namespace,
+            writer_id,
             position: PositionState {
-                publish_tail: None,
+                current: None,
                 projection_observed: None,
                 acquired_anchor: None,
-                basis_checked: None,
                 session: SharedWriterSessionStatus::default(),
                 published_manifest_no: None,
             },
@@ -751,7 +702,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// store reads or writer acquisition.
     pub fn retains_commit_receipt(&self, commit_id: &CommitId) -> bool {
         self.position
-            .publish_tail
+            .current
             .as_ref()
             .is_some_and(|position| position.tail.find_commit_receipt(commit_id).is_some())
     }
@@ -760,34 +711,31 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// the engine has no position.
     pub fn wal_tail_objects(&self) -> Option<u64> {
         self.position
-            .publish_tail
+            .current
             .as_ref()
-            .map(|position| position.head.unfolded_wal_objects())
+            .map(WriterPosition::wal_tail_objects)
     }
 
     /// Inline content bytes in the unfolded WAL tail as of the last
     /// publication unit, or `None` when the engine has no position.
     pub fn wal_tail_inline_bytes(&self) -> Option<usize> {
         self.position
-            .publish_tail
+            .current
             .as_ref()
-            .map(PublishTailPosition::wal_tail_inline_bytes)
+            .map(WriterPosition::wal_tail_inline_bytes)
     }
 
-    /// The position's tail as a fold input, or `None` when the engine has no
-    /// position.
-    pub fn wal_fold_input(&self) -> Option<WalFoldInput> {
-        self.position
-            .read_position()
-            .as_ref()
-            .map(ReadPosition::wal_fold_input)
+    /// Returns the engine's position, whether or not the session is fenced,
+    /// or `None` when the engine has no position.
+    pub fn writer_position(&self) -> Option<WriterPosition> {
+        self.position.current.clone()
     }
 
     /// Moves the position onto `manifest`, a manifest that this runtime
     /// published or found current (the session's own fold, or a maintenance
     /// call), or that a read found above the position, or drops the
     /// position when it can't move there (see
-    /// `PublishTailPosition::move_to` for the rule).
+    /// `WriterPosition::move_to` for the rule).
     ///
     /// Later commits then plan against the new manifest, and reads in this
     /// runtime start from it, so a read's manifest check doesn't find the
@@ -803,7 +751,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// position keeps the younger of the two checks.
     pub fn record_manifest_published(&mut self, manifest: PublishedManifest) {
         let state = &mut self.position;
-        let Some(position) = state.publish_tail.as_mut() else {
+        let Some(position) = state.current.as_mut() else {
             return;
         };
         if !position.move_to(&manifest) {
@@ -813,13 +761,10 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         let Some(started) = manifest.started else {
             return;
         };
-        if position.basis().manifest() == &manifest.manifest
-            && state
-                .basis_checked
-                .as_ref()
-                .is_none_or(|checked| started.age_ms() < checked.age_ms())
+        if position.read_basis.basis.manifest() == &manifest.manifest
+            && started.age_ms() < position.basis_checked.age_ms()
         {
-            state.basis_checked = Some(started);
+            position.basis_checked = started;
         }
     }
 
@@ -828,14 +773,14 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     ///
     /// A fenced session publishes nothing more, so its position would stay
     /// on a head that the new writer has moved past.
-    pub fn read_position(&self) -> Option<ReadPosition> {
+    pub fn read_position(&self) -> Option<WriterPosition> {
         if matches!(
             *self.position.lock_session(),
             WriterSessionStatus::Fenced(_)
         ) {
             return None;
         }
-        self.position.read_position()
+        self.position.current.clone()
     }
 
     /// Returns the number of the newest manifest that this engine published
@@ -860,22 +805,15 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     pub async fn delete_namespace(
         &mut self,
         options: DeleteNamespaceOptions,
-        context: &MutationContext,
     ) -> Result<DeleteNamespaceResponse> {
-        let deadline = Deadline::start(Arc::clone(&self.namespace.timer));
+        let clock = self.namespace.start_clock();
         let acquired_writer = self
             .position
-            .session_writer_epoch(&self.namespace, context)
+            .session_writer_epoch(&self.namespace, &self.writer_id)
             .await?;
         let deleted = self
             .namespace
-            .delete_namespace(
-                options,
-                acquired_writer,
-                self.wal_fold_input(),
-                context,
-                &deadline,
-            )
+            .delete_namespace(options, acquired_writer, self.writer_position(), &clock)
             .await;
         self.position.invalidate_projection();
         match deleted {
@@ -895,12 +833,12 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         }
     }
 
-    /// Retries share `batch` so content evidence continues aging.
+    /// Publishes `candidates` as one batch. Retries share `clock`, so the
+    /// batch keeps one commit time, and content evidence continues aging.
     pub async fn publish_batch(
         &mut self,
         candidates: impl AsRef<[CommitCandidate]>,
-        context: &MutationContext,
-        batch: &Deadline,
+        clock: &OperationClock,
     ) -> NamespaceCommitEnginePublishResult {
         let candidates = candidates.as_ref();
         if candidates.is_empty() {
@@ -911,12 +849,16 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         }
         let Self {
             namespace,
+            writer_id,
             position,
         } = self;
-        match position.load_publish_view(namespace, context, batch).await {
+        match position
+            .load_publish_view(namespace, writer_id, clock)
+            .await
+        {
             Ok(loaded) => {
                 position
-                    .publish_against(namespace, loaded, candidates, context, batch)
+                    .publish_against(namespace, loaded, candidates, clock)
                     .await
             }
             Err(error) => failed_publication(candidates.len(), error),
@@ -925,22 +867,18 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
 
     /// Publishes `candidates` as one batch, and publishes again each
     /// candidate whose attempt the store settled as retryable, until every
-    /// candidate settles or the attempts run out. The attempts share one
-    /// deadline and keep this engine's position.
+    /// candidate settles or the attempts run out. The attempts share
+    /// `clock` and keep this engine's position.
     pub async fn publish_batch_until_settled(
         &mut self,
         candidates: Vec<CommitCandidate>,
-        context: &MutationContext,
+        clock: &OperationClock,
     ) -> Vec<Result<Commit>> {
-        let batch = Deadline::start(Arc::clone(&self.namespace.timer));
         let mut results = vec![None; candidates.len()];
         let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
         for _ in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
             let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
-            let observed = self
-                .publish_batch(&attempted, context, &batch)
-                .await
-                .results;
+            let observed = self.publish_batch(&attempted, clock).await.results;
             pending =
                 settle_publish_attempt(&mut results, indices.into_iter().zip(attempted), observed);
             if pending.is_empty() {
@@ -964,35 +902,19 @@ impl PositionState {
     }
 
     fn invalidate_projection(&mut self) {
-        self.publish_tail = None;
+        self.current = None;
         self.acquired_anchor = None;
         self.projection_observed = None;
-        self.basis_checked = None;
     }
 
     /// The basis manifest that needs a successor check, either because its
     /// last confirmation expired or because the tip observation expired, so
     /// that the check also confirms the tip.
     fn unconfirmed_basis(&self, attempt: &Observation, tip_expired: bool) -> Option<ManifestNo> {
-        let projection = self.publish_tail.as_ref()?;
+        let position = self.current.as_ref()?;
         let confirmed_recently = !tip_expired
-            && self.basis_checked.as_ref().is_some_and(|checked| {
-                checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS
-            });
-        (!confirmed_recently).then(|| projection.basis().manifest_no())
-    }
-
-    /// Returns the position and its last check, whether or not the session
-    /// is fenced, or `None` when the engine has no position or no record of
-    /// the position's last check.
-    fn read_position(&self) -> Option<ReadPosition> {
-        let position = self.publish_tail.as_ref()?;
-        Some(ReadPosition {
-            head: position.head.clone(),
-            basis: position.basis().clone(),
-            tail: Arc::clone(&position.tail),
-            basis_checked: self.basis_checked.clone()?,
-        })
+            && position.basis_checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS;
+        (!confirmed_recently).then(|| position.read_basis.basis.manifest_no())
     }
 
     fn record_published_manifest_no(&mut self, manifest_no: ManifestNo) {
@@ -1008,7 +930,7 @@ impl PositionState {
     async fn session_writer_epoch<S: ObjectStore>(
         &mut self,
         namespace: &NamespaceStore<S>,
-        context: &MutationContext,
+        writer_id: &WriterId,
     ) -> Result<AcquiredWriter> {
         let already_acquired = match &*self.lock_session() {
             WriterSessionStatus::Fenced(fence) => {
@@ -1020,7 +942,7 @@ impl PositionState {
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
         }
-        let acquisition = namespace.acquire_writer(context).await?;
+        let acquisition = namespace.acquire_writer(writer_id).await?;
         let acquired_writer = acquisition.writer;
         self.record_published_manifest_no(acquisition.claim.manifest.manifest_no);
         self.acquired_anchor = Some(acquisition.anchor);
@@ -1043,11 +965,11 @@ impl PositionState {
     async fn load_publish_view<'a, S: ObjectStore>(
         &mut self,
         namespace: &'a NamespaceStore<S>,
-        context: &MutationContext,
-        batch: &Deadline,
+        writer_id: &WriterId,
+        clock: &OperationClock,
     ) -> Result<LoadedPublishView<'a, S>> {
-        let attempt = batch.observe();
-        let acquired_writer = self.session_writer_epoch(namespace, context).await?;
+        let attempt = clock.observe();
+        let acquired_writer = self.session_writer_epoch(namespace, writer_id).await?;
 
         let tip_expired = self.projection_observed.as_ref().is_some_and(|observed| {
             observed.age_at(&attempt) > crate::limits::WAL_PUBLISH_BUDGET_MS
@@ -1055,8 +977,8 @@ impl PositionState {
         // An answer can't confirm a basis whose last confirmation is at the
         // revalidation bound, so the position is dropped without a probe.
         if tip_expired
-            && !self.basis_checked.as_ref().is_some_and(|checked| {
-                checked.age_at(&attempt) < crate::limits::READ_REVALIDATION_BOUND_MS
+            && !self.current.as_ref().is_some_and(|position| {
+                position.basis_checked.age_at(&attempt) < crate::limits::READ_REVALIDATION_BOUND_MS
             })
         {
             self.invalidate_projection();
@@ -1073,32 +995,30 @@ impl PositionState {
         // or fails reloads the view.
         if let Some(manifest_no) = self.unconfirmed_basis(&attempt, tip_expired) {
             let successor = namespace.manifest_has_successor(manifest_no).await;
-            if matches!(successor, Ok(false))
-                && self
-                    .basis_checked
-                    .as_ref()
-                    .is_some_and(Observation::is_within_revalidation_bound)
-            {
-                self.basis_checked = Some(attempt.clone());
-                if tip_expired {
-                    self.projection_observed = Some(attempt.clone());
+            match (successor, self.current.as_mut()) {
+                (Ok(false), Some(position))
+                    if position.basis_checked.is_within_revalidation_bound() =>
+                {
+                    position.basis_checked = attempt.clone();
+                    if tip_expired {
+                        self.projection_observed = Some(attempt.clone());
+                    }
                 }
-            } else {
-                self.invalidate_projection();
+                _ => self.invalidate_projection(),
             }
         }
         let acquired_anchor = self.acquired_anchor.take();
         let cached_position = match acquired_anchor {
             Some(_) => {
-                self.publish_tail = None;
+                self.current = None;
                 None
             }
-            None => self.publish_tail.take(),
+            None => self.current.take(),
         };
         let loaded = namespace
             .load_publish_metadata_view(acquired_writer, cached_position, acquired_anchor)
             .await;
-        let view = match loaded {
+        let mut view = match loaded {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate_projection();
@@ -1111,7 +1031,7 @@ impl PositionState {
         let projection_observed = if view.tail_discovered {
             // Discovery confirmed the basis and observed the tip no earlier
             // than this attempt began.
-            self.basis_checked = Some(attempt.clone());
+            view.position.basis_checked = attempt.clone();
             attempt.clone()
         } else {
             self.projection_observed
@@ -1132,8 +1052,7 @@ impl PositionState {
         namespace: &NamespaceStore<S>,
         loaded: LoadedPublishView<'_, S>,
         candidates: &[CommitCandidate],
-        context: &MutationContext,
-        batch: &Deadline,
+        clock: &OperationClock,
     ) -> NamespaceCommitEnginePublishResult {
         let LoadedPublishView {
             view: publish_view,
@@ -1142,16 +1061,13 @@ impl PositionState {
         } = loaded;
         let wal_tail_discovered = publish_view.tail_discovered;
         let published = crate::protocol::publish_namespace_commits_batch_against_publish_view(
-            &namespace.store,
             candidates,
-            context,
             &publish_view,
             crate::protocol::PublicationClock {
-                batch,
+                batch: clock,
                 attempt: attempt.clone(),
                 tip: projection_observed.clone(),
             },
-            &namespace.content_writes,
         )
         .await;
         let position = publish_view.into_position();
@@ -1163,7 +1079,7 @@ impl PositionState {
         );
         // A put that landed is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
-        if update.landed && self.publish_tail.is_some() {
+        if update.landed && self.current.is_some() {
             self.projection_observed = Some(attempt);
         }
         NamespaceCommitEnginePublishResult {
@@ -1186,7 +1102,7 @@ impl PositionState {
     fn update_publish_tail_projection(
         &mut self,
         namespace_id: &NamespaceId,
-        mut position: PublishTailPosition,
+        mut position: WriterPosition,
         effect: PublishViewEffect,
     ) -> TailProjectionUpdate {
         let advanced = matches!(effect, PublishViewEffect::Advanced { .. });
@@ -1195,13 +1111,13 @@ impl PositionState {
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
                 return TailProjectionUpdate {
-                    wal_tail_objects: position.head.unfolded_wal_objects(),
+                    wal_tail_objects: position.wal_tail_objects(),
                     wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
                     landed: false,
                 };
             }
             PublishViewEffect::Advanced { records, head } => {
-                position.reanchor(head);
+                position.read_basis.head = head;
                 if let Err(error) =
                     Arc::make_mut(&mut position.tail).push_object(namespace_id, &records)
                 {
@@ -1214,7 +1130,7 @@ impl PositionState {
                     );
                     self.invalidate_projection();
                     return TailProjectionUpdate {
-                        wal_tail_objects: position.head.unfolded_wal_objects(),
+                        wal_tail_objects: position.wal_tail_objects(),
                         wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
                         landed: false,
                     };
@@ -1222,11 +1138,11 @@ impl PositionState {
             }
         }
         let update = TailProjectionUpdate {
-            wal_tail_objects: position.head.unfolded_wal_objects(),
+            wal_tail_objects: position.wal_tail_objects(),
             wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
             landed: advanced,
         };
-        self.publish_tail = Some(position);
+        self.current = Some(position);
         update
     }
 }
@@ -1269,10 +1185,9 @@ impl<S: ObjectStore + Clone> NamespaceEngine<S, Writable> {
         &self,
         candidates: Vec<CommitCandidate>,
     ) -> Result<Vec<Result<Commit>>> {
-        let context = self.mutation_context();
         Ok(self
             .commit_engine()
-            .publish_batch_until_settled(candidates, &context)
+            .publish_batch_until_settled(candidates, &self.namespace.start_clock())
             .await)
     }
 
@@ -1282,9 +1197,7 @@ impl<S: ObjectStore + Clone> NamespaceEngine<S, Writable> {
         &self,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
-        self.commit_engine()
-            .delete_namespace(options, &self.mutation_context())
-            .await
+        self.commit_engine().delete_namespace(options).await
     }
 }
 

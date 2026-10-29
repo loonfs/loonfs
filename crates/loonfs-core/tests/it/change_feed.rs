@@ -66,7 +66,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("feed-matrix").expect("namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -205,7 +205,7 @@ async fn append_events_report_where_the_appended_bytes_begin_before_and_after_a_
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("feed-appends").expect("namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -295,7 +295,7 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("feed-source").expect("namespace id");
     let fork = NamespaceId::parse("feed-fork").expect("namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &source, &context)
         .create()
         .await

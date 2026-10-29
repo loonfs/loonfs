@@ -245,7 +245,6 @@ async fn raise_hint_to_current_manifest(store: &dyn ObjectStore, namespace_id: &
         .load_current_manifest()
         .await
         .expect("load the current manifest")
-        .state
         .manifest()
         .manifest_no;
     loonfs_core::test_support::namespace_store(store, namespace_id)

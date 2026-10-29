@@ -18,7 +18,6 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
         .await
         .expect("manifest");
     let successor = manifest
-        .state
         .manifest()
         .manifest_no
         .successor()
@@ -39,7 +38,7 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
         KeyPredicate::any(),
     );
     let report = crate::test_support::namespace_store(&recorded, &namespace_id)
-        .gc(None, &options(), &context(GRACE_MS + 1))
+        .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
         .expect("pass");
     assert_eq!(report.deleted.content_objects, 1);
@@ -54,7 +53,7 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
         .collect();
     // The hint lags, so the probe finds the manifest after the hinted one,
     // and then probes one window above that.
-    assert!(hinted < manifest.state.manifest().manifest_no);
+    assert!(hinted < manifest.manifest().manifest_no);
     let window = u64::try_from(crate::limits::MANIFEST_PROBE_WINDOW).expect("a small window");
     let mut expected: Vec<_> = (hinted.0 + 1..=hinted.0 + 1 + window)
         .map(|number| metadata_manifest_object(&namespace_id, &ManifestNo(number)))
@@ -74,7 +73,7 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
         .expect("delete target");
     recorded.reset();
     let retired = crate::test_support::namespace_store(&recorded, &target)
-        .gc(None, &options(), &context(1_000 + retirement_ms()))
+        .gc(None, &options(), &context(1_000 + retirement_ms()).clock())
         .await
         .expect("retire fork");
     assert_eq!(retired.deleted_checkpoints_by_owner.fork, 1);
@@ -108,7 +107,7 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
     let undated = MetadataMapStore::without_last_modified(aged, KeyPredicate::exact(&undated_key));
     let recorded = RecordingStore::new(undated, KeyPredicate::any());
     let report = crate::test_support::namespace_store(&recorded, &namespace_id)
-        .gc(None, &options(), &context(GRACE_MS + 1))
+        .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
         .expect("pass");
     assert_eq!(report.retained.no_provider_timestamp, 1);
@@ -132,8 +131,6 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
 
 fn layout_segments(manifest: &crate::namespace::control::LoadedManifest) -> BTreeSet<String> {
     manifest
-        .state
-        .envelope
         .payload()
         .runs
         .iter()
@@ -181,7 +178,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                 let outcome = crate::test_support::NamespaceFixture::new(
                     &store,
                     &namespace_id,
-                    &crate::test_support::mutation_context("test-writer", 0),
+                    &crate::test_support::writer_at("test-writer", 0),
                 )
                 .engine()
                 .compact_metadata_unit(
@@ -205,7 +202,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             }
         } else {
             crate::test_support::namespace_store(&store, &namespace_id)
-                .acquire_writer_epoch(&context(1_000))
+                .acquire_writer_epoch(&context(1_000).writer_id)
                 .await
                 .expect("supersede");
         }
@@ -228,7 +225,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
         );
         let rooted = RecordingStore::metadata_segments(recent);
         crate::test_support::namespace_store(&rooted, &namespace_id)
-            .gc(None, &options(), &context(now_ms))
+            .gc(None, &options(), &context(now_ms).clock())
             .await
             .expect("root predecessor");
         // Reads within one pass have no fixed order, so both lists are
@@ -237,7 +234,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
         rooted_reads.sort();
         let current_only = RecordingStore::metadata_segments(Arc::clone(&store));
         crate::test_support::namespace_store(&current_only, &namespace_id)
-            .gc(None, &options(), &context(now_ms))
+            .gc(None, &options(), &context(now_ms).clock())
             .await
             .expect("current only");
         let mut current_reads = current_only.take_get_keys();
@@ -309,7 +306,7 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
         crate::test_support::NamespaceFixture::new(
             setup_store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0)
+            &crate::test_support::writer_at("test-writer", 0)
         )
         .engine()
         .compact_metadata_unit(
@@ -335,7 +332,7 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
     // Every successor is younger than the grace, so every manifest is a root.
     let now_ms = now_after_newest_object(setup_store, &namespace_id, 1).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(now_ms))
+        .gc(None, &options(), &context(now_ms).clock())
         .await
         .expect("pass");
 

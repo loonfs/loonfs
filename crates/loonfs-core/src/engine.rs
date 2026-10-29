@@ -4,19 +4,17 @@
 //! operation is a method in the module that implements it.
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
-use crate::cache::{HeadAndWalTailCache, MetadataSegmentCache, ObjectCache};
-use crate::commit_engine::{NamespaceCommitEngine, WalFoldInput};
-use crate::context::MutationContext;
+use crate::commit_engine::NamespaceCommitEngine;
 use crate::error::{CoreError, Result};
 use crate::metadata::access::is_administrator;
-use crate::namespace::basis::MetadataBasis;
+use crate::namespace::basis::ReadBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
-    LoadedMetadataView, ReadLoadContext,
+    LoadedMetadataView,
 };
+use crate::protocol::WriterPosition;
 use crate::storage::content::{
     ContentLocation, DurableContentValidationError, FileContentStream, StreamRange,
 };
@@ -34,35 +32,18 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use tracing::Instrument;
 
-/// Read context pinned by the runtime for one request. It contains the head,
-/// metadata basis, and shared caches needed to serve every read from the same
-/// namespace snapshot.
+/// The head and metadata basis that the runtime pins for one request, so
+/// every read of the request sees the same namespace state.
 ///
 /// This type supports the `loonfs` runtime. Applications should use the
 /// higher-level `loonfs` runtime and namespace handles instead.
 #[derive(Debug, Clone)]
 pub struct RuntimeReadContext {
-    pub head: NamespaceReadState,
-    /// Verified manifest used to replay the pinned WAL tail.
-    pub basis: MetadataBasis,
-    pub segment_cache: Arc<MetadataSegmentCache>,
-    pub head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,
-    pub object_cache: Arc<ObjectCache>,
-    /// The projected WAL tail above `basis` at `head`, when the context
+    pub read_basis: ReadBasis,
+    /// The projected WAL tail above the basis at the head, when the context
     /// starts from a writer session's position. Reads then take this tail
-    /// and don't look one up in `head_and_wal_tail_cache`.
+    /// and don't look one up in the namespace's WAL tail cache.
     pub tail: Option<Arc<ProjectedWalTail>>,
-}
-
-pub(crate) fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_, '_> {
-    ReadLoadContext::pinned_head(
-        &context.head,
-        &context.basis,
-        context.tail.as_ref(),
-        Some(&context.segment_cache),
-        Some(&context.head_and_wal_tail_cache),
-        Some(&context.object_cache),
-    )
 }
 
 /// Marks an engine that exposes read operations only.
@@ -105,7 +86,7 @@ pub struct NamespaceEngine<S, M> {
     authorization_head: Option<RuntimeReadContext>,
     /// The writer session's position that [`NamespaceEngine::fold_wal`]
     /// folds, or `None` to load the tail from the store.
-    pub(crate) writer_position: Option<WalFoldInput>,
+    pub(crate) writer_position: Option<WriterPosition>,
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
@@ -144,32 +125,35 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self
     }
 
-    /// The authorization for one per-subject read against `context`: a live
-    /// read evaluates on its own view; a snapshot read evaluates at the head
-    /// this engine was given.
-    fn read_access<'a>(
+    /// Loads the views and the authorization of one per-subject read at
+    /// `context`: the view at `context`, and the current head's view when
+    /// this engine authorizes historical reads there.
+    async fn authorized_read<'a>(
         &'a self,
         context: &'a RuntimeReadContext,
-        head_view: Option<&'a LoadedMetadataView<'a, S>>,
-    ) -> Result<ReadAccess<'a, S>> {
+    ) -> Result<AuthorizedRead<'a, S>> {
+        let head_view = match &self.authorization_head {
+            Some(head) => Some(
+                self.load_read_view(head)
+                    .instrument(crate::phase_span!(crate::Phase::LoadView))
+                    .await?,
+            ),
+            None => None,
+        };
         let authorizer = Authorizer::for_request(
             &self.namespace.namespace_id,
-            &context.head.access,
+            &context.read_basis.head.access,
             CommitAuthority::Subject(self.subject.as_ref()),
         )?;
-        Ok(match head_view {
-            Some(head) => ReadAccess::at_head(authorizer, head),
-            None => ReadAccess::live(authorizer),
+        let view = self
+            .load_read_view(context)
+            .instrument(crate::phase_span!(crate::Phase::LoadView))
+            .await?;
+        Ok(AuthorizedRead {
+            view,
+            head_view,
+            authorizer,
         })
-    }
-
-    /// The current head's view, when this engine authorizes historical
-    /// reads there.
-    async fn authorization_head_view(&self) -> Result<Option<LoadedMetadataView<'_, S>>> {
-        match &self.authorization_head {
-            Some(head) => Ok(Some(self.load_read_view(head).await?)),
-            None => Ok(None),
-        }
     }
 
     /// Refuses a reader with no subject on an ACL namespace, for callers
@@ -177,7 +161,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub fn ensure_subject(&self, context: &RuntimeReadContext) -> Result<()> {
         Authorizer::for_request(
             &self.namespace.namespace_id,
-            &context.head.access,
+            &context.read_basis.head.access,
             CommitAuthority::Subject(self.subject.as_ref()),
         )
         .map(|_| ())
@@ -193,7 +177,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let context = self.authorization_head.as_ref().unwrap_or(context);
         let authorizer = Authorizer::for_request(
             &self.namespace.namespace_id,
-            &context.head.access,
+            &context.read_basis.head.access,
             CommitAuthority::Subject(Some(subject)),
         )?;
         let Authorizer::Subject { principals } = authorizer else {
@@ -201,7 +185,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         };
         let view = self
             .namespace
-            .load_metadata_view_for_authorization(runtime_read_load_context(context))
+            .load_metadata_view_for_authorization(context)
             .await?;
         if is_administrator(&mut view.metadata_view().session(), principals).await? {
             Ok(())
@@ -215,7 +199,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads the root's current access row. Refused on an unrestricted
     /// namespace, which holds no access rows.
     pub async fn root_access(&self, context: &RuntimeReadContext) -> Result<RootAccess> {
-        if matches!(context.head.access, NamespaceAccess::Unrestricted {}) {
+        if matches!(
+            context.read_basis.head.access,
+            NamespaceAccess::Unrestricted {}
+        ) {
             return Err(CoreError::NamespaceUnrestricted {
                 namespace_id: self.namespace.namespace_id.clone(),
             });
@@ -260,10 +247,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         options: StatOptions,
         context: &RuntimeReadContext,
     ) -> Result<PathEntry> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.resolve_path(path.as_ref(), options.include_attributes, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .resolve_path(path.as_ref(), options.include_attributes, &read.access())
             .await
     }
 
@@ -276,20 +262,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         options: ListOptions,
         context: &RuntimeReadContext,
     ) -> Result<Page<PathEntry, ListPageCursor>> {
-        let head_view = self
-            .authorization_head_view()
-            .instrument(
-                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
-            )
-            .await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self
-            .load_read_view(context)
-            .instrument(
-                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
-            )
-            .await?;
-        view.list_path_page(path.as_ref(), request, &options, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .list_path_page(path.as_ref(), request, &options, &read.access())
             .await
     }
 
@@ -303,20 +278,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         options: ListOptions,
         context: &RuntimeReadContext,
     ) -> Result<Page<PathEntry, ListPageCursor>> {
-        let head_view = self
-            .authorization_head_view()
-            .instrument(
-                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
-            )
-            .await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self
-            .load_read_view(context)
-            .instrument(
-                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
-            )
-            .await?;
-        view.list_inode_children_page(inode_id, request, &options, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .list_inode_children_page(inode_id, request, &options, &read.access())
             .await
     }
 
@@ -327,10 +291,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
     ) -> Result<FileBytes> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.read_file_bytes(path.as_ref(), max_content_bytes, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .read_file_bytes(path.as_ref(), max_content_bytes, &read.access())
             .await
     }
 
@@ -342,10 +305,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
     ) -> Result<FileBytes> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.read_file_bytes_by_inode(inode_id, max_content_bytes, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .read_file_bytes_by_inode(inode_id, max_content_bytes, &read.access())
             .await
     }
 
@@ -372,24 +334,23 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     where
         S: Clone,
     {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        let entry = view
-            .resolve_file_content(path.as_ref(), revision_no, &access)
+        let read = self.authorized_read(context).await?;
+        let entry = read
+            .view
+            .resolve_file_content(path.as_ref(), revision_no, &read.access())
             .await?;
         let content_ref = crate::path::read::file_content_ref(&entry)?;
         range.ensure_within(content_ref.size_bytes)?;
         Ok(FileContentStream::open_inner(
             self.namespace.store.clone(),
-            view.resolve_content_location(&content_ref).await?,
+            read.view.resolve_content_location(&content_ref).await?,
             Some(entry),
             content_ref,
             chunk_bytes,
             range,
         )
         .await?
-        .with_object_cache(Arc::clone(&context.object_cache)))
+        .with_object_cache(Arc::clone(&self.namespace.object_cache)))
     }
 
     /// Streams inode content: one retained revision without requiring a
@@ -405,28 +366,31 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     where
         S: Clone,
     {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
+        let read = self.authorized_read(context).await?;
         let content_ref = match revision_no {
             Some(revision_no) => {
-                view.authorized_revision_by_inode(inode_id, revision_no, &access)
+                read.view
+                    .authorized_revision_by_inode(inode_id, revision_no, &read.access())
                     .await?
             }
-            None => view.current_revision_by_inode(inode_id, &access).await?,
+            None => {
+                read.view
+                    .current_revision_by_inode(inode_id, &read.access())
+                    .await?
+            }
         }
         .content_ref;
         range.ensure_within(content_ref.size_bytes)?;
         Ok(FileContentStream::open_inner(
             self.namespace.store.clone(),
-            view.resolve_content_location(&content_ref).await?,
+            read.view.resolve_content_location(&content_ref).await?,
             None,
             content_ref,
             chunk_bytes,
             range,
         )
         .await?
-        .with_object_cache(Arc::clone(&context.object_cache)))
+        .with_object_cache(Arc::clone(&self.namespace.object_cache)))
     }
 
     /// Prepares a file's content object for a direct download.
@@ -437,17 +401,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         start_offset: u64,
         context: &RuntimeReadContext,
     ) -> Result<DirectDownloadTarget> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.direct_download_target(
-            path.as_ref(),
-            revision_no,
-            start_offset,
-            &access,
-            &self.namespace.content_writes,
-        )
-        .await
+        let read = self.authorized_read(context).await?;
+        read.view
+            .direct_download_target(
+                path.as_ref(),
+                revision_no,
+                start_offset,
+                &read.access(),
+                &self.namespace.content_writes,
+            )
+            .await
     }
 
     /// Prepares inode content for a direct download: a retained revision, or
@@ -459,17 +422,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         start_offset: u64,
         context: &RuntimeReadContext,
     ) -> Result<DirectDownloadByInodeTarget> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.direct_download_target_by_inode(
-            inode_id,
-            revision_no,
-            start_offset,
-            &access,
-            &self.namespace.content_writes,
-        )
-        .await
+        let read = self.authorized_read(context).await?;
+        read.view
+            .direct_download_target_by_inode(
+                inode_id,
+                revision_no,
+                start_offset,
+                &read.access(),
+                &self.namespace.content_writes,
+            )
+            .await
     }
 
     /// Returns the current entry for a visible inode.
@@ -479,10 +441,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         options: StatOptions,
         context: &RuntimeReadContext,
     ) -> Result<PathEntry> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.stat_inode(inode_id, options.include_attributes, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .stat_inode(inode_id, options.include_attributes, &read.access())
             .await
     }
 
@@ -493,10 +454,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         request: PageRequest<FileRevisionsPageCursor>,
         context: &RuntimeReadContext,
     ) -> Result<crate::path::read::FileRevisionsPage> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.list_file_revisions_page(path.as_ref(), request, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .list_file_revisions_page(path.as_ref(), request, &read.access())
             .await
     }
 
@@ -506,10 +466,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         request: PageRequest<TrashPageCursor>,
         context: &RuntimeReadContext,
     ) -> Result<Page<TrashEntry, TrashPageCursor>> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.list_trash_page(request, &access).await
+        let read = self.authorized_read(context).await?;
+        read.view.list_trash_page(request, &read.access()).await
     }
 
     /// Resolves the current visibility, revision, and path for each inode ID.
@@ -525,10 +483,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<Vec<CurrentFileState>> {
         crate::path::read::ensure_stat_batch_within_cap(inode_ids.len())?;
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        crate::path::read::stat_current_files_by_inode(&view, inode_ids, &access).await
+        let read = self.authorized_read(context).await?;
+        crate::path::read::stat_current_files_by_inode(&read.view, inode_ids, &read.access()).await
     }
 
     /// Resolves an import source, including an unpublished upload.
@@ -539,7 +495,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<ContentLocation> {
         let view = self
             .namespace
-            .load_metadata_view_for_authorization(runtime_read_load_context(context))
+            .load_metadata_view_for_authorization(context)
             .await?;
         if view
             .metadata_view()
@@ -579,7 +535,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         location
             .read_bytes(
                 &self.namespace.store,
-                Some(&context.object_cache),
+                Some(&self.namespace.object_cache),
                 content_ref,
             )
             .await
@@ -592,11 +548,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     pub(crate) fn ensure_live_context(&self, context: &RuntimeReadContext) -> Result<()> {
-        crate::namespace::control::ensure_head_identity(
-            &context.head,
-            &self.namespace.namespace_id,
-        )?;
-        crate::namespace::control::ensure_namespace_live(&context.head)
+        let head = &context.read_basis.head;
+        crate::namespace::control::ensure_head_identity(head, &self.namespace.namespace_id)?;
+        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.
@@ -606,10 +560,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         request: PageRequest<FileRevisionsPageCursor>,
         context: &RuntimeReadContext,
     ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.list_file_revisions_by_inode_page(inode_id, request, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .list_file_revisions_by_inode_page(inode_id, request, &read.access())
             .await
     }
 
@@ -622,10 +575,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
     ) -> Result<FileBytes> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.read_file_revision_bytes(path.as_ref(), revision_no, max_content_bytes, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .read_file_revision_bytes(
+                path.as_ref(),
+                revision_no,
+                max_content_bytes,
+                &read.access(),
+            )
             .await
     }
 
@@ -637,10 +594,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
     ) -> Result<Vec<u8>> {
-        let head_view = self.authorization_head_view().await?;
-        let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
-        view.read_file_revision_bytes_by_inode(inode_id, revision_no, max_content_bytes, &access)
+        let read = self.authorized_read(context).await?;
+        read.view
+            .read_file_revision_bytes_by_inode(
+                inode_id,
+                revision_no,
+                max_content_bytes,
+                &read.access(),
+            )
             .await
     }
 
@@ -659,9 +620,28 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &'a self,
         context: &'a RuntimeReadContext,
     ) -> Result<LoadedMetadataView<'a, S>> {
-        self.namespace
-            .load_metadata_view(runtime_read_load_context(context))
-            .await
+        self.namespace.load_metadata_view(context).await
+    }
+}
+
+/// The views of one per-subject read, with the authorization that the read
+/// runs under.
+struct AuthorizedRead<'a, S: ObjectStore> {
+    view: LoadedMetadataView<'a, S>,
+    /// The current head's view, when the engine authorizes historical reads
+    /// there.
+    head_view: Option<LoadedMetadataView<'a, S>>,
+    authorizer: Authorizer<'a>,
+}
+
+impl<S: ObjectStore> AuthorizedRead<'_, S> {
+    /// Returns the read's access checks: a live read evaluates them on its
+    /// own view, and a historical read evaluates them at the current head.
+    fn access(&self) -> ReadAccess<'_, S> {
+        match &self.head_view {
+            Some(head) => ReadAccess::at_head(self.authorizer, head),
+            None => ReadAccess::live(self.authorizer),
+        }
     }
 }
 
@@ -686,7 +666,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Sets a writer session's position for [`Self::fold_wal`] to fold, so
     /// the fold takes the tail from the position instead of loading it from
     /// the store, and publishes on the position's manifest.
-    pub fn with_writer_position(mut self, position: WalFoldInput) -> Self {
+    pub fn with_writer_position(mut self, position: WriterPosition) -> Self {
         self.writer_position = Some(position);
         self
     }
@@ -728,15 +708,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     where
         S: Clone,
     {
-        NamespaceCommitEngine::new(self.namespace.clone())
-    }
-
-    /// Builds the mutation context for this engine's writer identity.
-    pub(crate) fn mutation_context(&self) -> MutationContext {
-        MutationContext {
-            writer_id: self.mode.writer_id.clone(),
-            now_ms: self.now_ms(),
-        }
+        NamespaceCommitEngine::new(self.namespace.clone(), self.mode.writer_id.clone())
     }
 
     /// Verifies that a runtime-supplied catalog belongs to this engine's
@@ -757,7 +729,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{mutation_context, namespace_store, NamespaceFixture};
+    use crate::test_support::{namespace_store, writer_at, NamespaceFixture};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
@@ -766,7 +738,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        NamespaceFixture::new(&store, &namespace_id, &mutation_context("writer-a", 1_000))
+        NamespaceFixture::new(&store, &namespace_id, &writer_at("writer-a", 1_000))
             .create()
             .await
             .expect("bootstrap namespace");
@@ -778,11 +750,10 @@ mod tests {
             .await
             .expect("read basis");
         let context = RuntimeReadContext {
-            basis: loaded.basis(),
-            head: loaded.read_state,
-            segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
-            head_and_wal_tail_cache: Arc::new(HeadAndWalTailCache::unshared(usize::MAX)),
-            object_cache: Arc::new(ObjectCache::unshared(0, 0)),
+            read_basis: crate::control::ReadBasis {
+                basis: loaded.basis(),
+                head: loaded.read_state,
+            },
             tail: None,
         };
         let changes = reader
@@ -801,8 +772,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer =
-            NamespaceFixture::new(&store, &namespace_id, &mutation_context("writer-a", 1_000));
+        let writer = NamespaceFixture::new(&store, &namespace_id, &writer_at("writer-a", 1_000));
         writer.create().await.expect("bootstrap namespace");
         let begun = writer.engine().begin_upload().await.expect("begin upload");
 

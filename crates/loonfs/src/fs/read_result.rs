@@ -3,8 +3,10 @@
 use super::reads::ReadSource;
 use super::RuntimeCore;
 use crate::cache::PinnedRead;
+use crate::trace::phase_span;
 use crate::{Consistency, CoreError, Error, NamespaceId, Result};
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
+use loonfs_core::Phase;
 use loonfs_core::{ManifestLoadError, MetadataProjectionLoadError, RuntimeReadContext};
 use tracing::Instrument;
 
@@ -25,15 +27,15 @@ pub(super) async fn classify_read_result<T>(
     ) {
         return result;
     }
-    let namespace = core.namespace_store(&context.head.namespace_id);
+    let namespace = core.namespace_store(&context.read_basis.head.namespace_id);
     match source {
         ReadSource::Head => {
             let current = namespace
                 .load_current_manifest()
                 .await
                 .map_err(CoreError::from)?;
-            let expected_manifest_no = context.basis.manifest_no();
-            let actual_manifest_no = current.state.envelope.payload().manifest_no;
+            let expected_manifest_no = context.read_basis.basis.manifest_no();
+            let actual_manifest_no = current.payload().manifest_no;
             if actual_manifest_no > expected_manifest_no {
                 return Err(Error::StaleHead {
                     expected_manifest_no,
@@ -42,9 +44,8 @@ pub(super) async fn classify_read_result<T>(
             }
         }
         ReadSource::Snapshot(snapshot_id) => {
-            let now_ms = core.now_ms();
             namespace
-                .load_snapshot_read_basis(&context.head, snapshot_id, now_ms)
+                .load_snapshot_read_basis(&context.read_basis.head, snapshot_id)
                 .await?;
         }
     }
@@ -84,9 +85,7 @@ impl RuntimeCore {
         }
         let pinned = self
             .pinned_read(namespace_id, consistency)
-            .instrument(
-                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
-            )
+            .instrument(phase_span!(self, Phase::PinRead, namespace_id))
             .await?;
         let context = pinned.context.clone();
         let result =
@@ -102,9 +101,7 @@ impl RuntimeCore {
         self.reload_namespace_head(namespace_id).await?;
         let pinned = self
             .pinned_read(namespace_id, consistency)
-            .instrument(
-                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
-            )
+            .instrument(phase_span!(self, Phase::PinRead, namespace_id))
             .await?;
         let context = pinned.context.clone();
         classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await

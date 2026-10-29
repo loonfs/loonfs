@@ -6,8 +6,9 @@
 use crate::common::*;
 use bytes::Bytes;
 use loonfs_core::publish::FilesystemOperation;
+use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::{CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -31,7 +32,7 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::NamespaceMetadata, CoreError> {
     namespace_engine(store, source_namespace_id, context)
         .fork_namespace(new_namespace_id, &loonfs_test_support::test_actor(), None)
@@ -59,7 +60,7 @@ async fn listed_names<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> Vec<String> {
     let context = crate::common::read_context(store, namespace_id).await;
-    namespace_engine(store, namespace_id, &mutation_context())
+    namespace_engine(store, namespace_id, &default_writer())
         .list_path_page(
             "/docs",
             loonfs_types::PageRequest {
@@ -84,7 +85,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::metadata_segment(),
     );
-    let context = mutation_context();
+    let context = default_writer();
     let source = namespace_id("source");
     let target = namespace_id("target");
     seed_source_namespace_for_fork(&store, &source, &context).await;
@@ -128,7 +129,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 4;
     let collected = namespace_store(&store, &source)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("collect source before fork");
     assert!(collected.deleted.metadata_segments > 0);
@@ -162,7 +163,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .expect("release snapshot");
     aged.now_ms = u64::MAX / 2;
     namespace_store(&store, &source)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("collect source past grace window");
     assert_eq!(listed_names(&store, &target).await, ["shared.txt"]);
@@ -182,7 +183,7 @@ async fn invalid_snapshot_forks_write_nothing() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    let context = mutation_context();
+    let context = default_writer();
     let source = namespace_id("source");
     let other = namespace_id("other");
     let target = namespace_id("target");
@@ -225,7 +226,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let source = namespace_id("source");
     let target = namespace_id("target");
     let store = LocalFsStore::new(directory.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     seed_source_namespace_for_fork(&store, &source, &context).await;
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
@@ -282,7 +283,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
 async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) {
     NamespaceFixture::new(store, source_namespace_id, context)
         .create()
@@ -318,7 +319,7 @@ async fn namespace_keys<S: ObjectStore + ?Sized>(
 async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
 
     let created = NamespaceFixture::new(&store, &namespace_id, &context)
@@ -401,7 +402,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
 async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let context = mutation_context();
+    let context = default_writer();
     let source = namespace_id("source");
     let target = NamespaceId::parse("target").expect("valid namespace id");
     seed_source_namespace_for_fork(store.as_ref(), &source, &context).await;
@@ -458,7 +459,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         store: &S,
         namespace_id: &NamespaceId,
         bytes: &[u8],
-        context: &MutationContext,
+        context: &WriterAt,
     ) -> loonfs_types::ContentRef {
         let engine = namespace_engine(store, namespace_id, context);
         let upload = engine.begin_upload().await.expect("begin upload");
@@ -487,7 +488,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::content_blob(),
     )));
-    let context = mutation_context();
+    let context = default_writer();
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
@@ -701,10 +702,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         .expect("clone metadata root");
     let clone_manifest_bytes = store
         .get(
-            &metadata_manifest_object(
-                &clone_namespace_id,
-                &clone_root.state.manifest().manifest_no,
-            ),
+            &metadata_manifest_object(&clone_namespace_id, &clone_root.manifest().manifest_no),
             None,
         )
         .await
@@ -784,7 +782,7 @@ async fn inode_rows<S: ObjectStore + ?Sized>(store: &S, namespace_id: &Namespace
 async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let source_namespace_id = namespace_id("source");
     let fork_namespace_id = NamespaceId::parse("fork").expect("valid namespace id");
     NamespaceFixture::new(&store, &source_namespace_id, &context)
@@ -869,7 +867,7 @@ async fn fork_clone_survives_source_delete() {
     let temp_dir = tempdir().expect("tempdir");
     let source = NamespaceId::parse("source").expect("valid namespace id");
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     seed_source_namespace_for_fork(&store, &source, &context).await;
     fork_namespace(&store, &source, &clone, &context)
@@ -898,7 +896,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let ancestor = NamespaceId::parse("ancestor").expect("valid namespace id");
     let parent = NamespaceId::parse("parent").expect("valid namespace id");
     let descendant = NamespaceId::parse("descendant").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     seed_source_namespace_for_fork(&store, &ancestor, &context).await;
     fork_namespace(&store, &ancestor, &parent, &context)
@@ -950,7 +948,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
     namespace_store(&store, &ancestor)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("collect ancestor");
 
@@ -973,12 +971,12 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
             .grace_window_ms
             .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
     let parent_waiting = namespace_store(&store, &parent)
-        .gc(None, &options, &aged)
+        .gc(None, &options, &aged.clock())
         .await
         .expect("parent waits");
     assert_eq!(parent_waiting.reclaimable_at_ms, Some(parent_deadline));
     let ancestor_waiting = namespace_store(&store, &ancestor)
-        .gc(None, &options, &aged)
+        .gc(None, &options, &aged.clock())
         .await
         .expect("ancestor waits");
     assert_eq!(ancestor_waiting.deleted_checkpoints_by_owner.fork, 0);
@@ -994,7 +992,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .deleted_at_ms()
         .expect("deletion stamp");
     let retired = namespace_store(&store, &descendant)
-        .gc(None, &options, &aged)
+        .gc(None, &options, &aged.clock())
         .await
         .expect("retire descendant");
     let descendant_deadline = retired
@@ -1002,23 +1000,23 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .expect("descendant retired despite compaction");
     assert_eq!(retired.deleted.content_objects, 0);
     let waiting = namespace_store(&store, &parent)
-        .gc(None, &options, &aged)
+        .gc(None, &options, &aged.clock())
         .await
         .expect("wait for descendant grace");
     assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
     aged.now_ms = descendant_deadline;
     namespace_store(&store, &descendant)
-        .gc(None, &options, &aged)
+        .gc(None, &options, &aged.clock())
         .await
         .expect("descendant releases its source pin");
     let released = namespace_store(&store, &parent)
-        .gc(None, &options, &aged)
+        .gc(None, &options, &aged.clock())
         .await
         .expect("parent releases its source pin");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
     assert_eq!(released.reclaimable_at_ms, Some(parent_deadline));
     let released = namespace_store(&store, &ancestor)
-        .gc(None, &options, &aged)
+        .gc(None, &options, &aged.clock())
         .await
         .expect("collect ancestor after parent releases its pin");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 0);
@@ -1029,7 +1027,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
 async fn a_fork_survives_a_concurrent_collection_pass() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let context = mutation_context();
+    let context = default_writer();
     let source = namespace_id("source");
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
     seed_source_namespace_for_fork(store.as_ref(), &source, &context).await;
@@ -1037,7 +1035,8 @@ async fn a_fork_survives_a_concurrent_collection_pass() {
     let gc_options = loonfs_core::GcOptions::default();
     let forking = fork_namespace(store.as_ref(), &source, &clone, &context);
     let source_store = namespace_store(store.as_ref(), &source);
-    let collecting = source_store.gc(None, &gc_options, &context);
+    let clock = context.clock();
+    let collecting = source_store.gc(None, &gc_options, &clock);
     let (forked, collected) = tokio::join!(forking, collecting);
     forked.expect("creation grace protects the fork");
     collected.expect("the pass finishes");
@@ -1058,7 +1057,7 @@ async fn a_fork_survives_a_concurrent_collection_pass() {
 async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
@@ -1109,7 +1108,7 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(format!("namespaces/{}/pins/", source_namespace_id.as_str())),
@@ -1141,7 +1140,7 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
 async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let context = mutation_context();
+    let context = default_writer();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     // Another writer's complete head for the same id, already durable.
     let foreign = loonfs_types::format::manifest::NamespaceManifestPayload::initial(
@@ -1187,7 +1186,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
 async fn namespace_delete_blocks_reads_writes_and_forks() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
@@ -1267,7 +1266,7 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
 async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
@@ -1281,7 +1280,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
     let report = namespace_store(&store, &namespace_id)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("gc a namespace with no root");
     assert_eq!(report.deleted.wal_objects, 0, "{report:?}");
@@ -1302,7 +1301,6 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .load_current_manifest()
         .await
         .expect("tombstone")
-        .state
         .manifest()
         .manifest_no;
     namespace_store(&store, &namespace_id)
@@ -1310,12 +1308,12 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .await
         .expect("raise the hint");
     let report = namespace_store(&store, &namespace_id)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("gc the tombstone");
     assert!(report.deleted.wal_objects >= 1, "{report:?}");
     namespace_store(&store, &namespace_id)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged)
+        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("collect obsolete tombstone version");
     let current = namespace_store(&store, &namespace_id)
@@ -1325,8 +1323,6 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     let mut expected = vec![hint(&namespace_id), current.object_key.clone()];
     expected.extend(
         current
-            .state
-            .envelope
             .payload()
             .runs
             .iter()
@@ -1349,7 +1345,7 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    let context = mutation_context();
+    let context = default_writer();
     let source = namespace_id("source");
     NamespaceFixture::new(&store, &source, &context)
         .create()
@@ -1455,14 +1451,14 @@ async fn bootstrap_hint_read_failures_write_nothing() {
         let store = RecordingStore::new(failing, KeyPredicate::any());
         for allow_existing in [false, true] {
             let error = (if allow_existing {
-                NamespaceFixture::new(&store, &namespace_id, &mutation_context())
+                NamespaceFixture::new(&store, &namespace_id, &default_writer())
                     .create_with_options(&loonfs_core::CreateNamespaceOptions {
                         allow_existing: true,
                         ..Default::default()
                     })
                     .await
             } else {
-                NamespaceFixture::new(&store, &namespace_id, &mutation_context())
+                NamespaceFixture::new(&store, &namespace_id, &default_writer())
                     .create()
                     .await
             })
@@ -1492,14 +1488,14 @@ async fn bootstrap_of_a_corrupt_hint_writes_nothing() {
     store.reset();
     for allow_existing in [false, true] {
         let error = (if allow_existing {
-            NamespaceFixture::new(&store, &namespace_id, &mutation_context())
+            NamespaceFixture::new(&store, &namespace_id, &default_writer())
                 .create_with_options(&loonfs_core::CreateNamespaceOptions {
                     allow_existing: true,
                     ..Default::default()
                 })
                 .await
         } else {
-            NamespaceFixture::new(&store, &namespace_id, &mutation_context())
+            NamespaceFixture::new(&store, &namespace_id, &default_writer())
                 .create()
                 .await
         })
@@ -1522,7 +1518,7 @@ async fn a_creator_losing_after_namespace_discovery_leaves_no_extra_objects() {
         OperationSelector::PutCreateIfAbsent,
     );
     let namespace_id = namespace_id("demo");
-    let context = mutation_context();
+    let context = default_writer();
     store.block_next();
     let delayed_fixture = NamespaceFixture::new(&store, &namespace_id, &context);
     let delayed = delayed_fixture.create();
@@ -1556,7 +1552,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    let setup = mutation_context();
+    let setup = default_writer();
     let source = namespace_id("template");
     let sibling = namespace_id("sibling");
     seed_source_namespace_for_fork(&store, &source, &setup).await;
@@ -1618,7 +1614,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .expect("delete leaf");
         store.reset();
         let report = namespace_store(&store, &leaf)
-            .gc(None, &options, &aged)
+            .gc(None, &options, &aged.clock())
             .await
             .expect("collect leaf");
         assert_eq!(report.deleted.retired_content_objects, 1);
@@ -1676,7 +1672,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
     for _ in 0..3 {
         aged.now_ms += options.grace_window_ms;
         let report = namespace_store(&store, &source)
-            .gc(None, &options, &aged)
+            .gc(None, &options, &aged.clock())
             .await
             .expect("collect deleted source");
         assert_eq!(report.reclaimable_at_ms, Some(source_deadline));

@@ -2,8 +2,9 @@
 
 use crate::common::*;
 use bytes::Bytes;
+use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::{CoreError, DirectPutUploadTarget, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, DirectPutUploadTarget, ErrorCode};
 use loonfs_objectstore::keys::{upload_outcome, upload_session};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -59,7 +60,7 @@ async fn read_upload_records<S: ObjectStore + ?Sized>(
 async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
         .begin_upload()
@@ -69,7 +70,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
 async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<DirectPutUploadTarget, CoreError> {
     namespace_engine(store, namespace_id, context)
         .begin_direct_put_upload_target()
@@ -81,7 +82,7 @@ async fn upload_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     bytes: &[u8],
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
         .upload_content(upload_id, bytes)
@@ -92,7 +93,7 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
     let catalog = namespace_store(store, namespace_id)
         .load_catalog_entry()
@@ -120,7 +121,7 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
     for inner in stores {
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let namespace_id = NamespaceId::parse("checksums").expect("namespace");
-        let context = mutation_context();
+        let context = default_writer();
         NamespaceFixture::new(&store, &namespace_id, &context)
             .create()
             .await
@@ -239,7 +240,7 @@ async fn begin_upload_rejects_missing_and_deleted_namespaces() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
 
     let missing_error = begin_upload(&store, &namespace_id, &context)
         .await
@@ -274,7 +275,7 @@ async fn begin_direct_put_mints_the_target_object_up_front() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -302,7 +303,7 @@ async fn begin_upload_reads_manifest_authority_without_replaying_wal() {
     let temp_dir = tempdir().expect("tempdir");
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
 
     NamespaceFixture::new(&setup_store, &namespace_id, &context)
         .create()
@@ -343,7 +344,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let temp_dir = tempdir().expect("tempdir");
     let store = content_blob_counting_store(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
@@ -393,7 +394,7 @@ mod streamed_content {
 
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let context = mutation_context();
+        let context = default_writer();
         let namespace_id = NamespaceId::parse("slow-upload").expect("namespace");
         NamespaceFixture::new(&store, &namespace_id, &context)
             .create()
@@ -436,13 +437,13 @@ mod streamed_content {
             let options = loonfs_core::GcOptions::default();
             // Model the body staying open across the post-abort grace interval.
             // No provider operation is suspended; the caller has not supplied its bytes.
-            let aged = MutationContext {
+            let aged = WriterAt {
                 now_ms: aborted_at_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
             if forget_before_resume {
                 namespace_store(&store, &namespace_id)
-                    .gc(None, &options, &aged)
+                    .gc(None, &options, &aged.clock())
                     .await
                     .expect("collect aborted session");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -457,7 +458,7 @@ mod streamed_content {
             ErrorCode::UploadNotFound
         );
         namespace_store(&store, &namespace_id)
-            .gc(None, &loonfs_core::GcOptions::default(), &aged)
+            .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
             .await
             .expect("repeat GC after late content write");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -482,7 +483,7 @@ mod streamed_content {
 
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let context = mutation_context();
+        let context = default_writer();
         let namespace_id = NamespaceId::parse("slow-owned-stream").expect("namespace");
         NamespaceFixture::new(&store, &namespace_id, &context)
             .create()
@@ -526,12 +527,12 @@ mod streamed_content {
             let options = loonfs_core::GcOptions::default();
             // Model a source stalled past its lease and both collection graces.
             // GC, not a caller's explicit abort, moves the implicit session terminal.
-            let expired = MutationContext {
+            let expired = WriterAt {
                 now_ms: expires_at_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
             namespace_store(&store, &namespace_id)
-                .gc(None, &options, &expired)
+                .gc(None, &options, &expired.clock())
                 .await
                 .expect("GC aborts expired implicit session");
             let (_, aborted) = read_upload_records(&store, &namespace_id, &session.upload_id).await;
@@ -542,13 +543,13 @@ mod streamed_content {
                 }),
                 "the first pass keeps the aborted session"
             );
-            let aged = MutationContext {
+            let aged = WriterAt {
                 now_ms: expired.now_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
             if forget_before_resume {
                 namespace_store(&store, &namespace_id)
-                    .gc(None, &options, &aged)
+                    .gc(None, &options, &aged.clock())
                     .await
                     .expect("forget expired implicit owner");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -563,7 +564,7 @@ mod streamed_content {
             ErrorCode::UploadNotFound
         );
         namespace_store(&store, &namespace_id)
-            .gc(None, &loonfs_core::GcOptions::default(), &aged)
+            .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
             .await
             .expect("GC after failed late completion");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -591,7 +592,7 @@ mod streamed_content {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         bytes: &[u8],
-        context: &MutationContext,
+        context: &WriterAt,
     ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
         namespace_engine(store, namespace_id, context)
             .upload_content_stream(upload_id, body(bytes))
@@ -602,7 +603,7 @@ mod streamed_content {
     async fn a_streamed_upload_produces_the_reference_the_buffered_one_would() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let context = mutation_context();
+        let context = default_writer();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         NamespaceFixture::new(&store, &namespace_id, &context)
             .create()
@@ -642,7 +643,7 @@ mod streamed_content {
     async fn a_repeated_body_replays_and_a_different_one_conflicts_without_rewriting() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let context = mutation_context();
+        let context = default_writer();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         NamespaceFixture::new(&store, &namespace_id, &context)
             .create()
@@ -700,7 +701,7 @@ mod streamed_content {
             KeyPredicate::content_blob(),
             OperationSelector::Put,
         ));
-        let context = mutation_context();
+        let context = default_writer();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         NamespaceFixture::new(blocking.as_ref(), &namespace_id, &context)
             .create()
@@ -839,7 +840,7 @@ mod direct_multipart {
 
     async fn open_session<S: ObjectStore>(
         store: &FakeMultipartStore<S>,
-        context: &MutationContext,
+        context: &WriterAt,
     ) -> Session {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         NamespaceFixture::new(store, &namespace_id, context)
@@ -931,7 +932,7 @@ mod direct_multipart {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         request: &CompleteUploadBody,
-        context: &MutationContext,
+        context: &WriterAt,
     ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
         let catalog = namespace_store(store, namespace_id)
             .load_catalog_entry()
@@ -946,7 +947,7 @@ mod direct_multipart {
     async fn a_multipart_upload_completes_against_the_assembled_object() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = mutation_context();
+        let context = default_writer();
         let session = open_session(&store, &context).await;
 
         let parts = upload_every_part(&store, &session);
@@ -1053,7 +1054,7 @@ mod direct_multipart {
     async fn a_multipart_completion_rejects_an_empty_part_list() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = mutation_context();
+        let context = default_writer();
         let session = open_session(&store, &context).await;
 
         let error = complete_upload(
@@ -1073,7 +1074,7 @@ mod direct_multipart {
     async fn a_re_uploaded_part_is_the_one_that_lands() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = mutation_context();
+        let context = default_writer();
         let session = open_session(&store, &context).await;
 
         // Part two arrives wrong first, then correct: same length both
@@ -1108,7 +1109,7 @@ mod direct_multipart {
     async fn a_lost_completion_reconciles_from_the_session_and_the_object() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = mutation_context();
+        let context = default_writer();
         let session = open_session(&store, &context).await;
         let parts = upload_every_part(&store, &session);
         let request = complete_request(&session, parts);
@@ -1149,7 +1150,7 @@ mod direct_multipart {
     async fn a_conflicting_retry_cannot_destroy_a_recoverable_assembly() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = mutation_context();
+        let context = default_writer();
         let session = open_session(&store, &context).await;
         let parts = upload_every_part(&store, &session);
         let provider_parts = parts
@@ -1219,7 +1220,7 @@ mod direct_multipart {
     async fn a_completion_that_does_not_verify_is_rejected_and_changes_nothing() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = mutation_context();
+        let context = default_writer();
         let session = open_session(&store, &context).await;
 
         // Every part is checksum-correct, but the last one is not the byte
@@ -1270,7 +1271,7 @@ mod direct_multipart {
             LocalFsStore::new(temp_dir.path()).expect("store"),
             MultipartChecksumEnforcement::Precondition,
         );
-        let context = mutation_context();
+        let context = default_writer();
         let session = open_session(&store, &context).await;
 
         let mut parts = upload_every_part(&store, &session);
@@ -1332,7 +1333,7 @@ mod direct_multipart {
             InjectedError::Transport("injected content read failure".to_owned()),
         ));
         let store = FakeMultipartStore::new(Arc::clone(&failing));
-        let context = mutation_context();
+        let context = default_writer();
         let session = open_session(&store, &context).await;
         let parts = upload_every_part(&store, &session);
         let request = complete_request(&session, parts);
@@ -1385,7 +1386,7 @@ mod direct_multipart {
     async fn upload_collection_abandons_the_provider_upload_of_an_expired_session() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = mutation_context();
+        let context = default_writer();
         let session = open_session(&store, &context).await;
         upload_every_part(&store, &session);
         assert_eq!(store.open_uploads(), 1);
@@ -1402,12 +1403,12 @@ mod direct_multipart {
             .await
             .expires_at_ms;
         let options = GcOptions::default();
-        let expired = MutationContext {
+        let expired = WriterAt {
             writer_id: context.writer_id.clone(),
             now_ms: expires_at_ms + options.grace_window_ms + 1,
         };
         namespace_store(&store, &session.namespace_id)
-            .gc(None, &options, &expired)
+            .gc(None, &options, &expired.clock())
             .await
             .expect("garbage collection");
 
@@ -1432,7 +1433,7 @@ mod direct_multipart {
     async fn a_multipart_session_takes_a_part_size_inside_the_providers_bounds() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = mutation_context();
+        let context = default_writer();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         NamespaceFixture::new(&store, &namespace_id, &context)
             .create()

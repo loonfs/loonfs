@@ -71,7 +71,7 @@ pub(crate) fn same_head(
     !manifest.status.is_deleted()
         && manifest.writer_epoch == head.writer_epoch
         && manifest.folded_wal_no == head.folded_wal_no
-        && manifest.manifest.head_seq == basis.0.head_seq
+        && manifest.manifest.head_seq == basis.manifest().head_seq
 }
 
 /// A maintenance call's response, and the manifest the call published.

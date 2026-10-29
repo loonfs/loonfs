@@ -14,7 +14,7 @@ use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::time::Deadline;
+use loonfs_core::time::OperationClock;
 use loonfs_model::metadata::{
     DirentryBindingRecord as ModelBindingRecord, DirentryBindingState as ModelBindingState,
     InodeRecord as ModelInodeRecord, MetadataState as ModelMetadataState,
@@ -1005,7 +1005,7 @@ async fn planned_appends_match_the_model() {
     let directory = tempfile::tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = loonfs_types::NamespaceId::parse("appends").expect("namespace");
-    let context = loonfs_core::test_support::mutation_context("differential", 1_000);
+    let context = loonfs_core::test_support::writer_at("differential", 1_000);
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -1048,7 +1048,10 @@ async fn planned_appends_match_the_model() {
         vec![append("/copy", b"five")],
         vec![append("/log", b"six")],
     ];
-    let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
     for (index, operations) in requests.into_iter().enumerate() {
         let request = CommitIntent {
             commit_id: CommitId::generate(),
@@ -1070,8 +1073,7 @@ async fn planned_appends_match_the_model() {
                     Vec::new(),
                     inline_content,
                 )],
-                &context,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                &context.clock(),
             )
             .await
             .results
@@ -1115,7 +1117,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
     let directory = tempfile::tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = loonfs_types::NamespaceId::parse("crc-base").expect("namespace");
-    let context = loonfs_core::test_support::mutation_context("differential", 1_000);
+    let context = loonfs_core::test_support::writer_at("differential", 1_000);
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -1159,8 +1161,11 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         append(b"+three"),
         append(b"+four"),
     ];
-    let deadline = || Deadline::start(Arc::new(StdMonotonicTimer::default()));
-    let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
+    let deadline = || OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
     for operation in operations {
         let request = CommitIntent {
             commit_id: CommitId::generate(),
@@ -1172,7 +1177,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         };
         let candidate = crate::common::prepared_candidate(&store, &namespace_id, request).await;
         engine
-            .publish_batch([candidate], &context, &deadline())
+            .publish_batch([candidate], &context.clock())
             .await
             .results
             .pop()
@@ -1311,7 +1316,7 @@ async fn commit_and_compact_at_the_floor(
     namespace_id: &loonfs_types::NamespaceId,
     steps: &[RetentionStep],
 ) {
-    let context = crate::common::mutation_context();
+    let context = crate::common::default_writer();
     NamespaceFixture::new(store, namespace_id, &context)
         .create()
         .await
@@ -1359,7 +1364,7 @@ async fn commit_retention_step(
     store: &LocalFsStore,
     namespace_id: &loonfs_types::NamespaceId,
     step: RetentionStep,
-    context: &loonfs_core::MutationContext,
+    context: &loonfs_core::test_support::WriterAt,
 ) {
     use crate::common::{create_directory_path, submit_operation};
     let path = |value: &str| AbsolutePath::parse(value).expect("path");
@@ -1428,9 +1433,9 @@ async fn assert_head_reads_match_model(
 ) {
     const ACCEPTED: &str = "the model should answer for a state it accepted";
     let context = crate::common::read_context(store, namespace_id).await;
-    assert_eq!(context.head.seq, head_seq);
+    assert_eq!(context.read_basis.head.seq, head_seq);
     let commits = wal_commits(store, namespace_id).await;
-    let mut model = loonfs_model::bootstrap_metadata_state(context.head.created_at_ms);
+    let mut model = loonfs_model::bootstrap_metadata_state(context.read_basis.head.created_at_ms);
     for commit in &commits {
         let deltas: Vec<_> = commit
             .deltas
@@ -1454,7 +1459,7 @@ async fn assert_head_reads_match_model(
             .flat_map(|commit| commit.deltas.iter().map(|delta| &delta.delta)),
     );
     let engine =
-        crate::common::namespace_engine(store, namespace_id, &crate::common::mutation_context());
+        crate::common::namespace_engine(store, namespace_id, &crate::common::default_writer());
     let stat = loonfs_types::options::StatOptions::default;
     for path in &questions.paths {
         let read = engine.resolve_path(path.as_str(), stat(), &context).await;

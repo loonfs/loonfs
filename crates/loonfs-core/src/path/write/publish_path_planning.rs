@@ -61,6 +61,10 @@ pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?S
     pub(super) access: &'a NamespaceAccess,
     pub(super) authorizer: &'a Authorizer<'a>,
     pub(super) view: &'a MetadataView<'view, 'store, S>,
+    /// The store that planning writes content objects to.
+    pub(super) store: &'a S,
+    /// Where each content write that planning sends takes its permit.
+    pub(super) content_writes: &'a crate::PermitPool,
 }
 
 /// Rejects the root, which only an access update may name as its target.

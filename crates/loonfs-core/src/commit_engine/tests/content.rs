@@ -7,6 +7,7 @@ use crate::limits::{
     GC_MIN_GRACE_WINDOW_MS,
 };
 use crate::protocol::CompletedUpload;
+use crate::test_support::WriterAt;
 use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -27,14 +28,14 @@ impl MonotonicTimer for PublicationTimer {
     }
 }
 
-fn context(now_ms: u64) -> MutationContext {
-    crate::test_support::mutation_context("writer", now_ms)
+fn context(now_ms: u64) -> WriterAt {
+    crate::test_support::writer_at("writer", now_ms)
 }
 
 async fn completed_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> CompletedUpload {
     let upload = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
@@ -44,7 +45,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context("test-writer", context.now_ms),
+        &crate::test_support::writer_at("test-writer", context.now_ms),
     )
     .engine()
     .upload_content(&upload.upload_id, b"completed content")
@@ -134,16 +135,18 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         .expect("token remains valid");
     let candidate =
         CommitCandidate::prepared(put_candidate(&completed).intent().clone(), vec![prepared]);
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: clock.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: clock.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        context(clock.now_ms()).writer_id.clone(),
+    );
     store.reset();
     let result = engine
         .publish_batch(
             vec![candidate],
-            &context(clock.now_ms()),
-            &Deadline::start(clock.clone()),
+            &OperationClock::start(clock.now_ms(), clock.clone()),
         )
         .await;
     assert_matches!(
@@ -172,13 +175,16 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1);
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: timer.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        publication.writer_id.clone(),
+    );
     engine
         .position
-        .session_writer_epoch(&engine.namespace, &setup)
+        .session_writer_epoch(&engine.namespace, &setup.writer_id)
         .await
         .expect("acquire writer");
     engine.invalidate_projection();
@@ -187,8 +193,8 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         .await
         .expect("head");
     store.block_next();
-    let batch = Deadline::start(timer.clone());
-    let publish = engine.publish_batch(vec![put_candidate(&completed)], &publication, &batch);
+    let batch = OperationClock::start(publication.now_ms, timer.clone());
+    let publish = engine.publish_batch(vec![put_candidate(&completed)], &batch);
     let collect = async {
         store.wait_until_blocked().await;
         timer
@@ -200,11 +206,11 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
             ..Default::default()
         };
         crate::test_support::namespace_store(&aged, &namespace_id)
-            .gc(None, &options, &reclaimed)
+            .gc(None, &options, &reclaimed.clock())
             .await
             .expect("gc removes the session record");
         let report = crate::test_support::namespace_store(&aged, &namespace_id)
-            .gc(None, &options, &reclaimed)
+            .gc(None, &options, &reclaimed.clock())
             .await
             .expect("gc reclaims the content");
         assert_eq!(report.deleted.content_objects, 1);
@@ -264,16 +270,18 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: timer.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        setup.writer_id.clone(),
+    );
     let replay = CommitCandidate::new(directory_request("original", "original"));
     let original = engine
         .publish_batch(
             vec![replay.clone()],
-            &setup,
-            &Deadline::start(timer.clone()),
+            &OperationClock::start(setup.now_ms, timer.clone()),
         )
         .await
         .results
@@ -290,11 +298,9 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.block_next();
     let candidates = vec![primary, alias, later, replay];
-    let batch = Deadline::start(timer.clone());
+    let batch = OperationClock::start(publication.now_ms, timer.clone());
     let publish = async {
-        let mut result = engine
-            .publish_batch(&candidates, &publication, &batch)
-            .await;
+        let mut result = engine.publish_batch(&candidates, &batch).await;
         // The first attempt finds the proof expired after loading its view
         // and aborts; the retry owner tries again from the same origin.
         while result.results.iter().any(|result| {
@@ -305,9 +311,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
                 ))
             )
         }) {
-            result = engine
-                .publish_batch(&candidates, &publication, &batch)
-                .await;
+            result = engine.publish_batch(&candidates, &batch).await;
         }
         result
     };
@@ -394,16 +398,18 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: timer.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        setup.writer_id.clone(),
+    );
     let replay = CommitCandidate::new(directory_request("original", "original"));
     let original = engine
         .publish_batch(
             vec![replay.clone()],
-            &setup,
-            &Deadline::start(timer.clone()),
+            &OperationClock::start(setup.now_ms, timer.clone()),
         )
         .await
         .results
@@ -418,8 +424,8 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let alias = CommitCandidate::new(primary.intent().clone());
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.block_next();
-    let batch = Deadline::start(timer.clone());
-    let publish = engine.publish_batch(vec![primary, alias, later, replay], &publication, &batch);
+    let batch = OperationClock::start(publication.now_ms, timer.clone());
+    let publish = engine.publish_batch(vec![primary, alias, later, replay], &batch);
     let advance = async {
         store.wait_until_blocked().await;
         let elapsed_ms = 2;
@@ -531,16 +537,18 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     );
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine = NamespaceCommitEngine::new(crate::NamespaceStore {
-        timer: timer.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    });
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        publication.writer_id.clone(),
+    );
     store.reset();
     let result = engine
         .publish_batch(
             vec![candidate.clone(), metadata],
-            &publication,
-            &Deadline::start(timer.clone()),
+            &OperationClock::start(publication.now_ms, timer.clone()),
         )
         .await;
     let original = result.results[0]
@@ -573,7 +581,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &store,
                 &namespace_id,
-                &crate::test_support::mutation_context("test-writer", 0),
+                &crate::test_support::writer_at("test-writer", 0),
             );
             fixture.namespace.run_policy = MetadataRunPolicy {
                 max_delta_runs: NonZeroUsize::MIN,
@@ -607,8 +615,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     let replay = engine
         .publish_batch(
             vec![candidate, later],
-            &expired,
-            &Deadline::start(timer.clone()),
+            &OperationClock::start(expired.now_ms, timer.clone()),
         )
         .await;
     assert_eq!(

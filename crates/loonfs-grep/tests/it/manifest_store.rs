@@ -1,7 +1,7 @@
 //! Numbered grep publication, hint discovery, and input validation.
 
 use bytes::Bytes;
-use loonfs::engine::Deadline;
+use loonfs::engine::OperationClock;
 use loonfs_grep::keyspace::{grep_prefix, hint_key, manifest_key, manifests_prefix};
 use loonfs_grep::manifest::{
     encode_grep_hint, encode_grep_manifest, load_current_grep_manifest, load_grep_manifest,
@@ -30,7 +30,7 @@ async fn publications_race_one_number_and_the_loser_replans_at_the_next() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix(grep_prefix(&namespace_id)),
     );
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     let first = publish_grep_manifest(
         &store,
         None,
@@ -233,7 +233,7 @@ async fn a_failed_hint_raise_leaves_a_discoverable_publication_and_invalid_candi
     );
     failing.fail_all();
     let store = RecordingStore::new(failing, KeyPredicate::any());
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     let first = publish_grep_manifest(
         &store,
         None,
@@ -265,7 +265,7 @@ async fn a_failed_hint_raise_leaves_a_discoverable_publication_and_invalid_candi
         .await
         .expect_err("a manifest for another namespace should be refused");
     let clock = Arc::new(ManualClock::new(0));
-    let expired = Deadline::start(clock.clone());
+    let expired = OperationClock::start(0, clock.clone());
     clock.advance_ms(loonfs::engine::METADATA_PUBLICATION_BUDGET_MS + 1);
     let valid = state(namespace_id, ManifestNo(3), RunNo(2));
     publish_grep_manifest(&store, Some(&loaded), &valid, &expired)
@@ -319,7 +319,7 @@ async fn missing_hint_etags_fail_without_repeated_store_attempts() {
         MetadataMapStore::without_etag(raw.clone(), KeyPredicate::exact(hint_key(&namespace_id))),
         KeyPredicate::any(),
     );
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     let first = state(namespace_id.clone(), ManifestNo(1), RunNo(0));
     assert_matches!(
         publish_grep_manifest(&store, None, &first, &deadline).await,
@@ -375,7 +375,7 @@ async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
         } else {
             store
         };
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
         let first = publish_grep_manifest(
             &store,
             None,
@@ -439,7 +439,7 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
             )
             .expect("state")
         };
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
         let first = publish_grep_manifest(
             &store,
             None,
@@ -490,7 +490,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
-    let deadline = Deadline::start(Arc::new(ManualClock::new(0)));
+    let deadline = OperationClock::start(0, Arc::new(ManualClock::new(0)));
     let first = publish_grep_manifest(
         &store,
         None,
@@ -516,7 +516,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         OperationSelector::PutCreateIfAbsent,
     );
     let timer = Arc::new(ManualClock::new(0));
-    let late_deadline = Deadline::start(timer.clone());
+    let late_deadline = OperationClock::start(0, timer.clone());
     blocked.block_next();
     let (outcome, ()) = tokio::join!(
         publish_grep_manifest(&blocked, Some(&first), &candidate, &late_deadline),

@@ -32,7 +32,7 @@ use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::PublicationBasis;
-use crate::time::Deadline;
+use crate::time::OperationClock;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
@@ -238,8 +238,8 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
 
 pub(super) struct CompactionPublication {
     pub(super) compactor_epoch: CompactorEpoch,
-    pub(super) compaction: Deadline,
-    pub(super) publication: Deadline,
+    pub(super) compaction: OperationClock,
+    pub(super) publication: OperationClock,
 }
 
 impl CompactionPublication {
@@ -285,7 +285,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     if cancellation.is_cancelled() {
                         return settled(CompactionUnitOutcome::Cancelled);
                     }
-                    let previous = current.state.envelope.payload();
+                    let previous = current.payload();
                     if previous.status.is_deleted() {
                         return settled(CompactionUnitOutcome::Abandoned);
                     }
@@ -340,7 +340,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             Ok((None, published, _)) => Ok(CompactionUnitOutcome::Published {
                 group: spec.group(),
                 manifest: PublishedManifest::new(
-                    &published.state.envelope,
+                    &published.envelope,
                     Some(publication.publication.origin()),
                 ),
                 input_runs: spec.input_runs(),
@@ -491,7 +491,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     run_policy: MetadataRunPolicy,
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
-    output_run_no: Option<RunNo>,
+    output_run_no: RunNo,
     chain_filter: ChainFilter,
     kept_inodes: KeptInodeFilter,
     result: MetadataMergeReport,
@@ -558,13 +558,8 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         Self {
             store: basis.store,
             basis_runs: &basis.scan_runs,
-            output_run_no: basis
-                .manifest
-                .as_ref()
-                .map(|manifest| manifest.payload().next_run_no),
-            acknowledged_floor_seq: basis.manifest.as_ref().map_or(ChangeSeq(0), |manifest| {
-                manifest.payload().acknowledged_floor_seq
-            }),
+            output_run_no: basis.manifest().payload().next_run_no,
+            acknowledged_floor_seq: basis.manifest().payload().acknowledged_floor_seq,
             chain_filter: ChainFilter::NotNeeded,
             kept_inodes,
             output_cache,
@@ -626,12 +621,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .fold(0_u64, |count, segment| {
                 count.saturating_add(segment.row_count)
             });
-        let mut filter = BloomFilter::new(
-            expected_ids,
-            self.output_run_no
-                .expect("a layout compaction should have a manifest basis")
-                .0,
-        );
+        let mut filter = BloomFilter::new(expected_ids, self.output_run_no.0);
         let loader = MetadataSegmentBlockLoader::new(self.store, None);
         for run in self.basis_runs {
             let segments = group_run_descriptors(run, MetadataFamilyGroup::Revisions)

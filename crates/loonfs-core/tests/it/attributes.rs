@@ -6,14 +6,13 @@ use crate::common::*;
 use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
+use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::time::Deadline;
-use loonfs_core::{CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
-use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     api::v0::FilesystemChange, AbsolutePath, AttributeKey, AttributeValue, Attributes,
     AttributesRevisionNo, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -21,11 +20,10 @@ use loonfs_types::{
 };
 use std::assert_matches;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use tempfile::tempdir;
 
-fn mutation_context() -> MutationContext {
-    loonfs_core::test_support::mutation_context("writer", 1)
+fn default_writer() -> WriterAt {
+    loonfs_core::test_support::writer_at("writer", 1)
 }
 
 fn path(value: &str) -> AbsolutePath {
@@ -88,16 +86,11 @@ fn remove_attributes(target: &str, names: &[&str]) -> FilesystemOperation {
     }
 }
 
-async fn setup() -> (
-    tempfile::TempDir,
-    LocalFsStore,
-    NamespaceId,
-    MutationContext,
-) {
+async fn setup() -> (tempfile::TempDir, LocalFsStore, NamespaceId, WriterAt) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -111,7 +104,7 @@ async fn update<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     id: &str,
     operation: FilesystemOperation,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::Commit, CoreError> {
     submit_operation(store, namespace_id, commit_id(id), operation, context).await
 }
@@ -119,14 +112,10 @@ async fn update<S: ObjectStore + ?Sized>(
 async fn publish_request<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine<S>,
     request: CommitIntent,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::Commit, CoreError> {
     engine
-        .publish_batch(
-            vec![CommitCandidate::new(request)],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch(vec![CommitCandidate::new(request)], &context.clock())
         .await
         .results
         .remove(0)
@@ -405,7 +394,10 @@ async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
         operation,
     );
     let store = RecordingStore::new(store, KeyPredicate::any());
-    let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
     let receipt = publish_request(&mut engine, request.clone(), &context)
         .await
         .expect("an unchanged map advances the revision");
@@ -551,7 +543,10 @@ async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_t
     // The engine keeps its writer session across the requests below, so it
     // reads through the recording store from the start.
     let store = RecordingStore::new(store, KeyPredicate::any());
-    let mut engine = NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
     publish_request(
         &mut engine,
         CommitIntent::single(

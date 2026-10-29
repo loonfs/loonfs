@@ -5,21 +5,18 @@
 //! materialization is available only in tests.
 
 pub(super) use super::block_load::SessionBlockMemo;
-use super::cache::{
-    read_working_memory, DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey,
-};
+use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
 use super::error::ManifestLoadError;
 use super::runs::{manifest_cache_heap_bytes, runs_newest_first};
 use super::scan::VerifiedMetadataSegments;
 use super::validate::{validate_manifest, validate_namespace_manifest};
-use crate::block_cache::SegmentBlockKind;
-use crate::commit_engine::WalFoldInput;
 use crate::error::CoreError;
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
+use crate::protocol::WriterPosition;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
@@ -117,13 +114,17 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
 pub async fn load_position_basis<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: &MetadataSegmentCache,
-    position: &WalFoldInput,
+    position: &WriterPosition,
 ) -> crate::error::Result<Option<PublicationBasis>> {
     if !position.basis_checked.is_within_revalidation_bound() {
         return Ok(None);
     }
-    let segments =
-        load_manifest_segments(store, Some(segment_cache), position.basis.manifest()).await?;
+    let segments = load_manifest_segments(
+        store,
+        Some(segment_cache),
+        position.read_basis.basis.manifest(),
+    )
+    .await?;
     Ok(Some(PublicationBasis {
         manifest: segments.loaded_manifest(),
         checked: position.basis_checked.clone(),
@@ -135,35 +136,28 @@ pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
     segment_cache: Option<&'a MetadataSegmentCache>,
     manifest: &LoadedManifest,
 ) -> LoadedMetadataBasis<'a, S> {
-    let scan_runs = Arc::new(runs_newest_first(manifest.state.envelope.payload()));
+    let scan_runs = Arc::new(runs_newest_first(manifest.payload()));
     if let Some(cache) = segment_cache {
         cache.insert(
-            MetadataSegmentCacheKey {
-                identity: manifest.object_key.clone(),
-                block_kind: SegmentBlockKind::Manifest,
-                block_offset: 0,
-            },
+            MetadataSegmentCacheKey::manifest(&manifest.object_key),
             DecodedMetadataSegmentBlock::Manifest {
-                decoded_bytes: manifest_cache_heap_bytes(&manifest.state.envelope, &scan_runs),
+                decoded_bytes: manifest_cache_heap_bytes(&manifest.envelope, &scan_runs),
                 manifest: (
-                    Arc::clone(&manifest.state.envelope),
+                    Arc::clone(&manifest.envelope),
                     Arc::clone(&scan_runs),
                     manifest.manifest_bytes,
                 ),
             },
         );
     }
-    metadata_basis_from_segments(VerifiedMetadataSegments {
+    metadata_basis_from_segments(VerifiedMetadataSegments::new(
         store,
         segment_cache,
-        manifest_object_key: manifest.object_key.clone(),
-        manifest: Some(Arc::clone(&manifest.state.envelope)),
-        manifest_bytes: manifest.manifest_bytes,
+        manifest.object_key.clone(),
+        Arc::clone(&manifest.envelope),
+        manifest.manifest_bytes,
         scan_runs,
-        block_memo: SessionBlockMemo::new(read_working_memory(segment_cache)),
-        #[cfg(test)]
-        peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
-    })
+    ))
 }
 
 fn metadata_basis_from_segments<S: ObjectStore + ?Sized>(
@@ -236,56 +230,35 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
     // Manifests are immutable per object key, so the decoded and validated
     // envelope is cacheable forever under that key.
     let fetch = || async {
-        let Some(manifest_bytes) = store
-            .get(&manifest_key, None)
-            .instrument(tracing::debug_span!(
-                "loonfs.phase",
-                phase = "load_namespace_manifest",
-                key_class = "manifest"
-            ))
-            .await
-            .map_err(|err| ManifestLoadError::ReadManifest {
-                object_key: manifest_key.clone(),
-                message: err.public_message().into_owned(),
-                kind: err.kind(),
-            })?
-        else {
-            return Err(ManifestLoadError::MissingManifest {
-                object_key: manifest_key.clone(),
-            });
-        };
-        let manifest =
-            decode_manifest_at(namespace_id, *manifest_no, &manifest_key, &manifest_bytes)?;
+        let (manifest, manifest_bytes) =
+            load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_no)
+                .await?
+                .ok_or_else(|| ManifestLoadError::MissingManifest {
+                    object_key: manifest_key.clone(),
+                })?;
         let scan_runs = Arc::new(runs_newest_first(manifest.payload()));
         Ok(DecodedMetadataSegmentBlock::Manifest {
             decoded_bytes: manifest_cache_heap_bytes(&manifest, &scan_runs),
-            manifest: (Arc::new(manifest), scan_runs, manifest_bytes.len() as u64),
+            manifest: (Arc::new(manifest), scan_runs, manifest_bytes),
         })
     };
     let decoded = match segment_cache {
         Some(cache) => {
-            let cache_key = MetadataSegmentCacheKey {
-                identity: manifest_key.clone(),
-                block_kind: SegmentBlockKind::Manifest,
-                block_offset: 0,
-            };
-            cache.get_or_load(&cache_key, fetch).await?
+            cache
+                .get_or_load(&MetadataSegmentCacheKey::manifest(&manifest_key), fetch)
+                .await?
         }
         None => fetch().await?,
     };
     let (manifest, scan_runs, manifest_bytes) = decoded.into_manifest(&manifest_key)?;
-    let segments = VerifiedMetadataSegments {
+    Ok(VerifiedMetadataSegments::new(
         store,
         segment_cache,
-        manifest_object_key: manifest_key,
-        manifest: Some(manifest),
+        manifest_key,
+        manifest,
         manifest_bytes,
         scan_runs,
-        block_memo: SessionBlockMemo::new(read_working_memory(segment_cache)),
-        #[cfg(test)]
-        peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
-    };
-    Ok(segments)
+    ))
 }
 
 pub(crate) fn head_from_manifest(
@@ -308,9 +281,8 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
     let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
     let Some(manifest_bytes) = store
         .get(&manifest_key, None)
-        .instrument(tracing::debug_span!(
-            "loonfs.phase",
-            phase = "load_namespace_manifest",
+        .instrument(crate::phase_span!(
+            crate::Phase::LoadNamespaceManifest,
             key_class = "manifest"
         ))
         .await

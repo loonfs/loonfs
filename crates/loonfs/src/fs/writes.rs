@@ -449,10 +449,12 @@ impl Namespace<Writable> {
                 loonfs_core::content::DurableContentValidationError::MissingContentObject {
                     ..
                 },
-            )) if context.head.status.is_deleted() => Err(crate::CoreError::NamespaceDeleted {
-                namespace_id: content_ref.owner_namespace_id,
+            )) if context.read_basis.head.status.is_deleted() => {
+                Err(crate::CoreError::NamespaceDeleted {
+                    namespace_id: content_ref.owner_namespace_id,
+                }
+                .into())
             }
-            .into()),
             result => Ok(result?),
         }
     }

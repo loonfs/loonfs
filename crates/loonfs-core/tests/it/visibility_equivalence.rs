@@ -40,6 +40,8 @@ impl VisibilityHarness {
                 Arc::clone(&store),
                 namespace_id.clone(),
                 std::sync::Arc::new(loonfs_core::cache::MetadataSegmentCache::unshared(0)),
+                std::sync::Arc::new(loonfs_core::cache::HeadAndWalTailCache::unshared(0)),
+                std::sync::Arc::new(loonfs_core::cache::ObjectCache::unshared(0, 0)),
                 clock.clone(),
                 loonfs_core::test_support::std_timer(),
                 std::sync::Arc::new(loonfs_core::test_support::content_writes()),

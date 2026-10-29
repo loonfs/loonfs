@@ -19,7 +19,7 @@ use crate::reads::{page_limit, published_revision, NamespaceReads};
 use crate::segments::GrepSegments;
 use crate::{GrepError, Result};
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
-use loonfs::engine::Deadline;
+use loonfs::engine::OperationClock;
 use loonfs::{CheckpointFilesPageCursor, CoreError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
@@ -49,7 +49,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }
             .into());
         }
-        let deadline = Deadline::start(self.timer());
+        let deadline = OperationClock::start(self.now_ms(), self.timer());
         let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
             return Ok(GrepBuildOutcome::NotEnabled);
         };
@@ -104,7 +104,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         current: LoadedGrepManifest,
         unit: CollectedIndexUnit,
         policy: GramIndexBuildPolicy,
-        deadline: &Deadline,
+        deadline: &OperationClock,
     ) -> Result<GrepBuildOutcome> {
         let CollectedIndexUnit {
             postings,

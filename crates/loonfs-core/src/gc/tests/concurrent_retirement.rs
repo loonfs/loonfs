@@ -48,8 +48,6 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .await
         .expect("target");
     let target_pin = target_manifest
-        .state
-        .envelope
         .payload()
         .fork_basis
         .as_ref()
@@ -61,8 +59,6 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .await
         .expect("sibling");
     let sibling_pin = sibling_manifest
-        .state
-        .envelope
         .payload()
         .fork_basis
         .as_ref()
@@ -91,11 +87,12 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
     );
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &target);
-    let (delayed, ()) = tokio::join!(namespace.gc(None, &gc_options, &deadline), async {
+    let clock = deadline.clock();
+    let (delayed, ()) = tokio::join!(namespace.gc(None, &gc_options, &clock), async {
         store.wait_until_blocked().await;
         store.inner().fail_next(1);
         crate::test_support::namespace_store(store.inner(), &target)
-            .gc(None, &gc_options, &deadline)
+            .gc(None, &gc_options, &deadline.clock())
             .await
             .expect_err("a delete landed but its acknowledgement was lost");
         assert!(store
@@ -110,7 +107,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         );
         store.inner().clear();
         crate::test_support::namespace_store(store.inner(), &source)
-            .gc(None, &gc_options, &deadline)
+            .gc(None, &gc_options, &deadline.clock())
             .await
             .expect("source stays pinned");
         for key in &source_keys {
@@ -123,7 +120,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         }
 
         crate::test_support::namespace_store(store.inner(), &target)
-            .gc(None, &gc_options, &deadline)
+            .gc(None, &gc_options, &deadline.clock())
             .await
             .expect("second collector retries from the beginning");
         assert!(!pin_exists(store.inner(), &source, &target_pin).await);
@@ -175,11 +172,11 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .expect("inherited file stays visible");
     }
     crate::test_support::namespace_store(&store, &target)
-        .gc(None, &gc_options, &deadline)
+        .gc(None, &gc_options, &deadline.clock())
         .await
         .expect("repeated target retirement");
     crate::test_support::namespace_store(&store, &source)
-        .gc(None, &gc_options, &deadline)
+        .gc(None, &gc_options, &deadline.clock())
         .await
         .expect("sibling continues to retain source");
     for key in source_keys {

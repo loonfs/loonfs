@@ -121,11 +121,7 @@ pub(super) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     if !spec.placement().may_drop_rows_below_the_retention_floor() || !removes_hidden_rows(group) {
         return Ok(Ok(KeptInodeFilter::EveryInode));
     }
-    let manifest = basis
-        .manifest
-        .as_ref()
-        .expect("a base compaction should have a manifest basis")
-        .payload();
+    let manifest = basis.manifest().payload();
     let acknowledged_floor_seq = manifest.acknowledged_floor_seq;
     if acknowledged_floor_seq == ChangeSeq(0) {
         return Ok(Ok(KeptInodeFilter::EveryInode));

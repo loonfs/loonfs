@@ -136,7 +136,6 @@ async fn hint_and_current(harness: &Harness) -> (u64, u64) {
         .load_current_manifest()
         .await
         .expect("current manifest")
-        .state
         .manifest()
         .manifest_no;
     let hint = loonfs_objectstore::ObjectStore::get(

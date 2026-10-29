@@ -1,6 +1,5 @@
 //! Namespace deletion status published as successive manifests.
 
-use crate::commit_engine::WalFoldInput;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::publish::ManifestChange;
@@ -11,7 +10,8 @@ use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
-use crate::time::Deadline;
+use crate::protocol::WriterPosition;
+use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::DeleteNamespaceResponse;
@@ -31,9 +31,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         options: DeleteNamespaceOptions,
         acquired_writer: AcquiredWriter,
-        position: Option<WalFoldInput>,
-        context: &crate::context::MutationContext,
-        deadline: &Deadline,
+        position: Option<WriterPosition>,
+        clock: &OperationClock,
     ) -> Result<PublicationReport<DeleteNamespaceResponse>> {
         let basis = match &position {
             Some(position) => {
@@ -47,23 +46,23 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let position = Mutex::new(position);
         self.update_manifest(
             basis,
-            deadline,
+            clock,
             MAX_CONTENTION_ATTEMPTS,
             |current: LoadedManifest| {
                 let acquired_writer = &acquired_writer;
                 let position = &position;
                 async move {
-                    let mut payload = current.state.envelope.payload().clone();
+                    let mut payload = current.payload().clone();
                     let held = position
                         .lock()
                         .expect("the deletion's position lock should not be poisoned")
                         .clone()
-                        .filter(|held| held.basis.manifest() == &current.state.manifest());
+                        .filter(|held| held.read_basis.basis.manifest() == &current.manifest());
                     let head = match &held {
-                        Some(held) => held.head.clone(),
-                        None => self.load_read_anchor(deadline.observe()).await?.read_state,
+                        Some(held) => held.read_basis.head.clone(),
+                        None => self.load_read_anchor(clock.observe()).await?.read_state,
                     };
-                    super::control::ensure_namespace_live(&head)?;
+                    super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
                     ensure_writer_not_fenced(&head, acquired_writer)?;
                     if let Some(expected) = options.expected_head_seq {
                         if head.seq != expected {
@@ -75,20 +74,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         }
                     }
                     if payload.folded_wal_no < head.wal_no {
-                        deadline.ensure_metadata_publication_budget(&self.namespace_id)?;
-                        let folded = self.fold_wal_tail(held.clone(), deadline).await?;
+                        clock.ensure_metadata_publication_budget(&self.namespace_id)?;
+                        let folded = self.fold_wal_tail(held.clone(), clock).await?;
                         *position
                             .lock()
                             .expect("the deletion's position lock should not be poisoned") = held
                             .filter(|_| folds_head(&folded.manifest, &head))
-                            .map(|held| WalFoldInput {
-                                basis: MetadataBasis(folded.manifest.manifest.clone()),
-                                ..held
+                            .map(|mut held| {
+                                held.read_basis.basis =
+                                    MetadataBasis::new(folded.manifest.manifest.clone());
+                                held
                             });
                         return Ok(ManifestChange::Again);
                     }
                     payload.status = NamespaceStatus::Deleted {
-                        deleted_at_ms: context.now_ms,
+                        deleted_at_ms: clock.request_at_ms(),
                     };
                     let response = DeleteNamespaceResponse {
                         namespace_id: self.namespace_id.clone(),
@@ -102,8 +102,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         .map(|(response, tombstone, _)| PublicationReport {
             response,
             published: Some(PublishedManifest::new(
-                &tombstone.state.envelope,
-                Some(deadline.origin()),
+                &tombstone.envelope,
+                Some(clock.origin()),
             )),
         })
     }

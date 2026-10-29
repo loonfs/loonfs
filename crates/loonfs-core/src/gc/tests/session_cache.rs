@@ -24,7 +24,7 @@ async fn completed_sessions(
     store: &RecordingStore<LocalFsStore>,
     namespace_id: &NamespaceId,
     count: usize,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> BTreeSet<UploadId> {
     let mut upload_ids = BTreeSet::new();
     for _ in 0..count {
@@ -45,7 +45,7 @@ async fn collect(
 ) -> (GcResponse, BTreeMap<String, usize>) {
     store.reset();
     let report = crate::test_support::namespace_store(store, namespace_id)
-        .gc(Some(cache), &options(), &context(now_ms))
+        .gc(Some(cache), &options(), &context(now_ms).clock())
         .await
         .expect("gc pass");
     let mut reads = BTreeMap::new();

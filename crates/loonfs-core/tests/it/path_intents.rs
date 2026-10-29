@@ -3,14 +3,13 @@
 use crate::common::*;
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::time::Deadline;
-use loonfs_core::{CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{commit_id, namespace_id, page_limit};
 use loonfs_test_support::stores::OperationSelector;
-use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     api::v0::FilesystemChange,
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
@@ -19,7 +18,6 @@ use loonfs_types::{
     RevisionNo,
 };
 use std::assert_matches;
-use std::sync::Arc;
 use tempfile::tempdir;
 
 fn named_entry(entry: &PathEntry) -> &str {
@@ -40,7 +38,7 @@ async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-    context: &MutationContext,
+    context: &WriterAt,
     commit_id: Option<&CommitId>,
 ) -> Result<loonfs_types::Commit, CoreError> {
     submit_operation(
@@ -62,7 +60,7 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     source_path: &str,
     destination_path: &str,
-    context: &MutationContext,
+    context: &WriterAt,
     commit_id: Option<&CommitId>,
 ) -> Result<loonfs_types::Commit, CoreError> {
     submit_operation(
@@ -89,7 +87,7 @@ async fn put_file_with_preconditions<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     bytes: &[u8],
     preconditions: WritePreconditions,
-    context: &MutationContext,
+    context: &WriterAt,
     commit_id: &str,
 ) -> Result<loonfs_types::Commit, CoreError> {
     let content = namespace_store(store, namespace_id)
@@ -117,7 +115,7 @@ async fn list_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<Vec<loonfs_types::PathEntry>, CoreError> {
     let context = read_context(store, namespace_id).await;
-    let engine = namespace_engine(store, namespace_id, &mutation_context());
+    let engine = namespace_engine(store, namespace_id, &default_writer());
     let mut entries = Vec::new();
     let mut cursor = None;
     loop {
@@ -148,7 +146,7 @@ async fn list_path_page<S: ObjectStore + ?Sized>(
     cursor: Option<ListPageCursor>,
 ) -> Result<Page<PathEntry, ListPageCursor>, CoreError> {
     let context = read_context(store, namespace_id).await;
-    namespace_engine(store, namespace_id, &mutation_context())
+    namespace_engine(store, namespace_id, &default_writer())
         .list_path_page(
             absolute_path,
             PageRequest {
@@ -179,7 +177,7 @@ async fn list_file_revisions_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
 ) -> Result<loonfs_types::ListFileRevisionsResponse, CoreError> {
     let context = read_context(store, namespace_id).await;
-    let engine = namespace_engine(store, namespace_id, &mutation_context());
+    let engine = namespace_engine(store, namespace_id, &default_writer());
     let mut revisions = Vec::new();
     let mut cursor = None;
     loop {
@@ -199,7 +197,7 @@ async fn list_file_revisions_by_inode<S: ObjectStore + ?Sized>(
             return Ok(loonfs_types::ListFileRevisionsResponse {
                 namespace_id: namespace_id.clone(),
                 inode_id,
-                head_seq: context.head.seq,
+                head_seq: context.read_basis.head.seq,
                 revisions,
                 next_cursor: None,
             });
@@ -214,7 +212,7 @@ async fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     revision_no: RevisionNo,
 ) -> Result<loonfs_core::FileBytes, CoreError> {
     let context = read_context(store, namespace_id).await;
-    namespace_engine(store, namespace_id, &mutation_context())
+    namespace_engine(store, namespace_id, &default_writer())
         .read_file_revision(absolute_path, revision_no, &context, None)
         .await
 }
@@ -226,7 +224,7 @@ async fn read_file_revision_bytes_by_inode<S: ObjectStore + ?Sized>(
     revision_no: RevisionNo,
 ) -> Result<Vec<u8>, CoreError> {
     let context = read_context(store, namespace_id).await;
-    namespace_engine(store, namespace_id, &mutation_context())
+    namespace_engine(store, namespace_id, &default_writer())
         .read_file_revision_by_inode(inode_id, revision_no, &context, None)
         .await
 }
@@ -251,7 +249,7 @@ async fn list_path_latest<S: ObjectStore + ?Sized>(
 async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = content_blob_counting_store(temp_dir.path());
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -316,7 +314,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
 async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = content_blob_counting_store(temp_dir.path());
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -439,7 +437,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
 async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     let temp_dir = tempdir().expect("tempdir");
     let store = content_blob_counting_store(temp_dir.path());
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -484,7 +482,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
 async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_and_rebinds() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -607,7 +605,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
 async fn query_driven_directory_page_merges_manifest_and_tail_visible_children() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -788,7 +786,7 @@ async fn revision_history_and_change_feed_name_the_same_supplied_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -833,7 +831,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -848,7 +846,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         )
         .await
         .expect("create file");
-    let replacement_context = MutationContext {
+    let replacement_context = WriterAt {
         writer_id: context.writer_id.clone(),
         now_ms: 2_000,
     };
@@ -945,7 +943,7 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -1002,7 +1000,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -1107,7 +1105,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
 async fn move_path_respells_the_same_slot_without_a_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -1156,7 +1154,7 @@ async fn move_path_respells_the_same_slot_without_a_conflict() {
 async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -1212,7 +1210,7 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
 async fn create_directory_path_creates_directory_without_auto_parents() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -1249,7 +1247,7 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
 async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -1327,7 +1325,7 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
 async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -1372,7 +1370,7 @@ async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
 async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
@@ -1526,7 +1524,7 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
 async fn delete_path_non_recursive_rejects_non_empty_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -1559,7 +1557,7 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
 async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -1618,14 +1616,16 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         loonfs_test_support::stores::KeyPredicate::any(),
     );
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
         .expect("bootstrap namespace");
-    let mut engine =
-        loonfs_core::publish::NamespaceCommitEngine::new(namespace_store(&store, &namespace_id));
+    let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(
+        namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
     let mut entries = std::collections::BTreeMap::<NameKey, PathEntry>::new();
     for NameVector {
         display_name,
@@ -1646,11 +1646,7 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
             ));
             store.take();
             let result = engine
-                .publish_batch(
-                    vec![candidate],
-                    &context,
-                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                )
+                .publish_batch(vec![candidate], &context.clock())
                 .await
                 .results
                 .into_iter()
@@ -1685,7 +1681,7 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
 async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .create()
         .await
@@ -1768,7 +1764,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
 async fn move_replace_atomically_replaces_a_file_destination() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -1851,7 +1847,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
 async fn move_replace_rejects_directory_destinations_and_self_moves() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -1930,7 +1926,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
 async fn copy_replace_appends_a_revision_to_the_destination_inode() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -1998,7 +1994,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
 async fn move_path_precondition_matrix_checks_the_destination_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
@@ -2153,7 +2149,7 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
 async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
@@ -2315,7 +2311,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
 async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
+    let context = default_writer();
     let namespace_id = namespace_id("demo");
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()

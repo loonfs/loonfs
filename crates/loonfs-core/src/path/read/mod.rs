@@ -11,7 +11,7 @@ pub(crate) use current_files::{
 };
 pub use current_files::{CurrentFile, CurrentFileState, MAX_CURRENT_FILES_PER_STAT};
 pub(crate) use materialized_view::{
-    ensure_within_read_limit, file_content_ref, LoadedMetadataView, ReadLoadContext,
+    ensure_within_read_limit, file_content_ref, LoadedMetadataView,
 };
 pub use materialized_view::{
     DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes, FileRevisionsPage, GrantedRange,

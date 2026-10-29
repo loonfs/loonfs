@@ -16,7 +16,7 @@
 use crate::common::{namespace, open_runtime_with_async, store, TestRuntime};
 use loonfs::{ContentRef, GcOptions, GcResponse, NamespaceId, PutFileOptions, SharedObjectStore};
 use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS};
-use loonfs_core::MutationContext;
+use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::layout::{upload_id_of, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -54,10 +54,11 @@ async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: 
         .gc(
             None,
             &gc_options(),
-            &MutationContext {
+            &WriterAt {
                 writer_id: loonfs_types::WriterId::parse("reclamation-test").expect("writer id"),
                 now_ms,
-            },
+            }
+            .clock(),
         )
         .await
         .expect("garbage collection")

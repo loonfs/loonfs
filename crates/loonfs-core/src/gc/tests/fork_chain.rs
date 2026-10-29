@@ -68,7 +68,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     let aged = context(aged_now);
     for index in [0, 1, 1, 0] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])
-            .gc(None, &options(), &aged)
+            .gc(None, &options(), &aged.clock())
             .await
             .expect("collect ancestor while grandchild lives");
         assert_eq!(report.deleted.retired_content_objects, 0);
@@ -86,14 +86,14 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     // Deletion alone must not release either link in the protection chain.
     for index in [0, 1] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])
-            .gc(None, &options(), &aged)
+            .gc(None, &options(), &aged.clock())
             .await
             .expect("ancestors still pinned by unretired descendants");
         assert_eq!(report.deleted.retired_content_objects, 0);
     }
     for index in [2, 1, 0] {
         crate::test_support::namespace_store(&store, &namespaces[index])
-            .gc(None, &options(), &aged)
+            .gc(None, &options(), &aged.clock())
             .await
             .expect("retire from leaf to root");
         assert!(store

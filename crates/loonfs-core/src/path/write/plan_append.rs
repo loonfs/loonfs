@@ -21,19 +21,13 @@ use loonfs_types::{
     DestinationBehavior, InodeId, InodeKind, RevisionNo,
 };
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "an append carries the commit's pieces, the store, and content write permits"
-)]
 pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     bytes: &[u8],
     expected_inode_id: Option<InodeId>,
     expected_revision_no: Option<RevisionNo>,
-    store: &S,
-    content_writes: &crate::PermitPool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-    pieces: &CommitPieces<'_>,
+    pieces: &CommitPieces<'_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     let expected = validate_expected_file_state(
@@ -64,8 +58,6 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
         .await?
         .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
     plan_append(
-        store,
-        content_writes,
         view,
         pieces,
         revision,
@@ -79,10 +71,8 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     bytes: &[u8],
     expected_revision_no: Option<RevisionNo>,
-    store: &S,
-    content_writes: &crate::PermitPool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-    pieces: &CommitPieces<'_>,
+    pieces: &CommitPieces<'_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
     view.authorize(inode_id, AccessRight::Write.into(), Absence::Inode)
@@ -98,26 +88,15 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
         .latest_revision_head(inode_id)
         .await?
         .ok_or(CoreError::InodeNotFound(inode_id))?;
-    plan_append(
-        store,
-        content_writes,
-        view,
-        pieces,
-        revision,
-        expected_revision_no,
-        bytes,
-    )
-    .await
+    plan_append(view, pieces, revision, expected_revision_no, bytes).await
 }
 
 /// Plans the next revision of a file as its current bytes followed by
 /// `bytes`. The guard is checked first so that a stale caller hears about
 /// the revision, not about the content it would have extended.
 async fn plan_append<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_writes: &crate::PermitPool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-    pieces: &CommitPieces<'_>,
+    pieces: &CommitPieces<'_, S>,
     revision: RevisionRecord,
     expected_revision_no: Option<RevisionNo>,
     bytes: &[u8],
@@ -133,7 +112,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    let appended = append_to(store, content_writes, view, pieces, &revision, bytes).await?;
+    let appended = append_to(view, pieces, &revision, bytes).await?;
     Ok(CompiledFilesystemOperation {
         ops: vec![CommitOperation::ReplaceFile {
             inode_id: revision.inode_id,
@@ -146,10 +125,8 @@ async fn plan_append<S: ObjectStore + ?Sized>(
 }
 
 async fn append_to<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_writes: &crate::PermitPool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-    pieces: &CommitPieces<'_>,
+    pieces: &CommitPieces<'_, S>,
     base_row: &RevisionRecord,
     bytes: &[u8],
 ) -> Result<AppendedContent> {
@@ -169,7 +146,7 @@ async fn append_to<S: ObjectStore + ?Sized>(
             base.content_id, base.size_bytes
         ))
     })?;
-    let algorithm = store.checksum_algorithm();
+    let algorithm = view.store.checksum_algorithm();
     if base.checksum.algorithm() != algorithm {
         return Err(CoreError::NamespaceCorrupt(format!(
             "content `{}` uses `{}`; the store requires `{algorithm}`",
@@ -196,8 +173,14 @@ async fn append_to<S: ObjectStore + ?Sized>(
     } else {
         let content = pieces.content(base);
         Some(
-            materialize_content_layout(store, view.view, content.as_ref(), base, content_writes)
-                .await?,
+            materialize_content_layout(
+                view.store,
+                view.view,
+                content.as_ref(),
+                base,
+                view.content_writes,
+            )
+            .await?,
         )
     };
     Ok(AppendedContent {

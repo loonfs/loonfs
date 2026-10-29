@@ -7,15 +7,13 @@ use loonfs::{
 use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
-use loonfs_core::time::Deadline;
-use loonfs_core::{MutationContext, NamespaceEngine};
+use loonfs_core::NamespaceEngine;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
-use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, CommitId, ContentId, ContentRef, DestinationBehavior,
     NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo, Subject,
@@ -48,21 +46,18 @@ async fn publish_inline(
         },
     );
     request.subject = subject;
-    NamespaceCommitEngine::new(loonfs_core::test_support::namespace_store(
-        store,
-        namespace_id,
-    ))
+    let writer = loonfs_core::test_support::writer_at("inline-writer", 1_000);
+    NamespaceCommitEngine::new(
+        loonfs_core::test_support::namespace_store(store, namespace_id),
+        writer.writer_id.clone(),
+    )
     .publish_batch(
         [CommitCandidate::with_inline_content(
             request,
             Vec::new(),
             vec![value.clone()],
         )],
-        &MutationContext {
-            writer_id: WriterId::parse("inline-writer").expect("writer"),
-            now_ms: 1_000,
-        },
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        &writer.clock(),
     )
     .await
     .results

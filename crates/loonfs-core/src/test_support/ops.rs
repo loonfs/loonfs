@@ -9,7 +9,6 @@ use crate::namespace::store::NamespaceStore;
 use crate::path::mutation_path::parse_mutation_path;
 use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::storage::content_admission::PreparedContent;
-use crate::time::Deadline;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_types::format::wal::{
     encode_wal_object_envelope_zstd, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
@@ -19,7 +18,6 @@ use loonfs_types::{
     AbsolutePath, ActorId, ChangeSeq, Commit, CommitId, DeleteDirectoryBehavior,
     DestinationBehavior, NamespaceMetadata, RevisionNo,
 };
-use std::sync::Arc;
 
 /// The actor every test commit records. It's the actor that
 /// `loonfs_test_support::test_actor` returns, spelled here because the
@@ -54,7 +52,7 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
     ) -> Vec<Result<Commit>> {
         self.engine()
             .commit_engine()
-            .publish_batch_until_settled(candidates, &self.context())
+            .publish_batch_until_settled(candidates, &self.namespace.start_clock())
             .await
     }
 
@@ -224,7 +222,6 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
     /// Appends one small commit per WAL object without folding the tail.
     pub async fn append_wal_objects(&self, count: u64) -> Result<()> {
         let mut engine = self.engine().commit_engine();
-        let context = self.context();
         for _ in 0..count {
             let commit_id = CommitId::generate();
             let path = AbsolutePath::parse(format!("/wal-tail-{commit_id}"))
@@ -241,8 +238,7 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
             let mut results = engine
                 .publish_batch(
                     vec![CommitCandidate::new(request)],
-                    &context,
-                    &Deadline::start(Arc::clone(&self.namespace.timer)),
+                    &self.namespace.start_clock(),
                 )
                 .await
                 .results;
@@ -276,7 +272,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .load_current_manifest()
             .await
             .expect("load the current manifest")
-            .state
             .manifest()
             .manifest_no;
         self.raise_hint(current, None)

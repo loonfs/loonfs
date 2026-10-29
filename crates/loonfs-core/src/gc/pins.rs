@@ -2,11 +2,11 @@
 //! window age checks.
 
 use super::live_set::LiveSet;
-use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::pin::record::load_pin_at_key;
+use crate::time::OperationClock;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{ForkBasis, PinOwner, PinPayload};
 use loonfs_types::{NamespaceId, RetainedReason};
@@ -27,7 +27,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         key: &str,
         grace_window_ms: u64,
         live: &LiveSet,
-        context: &MutationContext,
+        clock: &OperationClock,
     ) -> Result<PinSweep> {
         let record = match load_pin_at_key(&self.store, key).await {
             Ok(loaded) => loaded.state,
@@ -41,12 +41,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             } => {
                 return Ok(
                     match self
-                        .fork_pin_is_retained(
-                            &record,
-                            target_namespace_id,
-                            grace_window_ms,
-                            context,
-                        )
+                        .fork_pin_is_retained(&record, target_namespace_id, grace_window_ms, clock)
                         .await?
                     {
                         false => PinSweep::DeleteFork,
@@ -70,7 +65,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .then(|| record.created_at_ms.saturating_add(grace_window_ms));
         let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
         Ok(match reclaimable_at_ms {
-            Some(at_ms) if context.now_ms >= at_ms => deletion,
+            Some(at_ms) if clock.request_at_ms() >= at_ms => deletion,
             _ => PinSweep::Retain { reclaimable_at_ms },
         })
     }
@@ -80,9 +75,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         record: &PinPayload,
         target_namespace_id: &NamespaceId,
         grace_window_ms: u64,
-        context: &MutationContext,
+        clock: &OperationClock,
     ) -> Result<bool> {
-        if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
+        if clock.request_at_ms().saturating_sub(record.created_at_ms) < grace_window_ms {
             return Ok(true);
         }
         match self

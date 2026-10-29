@@ -1,6 +1,7 @@
 //! Lists files from the manifest pinned by a snapshot.
 
 use super::read_basis::{load_pin_basis, PinBasis};
+use super::snapshot::ensure_unexpired;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataView;
@@ -99,26 +100,22 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         // Rejects a mismatched or deleted namespace before any read work.
         self.ensure_live_context(context)?;
         self.namespace
-            .list_checkpoint_files_page(checkpoint_id, request, options, self.now_ms())
+            .list_checkpoint_files_page(checkpoint_id, request, options)
             .await
     }
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Lists one page of the files the snapshot `checkpoint_id` pins, as
-    /// [`NamespaceEngine::list_checkpoint_files_page`] describes, treating the
-    /// snapshot as expired at or before `now_ms`.
+    /// [`NamespaceEngine::list_checkpoint_files_page`] describes.
     pub(crate) async fn list_checkpoint_files_page(
         &self,
         checkpoint_id: &PinId,
         request: PageRequest<CheckpointFilesPageCursor>,
         options: ListCheckpointFilesOptions,
-        now_ms: u64,
     ) -> Result<CheckpointFilesPage> {
-        let record = self
-            .load_unexpired_snapshot(checkpoint_id, now_ms)
-            .await?
-            .state;
+        let now_ms = self.wall_clock.now_ms();
+        let record = ensure_unexpired(self.load_user_pin(checkpoint_id).await?, now_ms)?.state;
         let PinBasis { manifest, segments } =
             load_pin_basis(&self.store, &self.segment_cache, record).await?;
 

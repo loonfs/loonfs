@@ -7,10 +7,9 @@ use super::session_cache::CompletedUploadSessionCache;
 use super::uploads::{
     sweep_completed_session, ListedUpload, ListedUploadKind, OutcomeListing, UploadSessionSweep,
 };
-use crate::context::MutationContext;
 use crate::error::Result;
-use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use crate::namespace::store::NamespaceStore;
+use crate::time::OperationClock;
 use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::{RetainedReason, UploadId};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,7 +41,7 @@ pub(super) enum ContentReference {
 pub(super) struct Sweep<'a, S: ObjectStore> {
     pub(super) namespace: &'a NamespaceStore<S>,
     pub(super) grace_window_ms: u64,
-    pub(super) mutation: &'a MutationContext,
+    pub(super) clock: &'a OperationClock,
     pub(super) live: &'a LiveSet,
     pub(super) session_cache: Option<&'a CompletedUploadSessionCache>,
     /// The bytes of the listed objects that reached this sweep, as the
@@ -60,57 +59,19 @@ impl<S: ObjectStore> Sweep<'_, S> {
         if !family.recognizes(&entry.key) {
             return Ok(self.retain(RetainedReason::UnrecognizedKey, None));
         }
-        Ok(match family {
-            CandidateFamily::WalObjects => {
-                self.process_aged_family(family, entry, |report| &mut report.deleted.wal_objects)
-            }
-            CandidateFamily::MetadataSegments => {
-                self.process_aged_family(family, entry, |report| {
-                    &mut report.deleted.metadata_segments
-                })
-            }
-            CandidateFamily::Manifests => {
-                self.process_aged_family(family, entry, |report| &mut report.deleted.manifests)
-            }
-            CandidateFamily::Pins => self.process_pin(entry.key).await?,
-            CandidateFamily::Content => self
-                .process_aged_family(family, entry, |report| &mut report.deleted.content_objects),
-            CandidateFamily::Temporary => self.process_aged_family(family, entry, |report| {
-                &mut report.deleted.temporary_objects
-            }),
-        })
-    }
-    fn process_aged_family(
-        &self,
-        family: CandidateFamily,
-        entry: ListedObject,
-        deleted: DeletedCounter,
-    ) -> Decision {
-        let key = entry.key.as_str();
-        if family == CandidateFamily::Manifests
-            && loonfs_objectstore::layout::manifest_no_of(key)
-                .is_some_and(|number| number >= self.live.discovery_start_manifest_no)
-        {
-            return self.retain(RetainedReason::Referenced, None);
-        }
-        if self.live.objects.contains(key)
-            || (family == CandidateFamily::WalObjects && self.live.protects_wal(key))
-        {
-            return self.retain(RetainedReason::Referenced, None);
-        }
-        // A compaction may publish output that is exactly the minimum age
-        // old, so a segment must be strictly older before it goes.
-        let min_age_ms = if family == CandidateFamily::MetadataSegments {
-            UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1
-        } else {
-            self.grace_window_ms
+        let Some(deleted) = family.deleted_counter() else {
+            return self.process_pin(entry.key).await;
         };
-        self.sweep_aged(entry, min_age_ms, deleted)
+        if self.live.protects(family, &entry.key) {
+            return Ok(self.retain(RetainedReason::Referenced, None));
+        }
+        Ok(self.sweep_aged(entry, family.min_age_ms(self.grace_window_ms), deleted))
     }
+
     async fn process_pin(&self, key: String) -> Result<Decision> {
         let decision = self
             .namespace
-            .sweep_pin(&key, self.grace_window_ms, self.live, self.mutation)
+            .sweep_pin(&key, self.grace_window_ms, self.live, self.clock)
             .await?;
         let counter: DeletedCounter = match decision {
             PinSweep::DeleteFork => |report| &mut report.deleted_checkpoints_by_owner.fork,
@@ -163,7 +124,7 @@ impl<S: ObjectStore> Sweep<'_, S> {
             Some(session) => {
                 let sweep = sweep_completed_session(
                     self.live,
-                    self.mutation.now_ms,
+                    self.clock.request_at_ms(),
                     session.completed_at_ms,
                 );
                 // The sweep adds a kept session to the cache, so a later pass
@@ -189,7 +150,7 @@ impl<S: ObjectStore> Sweep<'_, S> {
                     return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
                 };
                 self.namespace
-                    .sweep_upload_session(self.grace_window_ms, self.live, self.mutation, &state)
+                    .sweep_upload_session(self.grace_window_ms, self.live, self.clock, &state)
                     .await?
             }
         };
@@ -236,7 +197,7 @@ impl<S: ObjectStore> Sweep<'_, S> {
         let age = GraceAge::of(
             entry.last_modified_at_ms,
             grace_window_ms,
-            self.mutation.now_ms,
+            self.clock.request_at_ms(),
         );
         match age.retained_reason() {
             Some(reason) => self.retain(reason, None),
@@ -250,7 +211,8 @@ impl<S: ObjectStore> Sweep<'_, S> {
     fn retain(&self, reason: RetainedReason, reclaimable_at_ms: Option<u64>) -> Decision {
         Decision::Retain {
             reason,
-            reclaimable_at_ms: reclaimable_at_ms.filter(|at_ms| *at_ms > self.mutation.now_ms),
+            reclaimable_at_ms: reclaimable_at_ms
+                .filter(|at_ms| *at_ms > self.clock.request_at_ms()),
         }
     }
 

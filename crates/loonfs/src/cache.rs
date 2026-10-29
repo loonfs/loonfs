@@ -15,11 +15,11 @@ use crate::{Consistency, CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    project_anchor_tail, MetadataBasis, NamespaceReadAnchor, NamespaceReadState, SnapshotReadBasis,
-    VerifiedNamespaceCatalogEntry,
+    project_anchor_tail, NamespaceReadAnchor, ReadBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
+use loonfs_core::Phase;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
 use std::sync::Arc;
 use tracing::Instrument;
@@ -107,7 +107,7 @@ impl RuntimeCore {
                 || async {
                     let cached = cache.get_head(namespace_id);
                     self.refresh_namespace_head(namespace_id, cached.as_deref().cloned())
-                        .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
+                        .instrument(phase_span!(self, Phase::ValidationRefresh, namespace_id))
                         .await
                         .inspect_err(|_| cache.invalidate_head(namespace_id))
                 },
@@ -157,15 +157,25 @@ impl RuntimeCore {
                 let check_due =
                     checked.age_ms() >= self.inner.config.manifest_revalidation_interval_ms;
                 let observed = Observation::now(Arc::clone(&self.inner.timer));
-                let matches = !check_due || !namespace.manifest_has_successor(head.basis.manifest_no())
-                    .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
-                    .await.map_err(MetadataProjectionLoadError::LoadHead)?;
+                let matches = !check_due
+                    || !namespace
+                        .manifest_has_successor(head.read_basis.basis.manifest_no())
+                        .instrument(phase_span!(
+                            self,
+                            Phase::ValidationManifestProbe,
+                            namespace_id
+                        ))
+                        .await
+                        .map_err(MetadataProjectionLoadError::LoadHead)?;
                 if matches {
-                    let mut context =
-                        self.read_context(head.head.clone(), head.basis.clone(), None);
-                    let probed = loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
-                        .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
-                        .await;
+                    let mut context = self.read_context(head.read_basis.clone(), None);
+                    let probed = loonfs_core::control::probe_namespace_wal(
+                        self.store(),
+                        &self.inner.head_and_wal_tail_cache,
+                        &mut context,
+                    )
+                    .instrument(phase_span!(self, Phase::ValidationWalProbe, namespace_id))
+                    .await;
                     // Check the bound before using the probe's result, so a view that passed
                     // the bound while the probe ran is reloaded whatever the probe returned.
                     // By then, garbage collection might have deleted WAL objects after the
@@ -178,15 +188,16 @@ impl RuntimeCore {
                         if check_due {
                             head.basis_checked = observed;
                         }
-                        head.head = context.head;
+                        head.read_basis.head = context.read_basis.head;
                         return Ok(head);
                     }
                 }
             }
         }
         let observed = Observation::now(Arc::clone(&self.inner.timer));
-        let loaded = namespace.load_read_anchor(observed.clone())
-            .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_anchor_load"))
+        let loaded = namespace
+            .load_read_anchor(observed.clone())
+            .instrument(phase_span!(self, Phase::ValidationAnchorLoad, namespace_id))
             .await
             .map_err(MetadataProjectionLoadError::LoadHead)?;
         if !loaded.read_state.status.is_deleted() {
@@ -231,8 +242,7 @@ impl RuntimeCore {
         {
             Some(position) => (
                 self.read_context(
-                    position.head.clone(),
-                    position.basis.clone(),
+                    position.read_basis.clone(),
                     Some(Arc::clone(&position.tail)),
                 ),
                 ReadHeadSource::Position,
@@ -246,10 +256,7 @@ impl RuntimeCore {
                         ReadHeadSource::Anchor,
                     ),
                 };
-                (
-                    self.read_context(head.head.clone(), head.basis.clone(), None),
-                    source,
-                )
+                (self.read_context(head.read_basis.clone(), None), source)
             }
         };
         self.inner.instruments.read_head(source);
@@ -298,18 +305,10 @@ impl RuntimeCore {
     /// other read passes `None` and looks its tail up in the read cache.
     pub(crate) fn read_context(
         &self,
-        head: NamespaceReadState,
-        basis: MetadataBasis,
+        read_basis: ReadBasis,
         tail: Option<Arc<ProjectedWalTail>>,
     ) -> RuntimeReadContext {
-        RuntimeReadContext {
-            head,
-            basis,
-            segment_cache: Arc::clone(&self.inner.metadata_segment_cache),
-            head_and_wal_tail_cache: Arc::clone(&self.inner.head_and_wal_tail_cache),
-            object_cache: Arc::clone(&self.inner.object_cache),
-            tail,
-        }
+        RuntimeReadContext { read_basis, tail }
     }
 
     /// The shared preamble of every pinned read: the read context of the
@@ -341,7 +340,7 @@ impl RuntimeCore {
             .await?;
         let pinned = self
             .namespace_store(namespace_id)
-            .load_snapshot_read_basis(&live.head, snapshot_id, self.now_ms())
+            .load_snapshot_read_basis(&live.read_basis.head, snapshot_id)
             .await
             .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, pinned, live))
@@ -350,14 +349,14 @@ impl RuntimeCore {
     fn pinned_read_at_basis(
         &self,
         namespace_id: &NamespaceId,
-        pinned: SnapshotReadBasis,
+        pinned: ReadBasis,
         live: RuntimeReadContext,
     ) -> PinnedRead {
         PinnedRead {
             engine: self
                 .reader_engine(namespace_id)
                 .with_authorization_head(live),
-            context: self.read_context(pinned.head, pinned.basis, None),
+            context: self.read_context(pinned, None),
         }
     }
 
@@ -370,7 +369,9 @@ impl RuntimeCore {
         let context = self
             .current_read_context(namespace_id, HeadConfirmation::View)
             .await?;
-        Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
+        Ok(VerifiedNamespaceCatalogEntry::from_head(
+            &context.read_basis.head,
+        ))
     }
 
     /// Drops the namespace's cached head, after this runtime learns of a
@@ -391,7 +392,7 @@ impl RuntimeCore {
     /// wrote. A tail whose key the confirmed head no longer uses is never
     /// wrong, only unused, and recency evicts it.
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
-        let _span = phase_span!(self, "update_cache", namespace_id).entered();
+        let _span = phase_span!(self, Phase::UpdateCache, namespace_id).entered();
         self.inner
             .head_and_wal_tail_cache
             .invalidate_head(namespace_id);
@@ -402,8 +403,10 @@ impl RuntimeCore {
 /// manifest check and its head confirmed at that observation.
 fn cached_head(anchor: NamespaceReadAnchor, observed: Observation) -> CachedHead {
     CachedHead {
-        basis: anchor.basis(),
-        head: anchor.read_state,
+        read_basis: ReadBasis {
+            basis: anchor.basis(),
+            head: anchor.read_state,
+        },
         basis_checked: observed.clone(),
         head_confirmed: observed,
     }

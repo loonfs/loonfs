@@ -45,7 +45,7 @@ async fn family_keys(
         .load_current_manifest()
         .await
         .expect("load manifest");
-    let runs = &manifest.state.envelope.payload().runs;
+    let runs = &manifest.payload().runs;
     let family_runs = runs
         .iter()
         .filter(|run| run.segments.iter().any(|segment| segment.family == family))

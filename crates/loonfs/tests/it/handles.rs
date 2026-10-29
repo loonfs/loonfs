@@ -9,7 +9,7 @@ use loonfs::{
     ManifestNo, NamespaceId, PutFileOptions, SharedObjectStore, StoreConfig, WalFoldStepOutcome,
     Writable,
 };
-use loonfs_core::MutationContext;
+use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::ObjectStore;
@@ -68,7 +68,7 @@ async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
     loonfs_core::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &MutationContext {
+        &WriterAt {
             writer_id: loonfs_types::WriterId::parse("wal-tail-test-writer").expect("writer id"),
             now_ms: 1_000,
         },
@@ -578,7 +578,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         loonfs_core::test_support::NamespaceFixture::new(
             failing.as_ref(),
             &namespace_id,
-            &MutationContext {
+            &WriterAt {
                 writer_id: loonfs_types::WriterId::parse("fold-failure-seed").expect("writer id"),
                 now_ms: 1_000,
             },
@@ -663,7 +663,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
         loonfs_core::test_support::NamespaceFixture::new(
             blocking.inner(),
             &namespace_id,
-            &MutationContext {
+            &WriterAt {
                 writer_id: loonfs_types::WriterId::parse("parked-fold-seed").expect("writer id"),
                 now_ms: 1_000,
             },

@@ -71,7 +71,7 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "load_manifest_segments", key_class = "metadata_segment")
+    fields(phase = crate::Phase::LoadManifestSegments.as_str(), key_class = "metadata_segment")
 )]
 #[cfg(test)]
 pub(crate) async fn load_manifest_metadata_state_for_inspection_from_manifest<

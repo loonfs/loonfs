@@ -4,7 +4,7 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::LeafRevisionPreload;
-use crate::path::read::{LoadedMetadataView, ReadLoadContext};
+use crate::path::read::LoadedMetadataView;
 use loonfs_test_support::stores::ConcurrencyWatchStore;
 use loonfs_types::options::ListOptions;
 use loonfs_types::{AttributeInclusion, InodeKind, ListPageCursor, PageRequest};
@@ -38,8 +38,6 @@ async fn a_cold_path_walk_reads_no_inode() {
         .await
         .expect("manifest");
     let inode_segments = manifest
-        .state
-        .envelope
         .payload()
         .runs
         .iter()
@@ -118,8 +116,6 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
         .load_current_manifest()
         .await
         .expect("manifest")
-        .state
-        .envelope
         .payload()
         .runs
         .iter()
@@ -140,8 +136,6 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
                 limit: EffectiveLimit::new(NonZeroU32::new(1000).expect("nonzero limit")),
             },
             crate::pin::ListCheckpointFilesOptions::default(),
-            // The pin has no expiry, so the read clock doesn't matter.
-            0,
         )
         .await
         .expect("checkpoint files page");
@@ -270,7 +264,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -337,17 +331,16 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         .expect("reused manifest");
     assert_names(&current, &[("/a", replacement), ("/b", inode_id)]).await;
     for (anchor, path) in [(&original, "/a"), (&moved, "/b")] {
-        let basis = anchor.basis();
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let context = crate::RuntimeReadContext {
+            read_basis: crate::control::ReadBasis {
+                basis: anchor.basis(),
+                head: anchor.read_state.clone(),
+            },
+            tail: None,
+        };
         let pinned = namespace
-            .load_metadata_view(ReadLoadContext::pinned_head(
-                &anchor.read_state,
-                &basis,
-                None,
-                None,
-                None,
-                None,
-            ))
+            .load_metadata_view(&context)
             .await
             .expect("pinned manifest");
         assert_names(&pinned, &[(path, inode_id)]).await;
@@ -406,7 +399,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -530,7 +523,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -622,8 +615,6 @@ async fn a_listing_reads_only_the_slot_binding_family() {
         .await
         .expect("manifest");
     let families = manifest
-        .state
-        .envelope
         .payload()
         .runs
         .iter()

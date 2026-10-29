@@ -10,7 +10,7 @@ use crate::manifest::{
 };
 use crate::reads::NamespaceReads;
 use crate::{GrepError, GrepPassBudget, Result};
-use loonfs::engine::{next_run_no_after, Deadline, Observation};
+use loonfs::engine::{next_run_no_after, Observation, OperationClock};
 use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, ReadOnly, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::{self, GrepIndex};
@@ -212,7 +212,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// backfilling manifest. Enabling an active manifest is idempotent.
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
         self.reads(namespace_id).head().await?;
-        let deadline = Deadline::start(self.timer());
+        let deadline = OperationClock::start(self.now_ms(), self.timer());
         let current =
             load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?;
         if let Some(current) = &current {
@@ -240,7 +240,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// candidates and are never deleted synchronously.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         self.reads(namespace_id).head().await?;
-        let deadline = Deadline::start(self.timer());
+        let deadline = OperationClock::start(self.now_ms(), self.timer());
         let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
@@ -347,7 +347,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
         current: &LoadedGrepManifest,
-        deadline: &Deadline,
+        deadline: &OperationClock,
     ) -> Result<GrepBuildOutcome> {
         let Some(checkpoint) = self
             .publish_backfill(namespace_id, Some(current), deadline)
@@ -369,7 +369,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     async fn load_enabled(
         &self,
         namespace_id: &NamespaceId,
-        deadline: &Deadline,
+        deadline: &OperationClock,
     ) -> Result<Option<LoadedGrepManifest>> {
         let current =
             load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?;
@@ -387,7 +387,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
         current: Option<&LoadedGrepManifest>,
-        deadline: &Deadline,
+        deadline: &OperationClock,
     ) -> Result<Option<loonfs_types::Snapshot>> {
         let manifest_no = next_manifest_no(current)?;
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;

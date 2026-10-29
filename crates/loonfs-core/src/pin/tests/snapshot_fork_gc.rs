@@ -17,7 +17,7 @@ struct Fixture {
     target: NamespaceId,
     snapshot: PinPayload,
     replaced: Vec<String>,
-    context: MutationContext,
+    context: WriterAt,
 }
 
 impl Fixture {
@@ -49,7 +49,7 @@ impl Fixture {
                     name: "historical".into(),
                     expires_at_ms: Some(u64::MAX),
                 },
-                &setup,
+                &setup.clock(),
             )
             .await
             .expect("snapshot")
@@ -69,14 +69,14 @@ impl Fixture {
         let report = crate::test_support::NamespaceFixture::new(
             &store,
             &source,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
             crate::manifest::CompactionAdmission::AnySize,
-            selected.state.compactor_epoch(),
+            selected.compactor_epoch(),
             &crate::manifest::MetadataCompactionCancellation::default(),
         )
         .await
@@ -87,8 +87,6 @@ impl Fixture {
             .await
             .expect("current");
         let current_segments: BTreeSet<_> = current
-            .state
-            .envelope
             .payload()
             .runs
             .iter()
@@ -96,8 +94,6 @@ impl Fixture {
             .map(metadata_segment_object_key)
             .collect();
         let replaced: Vec<_> = selected
-            .state
-            .envelope
             .payload()
             .runs
             .iter()
@@ -115,7 +111,7 @@ impl Fixture {
             replaced,
             // Old objects can be collected, but a fork pin created by this
             // attempt is still inside its installation grace.
-            context: mutation_context(
+            context: writer_at(
                 "fork",
                 crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
             ),
@@ -126,7 +122,7 @@ impl Fixture {
         crate::test_support::NamespaceFixture::new(
             self.store.as_ref(),
             &self.source,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
         .delete_snapshot(&self.snapshot.pin_id)
@@ -161,7 +157,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
     fork_gate.block_next();
     let collect = async {
         crate::test_support::namespace_store(&gc_gate, &fixture.source)
-            .gc(None, &GcOptions::default(), &fixture.context)
+            .gc(None, &GcOptions::default(), &fixture.context.clock())
             .await
             .expect("old collector keeps its captured snapshot root");
         fixture.assert_replaced_present(true).await;
@@ -187,7 +183,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
     };
     tokio::join!(collect, fork, release_snapshot);
     crate::test_support::namespace_store(&fixture.store, &fixture.source)
-        .gc(None, &GcOptions::default(), &fixture.context)
+        .gc(None, &GcOptions::default(), &fixture.context.clock())
         .await
         .expect("new collector keeps the fork root");
     fixture.assert_replaced_present(true).await;
@@ -241,7 +237,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             );
             fixture.delete_snapshot().await;
             crate::test_support::namespace_store(&fixture.store, &fixture.source)
-                .gc(None, &GcOptions::default(), &fixture.context)
+                .gc(None, &GcOptions::default(), &fixture.context.clock())
                 .await
                 .expect("tentative pin remains a root during verification");
             fixture.assert_replaced_present(true).await;
@@ -262,7 +258,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         .expect("no target installed")
         .is_none());
     crate::test_support::namespace_store(&fixture.store, &fixture.source)
-        .gc(None, &GcOptions::default(), &fixture.context)
+        .gc(None, &GcOptions::default(), &fixture.context.clock())
         .await
         .expect("later collection sees no historical root");
     fixture.assert_replaced_present(false).await;
@@ -272,7 +268,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
 async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification() {
     let fixture = Fixture::new().await;
     let writer = crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
-        .acquire_writer_epoch(&fixture.context)
+        .acquire_writer_epoch(&fixture.context.writer_id)
         .await
         .expect("writer");
     let gate = BlockingStore::new(
@@ -290,13 +286,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
         async {
             gate.wait_until_blocked().await;
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
-                .delete_namespace(
-                    Default::default(),
-                    writer,
-                    None,
-                    &fixture.context,
-                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                )
+                .delete_namespace(Default::default(), writer, None, &fixture.context.clock())
                 .await
                 .expect("delete source before the fork pin lands");
             gate.release();
@@ -338,7 +328,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
                 name: "short".into(),
                 expires_at_ms: Some(context.now_ms + 10),
             },
-            &context,
+            &context.clock(),
         )
         .await
         .expect("snapshot")

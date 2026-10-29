@@ -3,6 +3,7 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::GcOptions;
+use crate::test_support::WriterAt;
 use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, OperationSelector};
 use loonfs_types::ErrorCode;
 use std::assert_matches;
@@ -24,13 +25,13 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     // acknowledgment, which passes later requests through to `store`.
     let mut engine = NamespaceCommitEngine {
         namespace: crate::test_support::namespace_store(&failed, &namespace_id),
+        writer_id: engine.writer_id,
         position: engine.position,
     };
     let error = engine
         .publish_batch(
             [candidate("lost-ack", vec![original.clone()])],
-            &context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &context.clock(),
         )
         .await
         .results
@@ -66,10 +67,11 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .gc(
             None,
             &options,
-            &MutationContext {
+            &WriterAt {
                 now_ms: options.grace_window_ms + 1,
                 ..context.clone()
-            },
+            }
+            .clock(),
         )
         .await
         .expect("collect folded WAL");
@@ -93,11 +95,13 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     assert_no_writes(&store);
 
     drop(engine);
-    let mut restarted =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut restarted = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
     restarted
         .position
-        .session_writer_epoch(&restarted.namespace, &context)
+        .session_writer_epoch(&restarted.namespace, &context.writer_id)
         .await
         .expect("new writer fence");
     store.reset();

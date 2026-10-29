@@ -140,7 +140,6 @@ impl Takeover {
             .load_current_manifest()
             .await
             .expect("current manifest")
-            .state
             .manifest()
             .manifest_no
     }

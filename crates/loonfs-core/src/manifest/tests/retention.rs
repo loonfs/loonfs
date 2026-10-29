@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::manifest::{FoldWalOutcome, PublicationReport};
-use crate::time::Deadline;
+use crate::time::OperationClock;
 use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
 use std::assert_matches;
@@ -15,7 +15,6 @@ async fn current_manifest_no<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("read metadata manifest")
-        .state
         .manifest()
         .manifest_no
 }
@@ -144,7 +143,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     let unchanged = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -178,15 +177,14 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     }
     .fold_wal_tail(
         None,
-        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
     )
     .await
     .expect("fold the commits");
     let manifest = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
-        .expect("load metadata manifest")
-        .state;
+        .expect("load metadata manifest");
     let segments = load_manifest_segments_for_inspection(
         &store,
         None,
@@ -222,7 +220,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     let advanced = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -277,7 +275,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
         ("/c.txt", 2_500),
         ("/d.txt", 5_000),
     ] {
-        let context = MutationContext {
+        let context = WriterAt {
             now_ms: committed_at_ms,
             ..context.clone()
         };
@@ -318,7 +316,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
         let floor = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context(
+            &crate::test_support::writer_at(
                 "test-writer",
                 crate::test_support::grace_elapsed_after(5_000),
             ),
@@ -362,7 +360,7 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
         ("/e.txt", now_ms + grace_ms / 2),
         ("/f.txt", now_ms + 3 * grace_ms),
     ] {
-        let context = MutationContext {
+        let context = WriterAt {
             now_ms: committed_at_ms,
             ..context.clone()
         };
@@ -404,7 +402,7 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
         let floor = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", advance_at_ms),
+            &crate::test_support::writer_at("test-writer", advance_at_ms),
         )
         .engine()
         .advance_retention_floor(target)
@@ -456,19 +454,17 @@ async fn commit_directories_with_long_messages<S: ObjectStore + ?Sized>(
             ))
         })
         .collect();
-    let context = MutationContext {
+    let context = WriterAt {
         now_ms: committed_at_ms,
         ..test_context()
     };
-    for result in
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(store, namespace_id))
-            .publish_batch(
-                candidates,
-                &context,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            )
-            .await
-            .results
+    for result in NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        context.writer_id.clone(),
+    )
+    .publish_batch(candidates, &context.clock())
+    .await
+    .results
     {
         result.expect("commit a directory");
     }
@@ -482,8 +478,7 @@ async fn commit_segment_with_index<S: ObjectStore + ?Sized>(
     let manifest = crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
-        .expect("load the manifest")
-        .state;
+        .expect("load the manifest");
     let mut segments = manifest
         .envelope
         .payload()
@@ -634,7 +629,7 @@ async fn an_advance_sends_one_get_for_each_commit_block_up_to_where_it_stops() {
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &history.store,
                 &history.namespace_id,
-                &crate::test_support::mutation_context("test-writer", now_ms),
+                &crate::test_support::writer_at("test-writer", now_ms),
             );
             fixture.namespace.segment_cache = Arc::new(cache_reading_one_block_at_a_time());
             fixture
@@ -678,7 +673,7 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
                 let mut fixture = crate::test_support::NamespaceFixture::new(
                     &history.store,
                     &history.namespace_id,
-                    &crate::test_support::mutation_context("test-writer", now_ms),
+                    &crate::test_support::writer_at("test-writer", now_ms),
                 );
                 fixture.namespace.segment_cache = Arc::new(cache_reading_one_block_at_a_time());
                 fixture
@@ -727,7 +722,7 @@ async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once
         let floor = crate::test_support::NamespaceFixture::new(
             &history.store,
             &history.namespace_id,
-            &crate::test_support::mutation_context("test-writer", now_ms),
+            &crate::test_support::writer_at("test-writer", now_ms),
         )
         .engine()
         .advance_retention_floor(target)
@@ -764,7 +759,7 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
         ("/b.txt", 3 * hour_ms),
         ("/c.txt", 4 * hour_ms),
     ] {
-        let context = MutationContext {
+        let context = WriterAt {
             now_ms: committed_at_ms,
             ..context.clone()
         };
@@ -780,7 +775,7 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
     let engine = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine();
     let set_window =
@@ -820,7 +815,7 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
         let floor = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", now_ms),
+            &crate::test_support::writer_at("test-writer", now_ms),
         )
         .engine()
         .advance_retention_floor(target)
@@ -876,7 +871,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context(
+            &crate::test_support::writer_at(
                 "test-writer",
                 crate::test_support::grace_elapsed_after(context.now_ms),
             ),
@@ -919,8 +914,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
     let manifest = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
-        .expect("load metadata manifest")
-        .state;
+        .expect("load metadata manifest");
     let segments = load_manifest_segments_for_inspection(
         &store,
         None,
@@ -946,7 +940,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
     let error = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -988,8 +982,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     let manifest = crate::test_support::namespace_store(&setup_store, &namespace_id)
         .load_current_manifest()
         .await
-        .expect("load metadata manifest")
-        .state;
+        .expect("load metadata manifest");
     let segments = load_manifest_segments_for_inspection(
         &setup_store,
         None,
@@ -1024,7 +1017,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     let error = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -1068,9 +1061,8 @@ async fn publish_directories<S: ObjectStore>(
             ))
         })
         .collect();
-    let batch = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     for result in writer
-        .publish_batch(candidates, &test_context(), &batch)
+        .publish_batch(candidates, &test_context().clock())
         .await
         .results
     {
@@ -1086,8 +1078,7 @@ async fn current_floors<S: ObjectStore + ?Sized>(
     let manifest = crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
-        .expect("load the current manifest")
-        .state;
+        .expect("load the current manifest");
     let payload = manifest.envelope.payload();
     (payload.retention_floor_seq, payload.acknowledged_floor_seq)
 }
@@ -1118,7 +1109,7 @@ async fn advance_to_folded_head<S: ObjectStore + ?Sized>(
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(test_context().now_ms),
         ),
@@ -1137,8 +1128,10 @@ async fn a_fold_acknowledges_the_highest_basis_floor_that_it_folds() {
     bootstrap_namespace(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
-    let mut writer =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut writer = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        test_context().writer_id,
+    );
     publish_directories(&mut writer, "folded", 20).await;
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
@@ -1238,7 +1231,7 @@ async fn a_fence_acknowledges_the_floor_of_a_namespace_that_nobody_writes_to() {
     // A new session's fence records the floor of the manifest it found, and
     // a fold of the fence acknowledges that floor.
     crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context)
+        .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("acquire the writer epoch");
     assert_eq!(
@@ -1320,7 +1313,6 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
                 limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
             },
             crate::pin::ListCheckpointFilesOptions::default(),
-            test_context().now_ms,
         )
         .await?;
     Ok(page.files.into_iter().map(|file| file.inode_id).collect())
@@ -1356,7 +1348,7 @@ async fn deleting_a_pin_never_reuses_its_id() {
     let engine = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine();
     let delete = engine.delete_snapshot(&first.checkpoint_id);
@@ -1388,7 +1380,7 @@ async fn deleting_a_pin_never_reuses_its_id() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .delete_snapshot(&first.checkpoint_id)
@@ -1418,7 +1410,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         .expect("write");
 
     let first = crate::test_support::namespace_store(&store, &namespace_id)
-        .create_pin(owner(Some(10_000)), &context)
+        .create_pin(owner(Some(10_000)), &context.clock())
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
         .expect("create checkpoint");
@@ -1429,7 +1421,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
     for expiry in [Some(99_000), Some(5_000), None] {
         let next = crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(owner(expiry), &later_context)
+            .create_pin(owner(expiry), &later_context.clock())
             .await
             .map(|report| crate::pin::checkpoint_summary(report.response))
             .expect("create checkpoint");
@@ -1482,7 +1474,7 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
                 name: "test-pin".to_owned(),
                 expires_at_ms: Some(context.now_ms),
             },
-            &context,
+            &context.clock(),
         )
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
@@ -1502,10 +1494,11 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
         .gc(
             None,
             &crate::gc::GcOptions::default(),
-            &mutation_context(
+            &writer_at(
                 "expired",
                 context.now_ms + crate::gc::GcOptions::default().grace_window_ms,
-            ),
+            )
+            .clock(),
         )
         .await
         .expect("gc pass");
@@ -1544,7 +1537,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     distant.now_ms = u64::MAX / 2;
     for _ in 0..3 {
         crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(None, &crate::gc::GcOptions::default(), &distant)
+            .gc(None, &crate::gc::GcOptions::default(), &distant.clock())
             .await
             .expect("gc pass");
     }
@@ -1563,7 +1556,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .delete_snapshot(&pin.checkpoint_id)
@@ -1599,7 +1592,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -1619,7 +1612,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
                 expires_at_ms: None,
             },
             initial.basis().manifest().clone(),
-            &context,
+            &context.clock(),
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -1658,17 +1651,11 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         .state;
 
     let acquired = crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context)
+        .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("writer");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .delete_namespace(
-            Default::default(),
-            acquired,
-            None,
-            &context,
-            &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
-        )
+        .delete_namespace(Default::default(), acquired, None, &context.clock())
         .await
         .expect("delete");
 
@@ -1712,7 +1699,7 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
                 expires_at_ms: None,
             },
             initial.basis().manifest().clone(),
-            &context,
+            &context.clock(),
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -1750,8 +1737,10 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let boundary = usize::try_from(crate::limits::MAX_UNFOLDED_WAL_OBJECTS)
         .expect("the write-stop bound fits a WAL object count");
 
-    let mut engine =
-        NamespaceCommitEngine::new(crate::test_support::namespace_store(&store, &namespace_id));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
     for round in 0..boundary - 2 {
         let request = CommitIntent::single(
             CommitId::generate(),
@@ -1763,11 +1752,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             },
         );
         engine
-            .publish_batch(
-                vec![CommitCandidate::new(request)],
-                &context,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            )
+            .publish_batch(vec![CommitCandidate::new(request)], &context.clock())
             .await
             .results
             .remove(0)
@@ -1785,8 +1770,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let original = engine
         .publish_batch(
             vec![CommitCandidate::new(request.clone())],
-            &context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &context.clock(),
         )
         .await
         .results
@@ -1799,8 +1783,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let replay = engine
         .publish_batch(
             vec![CommitCandidate::new(request.clone())],
-            &context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &context.clock(),
         )
         .await;
     assert_eq!(replay.results.len(), 1);
@@ -1827,11 +1810,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         (new_request.clone(), ErrorCode::MaintenanceRequired),
     ] {
         let result = engine
-            .publish_batch(
-                vec![CommitCandidate::new(candidate)],
-                &context,
-                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            )
+            .publish_batch(vec![CommitCandidate::new(candidate)], &context.clock())
             .await;
         assert_eq!(result.results.len(), 1);
         assert_eq!(
@@ -1849,8 +1828,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
                 CommitCandidate::new(new_request.clone()),
                 CommitCandidate::new(new_request),
             ],
-            &context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &context.clock(),
         )
         .await;
     assert_eq!(mixed.results.len(), 3);
@@ -1940,7 +1918,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &store,
                 &namespace_id,
-                &crate::test_support::mutation_context("test-writer", 0),
+                &crate::test_support::writer_at("test-writer", 0),
             );
             fixture.namespace.run_policy = policy;
             fixture
@@ -2030,7 +2008,7 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = tiny_row_policy;
         fixture
@@ -2074,7 +2052,7 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = policy;
         fixture
@@ -2157,7 +2135,7 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &bounded_store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = bounded_policy;
         fixture
@@ -2244,7 +2222,7 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &unbounded_store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = unbounded_policy;
         fixture
@@ -2460,7 +2438,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = policy;
         fixture
@@ -2493,7 +2471,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &store,
                 &namespace_id,
-                &crate::test_support::mutation_context("test-writer", 0),
+                &crate::test_support::writer_at("test-writer", 0),
             );
             fixture.namespace.run_policy = policy;
             fixture
@@ -2540,7 +2518,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = MutationContext {
+    let context = WriterAt {
         writer_id: loonfs_types::WriterId::parse("budget-test").expect("writer id"),
         now_ms: 1_000,
     };
@@ -2559,8 +2537,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     let manifest_before = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
-        .expect("read manifest")
-        .state;
+        .expect("read manifest");
 
     // The clock advances 20 minutes, past the 15-minute budget, while the
     // fold writes its segments, so the pre-CAS check observes the
@@ -2577,7 +2554,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
             metadata
         },
     );
-    let overrun = Deadline::start(clock);
+    let overrun = OperationClock::start(0, clock);
     let Err(error) = crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal_tail(None, &overrun)
         .await
@@ -2593,8 +2570,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     let manifest_after = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
-        .expect("read manifest")
-        .state;
+        .expect("read manifest");
     assert_eq!(
         manifest_after, manifest_before,
         "an aborted publication must not publish a manifest"
@@ -2644,7 +2620,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = MutationContext {
+    let context = WriterAt {
         writer_id: loonfs_types::WriterId::parse("budget-test").expect("writer id"),
         now_ms: 1_000,
     };
@@ -2667,8 +2643,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
     let manifest_before = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
-        .expect("read manifest")
-        .state;
+        .expect("read manifest");
 
     let merge_everything = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
@@ -2678,7 +2653,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = merge_everything;
         fixture.namespace.timer = Arc::new(ManualClock::stepping(20 * 60 * 1000));
@@ -2703,15 +2678,14 @@ async fn over_budget_compaction_aborts_without_publishing() {
     let manifest_after = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
-        .expect("read manifest")
-        .state;
+        .expect("read manifest");
     assert_eq!(manifest_after, manifest_before);
 
     let report = {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = merge_everything;
         fixture
@@ -2773,7 +2747,7 @@ async fn compact_with<S: ObjectStore + ?Sized>(
         let mut fixture = crate::test_support::NamespaceFixture::new(
             store,
             namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = policy;
         fixture
@@ -2989,7 +2963,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -3140,7 +3114,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context(
+            &crate::test_support::writer_at(
                 "test-writer",
                 crate::test_support::grace_elapsed_after(context.now_ms),
             ),
@@ -3264,7 +3238,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     let floor = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context(
+        &crate::test_support::writer_at(
             "test-writer",
             crate::test_support::grace_elapsed_after(context.now_ms),
         ),
@@ -3279,9 +3253,9 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     crate::test_support::namespace_store(&store, &namespace_id)
         .raise_hint_to_current_manifest()
         .await;
-    let aged = mutation_context("gc", u64::MAX / 2);
+    let aged = writer_at("gc", u64::MAX / 2);
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &crate::gc::GcOptions::default(), &aged)
+        .gc(None, &crate::gc::GcOptions::default(), &aged.clock())
         .await
         .expect("collect past the floor");
     assert_eq!(
@@ -3302,14 +3276,14 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
-        &crate::test_support::mutation_context("test-writer", 0),
+        &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
     .delete_snapshot(&pin.checkpoint_id)
     .await
     .expect("delete pin");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &crate::gc::GcOptions::default(), &aged)
+        .gc(None, &crate::gc::GcOptions::default(), &aged.clock())
         .await
         .expect("collect deleted basis");
     assert!(store

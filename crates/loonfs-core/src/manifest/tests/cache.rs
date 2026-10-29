@@ -11,7 +11,7 @@ use std::sync::Mutex;
 async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> ManifestNo {
     bootstrap_namespace(store, namespace_id, context)
         .await
@@ -1443,8 +1443,6 @@ async fn current_segment_refs<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("load the current manifest")
-        .state
-        .envelope
         .payload()
         .runs
         .iter()
@@ -1504,7 +1502,7 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::mutation_context("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.segment_cache = Arc::clone(&cache);
         fixture

@@ -43,14 +43,15 @@ use loonfs_core::limits::{
 };
 use loonfs_core::publish::{
     is_retryable_wal_publish, settle_publish_attempt, NamespaceCommitEngine,
-    SharedWriterSessionStatus, TailSource, WalFoldInput, WalPublishError, WriterSessionStatus,
+    SharedWriterSessionStatus, TailSource, WalPublishError, WriterPosition, WriterSessionStatus,
 };
-use loonfs_core::time::{Deadline, Observation};
+use loonfs_core::time::{Observation, OperationClock};
+use loonfs_core::Phase;
 use loonfs_core::{PublicationReport, PublishedManifest};
 use loonfs_types::api::v0::Commit;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::MonotonicTimer;
-use loonfs_types::{ChangeSeq, CommitId, ManifestNo, NamespaceId};
+use loonfs_types::{ChangeSeq, CommitId, ManifestNo, NamespaceId, WriterId};
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -278,7 +279,7 @@ impl NamespaceSession {
         if let Err(error) = publisher.wait_for_fold().await {
             phase_event!(
                 publisher.runtime_core,
-                "wal_fold",
+                Phase::WalFold,
                 publisher.namespace_id,
                 tracing::Level::WARN,
                 error = %error.public_message(),
@@ -288,7 +289,7 @@ impl NamespaceSession {
         if let Err(error) = publisher.wait_for_compaction().await {
             phase_event!(
                 publisher.runtime_core,
-                "metadata_compaction",
+                Phase::MetadataCompaction,
                 publisher.namespace_id,
                 tracing::Level::WARN,
                 error = %error.public_message(),
@@ -544,20 +545,23 @@ impl PublisherRegistry {
     pub(crate) fn read_position_fold_input(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Option<WalFoldInput> {
+    ) -> Option<WriterPosition> {
         let position = self.shared.read_position_slot(namespace_id)?.current()?;
-        Some(position.wal_fold_input())
+        Some(WriterPosition::clone(&position))
     }
 
     /// Returns the namespace's writer position as a fold input: the manifest
     /// it plans against and the unfolded WAL tail above that manifest. Returns
     /// `None` when this runtime has no position for the namespace.
-    pub(crate) async fn wal_fold_input(&self, namespace_id: &NamespaceId) -> Option<WalFoldInput> {
+    pub(crate) async fn wal_fold_input(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Option<WriterPosition> {
         let publisher = self.live_publisher(namespace_id)?;
         let slot = publisher.lock_engine().await;
         slot.engine
             .as_ref()
-            .and_then(NamespaceCommitEngine::wal_fold_input)
+            .and_then(NamespaceCommitEngine::writer_position)
     }
 
     /// Whether [`Self::close_admission`] has run: later submissions fail
@@ -1439,7 +1443,7 @@ impl NamespacePublisher {
                         .publisher_batch(batch.candidates.len());
                     phase_event!(
                         self.runtime_core,
-                        "batch_collect",
+                        Phase::BatchCollect,
                         self.namespace_id,
                         tracing::Level::INFO,
                         batch_size = usize_to_u64(batch.candidates.len()),
@@ -1642,7 +1646,7 @@ impl NamespacePublisher {
         for candidate in &candidates {
             phase_event!(
                 self.runtime_core,
-                "wait_for_batch",
+                Phase::WaitForBatch,
                 self.namespace_id,
                 tracing::Level::DEBUG,
                 result = RESULT_OK,
@@ -1667,23 +1671,23 @@ impl NamespacePublisher {
 
         let publish_span = phase_span!(
             self.runtime_core,
-            "batch_publish",
+            Phase::BatchPublish,
             self.namespace_id,
             batch_size = usize_to_u64(candidates.len()),
             result = tracing::field::Empty,
             retry_count = tracing::field::Empty,
         );
         let (results, retry_count) = async {
-            let context = match self.writer.upgrade() {
-                Some(writer) => self.runtime_core.mutation_context(&writer.identity),
+            let writer_id = match self.writer.upgrade() {
+                Some(writer) => writer.identity.writer_id.clone(),
                 None => {
                     let error = Error::Core(CoreError::ShuttingDown);
                     return (candidates.iter().map(|_| Err(error.clone())).collect(), 0);
                 }
             };
-            // The wall timestamp and elapsed-time origin describe one batch.
-            // Refreshing only the timestamp on retry counts prior waiting twice.
-            let batch = Deadline::start(Arc::clone(&self.timer));
+            // The batch's retries share one clock. A retry that read the wall
+            // clock again would count the earlier waiting twice.
+            let clock = OperationClock::start(self.runtime_core.now_ms(), Arc::clone(&self.timer));
             let mut results = vec![None; candidates.len()];
             let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
             let mut retry_count = 0_u64;
@@ -1696,8 +1700,13 @@ impl NamespacePublisher {
                     .collect();
                 let observed = match self.writer.upgrade() {
                     Some(_writer) => {
-                        self.publish_through_engine(&candidates, &attempt_permits, &context, &batch)
-                            .await
+                        self.publish_through_engine(
+                            &candidates,
+                            &attempt_permits,
+                            &writer_id,
+                            &clock,
+                        )
+                        .await
                     }
                     None => candidates
                         .iter()
@@ -1774,15 +1783,15 @@ impl NamespacePublisher {
         &self,
         candidates: &[CommitCandidate],
         permits: &[Arc<AdmissionPermit>],
-        context: &loonfs_core::MutationContext,
-        batch: &Deadline,
+        writer_id: &WriterId,
+        clock: &OperationClock,
     ) -> Vec<Result<Commit, CoreError>> {
         let mut slot = self.lock_engine().await;
-        let engine = self.engine_for(&mut slot);
+        let engine = self.engine_for(&mut slot, writer_id);
         // Boxing erases the engine's deeply nested publish future. Without
         // it, callers awaiting a put or commit (CLI, server, embedding
         // crates) exceed rustc's type-recursion depth.
-        let publish = Box::pin(engine.publish_batch(candidates, context, batch)).await;
+        let publish = Box::pin(engine.publish_batch(candidates, clock)).await;
         if !publish.results.iter().any(is_retryable_wal_publish) {
             for (permit, result) in permits.iter().zip(&publish.results) {
                 // A commit refused at the write stop publishes later, so its
@@ -1844,17 +1853,22 @@ impl NamespacePublisher {
         fold_start
     }
 
-    /// Returns the publisher's lazily created commit engine.
+    /// Returns the publisher's lazily created commit engine, which commits as
+    /// `writer_id`.
     ///
     /// Each publish loads the namespace identity from the head, so construction
     /// only needs the runtime's cache views and the writer session.
     fn engine_for<'slot>(
         &self,
         slot: &'slot mut EngineSlot,
+        writer_id: &WriterId,
     ) -> &'slot mut NamespaceCommitEngine<SharedObjectStore> {
         slot.engine.get_or_insert_with(|| {
-            NamespaceCommitEngine::new(self.runtime_core.namespace_store(&self.namespace_id))
-                .writer_session(Arc::clone(&slot.session))
+            NamespaceCommitEngine::new(
+                self.runtime_core.namespace_store(&self.namespace_id),
+                writer_id.clone(),
+            )
+            .writer_session(Arc::clone(&slot.session))
         })
     }
 
@@ -2000,7 +2014,7 @@ impl NamespacePublisher {
         if let Err(error) = result {
             phase_event!(
                 self.runtime_core,
-                "metadata_compaction",
+                Phase::MetadataCompaction,
                 self.namespace_id,
                 tracing::Level::WARN,
                 error = %error.public_message(),
@@ -2064,16 +2078,19 @@ impl NamespacePublisher {
             }
             slot.engine
                 .as_ref()
-                .and_then(NamespaceCommitEngine::wal_fold_input)
+                .and_then(NamespaceCommitEngine::writer_position)
         };
         let started_at_ms = self.timer.monotonic_now_ms();
         let result = self
             .runtime_core
             .namespace_store(&self.namespace_id)
-            .fold_wal_tail(input, &Deadline::start(Arc::clone(&self.timer)))
+            .fold_wal_tail(
+                input,
+                &OperationClock::start(self.runtime_core.now_ms(), Arc::clone(&self.timer)),
+            )
             .instrument(phase_span!(
                 self.runtime_core,
-                "wal_fold",
+                Phase::WalFold,
                 self.namespace_id
             ))
             .await;
@@ -2105,7 +2122,7 @@ impl NamespacePublisher {
                 let error = Error::Core(error);
                 phase_event!(
                     self.runtime_core,
-                    "wal_fold",
+                    Phase::WalFold,
                     self.namespace_id,
                     tracing::Level::WARN,
                     error = %error.public_message(),
@@ -2156,7 +2173,7 @@ impl NamespacePublisher {
             if let Err(error) = self.wait_for_compaction().await {
                 phase_event!(
                     self.runtime_core,
-                    "metadata_compaction",
+                    Phase::MetadataCompaction,
                     self.namespace_id,
                     tracing::Level::WARN,
                     error = %error.public_message(),
@@ -2184,10 +2201,9 @@ impl NamespacePublisher {
         };
         let _permit = writer.execution_budget.fold_permit().await;
         let mut slot = self.lock_engine().await;
-        let engine = self.engine_for(&mut slot);
+        let engine = self.engine_for(&mut slot, &writer.identity.writer_id);
         crate::fs::delete_namespace_with_engine(
             &self.runtime_core,
-            &writer,
             &self.namespace_id,
             engine,
             options,
@@ -2334,7 +2350,7 @@ impl NamespacePublisher {
             self.runtime_core.instruments().publisher_publish(outcome);
             phase_event!(
                 self.runtime_core,
-                "wait_for_result",
+                Phase::WaitForResult,
                 self.namespace_id,
                 tracing::Level::DEBUG,
                 result = outcome.as_str(),
@@ -2353,7 +2369,7 @@ impl NamespacePublisher {
             .publisher_queue_depth(queue_depth);
         phase_event!(
             self.runtime_core,
-            "enqueue",
+            Phase::Enqueue,
             self.namespace_id,
             tracing::Level::DEBUG,
             queue_depth = usize_to_u64(queue_depth),

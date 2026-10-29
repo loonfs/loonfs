@@ -10,6 +10,7 @@ use loonfs_types::{
     AccessRight, AccessRights, InodeId, NamespaceAccess, NamespaceId, PrincipalSet, Subject,
 };
 
+#[derive(Clone, Copy)]
 pub(crate) enum Authorizer<'a> {
     /// An unrestricted namespace: every check passes without a lookup.
     Unrestricted,

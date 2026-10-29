@@ -152,7 +152,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .load_current_manifest()
         .await
         .expect("load metadata root");
-    let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest().manifest_no);
+    let manifest_key = metadata_manifest_object(&namespace_id, &root.manifest().manifest_no);
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await

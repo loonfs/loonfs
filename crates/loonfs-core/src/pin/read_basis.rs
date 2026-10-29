@@ -5,7 +5,7 @@ use crate::manifest::{
     head_from_manifest, load_manifest_segments, ManifestLoadError, MetadataSegmentCache,
     VerifiedMetadataSegments,
 };
-use crate::namespace::basis::MetadataBasis;
+use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ManifestRef, PinPayload};
@@ -15,15 +15,6 @@ pub(crate) struct PinBasis<'a, S: ObjectStore + ?Sized> {
     /// The manifest reference stored in the pin.
     pub(crate) manifest: ManifestRef,
     pub(crate) segments: VerifiedMetadataSegments<'a, S>,
-}
-
-/// The namespace state captured by a snapshot.
-#[derive(Debug, Clone)]
-pub struct SnapshotReadBasis {
-    /// The namespace head as of the captured sequence.
-    pub head: NamespaceReadState,
-    /// The manifest the snapshot pins.
-    pub basis: MetadataBasis,
 }
 
 pub(crate) async fn load_pin_basis<'a, S: ObjectStore + ?Sized>(
@@ -56,11 +47,11 @@ pub(crate) async fn load_snapshot_read_basis_from_record<S: ObjectStore + ?Sized
     segment_cache: &MetadataSegmentCache,
     live_head: &NamespaceReadState,
     record: PinPayload,
-) -> Result<SnapshotReadBasis> {
+) -> Result<ReadBasis> {
     let PinBasis { manifest, segments } = load_pin_basis(store, segment_cache, record).await?;
     let envelope = segments.manifest();
-    Ok(SnapshotReadBasis {
+    Ok(ReadBasis {
         head: head_from_manifest(live_head, envelope),
-        basis: MetadataBasis(manifest),
+        basis: MetadataBasis::new(manifest),
     })
 }

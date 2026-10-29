@@ -10,6 +10,7 @@ mod retry_gc;
 
 use super::*;
 use crate::manifest::FoldWalOutcome;
+use crate::test_support::WriterAt;
 use bytes::Bytes;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -29,7 +30,7 @@ async fn setup() -> (
     tempfile::TempDir,
     Arc<RecordingStore<LocalFsStore>>,
     RecordingEngine,
-    MutationContext,
+    WriterAt,
 ) {
     let directory = tempfile::tempdir().expect("directory");
     let store = Arc::new(RecordingStore::new(
@@ -37,7 +38,7 @@ async fn setup() -> (
         KeyPredicate::any(),
     ));
     let namespace_id = NamespaceId::parse("inline").expect("namespace");
-    let context = MutationContext {
+    let context = WriterAt {
         writer_id: WriterId::parse("writer").expect("writer"),
         now_ms: 1_000,
     };
@@ -45,13 +46,13 @@ async fn setup() -> (
         .create()
         .await
         .expect("bootstrap");
-    let mut engine = NamespaceCommitEngine::new(crate::test_support::namespace_store(
-        Arc::clone(&store),
-        &namespace_id,
-    ));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(Arc::clone(&store), &namespace_id),
+        context.writer_id.clone(),
+    );
     engine
         .position
-        .session_writer_epoch(&engine.namespace, &context)
+        .session_writer_epoch(&engine.namespace, &context.writer_id)
         .await
         .expect("acquire writer");
     store.reset();
@@ -98,15 +99,11 @@ fn candidate(commit_id: &str, values: Vec<InlineContent>) -> CommitCandidate {
 
 async fn publish<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine<S>,
-    context: &MutationContext,
+    context: &WriterAt,
     candidate: CommitCandidate,
 ) -> Result<Commit> {
     engine
-        .publish_batch(
-            [candidate],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
+        .publish_batch([candidate], &context.clock())
         .await
         .results
         .pop()
@@ -117,7 +114,7 @@ async fn publish<S: ObjectStore>(
 async fn folded_file(
     store: &RecordingStore<LocalFsStore>,
     engine: &mut RecordingEngine,
-    context: &MutationContext,
+    context: &WriterAt,
     bytes: &[u8],
 ) -> (InodeId, ContentRef) {
     let value = inline(
@@ -501,8 +498,8 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             .expect("publish");
         last = Some(candidate);
     }
-    let advanced = engine.wal_fold_input().expect("projection");
-    assert_eq!(advanced.tail_state.inline_bytes(), 11);
+    let advanced = engine.writer_position().expect("projection");
+    assert_eq!(advanced.tail.inline_bytes(), 11);
     let wal_before = store
         .list_prefix(&wal_prefix(&engine.namespace.namespace_id))
         .await
@@ -512,10 +509,10 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
     publish(&mut engine, &context, last.expect("last candidate"))
         .await
         .expect("replay after reload");
-    let reloaded = engine.wal_fold_input().expect("reloaded projection");
-    assert_eq!(reloaded.tail_state, advanced.tail_state);
+    let reloaded = engine.writer_position().expect("reloaded projection");
+    assert_eq!(reloaded.tail, advanced.tail);
     assert_no_writes(&store);
-    let folded_wal_no = advanced.head.wal_no;
+    let folded_wal_no = advanced.read_basis.head.wal_no;
     for (index, input) in [Some(advanced), Some(reloaded), None]
         .into_iter()
         .enumerate()
@@ -525,7 +522,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
             .fold_wal_tail(
                 input,
-                &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .expect("fold inline content");
@@ -559,12 +556,9 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             .load_current_manifest()
             .await
             .expect("manifest");
+        assert_eq!(manifest.payload().folded_wal_no, folded_wal_no);
         assert_eq!(
-            manifest.state.envelope.payload().folded_wal_no,
-            folded_wal_no
-        );
-        assert_eq!(
-            manifest.state.manifest().manifest_no,
+            manifest.manifest().manifest_no,
             folded.response.manifest_no,
             "only the first fold publishes a manifest"
         );

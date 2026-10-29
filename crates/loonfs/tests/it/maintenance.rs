@@ -406,7 +406,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
             .load_current_manifest(),
     )
     .expect("metadata root");
-    let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest().manifest_no);
+    let manifest_key = metadata_manifest_object(&namespace_id, &root.manifest().manifest_no);
     let manifest_bytes = block_on(raw_store.get(&manifest_key, None))
         .expect("read namespace manifest")
         .expect("namespace manifest exists");
@@ -534,10 +534,7 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
         .load_current_manifest()
         .await
         .expect("manifest before fencing");
-    assert_eq!(
-        before.state.compactor_epoch(),
-        loonfs_types::CompactorEpoch(2)
-    );
+    assert_eq!(before.compactor_epoch(), loonfs_types::CompactorEpoch(2));
 
     assert_eq!(
         first
@@ -552,7 +549,7 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
         .load_current_manifest()
         .await
         .expect("manifest after fencing");
-    assert_eq!(fenced.state.manifest(), before.state.manifest());
+    assert_eq!(fenced.manifest(), before.manifest());
 
     assert_matches!(
         first
@@ -567,11 +564,8 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
         .load_current_manifest()
         .await
         .expect("manifest after publication");
-    assert_eq!(
-        published.state.compactor_epoch(),
-        loonfs_types::CompactorEpoch(3)
-    );
-    assert!(published.state.manifest().manifest_no > before.state.manifest().manifest_no);
+    assert_eq!(published.compactor_epoch(), loonfs_types::CompactorEpoch(3));
+    assert!(published.manifest().manifest_no > before.manifest().manifest_no);
 }
 
 #[tokio::test]
@@ -655,10 +649,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
             .load_current_manifest()
             .await
             .expect("new claim");
-        assert_eq!(
-            current.state.compactor_epoch(),
-            loonfs_types::CompactorEpoch(3)
-        );
+        assert_eq!(current.compactor_epoch(), loonfs_types::CompactorEpoch(3));
         blocked.release();
     };
     let (delayed, ()) =
@@ -682,7 +673,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
         .await
         .expect("current epoch");
     assert_eq!(
-        current.state.compactor_epoch(),
+        current.compactor_epoch(),
         loonfs_types::CompactorEpoch(3),
         "a delayed result for epoch 1 must not evict epoch 3 and force another claim",
     );

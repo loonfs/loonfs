@@ -2,8 +2,9 @@
 
 use crate::common::{namespace_engine, read_context, submit_commit};
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::{CreateNamespaceOptions, MutationContext};
+use loonfs_core::CreateNamespaceOptions;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::api::v0::FilesystemChange;
@@ -39,16 +40,11 @@ fn update_access(path: &str, boundary: bool, grants: AccessGrants) -> Filesystem
     }
 }
 
-async fn setup() -> (
-    tempfile::TempDir,
-    LocalFsStore,
-    NamespaceId,
-    MutationContext,
-) {
+async fn setup() -> (tempfile::TempDir, LocalFsStore, NamespaceId, WriterAt) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = loonfs_core::test_support::mutation_context("writer", 1);
+    let context = loonfs_core::test_support::writer_at("writer", 1);
     namespace_engine(&store, &namespace_id, &context)
         .bootstrap_namespace(
             &loonfs_test_support::test_actor(),
@@ -234,7 +230,7 @@ async fn an_unrestricted_namespace_refuses_access_updates() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
-    let context = loonfs_core::test_support::mutation_context("writer", 1);
+    let context = loonfs_core::test_support::writer_at("writer", 1);
     NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
@@ -357,7 +353,7 @@ fn move_path(from: &str, to: &str) -> FilesystemOperation {
 async fn commit_as(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
     subject: loonfs_types::Subject,
     operation: FilesystemOperation,
 ) -> Result<loonfs_types::Commit, loonfs_core::CoreError> {
@@ -379,7 +375,7 @@ async fn commit_as(
 async fn seed(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    context: &WriterAt,
     operations: Vec<FilesystemOperation>,
 ) {
     for operation in operations {
@@ -886,7 +882,7 @@ async fn submit_operation(
     namespace_id: &NamespaceId,
     commit_id: CommitId,
     operation: FilesystemOperation,
-    context: &MutationContext,
+    context: &WriterAt,
 ) -> Result<loonfs_types::Commit, loonfs_core::CoreError> {
     submit_commit(
         store,
@@ -937,7 +933,7 @@ async fn read_fixture() -> (
     tempfile::TempDir,
     LocalFsStore,
     NamespaceId,
-    MutationContext,
+    WriterAt,
     ContentRef,
 ) {
     use AccessRight::{Create, History, Read, Remove, Write};

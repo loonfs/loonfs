@@ -5,7 +5,7 @@ use crate::error::{CoreError, Result as CoreResult};
 use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache, PublishedManifest};
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
-use crate::namespace::control::{CurrentManifest, LoadedHint, LoadedManifest};
+use crate::namespace::control::{LoadedHint, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::wal::{
@@ -29,17 +29,17 @@ pub struct NamespaceReadAnchor {
 
 impl NamespaceReadAnchor {
     pub fn retention_floor_seq(&self) -> ChangeSeq {
-        self.manifest.state.retention_floor_seq()
+        self.manifest.retention_floor_seq()
     }
 
     pub fn basis(&self) -> MetadataBasis {
-        MetadataBasis(self.manifest.state.manifest().clone())
+        MetadataBasis::new(self.manifest.manifest().clone())
     }
 
     /// Returns the current manifest that the anchor loaded before it read
     /// the WAL tail above that manifest.
-    pub fn current_manifest(&self) -> &CurrentManifest {
-        &self.manifest.state
+    pub fn current_manifest(&self) -> &LoadedManifest {
+        &self.manifest
     }
 
     /// Returns the anchor's manifest, with the time that the anchor's checks
@@ -68,7 +68,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         observed: crate::time::Observation,
     ) -> CoreResult<NamespaceReadAnchor> {
         let anchor = self.load_read_anchor(observed).await?;
-        crate::namespace::control::ensure_namespace_live(&anchor.read_state)?;
+        crate::namespace::control::ensure_namespace_live(
+            &anchor.read_state.namespace_id,
+            anchor.read_state.status,
+        )?;
         Ok(anchor)
     }
 
@@ -83,7 +86,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Ok(DiscoveredTail { head: state, tail }) => {
                     if !state.status.is_deleted() {
                         let successor = self
-                            .manifest_has_successor(manifest.state.manifest().manifest_no)
+                            .manifest_has_successor(manifest.manifest().manifest_no)
                             .await?;
                         if successor || !observed.is_within_revalidation_bound() {
                             observed = observed.renew();
@@ -102,8 +105,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Err(error @ ControlObjectLoadError::Codec { .. }) => {
                     observed = observed.renew();
                     let (current, current_hint) = self.load_current_manifest_with_hint().await?;
-                    if current.state.manifest().manifest_no == manifest.state.manifest().manifest_no
-                    {
+                    if current.manifest().manifest_no == manifest.manifest().manifest_no {
                         return Err(error);
                     }
                     manifest = current;
@@ -149,11 +151,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
             let Some(loaded) = self.load_manifest_by_no(next).await? else {
                 return Ok((!moves.is_empty()).then_some(moves));
             };
-            let payload = loaded.state.envelope.payload();
+            let payload = loaded.payload();
             if payload.writer_epoch != writer_epoch || payload.status.is_deleted() {
                 break;
             }
-            moves.push(PublishedManifest::new(&loaded.state.envelope, None));
+            moves.push(PublishedManifest::new(&loaded.envelope, None));
             manifest_no = next;
         }
         Ok(None)
