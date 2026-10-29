@@ -5,8 +5,6 @@ use super::current_files::resolve_visible_inode;
 use super::listing::{invalid_cursor, validate_cursor_head, DirectoryListingRequest};
 use crate::authorize::{Absence, ReadAccess};
 use crate::engine::RuntimeReadContext;
-#[cfg(test)]
-use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::manifest::{load_basis_metadata_segments, VerifiedMetadataSegments, WalTailCacheKey};
 use crate::metadata::{
@@ -22,7 +20,7 @@ use crate::path::mutation_path::parse_absolute_path_for_core;
 use crate::phase::Phase;
 use crate::storage::content::ContentLocation;
 use crate::storage::content_location::extent_object_key;
-use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
+use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
 use crate::PermitPool;
@@ -31,10 +29,10 @@ use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::options::ListOptions;
 use loonfs_types::{
-    AbsolutePath, AccessRight, AttributeInclusion, ChangeSeq, ContentRef, DirectoryPageCursor,
-    DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ListPageCursor,
-    ManifestNo, NameKey, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo, TrashEntry,
-    TrashPageCursor,
+    AbsolutePath, AccessRight, AttributeInclusion, ChangeSeq, ContentExtent, ContentRef,
+    DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
+    ListPageCursor, ManifestNo, NameKey, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo,
+    TrashEntry, TrashPageCursor,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -121,8 +119,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn load_current_metadata_view(&self) -> Result<LoadedMetadataView<'_, S>> {
         let loaded = self
             .load_read_anchor(crate::test_support::observed_now())
-            .await
-            .map_err(MetadataProjectionLoadError::LoadHead)?;
+            .await?;
         let context = RuntimeReadContext {
             read_basis: ReadBasis {
                 basis: loaded.basis(),
@@ -445,11 +442,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .content(content_ref)
                 .expect("resident pieces should name a projected chain");
             write_tail_content(
-                store,
+                ContentWrites::new(store, content_writes),
                 &self.metadata_view(),
                 &content,
                 assemble_tail_content(&content)?,
-                content_writes,
             )
             .await
             .map_err(cannot_write)?
@@ -462,25 +458,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .map(|located| located.extent)
                 .collect()
         };
-        let mut ranges = Vec::new();
-        let mut offset = 0;
-        for extent in extents {
-            let end = offset + extent.length;
-            let first = offset.max(start_offset);
-            let last = end.min(content_ref.size_bytes);
-            if first < last {
-                ranges.push(GrantedRange {
-                    object_key: extent_object_key(&extent),
-                    object_start: extent.offset + (first - offset),
-                    length: last - first,
-                });
-            }
-            offset = end;
-            if offset >= content_ref.size_bytes {
-                break;
-            }
-        }
-        Ok(ranges)
+        Ok(granted_ranges(
+            extents,
+            start_offset,
+            content_ref.size_bytes,
+        ))
     }
 
     pub(crate) async fn direct_download_target(
@@ -1365,6 +1347,33 @@ fn validate_file_revisions_cursor(
     Ok(())
 }
 
+/// Returns the ranges of `extents` that hold the bytes of a
+/// `size_bytes`-byte file from `start_offset` to its end.
+fn granted_ranges(
+    extents: Vec<ContentExtent>,
+    start_offset: u64,
+    size_bytes: u64,
+) -> Vec<GrantedRange> {
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    for extent in extents {
+        let end = offset + extent.length;
+        let first = offset.max(start_offset);
+        let last = end.min(size_bytes);
+        if first < last {
+            ranges.push(GrantedRange {
+                object_key: extent_object_key(&extent),
+                object_start: extent.offset + (first - offset),
+                length: last - first,
+            });
+        }
+        offset = end;
+        if offset >= size_bytes {
+            break;
+        }
+    }
+    ranges
+}
 #[cfg(test)]
 mod tests {
     use super::*;

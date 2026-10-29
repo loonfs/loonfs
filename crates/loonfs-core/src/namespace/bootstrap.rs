@@ -7,7 +7,7 @@ use crate::options::CreateNamespaceOptions;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_types::{
-    AccessRevisionNo, ActorId, ChangeSeq, InodeKind, NamespaceMetadata, ROOT_INODE_ID,
+    AccessRevisionNo, AccessRight, ActorId, ChangeSeq, InodeKind, NamespaceMetadata, ROOT_INODE_ID,
 };
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
@@ -20,6 +20,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &loonfs_types::ActorId,
         options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
+        if let NamespaceAccess::Acl { root_grants, .. } = &options.access {
+            if !root_grants
+                .iter()
+                .any(|(_, rights)| rights.contains(AccessRight::Admin))
+            {
+                return Err(CoreError::RootGrantsWithoutAdministrator);
+            }
+        }
         let clock = self.namespace.start_clock();
         let start = NamespaceManifestPayload {
             retention_window_ms: options.retention_window_ms,

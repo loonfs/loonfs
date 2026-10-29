@@ -212,8 +212,7 @@ impl Maintenance {
             .core
             .namespace_store(namespace_id)
             .load_current_manifest()
-            .await
-            .map_err(CoreError::from)?;
+            .await?;
         if manifest.payload().status.is_deleted() {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
@@ -1124,7 +1123,6 @@ impl crate::Namespace<crate::Writable> {
             Error::Core(crate::CoreError::InvalidCommitField {
                 field: "grants",
                 message: error.to_string(),
-                precondition_index: None,
             })
         })?;
         let request = crate::publish::CommitIntent::single(

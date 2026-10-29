@@ -638,8 +638,7 @@ pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
         load_manifest_projection_metadata_state(store, namespace_id).await?;
     let manifest = crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
+        .await?;
     Ok(CurrentProjection {
         head,
         manifest,
@@ -1009,8 +1008,7 @@ async fn publish_once_within<S: ObjectStore + ?Sized>(
     let checked = deadline.observe();
     let current = crate::test_support::namespace_store(store, &namespace_id)
         .load_current_manifest()
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
+        .await?;
     let basis = crate::namespace::PublicationBasis {
         manifest: current,
         checked,

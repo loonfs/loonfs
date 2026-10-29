@@ -25,12 +25,6 @@ impl std::fmt::Debug for ReadWorkingMemory {
     }
 }
 
-impl Default for ReadWorkingMemory {
-    fn default() -> Self {
-        Self::new(64 * 1024 * 1024, None)
-    }
-}
-
 impl ReadWorkingMemory {
     pub fn new(limit: usize, observer: Option<Arc<dyn ReadWorkingMemoryObserver>>) -> Self {
         Self {
@@ -79,16 +73,8 @@ impl ReadWorkingMemory {
     }
 
     fn report(&self) {
-        let Some(observer) = &self.observer else {
-            return;
-        };
-        loop {
-            let bytes = self.in_use();
-            observer.in_use(bytes);
-            // A concurrent report may finish first; leave the gauge current.
-            if self.in_use() == bytes {
-                break;
-            }
+        if let Some(observer) = &self.observer {
+            observer.in_use(self.in_use());
         }
     }
 }

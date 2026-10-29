@@ -135,7 +135,7 @@ async fn discovery_still_rejects_a_missing_manifest_when_the_hint_has_not_advanc
         .expect_err("an unchanged hint cannot explain a missing manifest");
     assert_matches!(
         error,
-        crate::control_object::ControlObjectLoadError::Codec { .. }
+        CoreError::ControlObjectLoad(crate::control_object::ControlObjectLoadError::Codec { .. })
     );
 }
 

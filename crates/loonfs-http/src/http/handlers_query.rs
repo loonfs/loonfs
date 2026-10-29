@@ -110,7 +110,7 @@ pub(super) async fn grep(
     let response = service
         .query(&request, page, &reads, &store)
         .await
-        .map_err(|error| map_grep_error(&namespace_id, error))?;
+        .map_err(map_grep_error)?;
     Ok(Json(response))
 }
 
@@ -197,10 +197,7 @@ pub(super) async fn enable_grep_index(
     NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
     let _handle = state.open_writer(&namespace_id, None).await?;
-    let outcome = worker
-        .enable(&namespace_id)
-        .await
-        .map_err(|error| map_grep_error(&namespace_id, error))?;
+    let outcome = worker.enable(&namespace_id).await.map_err(map_grep_error)?;
     state.namespaces.mark_index_dirty(&namespace_id);
     match outcome {
         GrepEnableOutcome::Enabled { .. } | GrepEnableOutcome::AlreadyEnabled { .. } => {}
@@ -250,7 +247,7 @@ async fn read_grep_index_status(
     worker
         .get_grep_index(namespace_id)
         .await
-        .map_err(|error| map_grep_error(namespace_id, error))
+        .map_err(map_grep_error)
 }
 
 #[cfg_attr(
@@ -287,7 +284,7 @@ pub(super) async fn disable_grep_index(
     let outcome = worker
         .disable(&namespace_id)
         .await
-        .map_err(|error| map_grep_error(&namespace_id, error))?;
+        .map_err(map_grep_error)?;
     state.namespaces.mark_index_dirty(&namespace_id);
     match outcome {
         GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {}
@@ -298,13 +295,7 @@ pub(super) async fn disable_grep_index(
     Ok(Json(read_grep_index_status(&worker, &namespace_id).await?))
 }
 
-pub(super) fn map_grep_error(
-    namespace_id: &loonfs_types::NamespaceId,
-    error: GrepError,
-) -> ApiResponseError {
-    if let GrepError::Runtime(error) = error {
-        return ApiResponseError::runtime_for_namespace(namespace_id, error);
-    }
+pub(super) fn map_grep_error(error: GrepError) -> ApiResponseError {
     ApiResponseError::from_error_response(error.code(), error.to_error_response())
 }
 

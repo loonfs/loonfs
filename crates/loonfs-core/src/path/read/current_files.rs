@@ -6,15 +6,13 @@
 use super::materialized_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
+use crate::limits::MAX_CURRENT_FILES_PER_STAT;
 use crate::metadata::{
-    DirentryBindingRecord, MetadataViewSession, ResolvedVisiblePath, VisiblePathError,
+    AncestorWalk, DirentryBindingRecord, MetadataViewSession, ResolvedVisiblePath,
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
-use std::collections::{HashMap, HashSet};
-
-/// Maximum number of inode IDs accepted by a batch resolution.
-pub const MAX_CURRENT_FILES_PER_STAT: usize = loonfs_types::MAX_PAGE_LIMIT as usize;
+use std::collections::HashMap;
 
 /// Current namespace state for one inode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,23 +162,18 @@ async fn current_path<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
 ) -> Result<Option<AbsolutePath>> {
     let mut climbed = Vec::new();
-    let mut visited = HashSet::new();
-    let mut current = inode_id;
+    let mut walk = AncestorWalk::new(inode_id);
     let base = loop {
+        let Some(current) = walk.next(session).await? else {
+            return Ok(None);
+        };
+        climbed.extend(walk.take_followed_binding());
         if current == ROOT_INODE_ID {
             break AbsolutePath::root();
         }
         if let Some(known) = ancestor_paths.get(&current) {
             break known.clone();
         }
-        if !visited.insert(current) {
-            return Err(VisiblePathError::ParentBindingCycle { inode_id: current }.into());
-        }
-        let Some(binding) = session.current_parent_binding_for_child(current).await? else {
-            return Ok(None);
-        };
-        current = binding.parent_inode_id;
-        climbed.push(binding);
     };
 
     // Cache each path reconstructed from the known ancestor to the leaf.
@@ -198,7 +191,8 @@ async fn current_path<S: ObjectStore + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_stat_batch_within_cap, MAX_CURRENT_FILES_PER_STAT};
+    use super::ensure_stat_batch_within_cap;
+    use crate::limits::MAX_CURRENT_FILES_PER_STAT;
     use loonfs_types::ErrorCode;
 
     #[test]

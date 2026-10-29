@@ -37,7 +37,7 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
                     tracing::error!(namespace_id = %payload.namespace_id, %object_key, %error, "WAL publication failed");
                     match error {
                         error @ ObjectStoreError::Transport { .. } => WalPublishError::OutcomeUnknown(error.public_message().into_owned()).into(),
-                        error => crate::error::CoreError::WalWrite { object_key, message: error.public_message().into_owned(), kind: error.kind() },
+                        error => WalPublishError::Write { object_key, message: error.public_message().into_owned(), kind: error.kind() }.into(),
                     }
                 }
             }

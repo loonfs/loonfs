@@ -321,8 +321,10 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
         .expect_err("gap in discovery window");
     assert_matches!(
         error,
-        crate::control_object::ControlObjectLoadError::Codec { object_key, .. }
-            if object_key == missing
+        crate::error::CoreError::ControlObjectLoad(crate::control_object::ControlObjectLoadError::Codec {
+            object_key,
+            ..
+        }) if object_key == missing
     );
 }
 
@@ -1131,8 +1133,10 @@ async fn a_warm_probe_leaves_a_gap_in_the_wal_to_discovery_which_reports_corrupt
         .expect_err("a gap above the folded boundary is corruption");
     assert_matches!(
         error,
-        crate::control_object::ControlObjectLoadError::Codec { object_key, .. }
-            if object_key == missing
+        crate::error::CoreError::ControlObjectLoad(crate::control_object::ControlObjectLoadError::Codec {
+            object_key,
+            ..
+        }) if object_key == missing
     );
 }
 

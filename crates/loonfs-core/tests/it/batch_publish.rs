@@ -5,7 +5,7 @@ use bytes::Bytes;
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::prepare_existing_content_ref;
 use loonfs_core::publish::{
-    CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
+    CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine, WalPublishError,
 };
 use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
@@ -533,11 +533,14 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         .expect_err("materialization-decided rejection");
     assert_eq!(materialization_rejection.code(), ErrorCode::PathNotFound);
     let accepted = failed[1].as_ref().expect_err("accepted candidate fails");
-    assert_matches!(accepted, CoreError::WalWrite { .. });
+    assert_matches!(
+        accepted,
+        CoreError::WalPublish(WalPublishError::Write { .. })
+    );
     let speculative = failed[2].as_ref().expect_err("speculative rejection");
     assert_matches!(
         speculative,
-        CoreError::WalWrite { .. },
+        CoreError::WalPublish(WalPublishError::Write { .. }),
         "rejection decided against unpublished in-batch state must take the \
          batch error, got {speculative:?}"
     );
@@ -546,7 +549,10 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let accepted_alias = failed[4]
         .as_ref()
         .expect_err("alias of an accepted candidate fails with it");
-    assert_matches!(accepted_alias, CoreError::WalWrite { .. });
+    assert_matches!(
+        accepted_alias,
+        CoreError::WalPublish(WalPublishError::Write { .. })
+    );
 
     let head = namespace_store(&store, &namespace_id)
         .load_read_state()
@@ -626,7 +632,10 @@ async fn failed_batch_preserves_an_independent_commit_id_conflict() {
         ])
         .await;
 
-    assert_matches!(failed[0], Err(CoreError::WalWrite { .. }));
+    assert_matches!(
+        failed[0],
+        Err(CoreError::WalPublish(WalPublishError::Write { .. }))
+    );
     assert_eq!(
         failed[1]
             .as_ref()

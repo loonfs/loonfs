@@ -1,78 +1,47 @@
 //! Publish plans that delete visible paths.
 
-use super::preconditions::ensure_expected_inode;
-use super::publish_path_planning::{
-    resolve_visible_path_for_authorization, source_binding, CompiledFilesystemOperation,
-    PublishPathPlanningView,
-};
-use crate::authorize::Absence;
+use super::planner::OperationPlanningSession;
+use super::publish_path_planning::{CompiledFilesystemOperation, Target};
 use crate::commit::CommitOperation;
-use crate::error::{CoreError, Result};
-use crate::metadata::ResolvedVisiblePath;
-use crate::path::mutation_path::{ensure_mutation_path, final_component};
+use crate::error::Result;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{AbsolutePath, AccessRight, DeleteDirectoryBehavior, InodeId, InodeKind};
+use loonfs_types::{AccessRight, AccessRights, BindingVersion, DeleteDirectoryBehavior, InodeKind};
 
-pub(super) async fn plan_delete_path<S: ObjectStore + ?Sized>(
-    absolute_path: &AbsolutePath,
-    behavior: DeleteDirectoryBehavior,
-    expected_inode_id: Option<InodeId>,
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<CompiledFilesystemOperation> {
-    ensure_mutation_path(absolute_path)?;
-    let resolved = resolve_visible_path_for_authorization(
-        view,
-        absolute_path,
-        AccessRight::Remove.into(),
-        Absence::Path(absolute_path.as_str()),
-    )
-    .await?;
-    let name = final_component(absolute_path)?;
-    plan_delete(
-        view,
-        &resolved,
-        behavior,
-        Absence::Path(absolute_path.as_str()),
-        || ensure_expected_inode(&resolved, expected_inode_id, &name),
-    )
-    .await
-}
-
-/// `expectation` runs after authorization: its errors name the inode the
-/// caller found, which a subject without rights must not learn.
-pub(super) async fn plan_delete<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    resolved: &ResolvedVisiblePath,
-    behavior: DeleteDirectoryBehavior,
-    absence: Absence<'_>,
-    expectation: impl FnOnce() -> Result<()>,
-) -> Result<CompiledFilesystemOperation> {
-    view.authorize(
-        resolved
-            .parent_inode_id
-            .ok_or(CoreError::RootMutationForbidden)?,
-        AccessRight::Remove.into(),
-        absence,
-    )
-    .await?;
-    expectation()?;
-    let recursive = behavior == DeleteDirectoryBehavior::Recursive;
-    let source_binding = source_binding(view, resolved).await?;
-    let op = match resolved.inode_kind {
-        InodeKind::File => CommitOperation::DeleteFile {
-            inode_id: resolved.inode_id,
-            source_binding,
-        },
-        InodeKind::Directory if recursive => CommitOperation::DeleteSubtree {
-            root_inode_id: resolved.inode_id,
-            source_binding,
-            require_empty: false,
-        },
-        InodeKind::Directory => CommitOperation::DeleteSubtree {
-            root_inode_id: resolved.inode_id,
-            source_binding,
-            require_empty: true,
-        },
-    };
-    Ok(CompiledFilesystemOperation::new(vec![op]))
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+    /// Plans the delete of `target`, after checking its binding version when
+    /// the request names one.
+    pub(super) async fn plan_delete(
+        &self,
+        target: Target<'_>,
+        expected_binding_version: Option<&BindingVersion>,
+        behavior: DeleteDirectoryBehavior,
+    ) -> Result<CompiledFilesystemOperation> {
+        let remove = AccessRights::from(AccessRight::Remove);
+        let target = self.view.resolve_target(target, remove).await?;
+        self.view
+            .authorize(target.parent_inode_id()?, remove, target.absence())
+            .await?;
+        // The expectations run after authorization: their errors name the
+        // inode the caller found, which a subject without rights must not
+        // learn.
+        target.ensure_expected_inode()?;
+        if let Some(expected) = expected_binding_version {
+            self.view
+                .ensure_binding_version(&target.resolved, expected)?;
+        }
+        let resolved = &target.resolved;
+        let source_binding = self.view.source_binding(resolved).await?;
+        let op = match resolved.inode_kind {
+            InodeKind::File => CommitOperation::DeleteFile {
+                inode_id: resolved.inode_id,
+                source_binding,
+            },
+            InodeKind::Directory => CommitOperation::DeleteSubtree {
+                root_inode_id: resolved.inode_id,
+                source_binding,
+                require_empty: behavior != DeleteDirectoryBehavior::Recursive,
+            },
+        };
+        Ok(CompiledFilesystemOperation::new(vec![op]))
+    }
 }

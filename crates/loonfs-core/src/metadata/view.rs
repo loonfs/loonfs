@@ -5,6 +5,7 @@ use super::durable_cache::{
     DurableVisibilityCache, DurableVisibilityCacheInner, ParentNameCacheKey, SharedRows,
 };
 use super::manifest_index;
+use super::manifest_tail_merge::{ManifestPage, ManifestTailMerge, TieOrder};
 use super::view_session::{LeafRevisionPreload, MetadataViewSession};
 use super::visibility::{self, MetadataVisibilityReads};
 use crate::error::{CoreError, Result};
@@ -17,8 +18,6 @@ use crate::metadata::{
 };
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::ProjectedWalTail;
-#[cfg(any(test, feature = "test-support"))]
-use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::wal::WalCommitPayload;
@@ -26,60 +25,21 @@ use loonfs_types::{
     AbsolutePath, AccessRevisionNo, Attributes, AttributesProjection, AttributesRevisionNo,
     ChangeSeq, CommitId, InodeId, InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-
-/// The fewest binding rows that one directory scan reads per manifest
-/// round-trip.
-pub(crate) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
 /// Rows one trash page fetches per manifest round-trip. A page's entries are
 /// listed rows; undelete markers share the range until compaction removes
 /// each pair away, so the raw scan runs a little ahead of the page.
 const ACTIVE_DELETION_RAW_SCAN_LIMIT: usize = 64;
 
-/// The manifest half of the active-deletion merge: a key-ordered cursor that
-/// refills from range scans and reports when the range is spent.
-struct ActiveDeletionScan {
-    lower_bound: String,
-    exhausted: bool,
-    buffered: VecDeque<(String, ActiveDeletionRecord)>,
-}
-
-impl ActiveDeletionScan {
-    fn new(lower_bound: String, exhausted: bool) -> Self {
-        Self {
-            lower_bound,
-            exhausted,
-            buffered: VecDeque::new(),
-        }
-    }
-
-    /// Takes one fetched page. A short page is the end of the range; a full
-    /// one leaves the cursor just past its last row.
-    fn absorb(&mut self, page: Vec<(String, ActiveDeletionRecord)>, requested: usize) {
-        if page.len() < requested {
-            self.exhausted = true;
-        } else if let Some((last_row_key, _)) = page.last() {
-            self.lower_bound = lookup_keys::after_row_key(last_row_key);
-        }
-        self.buffered.extend(page);
-    }
-}
-
-#[derive(Clone)]
-pub(super) struct DirentryBindingPageCandidate {
-    pub(super) row_key: String,
-    pub(super) record: DirentryBindingRecord,
-}
-
 pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
     overlay: Option<&'a MetadataState>,
     batch_accepted: Option<&'a MetadataState>,
     wal_tail: Option<&'a ProjectedWalTail>,
-    manifest: Option<&'a VerifiedMetadataSegments<'store, S>>,
+    manifest: &'a VerifiedMetadataSegments<'store, S>,
     durable_cache: Option<&'a DurableVisibilityCache>,
 }
 
@@ -109,9 +69,6 @@ impl<S: ObjectStore + ?Sized> crate::storage::content_location::LayoutLookup
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) type InMemoryMetadataView<'a> = MetadataView<'a, 'a, LocalFsStore>;
-
 impl<S: ObjectStore + ?Sized> Copy for MetadataSourceStack<'_, '_, S> {}
 
 impl<S: ObjectStore + ?Sized> Clone for MetadataSourceStack<'_, '_, S> {
@@ -128,9 +85,12 @@ impl<S: ObjectStore + ?Sized> Clone for MetadataView<'_, '_, S> {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
-impl<'a> InMemoryMetadataView<'a> {
+impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
+    /// Creates a view of `base`'s rows over `manifest`, for a test that
+    /// builds its rows in memory.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn in_memory(
+        manifest: &'a VerifiedMetadataSegments<'store, S>,
         base: &'a ProjectedWalTail,
         overlay: Option<&'a MetadataState>,
         visible_seq: ChangeSeq,
@@ -141,14 +101,12 @@ impl<'a> InMemoryMetadataView<'a> {
                 overlay,
                 batch_accepted: None,
                 wal_tail: Some(base),
-                manifest: None,
+                manifest,
                 durable_cache: None,
             },
         }
     }
-}
 
-impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) fn from_loaded_head(
         head: &'a NamespaceReadState,
         segments: &'a VerifiedMetadataSegments<'store, S>,
@@ -160,7 +118,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 overlay: None,
                 batch_accepted: None,
                 wal_tail: Some(wal_tail),
-                manifest: Some(segments),
+                manifest: segments,
                 durable_cache: None,
             },
         }
@@ -181,7 +139,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 overlay: None,
                 batch_accepted: None,
                 wal_tail: None,
-                manifest: Some(segments),
+                manifest: segments,
                 durable_cache: None,
             },
         }
@@ -209,13 +167,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         self.visible_seq
     }
 
-    /// The retention floor of the view's manifest. A view without a
-    /// manifest, which only tests build, has a floor of 0, like a new
-    /// namespace's first manifest.
+    /// The retention floor of the view's manifest.
     pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
-        self.sources.manifest.map_or(ChangeSeq(0), |segments| {
-            segments.manifest().payload().retention_floor_seq
-        })
+        self.sources
+            .manifest
+            .manifest()
+            .payload()
+            .retention_floor_seq
     }
 
     /// Attaches a cache for durable lookups performed during one batch.
@@ -249,7 +207,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .flat_map(move |tail| tail.row_states(visible_seq))
     }
 
-    pub(super) fn manifest_segments(&self) -> Option<&'a VerifiedMetadataSegments<'store, S>> {
+    pub(super) fn manifest_segments(&self) -> &'a VerifiedMetadataSegments<'store, S> {
         self.sources.manifest
     }
 
@@ -378,9 +336,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .durable_row_states()
             .find_map(|state| state.inode_at_seq(inode_id, self.visible_seq()));
         if durable.is_none() {
-            if let Some(segments) = self.manifest_segments() {
-                durable = manifest_index::inode_at_seq(segments, inode_id).await?;
-            }
+            durable = manifest_index::inode_at_seq(self.manifest_segments(), inode_id).await?;
         }
         if let Some(cache) = self.sources.durable_cache {
             cache.insert(|inner| &mut inner.inodes, inode_id, durable.clone());
@@ -402,16 +358,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         inode_id: InodeId,
     ) -> Result<Option<RevisionRecord>> {
-        let row_revision = self.row_latest_revision_by_inode(inode_id);
-        let manifest_revision = if let Some(segments) = self.manifest_segments() {
-            manifest_index::latest_revision_by_inode(segments, inode_id).await?
-        } else {
-            None
-        };
-        Ok(row_revision
-            .into_iter()
-            .chain(manifest_revision)
-            .max_by_key(revision_order_key))
+        Ok(newest(
+            self.row_latest_revision_by_inode(inode_id),
+            manifest_index::latest_revision_by_inode(self.manifest_segments(), inode_id).await?,
+            revision_order_key,
+        ))
     }
 
     pub(crate) async fn revision_by_inode(
@@ -442,16 +393,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Option<RevisionRecord>> {
-        let row_revision = self.row_revision_by_inode_no(inode_id, revision_no);
-        let manifest_revision = if let Some(segments) = self.manifest_segments() {
-            manifest_index::revision_by_inode_no(segments, inode_id, revision_no).await?
-        } else {
-            None
-        };
-        Ok(row_revision
-            .into_iter()
-            .chain(manifest_revision)
-            .max_by_key(revision_order_key))
+        Ok(newest(
+            self.row_revision_by_inode_no(inode_id, revision_no),
+            manifest_index::revision_by_inode_no(self.manifest_segments(), inode_id, revision_no)
+                .await?,
+            revision_order_key,
+        ))
     }
 
     pub(crate) async fn revisions_by_inode_page_desc(
@@ -463,12 +410,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut revisions = if let Some(segments) = self.manifest_segments() {
-            manifest_index::revisions_by_inode_page_desc(segments, inode_id, start_after, limit)
-                .await?
-        } else {
-            Vec::new()
-        };
+        let mut revisions = manifest_index::revisions_by_inode_page_desc(
+            self.manifest_segments(),
+            inode_id,
+            start_after,
+            limit,
+        )
+        .await?;
         revisions.extend(self.row_revisions_by_inode_page_desc(inode_id, start_after));
         revisions.retain(|revision| revision.committed_seq <= self.visible_seq());
         revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
@@ -498,15 +446,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             })
             .max_by_key(|record| attributes_order_key(record))
             .cloned();
-        let manifest_record = if let Some(segments) = self.manifest_segments() {
-            manifest_index::attributes_by_inode(segments, inode_id, self.visible_seq()).await?
-        } else {
-            None
-        };
-        Ok(row_record
-            .into_iter()
-            .chain(manifest_record)
-            .max_by_key(attributes_order_key))
+        Ok(newest(
+            row_record,
+            manifest_index::attributes_by_inode(
+                self.manifest_segments(),
+                inode_id,
+                self.visible_seq(),
+            )
+            .await?,
+            attributes_order_key,
+        ))
     }
 
     /// Access rows are whole state, not history, so both sources are filtered at the visible sequence.
@@ -522,15 +471,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             })
             .max_by_key(|record| access_order_key(record))
             .cloned();
-        let manifest_record = if let Some(segments) = self.manifest_segments() {
-            manifest_index::access_by_inode(segments, inode_id, self.visible_seq()).await?
-        } else {
-            None
-        };
-        Ok(row_record
-            .into_iter()
-            .chain(manifest_record)
-            .max_by_key(access_order_key))
+        Ok(newest(
+            row_record,
+            manifest_index::access_by_inode(self.manifest_segments(), inode_id, self.visible_seq())
+                .await?,
+            access_order_key,
+        ))
     }
 
     /// Returns the inode's attributes at the visible sequence, with the actor
@@ -612,15 +558,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 }
             })
             .max_by_key(|row| (row.size_bytes, row.committed_seq));
-        let folded = match self.manifest_segments() {
-            Some(segments) => manifest_index::content_layout(segments, content_id).await?,
-            None => None,
-        };
-        Ok(tail
-            .cloned()
-            .into_iter()
-            .chain(folded)
-            .max_by_key(|row| (row.size_bytes, row.committed_seq)))
+        Ok(newest(
+            tail.cloned(),
+            manifest_index::content_layout(self.manifest_segments(), content_id).await?,
+            |row| (row.size_bytes, row.committed_seq),
+        ))
     }
 
     pub(crate) async fn find_commit_receipt(
@@ -637,15 +579,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .filter(|receipt| receipt.committed_seq <= self.visible_seq())
             .max_by_key(|receipt| receipt.committed_seq)
             .cloned();
-        let manifest_receipt = if let Some(segments) = self.manifest_segments() {
-            manifest_index::commit_receipt(segments, commit_id).await?
-        } else {
-            None
-        };
-        Ok(row_receipt
-            .into_iter()
-            .chain(manifest_receipt)
-            .max_by_key(|receipt| receipt.committed_seq))
+        Ok(newest(
+            row_receipt,
+            manifest_index::commit_receipt(self.manifest_segments(), commit_id).await?,
+            |receipt| receipt.committed_seq,
+        ))
     }
 
     pub(crate) async fn commit_at_seq(&self, seq: ChangeSeq) -> Result<Option<WalCommitPayload>> {
@@ -659,10 +597,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         {
             return Ok(Some(record.clone()));
         }
-        match self.manifest_segments() {
-            Some(segments) => manifest_index::commit_at_seq(segments, seq).await,
-            None => Ok(None),
-        }
+        manifest_index::commit_at_seq(self.manifest_segments(), seq).await
     }
 
     pub(crate) async fn commits_after(
@@ -674,15 +609,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             return Ok(Vec::new());
         }
         let visible_seq = self.visible_seq();
-        let mut page: Vec<WalCommitPayload> = if let Some(segments) = self.manifest_segments() {
-            manifest_index::commits_after_page(segments, after_seq, limit)
+        let mut page: Vec<WalCommitPayload> =
+            manifest_index::commits_after_page(self.manifest_segments(), after_seq, limit)
                 .await?
                 .into_iter()
                 .filter(|record| record.committed_seq <= visible_seq)
-                .collect()
-        } else {
-            Vec::new()
-        };
+                .collect();
         let remaining = limit.saturating_sub(page.len());
         if remaining == 0 {
             return Ok(page);
@@ -789,19 +721,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         self.shared_rows(
             |inner| &mut inner.binds_for_parent_name,
             cache_key,
-            Box::pin(async {
-                if let Some(segments) = self.manifest_segments() {
-                    manifest_index::direntry_binds_for_parent_name(
-                        segments,
-                        parent_inode_id,
-                        name_key,
-                        self.visible_seq(),
-                    )
-                    .await
-                } else {
-                    Ok(Vec::new())
-                }
-            }),
+            Box::pin(manifest_index::direntry_binds_for_parent_name(
+                self.manifest_segments(),
+                parent_inode_id,
+                name_key,
+                self.visible_seq(),
+            )),
             MetadataState::direntry_binds,
             |direntry| {
                 direntry.parent_inode_id == parent_inode_id && direntry.name_key == *name_key
@@ -818,18 +743,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         self.shared_rows(
             |inner| &mut inner.binds_for_child,
             child_inode_id,
-            Box::pin(async {
-                if let Some(segments) = self.manifest_segments() {
-                    manifest_index::direntry_binds_for_child(
-                        segments,
-                        child_inode_id,
-                        self.visible_seq(),
-                    )
-                    .await
-                } else {
-                    Ok(Vec::new())
-                }
-            }),
+            Box::pin(manifest_index::direntry_binds_for_child(
+                self.manifest_segments(),
+                child_inode_id,
+                self.visible_seq(),
+            )),
             MetadataState::direntry_binds,
             |direntry| direntry.child_inode_id == child_inode_id,
             |state| state.indexes.latest_binding_for_child(child_inode_id),
@@ -837,11 +755,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         .await
     }
 
+    /// Returns the bind rows of `parent_inode_id` that the row states hold
+    /// after `start_after_name_key`, with their row keys, in row-key order.
     pub(super) fn tail_direntry_bind_page_candidates(
         &self,
         parent_inode_id: InodeId,
         start_after_name_key: Option<&NameKey>,
-    ) -> Vec<DirentryBindingPageCandidate> {
+    ) -> Vec<(String, DirentryBindingRecord)> {
         let mut candidates = self
             .row_states()
             .flat_map(|state| state.direntry_binds())
@@ -850,18 +770,18 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     && start_after_name_key
                         .is_none_or(|last_name_key| &direntry.name_key > last_name_key)
             })
-            .map(|record| DirentryBindingPageCandidate {
-                row_key: lookup_keys::direntry_bind_row_key(
+            .map(|record| {
+                let row_key = lookup_keys::direntry_bind_row_key(
                     record.parent_inode_id,
                     &record.name_key,
                     record.child_inode_id,
                     record.committed_seq,
                     record.delta_index,
-                ),
-                record: record.clone(),
+                );
+                (row_key, record.clone())
             })
             .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| left.row_key.cmp(&right.row_key));
+        candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
         candidates
     }
 
@@ -953,45 +873,33 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
         tail.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-        let mut durable = ActiveDeletionScan::new(
-            range.lower_bound.clone(),
-            self.manifest_segments().is_none(),
-        );
-        let mut tail_index = 0usize;
+        let segments = self.manifest_segments();
+        let raw_limit = limit.max(ACTIVE_DELETION_RAW_SCAN_LIMIT);
+        // A short page is the end of the range.
+        let refill = |after: Option<String>| async move {
+            let lower_bound = after.map_or_else(
+                || range.lower_bound.clone(),
+                |row_key| lookup_keys::after_row_key(&row_key),
+            );
+            let rows = manifest_index::active_deletions_page(
+                segments,
+                &lower_bound,
+                range.upper_bound.as_deref(),
+                raw_limit,
+            )
+            .await?;
+            Ok(ManifestPage {
+                more: rows.len() >= raw_limit,
+                rows,
+            })
+        };
+        let mut merge = ManifestTailMerge::new(tail, TieOrder::TailFirst);
         let mut entries = Vec::with_capacity(limit);
         let mut removed_position: Option<(ChangeSeq, InodeId)> = None;
         let mut last_row_key: Option<String> = None;
         while entries.len() < limit {
-            if durable.buffered.is_empty() && !durable.exhausted {
-                let raw_limit = limit.max(ACTIVE_DELETION_RAW_SCAN_LIMIT);
-                let segments = self
-                    .manifest_segments()
-                    .expect("a view without manifest segments should start its scan exhausted");
-                let page = manifest_index::active_deletions_page(
-                    segments,
-                    &durable.lower_bound,
-                    range.upper_bound.as_deref(),
-                    raw_limit,
-                )
-                .await?;
-                durable.absorb(page, raw_limit);
-                continue;
-            }
-            let take_tail = match (durable.buffered.front(), tail.get(tail_index)) {
-                (Some((durable_key, _)), Some((tail_key, _))) => tail_key <= durable_key,
-                (None, Some(_)) => true,
-                (Some(_), None) => false,
-                (None, None) => break,
-            };
-            let (row_key, record) = if take_tail {
-                let row = tail[tail_index].clone();
-                tail_index += 1;
-                row
-            } else {
-                durable
-                    .buffered
-                    .pop_front()
-                    .expect("a non-empty buffer should yield a row")
+            let Some((row_key, record)) = merge.next(refill).await? else {
+                break;
             };
             // A row present in both the manifest and the replayed tail is one
             // deletion, not two.
@@ -1016,13 +924,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         self.shared_rows(
             |inner| &mut inner.tombstones_for_root,
             root_inode_id,
-            Box::pin(async {
-                if let Some(segments) = self.manifest_segments() {
-                    manifest_index::tombstones_for_root(segments, root_inode_id).await
-                } else {
-                    Ok(Vec::new())
-                }
-            }),
+            Box::pin(manifest_index::tombstones_for_root(
+                self.manifest_segments(),
+                root_inode_id,
+            )),
             MetadataState::subtree_tombstones,
             |tombstone| tombstone.root_inode_id == root_inode_id,
             |state| state.indexes.latest_tombstone(root_inode_id),
@@ -1127,4 +1032,9 @@ fn revision_is_after_position_desc(
             position.committed_seq,
             position.revision_delta_index,
         )
+}
+
+/// Returns the newer of a row-state row and a manifest row by `key`.
+fn newest<T, K: Ord>(row: Option<T>, manifest: Option<T>, key: impl Fn(&T) -> K) -> Option<T> {
+    row.into_iter().chain(manifest).max_by_key(key)
 }

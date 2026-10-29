@@ -88,7 +88,7 @@ pub(super) struct SessionBlockMemo {
 
 impl Default for SessionBlockMemo {
     fn default() -> Self {
-        Self::new(Arc::default())
+        Self::new(super::cache::unshared_read_working_memory())
     }
 }
 

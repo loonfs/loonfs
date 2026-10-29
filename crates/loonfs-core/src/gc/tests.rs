@@ -2253,7 +2253,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         .await
         .expect_err("a corrupt target manifest must fail the source pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(error.message().contains(&hint(&clone)));
+    assert!(error.to_string().contains(&hint(&clone)));
     assert_eq!(namespace_keys(store.inner(), &source).await, before);
 }
 
@@ -2435,7 +2435,7 @@ async fn a_corrupt_pin_and_an_unreadable_one_both_fail_the_pass() {
         .expect_err("a record the store will not read fails the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
     assert!(
-        error.message().contains(&record_key),
+        error.to_string().contains(&record_key),
         "the error names the object: {error}"
     );
     assert_eq!(
@@ -2455,7 +2455,7 @@ async fn a_corrupt_pin_and_an_unreadable_one_both_fail_the_pass() {
         .expect_err("a corrupt record fails the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
     assert!(
-        error.message().contains(&record_key),
+        error.to_string().contains(&record_key),
         "the error names the object: {error}"
     );
     assert_eq!(
@@ -2524,7 +2524,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
     assert!(
         manifest_keys
             .iter()
-            .any(|key| error.message().contains(key)),
+            .any(|key| error.to_string().contains(key)),
         "the error names the object: {error}"
     );
     assert_eq!(

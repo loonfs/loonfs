@@ -1,7 +1,7 @@
 //! Assembles and validates data and fence WAL objects before publication.
 
 use super::PreparedWalObject;
-use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
+use crate::commit::{wal_payload_from_commit_plan, CommitPlan};
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{
@@ -20,27 +20,24 @@ pub(crate) fn prepare_wal_object(
     writer_epoch: WriterEpoch,
     head: &NamespaceReadState,
     basis_floor_seq: ChangeSeq,
-    records: &[PreparedCommit],
+    records: &[CommitPlan],
 ) -> Result<PreparedWalObject> {
     assert!(
         records
             .iter()
-            .all(|record| record.commit.namespace_id == namespace_id),
+            .all(|record| record.namespace_id == namespace_id),
         "every record in a WAL object should belong to namespace `{namespace_id}`"
     );
-    let next_inode_id = records.last().map_or(head.next_inode_id, |record| {
-        record.commit.resulting_next_inode_id
-    });
+    let next_inode_id = records
+        .last()
+        .map_or(head.next_inode_id, |record| record.resulting_next_inode_id);
     prepare_wal_object_from_payloads(
         namespace_id,
         writer_epoch,
         head,
         basis_floor_seq,
         next_inode_id,
-        records
-            .iter()
-            .map(wal_payload_from_prepared_commit)
-            .collect(),
+        records.iter().map(wal_payload_from_commit_plan).collect(),
     )
 }
 

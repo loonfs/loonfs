@@ -5,7 +5,7 @@
 use super::batch::BatchOutcomeSlot;
 use super::publish_view::PublishMetadataView;
 use crate::authorize::Authorizer;
-use crate::commit::{CandidateAllocation, CommitFingerprint, ValidatedCommitPlan};
+use crate::commit::{CommitFingerprint, CommitPlan};
 use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
@@ -18,21 +18,10 @@ use loonfs_types::api::v0::{Commit, CommittedReceipt};
 use loonfs_types::{CommitId, ContentId, NamespaceId};
 use std::collections::{HashMap, HashSet};
 
-pub(super) struct PreparedCandidateCommit {
-    pub(super) validated: ValidatedCommitPlan,
-    pub(super) allocation: CandidateAllocation,
-}
-
-/// Keeps the commit timestamp fixed while content evidence ages across retries.
-pub(super) struct CandidateTime {
-    pub(super) committed_at_ms: u64,
-    pub(super) admission_now_ms: u64,
-}
-
 /// How one batch candidate resolved during admission.
 pub(super) enum CandidateAdmission {
     /// A new request ready for content validation and materialization.
-    Prepared(PreparedCandidateCommit),
+    Prepared(CommitPlan),
     /// A result decided during admission.
     Settled(BatchOutcomeSlot),
 }
@@ -92,20 +81,23 @@ impl BatchDedup {
 }
 
 /// Prepares a request and resolves commit-ID reuse.
+///
+/// `admission_now_ms` is the time that content evidence is checked at; the
+/// commit time stays fixed across retries while the evidence ages.
 pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     view: &PublishMetadataView<'_, S>,
     session: &PublishPlanningSession<'_, S>,
     candidate: &CommitCandidate,
     index: usize,
-    time: CandidateTime,
+    admission_now_ms: u64,
     dedup: &mut BatchDedup,
 ) -> CandidateAdmission {
     let namespace_id = &view.head().namespace_id;
-    if let Err(error) =
-        Authorizer::for_request(namespace_id, &view.head().access, candidate.authority())
-    {
-        return CandidateAdmission::independent(Err(error));
-    }
+    let authorizer =
+        match Authorizer::for_request(namespace_id, &view.head().access, candidate.authority()) {
+            Ok(authorizer) => authorizer,
+            Err(error) => return CandidateAdmission::independent(Err(error)),
+        };
     if let Err(error) = candidate.validate_request_has_operations() {
         return CandidateAdmission::independent(Err(error));
     }
@@ -136,25 +128,15 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         return CandidateAdmission::independent(Err(error));
     }
     if let Err(error) =
-        validate_candidate_content_references(candidate, namespace_id, time.admission_now_ms)
+        validate_candidate_content_references(candidate, namespace_id, admission_now_ms)
     {
         return CandidateAdmission::independent(Err(error));
     }
-    let mut allocation = session.begin_candidate();
     match session
-        .prepare_commit(
-            candidate,
-            semantic_identity,
-            view.metadata_view(),
-            time.committed_at_ms,
-            &mut allocation,
-        )
+        .prepare_commit(candidate, authorizer, semantic_identity)
         .await
     {
-        Ok(validated) => CandidateAdmission::Prepared(PreparedCandidateCommit {
-            validated,
-            allocation,
-        }),
+        Ok(plan) => CandidateAdmission::Prepared(plan),
         Err(error) => CandidateAdmission::Settled(BatchOutcomeSlot::Settled {
             outcome: Err(error),
             depends_on_batch: true,

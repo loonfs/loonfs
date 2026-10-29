@@ -291,7 +291,6 @@ impl CommitCandidate {
                 CoreError::InvalidCommitField {
                     field: "inline_content",
                     message: "an append carries at least 1 byte".to_owned(),
-                    precondition_index: None,
                 }
             } else if bytes.len() > MAX_WAL_INLINE_CONTENT_BYTES {
                 CoreError::AppendTooLarge {

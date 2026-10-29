@@ -1,81 +1,70 @@
 //! [`PublishPlanningSession`]: plans a batch's candidates in admission
 //! order, each seeing the rows earlier candidates would persist.
 
-use super::planned_pieces::PlannedPieces;
-use super::planner::prepare_commit_against_publish_view;
-use super::preconditions::evaluate_preconditions;
+use super::planned_pieces::{CommitPieces, PlannedPieces};
+use super::planner::OperationPlanningSession;
+use super::publish_path_planning::PlanningView;
+use crate::authorize::Authorizer;
 use crate::commit::{
-    CandidateAllocation, CommitFingerprint, CommitPlan, InodeAllocator, ValidatedCommitPlan,
+    AppendedContent, CandidateAllocation, CommitFingerprint, CommitPlan, CommitValidationSession,
 };
 use crate::commit_engine::CommitCandidate;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
+use crate::storage::tail_content::{cut_layout, materialize_content_layout, ContentWrites};
 use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
-use crate::PermitPool;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::WalCommitPayload;
-#[cfg(test)]
-use loonfs_types::AbsolutePath;
-#[cfg(test)]
-use loonfs_types::CommitPrecondition;
-use loonfs_types::ContentRef;
-#[cfg(test)]
-use loonfs_types::NamespaceId;
+use loonfs_types::format::wal::{WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::{next_public_ordinal, ChangeSeq, ContentRef, InodeId};
+use std::collections::BTreeSet;
 
 /// Working view of one publish attempt.
 ///
-/// The session keeps accepted rows and resident pieces so later candidates
-/// can resolve earlier candidates and materialize references to them.
+/// The session keeps the batch's constants (the publish view, where content
+/// writes go, and the commit time), and the accepted rows and resident
+/// pieces so later candidates can resolve earlier candidates and
+/// materialize references to them.
 pub(crate) struct PublishPlanningSession<'a, S: ObjectStore + ?Sized> {
+    /// The head after the batch's accepted candidates. Its next inode ID is
+    /// where the next candidate's allocation starts.
     head: NamespaceReadState,
-    inode_allocator: InodeAllocator,
     tail: &'a ProjectedWalTail,
+    base_view: MetadataView<'a, 'a, S>,
+    content_writes: ContentWrites<'a, S>,
+    committed_at_ms: u64,
     accepted_rows: MetadataState,
     accepted_pieces: PlannedPieces,
     /// Durable-layer lookups memoized across the whole batch attempt; the
     /// accepted-rows overlay is the only layer that changes between
     /// candidates and is composed per lookup.
     durable_cache: DurableVisibilityCache,
-    /// The store that planning writes content objects to.
-    store: &'a S,
-    /// Where each content write that planning sends takes its permit.
-    content_writes: &'a PermitPool,
 }
 
 impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
     pub(crate) fn new(
         head: &NamespaceReadState,
         tail: &'a ProjectedWalTail,
-        store: &'a S,
-        content_writes: &'a PermitPool,
+        base_view: MetadataView<'a, 'a, S>,
+        content_writes: ContentWrites<'a, S>,
+        committed_at_ms: u64,
     ) -> Self {
         Self {
             head: head.clone(),
-            inode_allocator: InodeAllocator::new(head.next_inode_id),
             tail,
+            base_view,
+            content_writes,
+            committed_at_ms,
             accepted_rows: MetadataState::default(),
             accepted_pieces: PlannedPieces::default(),
             durable_cache: DurableVisibilityCache::default(),
-            store,
-            content_writes,
         }
     }
 
-    pub(super) fn head(&self) -> &NamespaceReadState {
-        &self.head
-    }
-
-    pub(super) fn store(&self) -> &'a S {
-        self.store
-    }
-
-    pub(super) fn content_writes(&self) -> &'a PermitPool {
-        self.content_writes
-    }
-
-    pub(super) fn accepted_rows(&self) -> &MetadataState {
-        &self.accepted_rows
+    /// Returns the namespace's next inode ID after the batch's accepted
+    /// candidates.
+    pub(crate) fn next_inode_id(&self) -> InodeId {
+        self.head.next_inode_id
     }
 
     pub(super) fn content(&self, content_ref: &ContentRef) -> Option<ProjectedContent> {
@@ -90,52 +79,39 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         &self.durable_cache
     }
 
-    pub(crate) fn begin_candidate(&self) -> CandidateAllocation {
-        self.inode_allocator.begin_candidate()
-    }
-
-    /// Plans and validates a mutation request in one pass, producing the
-    /// validated plan that only awaits the accepted allocation position.
+    /// Checks a candidate's preconditions and plans and validates its
+    /// operations in one pass, against the batch's state before the
+    /// candidate.
     pub(crate) async fn prepare_commit(
         &self,
         candidate: &CommitCandidate,
+        authorizer: Authorizer<'_>,
         semantic_identity: CommitFingerprint,
-        base_view: MetadataView<'_, '_, S>,
-        committed_at_ms: u64,
-        allocation: &mut CandidateAllocation,
-    ) -> Result<ValidatedCommitPlan> {
-        let base_view = base_view.with_durable_cache(&self.durable_cache);
+    ) -> Result<CommitPlan> {
+        let base_view = self.base_view.with_durable_cache(&self.durable_cache);
         let pre_state = base_view.with_overlay(None, &self.accepted_rows, self.head.seq);
-        evaluate_preconditions(
-            &candidate.intent().preconditions,
-            candidate.authority(),
-            self,
+        self.planning_view(authorizer, pre_state)
+            .evaluate_preconditions(&candidate.intent().preconditions, self.head.seq)
+            .await?;
+        self.plan_commit(
+            candidate,
+            authorizer,
+            semantic_identity,
+            base_view,
             &pre_state,
         )
-        .await?;
-        prepare_commit_against_publish_view(
-            candidate,
-            semantic_identity,
-            self,
-            base_view,
-            committed_at_ms,
-            allocation,
-        )
         .await
-    }
-
-    /// Commits the candidate-local allocator fork and returns the new
-    /// authoritative batch position.
-    pub(crate) fn commit_candidate(
-        &mut self,
-        allocation: CandidateAllocation,
-    ) -> loonfs_types::InodeId {
-        self.inode_allocator.commit_candidate(allocation)
     }
 
     /// Folds an accepted commit into the session so later candidates in the
     /// same batch plan and validate against it.
     pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
+        // A plan belongs to the head it was planned against; accepting it at
+        // another head would rewind or skip inode IDs.
+        assert_eq!(
+            plan.apply_after_seq, self.head.seq,
+            "a commit plan should be accepted at the head it was planned against"
+        );
         for (content_ref, entry) in inline_content_refs(&self.head.namespace_id, preview) {
             self.accepted_pieces.insert_piece(
                 self.tail.content(content_ref).as_ref(),
@@ -147,6 +123,194 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         self.accepted_rows.apply_committed_wal_record_mut(preview);
         self.head.seq = plan.assigned_seq;
         self.head.next_inode_id = plan.resulting_next_inode_id;
+    }
+
+    fn planning_view<'v>(
+        &'v self,
+        authorizer: Authorizer<'v>,
+        metadata: MetadataView<'v, 'v, S>,
+    ) -> PlanningView<'v, S> {
+        PlanningView {
+            namespace_id: &self.head.namespace_id,
+            access: &self.head.access,
+            authorizer,
+            metadata,
+        }
+    }
+
+    /// Plans each operation against the view, validates its compiled
+    /// operations at once, and applies the accepted effects, so later
+    /// operations observe earlier ones. The first failure aborts the request
+    /// and attaches the failing operation's index.
+    ///
+    /// The head is the validated source of the namespace and writer epoch:
+    /// `load_publish_metadata_view` fences on epoch equality, and the batch
+    /// rejects namespace mismatches before admission.
+    async fn plan_commit(
+        &self,
+        candidate: &CommitCandidate,
+        authorizer: Authorizer<'_>,
+        semantic_identity: CommitFingerprint,
+        base_view: MetadataView<'_, '_, S>,
+        pre_state: &MetadataView<'_, '_, S>,
+    ) -> Result<CommitPlan> {
+        let head = &self.head;
+        let request = candidate.intent();
+        let committed_seq = next_public_ordinal(head.seq.0)
+            .map(ChangeSeq)
+            .ok_or_else(|| {
+                CoreError::NamespaceCorrupt(format!(
+                    "the namespace head is at sequence {}, the largest sequence number, so no \
+                     commit can follow it",
+                    head.seq
+                ))
+            })?;
+        let mut validation = CommitValidationSession::new(
+            base_view,
+            &self.accepted_rows,
+            committed_seq,
+            &request.commit_id,
+            &request.actor_id,
+            self.committed_at_ms,
+        );
+        let mut allocation = CandidateAllocation::new(head.next_inode_id);
+        let mut deltas = Vec::new();
+        let mut appended: Vec<AppendedContent> = Vec::new();
+        let mut pieces = CommitPieces::new(self);
+        for value in candidate.inline_content() {
+            pieces.insert_piece(
+                value.content_ref(),
+                &WalInlineContent {
+                    content_id: value.content_ref().content_id.clone(),
+                    offset: 0,
+                    bytes: value.bytes().to_vec(),
+                },
+                committed_seq,
+            );
+        }
+        for (index, operation) in request.operations.iter().enumerate() {
+            let compiled = OperationPlanningSession {
+                view: self.planning_view(authorizer, validation.view()),
+                pieces: &pieces,
+                content_writes: self.content_writes,
+                allocation: &mut allocation,
+            }
+            .plan(operation)
+            .await
+            .map_err(|error| error.at_operation(index))?;
+            if let Some(value) = &compiled.appended {
+                for piece in &value.pieces {
+                    pieces.insert_piece(&value.content_ref, piece, committed_seq);
+                }
+            }
+            appended.extend(compiled.appended);
+            let operation_deltas = validation
+                .validate(&compiled.ops, |content_ref| {
+                    if let Some(value) = appended
+                        .iter()
+                        .find(|value| value.content_ref == *content_ref)
+                    {
+                        return value.layout.clone();
+                    }
+                    candidate.revision_layout(content_ref)
+                })
+                .await
+                .map_err(|error| error.at_operation(index))?;
+            deltas.extend(operation_deltas);
+        }
+
+        let mut plan = CommitPlan {
+            namespace_id: head.namespace_id.clone(),
+            commit_id: request.commit_id.clone(),
+            actor_id: request.actor_id.clone(),
+            writer_epoch: head.writer_epoch,
+            message: request.message.clone(),
+            semantic_identity,
+            apply_after_seq: head.seq,
+            assigned_seq: committed_seq,
+            committed_at_ms: self.committed_at_ms,
+            deltas,
+            appended: appended
+                .into_iter()
+                .flat_map(|value| value.pieces)
+                .collect(),
+            inline_content: candidate.inline_content().to_vec(),
+            resulting_next_inode_id: allocation.resulting_next_inode_id(),
+        };
+        self.carry_revision_layouts(&validation.view(), pre_state, &pieces, candidate, &mut plan)
+            .await?;
+        Ok(plan)
+    }
+
+    async fn carry_revision_layouts(
+        &self,
+        view: &MetadataView<'_, '_, S>,
+        before: &MetadataView<'_, '_, S>,
+        pieces: &CommitPieces<'_, S>,
+        candidate: &CommitCandidate,
+        plan: &mut CommitPlan,
+    ) -> Result<()> {
+        let mut revision_content_ids = BTreeSet::new();
+        for delta in &mut plan.deltas {
+            let WalDelta::AppendFileRevision {
+                content_ref,
+                layout,
+                ..
+            } = &mut delta.delta
+            else {
+                continue;
+            };
+            let earlier_revision = !revision_content_ids.insert(content_ref.content_id.clone());
+            let first_offset = candidate
+                .inline_content()
+                .iter()
+                .filter(|value| value.content_ref().content_id == content_ref.content_id)
+                .map(|_| 0)
+                .chain(
+                    plan.appended
+                        .iter()
+                        .filter(|piece| piece.content_id == content_ref.content_id)
+                        .map(|piece| piece.offset),
+                )
+                .min();
+            if first_offset == Some(0) {
+                *layout = None;
+                continue;
+            }
+            if first_offset.is_some()
+                && (earlier_revision || before.content_published(&content_ref.content_id).await?)
+            {
+                *layout = None;
+                continue;
+            }
+            let mut prefix = content_ref.clone();
+            prefix.size_bytes = first_offset.unwrap_or(content_ref.size_bytes);
+            if let Some(layout) = layout
+                .as_mut()
+                .filter(|layout| layout.size_bytes() >= prefix.size_bytes)
+            {
+                cut_layout(layout, prefix.size_bytes);
+            } else {
+                assert!(
+                    first_offset.is_none(),
+                    "append planning should give fresh content `{}` a layout covering {} bytes",
+                    content_ref.content_id,
+                    prefix.size_bytes
+                );
+                let content = pieces.content(&prefix);
+                *layout = Some(
+                    materialize_content_layout(
+                        self.content_writes,
+                        view,
+                        content.as_ref(),
+                        &prefix,
+                    )
+                    .await
+                    .map_err(|error| error.at_operation(delta.semantic_operation_index as usize))?,
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -160,7 +324,10 @@ mod tests {
     use crate::storage::content_admission::PreparedContent;
     use crate::test_support::WriterAt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_types::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
+    use loonfs_types::{
+        AbsolutePath, CommitId, CommitPrecondition, DeleteDirectoryBehavior, DestinationBehavior,
+        NamespaceId,
+    };
     use std::assert_matches;
     use tempfile::tempdir;
 
@@ -262,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn preconditions_change_only_the_fingerprint_in_the_wal_payload() {
         use super::super::planner::commit_fingerprint;
-        use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
+        use crate::commit::wal_payload_from_commit_plan;
 
         let (_temp_dir, store, namespace_id, _) = setup_namespace().await;
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -277,29 +444,22 @@ mod tests {
         ] {
             let request = request.clone().preconditions(preconditions);
             let content_writes = crate::test_support::content_writes();
-            let mut session = PublishPlanningSession::new(
+            let session = PublishPlanningSession::new(
                 view.head(),
                 view.wal_tail(),
-                &namespace.store,
-                &content_writes,
+                view.projected_metadata_view(),
+                ContentWrites::new(&namespace.store, &content_writes),
+                1,
             );
-            let mut allocation = session.begin_candidate();
             let plan = session
                 .prepare_commit(
                     &CommitCandidate::new(request.clone()),
+                    Authorizer::Unrestricted,
                     commit_fingerprint(&namespace_id, &request, &std::collections::BTreeMap::new()),
-                    view.projected_metadata_view(),
-                    1,
-                    &mut allocation,
                 )
                 .await
                 .expect("plan");
-            let next_inode_id = session.commit_candidate(allocation);
-            payloads.push(wal_payload_from_prepared_commit(&PreparedCommit {
-                commit: plan.finish(next_inode_id),
-                committed_at_ms: 1,
-                inline_content: Vec::new(),
-            }));
+            payloads.push(wal_payload_from_commit_plan(&plan));
         }
         assert_ne!(
             payloads[0].semantic_commit_fingerprint,
@@ -336,8 +496,9 @@ mod tests {
         let session = PublishPlanningSession::new(
             view.head(),
             view.wal_tail(),
-            &namespace.store,
-            &content_writes,
+            view.projected_metadata_view(),
+            ContentWrites::new(&namespace.store, &content_writes),
+            1,
         );
 
         let first_request = CommitIntent::single(
@@ -352,14 +513,11 @@ mod tests {
                 expected_revision_no: None,
             },
         );
-        let mut first_allocation = session.begin_candidate();
         session
             .prepare_commit(
                 &CommitCandidate::new(first_request.clone()),
+                Authorizer::Unrestricted,
                 test_fingerprint(),
-                view.projected_metadata_view(),
-                1,
-                &mut first_allocation,
             )
             .await
             .expect("first plan");
@@ -377,14 +535,11 @@ mod tests {
                 expected_revision_no: None,
             },
         );
-        let mut second_allocation = session.begin_candidate();
         session
             .prepare_commit(
                 &CommitCandidate::new(second_request.clone()),
+                Authorizer::Unrestricted,
                 test_fingerprint(),
-                view.projected_metadata_view(),
-                1,
-                &mut second_allocation,
             )
             .await
             .expect("second plan");

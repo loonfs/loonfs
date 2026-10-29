@@ -19,11 +19,12 @@ use super::streaming_compaction::MetadataCompactionCancellation;
 use super::streaming_compaction::MetadataCompactionSpec;
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
+use crate::limits::DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 use crate::limits::MAX_KEPT_INODE_WALK_DEPTH;
 use crate::metadata::row_decode::{
     active_deletion_from_manifest_row, direntry_binding_from_manifest_row,
 };
-use crate::metadata::{ActiveDeletionRecord, DirentryBindingRecord, DIRECTORY_PAGE_RAW_SCAN_LIMIT};
+use crate::metadata::{ActiveDeletionRecord, DirentryBindingRecord};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     lookup_keys, ActiveDeletionRowAction, MetadataRow, MetadataRowFamily,

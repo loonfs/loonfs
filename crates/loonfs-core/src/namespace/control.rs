@@ -131,10 +131,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let object_key = hint(&self.namespace_id);
         let current = match known {
             Some(known) => known,
-            None => self
-                .load_hint()
-                .await
-                .map_err(CoreError::ControlObjectLoad)?,
+            None => match self.load_hint().await {
+                Ok(current) => current,
+                Err(ControlObjectLoadError::MissingObject { .. }) => {
+                    return Err(self.namespace_not_found())
+                }
+                Err(error) => return Err(error.into()),
+            },
         };
         if current.state.manifest_no >= manifest_no {
             return Ok(current);
@@ -165,10 +168,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Loads the namespace's current manifest through the hint.
-    pub async fn load_current_manifest(&self) -> Result<LoadedManifest, ControlObjectLoadError> {
+    pub async fn load_current_manifest(&self) -> crate::error::Result<LoadedManifest> {
         self.load_current_manifest_if_present()
             .await?
-            .ok_or_else(|| missing_current_manifest(&self.namespace_id))
+            .ok_or_else(|| self.namespace_not_found())
     }
 
     pub(crate) async fn load_current_manifest_if_present(
@@ -182,15 +185,24 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     pub(crate) async fn load_current_manifest_with_hint(
         &self,
-    ) -> Result<(LoadedManifest, LoadedHint), ControlObjectLoadError> {
+    ) -> crate::error::Result<(LoadedManifest, LoadedHint)> {
         self.discover_manifest()
             .await?
-            .ok_or_else(|| missing_current_manifest(&self.namespace_id))
+            .ok_or_else(|| self.namespace_not_found())
+    }
+
+    /// Returns the error for a namespace that has no hint, and so no current
+    /// manifest.
+    pub(crate) fn namespace_not_found(&self) -> CoreError {
+        CoreError::NamespaceNotFound {
+            namespace_id: self.namespace_id.clone(),
+        }
     }
 
     /// Loads the current manifest through the hint (format spec, "Resolving the
     /// metadata basis"), with the hint as last read, or returns `None` when the
-    /// namespace has no hint.
+    /// namespace has no hint, including a hint that disappears while
+    /// discovery runs.
     ///
     /// Discovery loads the hinted manifest, finds the newest manifest above it
     /// with [`find_newest_manifest_above`], and reads the hint again before it
@@ -226,7 +238,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
             // A newer hint lets GC remove an old discovery path. Recheck after a
             // missing object before treating it as either absence or the tip.
-            let refreshed = self.load_hint().await?;
+            let refreshed = match self.load_hint().await {
+                Ok(refreshed) => refreshed,
+                Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            };
             let newer = refreshed.state.manifest_no > manifest_no;
             hint = refreshed;
             if newer {
@@ -363,24 +379,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }))
     }
 
-    pub async fn load_read_state(&self) -> Result<NamespaceReadState, ControlObjectLoadError> {
+    pub async fn load_read_state(&self) -> crate::error::Result<NamespaceReadState> {
         let observed = crate::time::Observation::now(Arc::clone(&self.timer));
         Ok(self.load_read_anchor(observed).await?.read_state)
     }
 }
 
 pub type LoadedHint = LoadedControl<HintPayload>;
-
-/// Returns the error for a namespace that has no current manifest, with the
-/// key of the namespace's first manifest.
-fn missing_current_manifest(namespace_id: &NamespaceId) -> ControlObjectLoadError {
-    ControlObjectLoadError::MissingObject {
-        object_key: loonfs_objectstore::keys::metadata_manifest_object(
-            namespace_id,
-            &ManifestNo(1),
-        ),
-    }
-}
 
 const _: () = assert!(
     0 < MANIFEST_PROBE_WINDOW && MANIFEST_PROBE_WINDOW <= crate::in_flight::STORE_READS_IN_FLIGHT

@@ -15,6 +15,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::namespace::writer_epoch::AcquiredWriter;
+use crate::storage::tail_content::ContentWrites;
 use crate::time::Observation;
 use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
@@ -27,7 +28,7 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) acquired_writer: AcquiredWriter,
     /// Where each content write that the batch's planning sends takes its
     /// permit.
-    content_writes: &'a PermitPool,
+    content_write_permits: &'a PermitPool,
     /// The tip observation starts with this load rather than a retained view.
     pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
@@ -49,10 +50,9 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         self.manifest_segments.store()
     }
 
-    /// Returns where each content write that the batch's planning sends
-    /// takes its permit.
-    pub(super) fn content_writes(&self) -> &PermitPool {
-        self.content_writes
+    /// Returns where the content writes that the batch's planning sends go.
+    pub(super) fn content_writes(&self) -> ContentWrites<'_, S> {
+        ContentWrites::new(self.store(), self.content_write_permits)
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
@@ -226,7 +226,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let write_stop = (wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS).then_some(wal_tail_objects);
         Ok(PublishMetadataView {
             acquired_writer,
-            content_writes: &self.content_writes,
+            content_write_permits: &self.content_writes,
             tail_discovered,
             manifest_segments,
             position,

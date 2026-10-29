@@ -1,30 +1,47 @@
-//! The metadata session used while validating a commit for publication.
+//! [`CommitValidationSession`]: validates one commit's operations over the
+//! loaded metadata and the rows the commit's earlier operations would
+//! persist.
 
+use super::checks::CommitNumbering;
+use crate::commit::CommitOperation;
+use crate::error::Result;
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::WalDelta;
-use loonfs_types::{ActorId, ChangeSeq, CommitId};
+use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
+use loonfs_types::{ActorId, ChangeSeq, CommitId, ContentLayout, ContentRef};
 
-/// The publish session: it holds the loaded [`MetadataView`] plus the
-/// accumulating commit overlay, rebuilding an overlaid view for each lookup.
-pub(crate) struct PublishValidationSession<'a, S: ObjectStore + ?Sized> {
+/// One commit's validation: the loaded [`MetadataView`], the rows the
+/// batch's earlier commits and this commit's earlier operations would
+/// persist, the commit's numbering, and the commit's header.
+pub(crate) struct CommitValidationSession<'a, S: ObjectStore + ?Sized> {
     base_view: MetadataView<'a, 'a, S>,
     batch_accepted: &'a MetadataState,
-    committed_seq: ChangeSeq,
+    pub(super) committed_seq: ChangeSeq,
     overlay: MetadataState,
+    pub(super) numbering: CommitNumbering,
+    commit_id: &'a CommitId,
+    pub(super) actor_id: &'a ActorId,
+    pub(super) committed_at_ms: u64,
 }
 
-impl<'a, S: ObjectStore + ?Sized> PublishValidationSession<'a, S> {
+impl<'a, S: ObjectStore + ?Sized> CommitValidationSession<'a, S> {
     pub(crate) fn new(
         base_view: MetadataView<'a, 'a, S>,
-        accepted_rows: &'a MetadataState,
+        batch_accepted: &'a MetadataState,
         committed_seq: ChangeSeq,
+        commit_id: &'a CommitId,
+        actor_id: &'a ActorId,
+        committed_at_ms: u64,
     ) -> Self {
         Self {
             base_view,
-            batch_accepted: accepted_rows,
+            batch_accepted,
             committed_seq,
             overlay: MetadataState::default(),
+            numbering: CommitNumbering::default(),
+            commit_id,
+            actor_id,
+            committed_at_ms,
         }
     }
 
@@ -36,28 +53,46 @@ impl<'a, S: ObjectStore + ?Sized> PublishValidationSession<'a, S> {
         self.base_view
             .with_overlay(Some(&self.overlay), self.batch_accepted, self.committed_seq)
     }
-}
 
-impl<S: ObjectStore + ?Sized> PublishValidationSession<'_, S> {
-    pub(crate) fn committed_seq(&self) -> ChangeSeq {
-        self.committed_seq
-    }
-
-    pub(crate) fn apply_deltas_mut(
+    /// Validates `ops` in order, applying each operation's deltas before the
+    /// next operation is validated, and returns the deltas.
+    ///
+    /// `revision_layout` returns the layout that a revision of a content
+    /// reference carries, when the commit planned one.
+    pub(crate) async fn validate(
         &mut self,
-        commit_id: &CommitId,
-        actor: &ActorId,
-        committed_at_ms: u64,
-        deltas: &[WalDelta],
-    ) {
-        for delta in deltas {
-            self.overlay.apply_committed_wal_delta_mut(
-                self.committed_seq,
-                commit_id,
-                actor,
-                committed_at_ms,
+        ops: &[CommitOperation],
+        revision_layout: impl Fn(&ContentRef) -> Option<ContentLayout>,
+    ) -> Result<Vec<WalCommitDelta>> {
+        let mut deltas = Vec::new();
+        for op in ops {
+            let op_index = self.numbering.reserve_op_index()?;
+            let mut operation_deltas = self.validate_operation(op).await?;
+            for delta in &mut operation_deltas {
+                if let WalDelta::AppendFileRevision {
+                    content_ref,
+                    layout,
+                    ..
+                } = delta
+                {
+                    let carried_layout = revision_layout(content_ref);
+                    *layout = carried_layout.or_else(|| layout.take());
+                }
+            }
+            for delta in &operation_deltas {
+                self.overlay.apply_committed_wal_delta_mut(
+                    self.committed_seq,
+                    self.commit_id,
+                    self.actor_id,
+                    self.committed_at_ms,
+                    delta,
+                );
+            }
+            deltas.extend(operation_deltas.into_iter().map(|delta| WalCommitDelta {
+                semantic_operation_index: op_index,
                 delta,
-            );
+            }));
         }
+        Ok(deltas)
     }
 }

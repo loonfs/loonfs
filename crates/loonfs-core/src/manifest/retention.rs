@@ -7,7 +7,7 @@ use super::load::metadata_basis_from_manifest;
 use super::publish::ManifestChange;
 use super::published::{PublicationReport, PublishedManifest};
 use crate::engine::{NamespaceEngine, Writable};
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
 use crate::metadata::manifest_index::commits_after_page;
@@ -109,11 +109,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<PublicationReport<AdvanceRetentionResponse>> {
         let clock = self.namespace.start_clock();
         let now_ms = clock.request_at_ms();
-        let current = self
-            .namespace
-            .load_current_manifest()
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
+        let current = self.namespace.load_current_manifest().await?;
         let manifest = current.payload();
         ensure_namespace_live(&manifest.namespace_id, manifest.status)?;
         let grace_cutoff_at_ms = now_ms.saturating_sub(GC_DEFAULT_GRACE_WINDOW_MS);

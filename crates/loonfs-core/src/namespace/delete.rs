@@ -67,7 +67,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     if let Some(expected) = options.expected_head_seq {
                         if head.seq != expected {
                             return Err(CoreError::StaleHeadPrecondition {
-                                precondition_index: None,
                                 expected,
                                 actual: head.seq,
                             });

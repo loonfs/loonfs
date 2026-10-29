@@ -1,108 +1,57 @@
 //! The publish plan for one attribute update.
 
-use super::preconditions::ensure_expected_inode;
-use super::publish_path_planning::{
-    ensure_mutation_inode, resolve_visible_inode, resolve_visible_path_for_authorization,
-    CompiledFilesystemOperation, PublishPathPlanningView,
-};
-use crate::authorize::Absence;
+use super::planner::OperationPlanningSession;
+use super::publish_path_planning::{CompiledFilesystemOperation, Target};
 use crate::commit::CommitOperation;
 use crate::error::{CoreError, Result};
-use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{
-    AbsolutePath, AccessRight, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo,
-    InodeId,
-};
+use loonfs_types::{AccessRight, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
-    absolute_path: &AbsolutePath,
-    set: &BTreeMap<AttributeKey, AttributeValue>,
-    remove: &[AttributeKey],
-    expected_inode_id: Option<InodeId>,
-    expected_attributes_revision_no: Option<AttributesRevisionNo>,
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<CompiledFilesystemOperation> {
-    ensure_mutation_path(absolute_path)?;
-    validate_request_shape(set, remove)?;
-    super::preconditions::validate_attributes_precondition(
-        expected_inode_id,
-        expected_attributes_revision_no,
-    )?;
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+    pub(super) async fn plan_update_attributes(
+        &self,
+        target: Target<'_>,
+        set: &BTreeMap<AttributeKey, AttributeValue>,
+        remove: &[AttributeKey],
+        expected_attributes_revision_no: Option<AttributesRevisionNo>,
+    ) -> Result<CompiledFilesystemOperation> {
+        validate_request_shape(set, remove)?;
+        // Attributes belong to the resource, so a directory is as valid a
+        // target as a file; nothing here looks at the inode kind.
+        let target = self
+            .view
+            .resolve_authorized_target(target, AccessRight::Write.into())
+            .await?;
+        let inode_id = target.inode_id();
+        let current = self.view.metadata.attributes(inode_id).await?;
+        // A caller-supplied precondition replaces the freshly-read revision in
+        // the op, so commit validation rejects a raced update with the
+        // stale-attributes error and its expected/actual details.
+        let base_attributes_revision_no =
+            expected_attributes_revision_no.unwrap_or(current.attributes_revision_no);
 
-    // Attributes belong to the resource, so a directory is as valid a target
-    // as a file; nothing here looks at the inode kind.
-    let target = resolve_visible_path_for_authorization(
-        view,
-        absolute_path,
-        AccessRight::Write.into(),
-        Absence::Path(absolute_path.as_str()),
-    )
-    .await?;
-    view.authorize(
-        target.inode_id,
-        AccessRight::Write.into(),
-        Absence::Path(absolute_path.as_str()),
-    )
-    .await?;
-    ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
-    update_attributes(
-        view,
-        target.inode_id,
-        set,
-        remove,
-        expected_attributes_revision_no,
-    )
-    .await
-}
-
-pub(super) async fn plan_update_attributes_by_inode<S: ObjectStore + ?Sized>(
-    inode_id: InodeId,
-    set: &BTreeMap<AttributeKey, AttributeValue>,
-    remove: &[AttributeKey],
-    expected_attributes_revision_no: Option<AttributesRevisionNo>,
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<CompiledFilesystemOperation> {
-    ensure_mutation_inode(inode_id)?;
-    validate_request_shape(set, remove)?;
-    resolve_visible_inode(view, inode_id).await?;
-    view.authorize(inode_id, AccessRight::Write.into(), Absence::Inode)
-        .await?;
-    update_attributes(view, inode_id, set, remove, expected_attributes_revision_no).await
-}
-
-async fn update_attributes<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    inode_id: InodeId,
-    set: &BTreeMap<AttributeKey, AttributeValue>,
-    remove: &[AttributeKey],
-    expected_attributes_revision_no: Option<AttributesRevisionNo>,
-) -> Result<CompiledFilesystemOperation> {
-    let current = view.view.attributes(inode_id).await?;
-    // A caller-supplied precondition replaces the freshly-read revision in the op,
-    // so commit validation rejects a raced update with the stale-attributes
-    // error and its expected/actual details.
-    let base_attributes_revision_no =
-        expected_attributes_revision_no.unwrap_or(current.attributes_revision_no);
-
-    let mut updated: BTreeMap<AttributeKey, AttributeValue> = current.attributes.as_map().clone();
-    for (key, value) in set {
-        updated.insert(key.clone(), value.clone());
+        let mut updated: BTreeMap<AttributeKey, AttributeValue> =
+            current.attributes.as_map().clone();
+        for (key, value) in set {
+            updated.insert(key.clone(), value.clone());
+        }
+        for key in remove {
+            updated.remove(key);
+        }
+        let attributes = Attributes::new(updated).map_err(|error| {
+            CoreError::InvalidCommitRequest(format!(
+                "the resulting attribute map is invalid: {error}"
+            ))
+        })?;
+        Ok(CompiledFilesystemOperation::new(vec![
+            CommitOperation::UpdateAttributes {
+                inode_id,
+                base_attributes_revision_no,
+                attributes,
+            },
+        ]))
     }
-    for key in remove {
-        updated.remove(key);
-    }
-    let attributes = Attributes::new(updated).map_err(|error| {
-        CoreError::InvalidCommitRequest(format!("the resulting attribute map is invalid: {error}"))
-    })?;
-    Ok(CompiledFilesystemOperation::new(vec![
-        CommitOperation::UpdateAttributes {
-            inode_id,
-            base_attributes_revision_no,
-            attributes,
-        },
-    ]))
 }
 
 /// Rejects requests that do not describe one coherent update, each with a

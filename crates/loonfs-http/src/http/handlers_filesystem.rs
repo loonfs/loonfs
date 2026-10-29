@@ -268,10 +268,7 @@ pub(super) async fn list_path_entries(
         .cursor(cursor)
         .page()
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_invalid_request_param("path")
-        })?;
+        .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
     Ok(super::page_response::page_response(listing))
 }
 
@@ -318,10 +315,7 @@ pub(super) async fn get_path_entry(
         .namespace(&namespace_id)
         .stat_with_options(&path, &options)
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_invalid_request_param("path")
-        })?;
+        .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
     Ok(Json(entry))
 }
 
@@ -382,10 +376,7 @@ pub(super) async fn get_file_content(
                 .await
         }
     }
-    .map_err(|error| {
-        ApiResponseError::runtime_for_namespace(&namespace_id, error)
-            .with_invalid_request_param("path")
-    })?;
+    .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
     streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)
 }
 
@@ -430,7 +421,7 @@ pub(super) async fn list_trash(
         .cursor(checked_cursor::<TrashPageCursor>(query.cursor)?)
         .page()
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -476,10 +467,7 @@ pub(super) async fn list_file_revisions(
         .cursor(checked_cursor::<FileRevisionsPageCursor>(query.cursor)?)
         .page()
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
-                .with_invalid_request_param("path")
-        })?;
+        .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
     Ok(Json(response))
 }
 
@@ -541,9 +529,7 @@ pub(super) async fn create_commit(
         .namespaces
         .open(&namespace_id)
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
-        })?;
+        .map_err(|error| ApiResponseError::runtime(error).with_commit_id(&commit_id))?;
     // Every put in the request shares one preparation pass: a proof belongs
     // to the content, not to the operation that names it.
     let put_content_refs = operations
@@ -647,7 +633,7 @@ pub(super) async fn list_changes(
         .page_limit(limit)
         .page()
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 

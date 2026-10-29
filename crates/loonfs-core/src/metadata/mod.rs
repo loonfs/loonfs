@@ -9,6 +9,7 @@ mod apply;
 mod durable_cache;
 mod indexes;
 pub(crate) mod manifest_index;
+mod manifest_tail_merge;
 mod queries;
 pub(crate) mod row_decode;
 mod rows;
@@ -33,9 +34,7 @@ pub(crate) use self::rows::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, ActiveDeletionRange,
     RecoverableDeletion,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use self::view::InMemoryMetadataView;
-pub(crate) use self::view::{MetadataView, DIRECTORY_PAGE_RAW_SCAN_LIMIT};
+pub(crate) use self::view::MetadataView;
 pub(crate) use self::view_session::{
     LeafRevisionPreload, MetadataViewSession, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
@@ -45,4 +44,6 @@ pub(crate) use loonfs_types::format::manifest::ActiveDeletionRecord;
 #[cfg(test)]
 pub(crate) use self::rows::MetadataStateBuilder;
 
-pub(crate) use visibility::{ancestry_allows_read, visible_child, MetadataVisibilityReads};
+pub(crate) use visibility::{
+    ancestry_allows_read, visible_child, AncestorWalk, MetadataVisibilityReads,
+};

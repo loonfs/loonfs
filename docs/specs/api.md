@@ -1782,7 +1782,7 @@ Ten operations use inode IDs instead of paths, so a client can act on an entry i
 
 `copy_by_inode` copies the current revision of a file inode to `destination_display_name` under `destination_parent_inode_id`. Its `behavior`, destination preconditions, and attribute rule match `copy_path`.
 
-`restore_revision_by_inode`, `update_attributes_by_inode`, and `update_access_by_inode` behave like `restore_revision`, `update_attributes`, and `update_access`, except that `inode_id` identifies the target. They take no `expected_inode_id`, because the inode is the target, so `expected_attributes_revision_no` and `expected_access_revision_no` stand alone. `copy_by_inode`, `restore_revision_by_inode`, and `update_attributes_by_inode` reject the root inode with `invalid_request`, just as their path forms reject `/`. `update_access_by_inode` accepts the root inode.
+`restore_revision_by_inode`, `update_attributes_by_inode`, and `update_access_by_inode` behave like `restore_revision`, `update_attributes`, and `update_access`, except that `inode_id` identifies the target. They take no `expected_inode_id`, because the inode is the target, so `expected_attributes_revision_no` and `expected_access_revision_no` stand alone. An operation whose `inode_id` names the root inode returns `invalid_request`, just as a path form that names `/` does. The exception is `update_access_by_inode`, which accepts the root inode.
 
 For example:
 

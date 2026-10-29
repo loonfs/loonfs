@@ -116,25 +116,8 @@ impl ApiResponseError {
         response
     }
 
-    pub(super) fn runtime(error: loonfs::Error) -> Self {
+    pub(crate) fn runtime(error: loonfs::Error) -> Self {
         Self::from_error_response(error.code(), error.to_error_response())
-    }
-
-    pub(super) fn runtime_for_namespace(namespace_id: &NamespaceId, error: loonfs::Error) -> Self {
-        if error.code() == ErrorCode::NamespaceNotFound {
-            return Self::new(
-                ErrorCode::NamespaceNotFound,
-                &format!("namespace `{}` does not exist", namespace_id.as_str()),
-            );
-        }
-
-        Self::runtime(error)
-    }
-
-    pub(crate) fn for_namespace(
-        namespace_id: &NamespaceId,
-    ) -> impl FnOnce(loonfs::Error) -> Self + '_ {
-        |error| Self::runtime_for_namespace(namespace_id, error)
     }
 
     /// Maps a failure from the host's writable handle for `namespace_id`, and
@@ -148,7 +131,7 @@ impl ApiResponseError {
         if error.code() == ErrorCode::WriterFenced {
             namespaces.forget_if_fenced(namespace_id, &error);
         }
-        Self::runtime_for_namespace(namespace_id, error)
+        Self::runtime(error)
     }
 
     pub(super) fn for_namespace_writer<'a>(
@@ -240,8 +223,7 @@ mod tests {
         let source = NamespaceId::parse("source").expect("source id");
         let target = NamespaceId::parse("target").expect("target id");
         for namespace_id in [&source, &target] {
-            let response = ApiResponseError::runtime_for_namespace(
-                &source,
+            let response = ApiResponseError::runtime(
                 loonfs::CoreError::NamespaceDeleted {
                     namespace_id: namespace_id.clone(),
                 }

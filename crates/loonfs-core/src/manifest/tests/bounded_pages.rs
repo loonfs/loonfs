@@ -76,7 +76,7 @@ fn cache_with_window(max_decoded_bytes: usize, window_bytes: usize) -> MetadataS
             max_decoded_bytes,
         )),
         ObjectStoreScope::new(0),
-        Arc::default(),
+        crate::manifest::cache::unshared_read_working_memory(),
         window_bytes,
     )
 }
@@ -527,7 +527,7 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
         blocks.clone(),
         shared,
         ObjectStoreScope::new(0),
-        Arc::default(),
+        crate::manifest::cache::unshared_read_working_memory(),
         window_of_blocks(&store, &descriptor, 1, 32).await,
     );
     let runs = vec![MetadataRunManifest {
@@ -730,7 +730,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
     }
     let mut descriptor = segment(&store, &expected).await;
     descriptor.filter_inline = None;
-    let pool = Arc::new(ReadWorkingMemory::default());
+    let pool = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
     let memo = load::SessionBlockMemo::new(Arc::clone(&pool));
     store.reset();
     let index = index_block_load::load_segment_index(&store, None, &memo, &descriptor)

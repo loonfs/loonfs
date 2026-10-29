@@ -131,18 +131,21 @@ pub fn writer_at(writer_id: &str, now_ms: u64) -> WriterAt {
 }
 
 /// Returns the content head of `content_id` that commit validation reads,
-/// from a view over `state` at its newest sequence.
-pub fn content_head(
+/// from a view over `state` at its newest sequence above a first manifest
+/// over `store`.
+pub fn content_head<S: ObjectStore + ?Sized>(
+    store: &S,
     state: &crate::metadata::MetadataState,
     content_id: &loonfs_types::ContentId,
 ) -> Option<u64> {
     use futures::FutureExt;
     let tail = crate::wal::ProjectedWalTail::from_rows(state.clone());
-    crate::metadata::InMemoryMetadataView::in_memory(&tail, None, state.indexed_seq())
+    let manifest = crate::manifest::VerifiedMetadataSegments::initial(store);
+    crate::metadata::MetadataView::in_memory(&manifest, &tail, None, state.indexed_seq())
         .content_head(content_id)
         .now_or_never()
-        .expect("a view without manifest segments should answer without waiting")
-        .expect("a view without manifest segments should not fail")
+        .expect("a view over a manifest without runs should answer without waiting")
+        .expect("a view over a manifest without runs should not fail")
 }
 
 mod content_write;

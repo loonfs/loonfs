@@ -325,6 +325,9 @@ impl Error {
             Self::Core(CoreError::InvalidCursor(_)) => Some("cursor".to_owned()),
             Self::Core(CoreError::ResumeOffsetOutOfRange { .. }) => Some("start_offset".to_owned()),
             Self::Core(CoreError::InvalidSnapshotRequest(_)) => Some("/name".to_owned()),
+            Self::Core(CoreError::RootGrantsWithoutAdministrator) => {
+                Some("/access/root_grants".to_owned())
+            }
             Self::Core(CoreError::SubjectRequired { .. }) => {
                 Some(loonfs_types::headers::PRINCIPALS.to_owned())
             }
@@ -337,11 +340,15 @@ impl Error {
                 }
                 _ => None,
             },
-            Self::Core(CoreError::InvalidCommitField {
-                field,
-                precondition_index: Some(precondition_index),
-                ..
-            }) => Some(format!("/preconditions/{precondition_index}/{field}")),
+            Self::Core(CoreError::FailedPrecondition {
+                precondition_index,
+                error,
+            }) => match error.as_ref() {
+                CoreError::InvalidCommitField { field, .. } => {
+                    Some(format!("/preconditions/{precondition_index}/{field}"))
+                }
+                _ => None,
+            },
             _ => None,
         }
     }

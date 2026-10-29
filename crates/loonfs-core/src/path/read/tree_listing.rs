@@ -6,9 +6,8 @@ use super::materialized_view::{
 };
 use crate::authorize::ReadAccess;
 use crate::error::Result;
-use crate::metadata::{
-    visible_child, MetadataViewSession, ResolvedVisiblePath, DIRECTORY_PAGE_RAW_SCAN_LIMIT,
-};
+use crate::limits::DIRECTORY_PAGE_RAW_SCAN_LIMIT;
+use crate::metadata::{visible_child, MetadataViewSession, ResolvedVisiblePath};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AttributeInclusion, DirectoryTreeFrame, DirectoryTreePageCursor, InodeKind, NameKey, Page,

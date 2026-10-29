@@ -590,7 +590,7 @@ fn cache_reading_one_block_at_a_time() -> MetadataSegmentCache {
     MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(64 * 1024 * 1024, 64 * 1024 * 1024)),
         ObjectStoreScope::new(0),
-        Arc::default(),
+        crate::manifest::cache::unshared_read_working_memory(),
         1,
     )
 }
@@ -2604,7 +2604,9 @@ async fn a_read_anchor_that_goes_stale_on_every_check_stops_at_the_contention_li
         .await
         .expect_err("a check that never confirms its manifest stops");
 
-    let crate::control_object::ControlObjectLoadError::StoreContention { object_key } = &error
+    let CoreError::ControlObjectLoad(
+        crate::control_object::ControlObjectLoadError::StoreContention { object_key },
+    ) = &error
     else {
         panic!("expected StoreContention, got {error:?}");
     };

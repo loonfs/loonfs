@@ -1,86 +1,31 @@
 //! Publish plans that restore an earlier file revision.
 
-use super::publish_path_planning::{
-    ensure_mutation_inode, resolve_visible_inode, resolve_visible_path_for_authorization,
-    CompiledFilesystemOperation, PublishPathPlanningView,
-};
-use crate::authorize::Absence;
+use super::planner::OperationPlanningSession;
+use super::publish_path_planning::{CompiledFilesystemOperation, Target};
 use crate::commit::CommitOperation;
-use crate::error::{CoreError, Result};
-use crate::path::mutation_path::ensure_mutation_path;
+use crate::error::Result;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{AbsolutePath, AccessRight, AccessRights, InodeId, InodeKind, RevisionNo};
+use loonfs_types::{AccessRight, AccessRights, RevisionNo};
 
-pub(super) async fn plan_restore_revision<S: ObjectStore + ?Sized>(
-    absolute_path: &AbsolutePath,
-    source_revision_no: RevisionNo,
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<CompiledFilesystemOperation> {
-    ensure_mutation_path(absolute_path)?;
-    let required = AccessRights::from_iter([AccessRight::Write, AccessRight::History]);
-    let target = resolve_visible_path_for_authorization(
-        view,
-        absolute_path,
-        required,
-        Absence::Path(absolute_path.as_str()),
-    )
-    .await?;
-    view.authorize(
-        target.inode_id,
-        required,
-        Absence::Path(absolute_path.as_str()),
-    )
-    .await?;
-    if target.inode_kind != InodeKind::File {
-        return Err(CoreError::ExpectedFile {
-            target: absolute_path.as_str().to_owned(),
-            kind: target.inode_kind,
-        });
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+    pub(super) async fn plan_restore_revision(
+        &self,
+        target: Target<'_>,
+        source_revision_no: RevisionNo,
+    ) -> Result<CompiledFilesystemOperation> {
+        let required = AccessRights::from_iter([AccessRight::Write, AccessRight::History]);
+        let target = self
+            .view
+            .resolve_authorized_target(target, required)
+            .await?;
+        target.ensure_file()?;
+        let revision = self.view.latest_file_revision(&target).await?;
+        Ok(CompiledFilesystemOperation::new(vec![
+            CommitOperation::RestoreRevision {
+                inode_id: target.inode_id(),
+                source_revision_no,
+                base_revision_no: revision.revision_no,
+            },
+        ]))
     }
-    let revision = view
-        .view
-        .latest_revision_head(target.inode_id)
-        .await?
-        .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
-
-    Ok(CompiledFilesystemOperation::new(vec![
-        CommitOperation::RestoreRevision {
-            inode_id: target.inode_id,
-            source_revision_no,
-            base_revision_no: revision.revision_no,
-        },
-    ]))
-}
-
-pub(super) async fn plan_restore_revision_by_inode<S: ObjectStore + ?Sized>(
-    inode_id: InodeId,
-    source_revision_no: RevisionNo,
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<CompiledFilesystemOperation> {
-    ensure_mutation_inode(inode_id)?;
-    let target = resolve_visible_inode(view, inode_id).await?;
-    view.authorize(
-        inode_id,
-        AccessRights::from_iter([AccessRight::Write, AccessRight::History]),
-        Absence::Inode,
-    )
-    .await?;
-    if target.inode_kind != InodeKind::File {
-        return Err(CoreError::ExpectedFile {
-            target: target.absolute_path.to_string(),
-            kind: target.inode_kind,
-        });
-    }
-    let revision = view
-        .view
-        .latest_revision_head(inode_id)
-        .await?
-        .ok_or(CoreError::InodeNotFound(inode_id))?;
-    Ok(CompiledFilesystemOperation::new(vec![
-        CommitOperation::RestoreRevision {
-            inode_id,
-            source_revision_no,
-            base_revision_no: revision.revision_no,
-        },
-    ]))
 }

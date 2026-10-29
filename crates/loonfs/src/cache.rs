@@ -198,8 +198,7 @@ impl RuntimeCore {
         let loaded = namespace
             .load_read_anchor(observed.clone())
             .instrument(phase_span!(self, Phase::ValidationAnchorLoad, namespace_id))
-            .await
-            .map_err(MetadataProjectionLoadError::LoadHead)?;
+            .await?;
         if !loaded.read_state.status.is_deleted() {
             let tail =
                 project_anchor_tail(self.store(), &self.inner.metadata_segment_cache, &loaded)?;

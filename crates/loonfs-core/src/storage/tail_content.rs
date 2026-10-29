@@ -57,23 +57,42 @@ pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Vec<By
     Ok(pieces)
 }
 
+/// Where content writes go: the store that holds the content objects, and
+/// the permits that bound how many writes run at once.
+pub(crate) struct ContentWrites<'a, S: ?Sized> {
+    pub(crate) store: &'a S,
+    pub(crate) permits: &'a PermitPool,
+}
+
+impl<'a, S: ?Sized> ContentWrites<'a, S> {
+    pub(crate) fn new(store: &'a S, permits: &'a PermitPool) -> Self {
+        Self { store, permits }
+    }
+}
+
+impl<S: ?Sized> Clone for ContentWrites<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S: ?Sized> Copy for ContentWrites<'_, S> {}
+
 pub(crate) async fn materialize_content_layout<S: ObjectStore + ?Sized, L: LayoutLookup>(
-    store: &S,
+    content_writes: ContentWrites<'_, S>,
     lookup: &L,
     content: Option<&ProjectedContent>,
     content_ref: &ContentRef,
-    content_writes: &PermitPool,
 ) -> Result<ContentLayout> {
     let location = ContentLocation::resolve(lookup, content, content_ref).await?;
     let mut layout =
         if location.has_pieces() || (content_ref.size_bytes == 0 && location.is_resident()) {
             let content = content.expect("resident pieces should name a projected chain");
             write_tail_content(
-                store,
+                content_writes,
                 lookup,
                 content,
                 assemble_tail_content(content)?,
-                content_writes,
             )
             .await?
             .layout
@@ -103,12 +122,78 @@ pub(crate) fn cut_layout(layout: &mut ContentLayout, size_bytes: u64) {
 }
 
 pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>(
-    store: &S,
+    content_writes: ContentWrites<'_, S>,
     lookup: &L,
     content: &ProjectedContent,
     pieces: Vec<Bytes>,
-    content_writes: &PermitPool,
 ) -> Result<ContentLayoutRecord> {
+    let newest = &content.content_ref;
+    let TailExtentPlan {
+        mut extents,
+        retained,
+        extent,
+        candidate,
+    } = tail_extent_plan(lookup, content, pieces).await?;
+    let object_key = extent_object_key(&extent);
+    let _permit = content_writes.permits.acquire().await;
+    let (sources, expected) = assembly_sources(
+        content_writes.store,
+        &object_key,
+        &extents[retained..],
+        &candidate,
+    )
+    .await?;
+    let written = content_writes
+        .store
+        .assemble(&object_key, &sources, candidate, &expected)
+        .await;
+    if let Err(error) = written {
+        tracing::error!(
+            namespace_id = %newest.owner_namespace_id,
+            object_key = %object_key,
+            error = %error,
+            "content write failed"
+        );
+        return Err(match error {
+            ObjectStoreError::Transport { message, .. } => CoreError::store(
+                &object_key,
+                &ObjectStoreError::retryable_transport(&object_key, message),
+            ),
+            ObjectStoreError::ChecksumMismatch {
+                object_key: mismatched,
+            } => CoreError::NamespaceCorrupt(format!(
+                "content object `{mismatched}` does not match its stored checksum"
+            )),
+            error => CoreError::store(&object_key, &error),
+        });
+    }
+    extents.truncate(retained);
+    let mut extents: Vec<_> = extents.into_iter().map(|located| located.extent).collect();
+    extents.push(extent);
+    Ok(ContentLayoutRecord {
+        owner_namespace_id: newest.owner_namespace_id.clone(),
+        content_id: newest.content_id.clone(),
+        committed_seq: content.committed_seq,
+        size_bytes: newest.size_bytes,
+        layout: ContentLayout { extents },
+    })
+}
+
+/// What one write of a chain's tail assembles: the chain's extents, how many
+/// of them the new layout keeps, the extent that the write puts after them,
+/// and the bytes that the new extent ends with.
+struct TailExtentPlan {
+    extents: Vec<LocatedExtent>,
+    retained: usize,
+    extent: ContentExtent,
+    candidate: Vec<Bytes>,
+}
+
+async fn tail_extent_plan<L: LayoutLookup>(
+    lookup: &L,
+    content: &ProjectedContent,
+    pieces: Vec<Bytes>,
+) -> Result<TailExtentPlan> {
     let newest = &content.content_ref;
     let mut location = ContentLocation::resolve(lookup, Some(content), newest).await?;
     if newest.size_bytes == 0 {
@@ -160,7 +245,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
     }
     // The whole key can already hold the first reference after a failed fold.
     let whole = location.extents.is_empty() && !lookup.content_has_other_size(newest);
-    let mut extents = location.extents;
+    let extents = location.extents;
     let tail_length = candidate.iter().map(|piece| piece.len() as u64).sum();
     let MergePlan {
         retained,
@@ -183,42 +268,11 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         offset: 0,
         length: candidate_length,
     };
-    let object_key = extent_object_key(&extent);
-    let _permit = content_writes.acquire().await;
-    let (sources, expected) =
-        assembly_sources(store, &object_key, &extents[retained..], &candidate).await?;
-    let written = store
-        .assemble(&object_key, &sources, candidate, &expected)
-        .await;
-    if let Err(error) = written {
-        tracing::error!(
-            namespace_id = %newest.owner_namespace_id,
-            object_key = %object_key,
-            error = %error,
-            "content write failed"
-        );
-        return Err(match error {
-            ObjectStoreError::Transport { message, .. } => CoreError::store(
-                &object_key,
-                &ObjectStoreError::retryable_transport(&object_key, message),
-            ),
-            ObjectStoreError::ChecksumMismatch {
-                object_key: mismatched,
-            } => CoreError::NamespaceCorrupt(format!(
-                "content object `{mismatched}` does not match its stored checksum"
-            )),
-            error => CoreError::store(&object_key, &error),
-        });
-    }
-    extents.truncate(retained);
-    let mut extents: Vec<_> = extents.into_iter().map(|located| located.extent).collect();
-    extents.push(extent);
-    Ok(ContentLayoutRecord {
-        owner_namespace_id: newest.owner_namespace_id.clone(),
-        content_id: newest.content_id.clone(),
-        committed_seq: content.committed_seq,
-        size_bytes: newest.size_bytes,
-        layout: ContentLayout { extents },
+    Ok(TailExtentPlan {
+        extents,
+        retained,
+        extent,
+        candidate,
     })
 }
 

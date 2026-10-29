@@ -1,18 +1,17 @@
-//! Adds publication metadata to the validated deltas for the WAL payload.
+//! Builds the WAL record of a planned commit.
 
-use super::PreparedCommit;
+use super::CommitPlan;
 use loonfs_types::format::wal::{WalCommitPayload, WalInlineContent};
 
-pub(crate) fn wal_payload_from_prepared_commit(commit: &PreparedCommit) -> WalCommitPayload {
-    let prepared = &commit.commit;
+pub(crate) fn wal_payload_from_commit_plan(plan: &CommitPlan) -> WalCommitPayload {
     WalCommitPayload {
-        committed_seq: prepared.assigned_seq,
-        commit_id: prepared.commit_id.clone(),
-        committed_by: prepared.actor_id.clone(),
-        semantic_commit_fingerprint: prepared.semantic_identity.clone(),
-        committed_at_ms: commit.committed_at_ms,
-        message: prepared.message.clone(),
-        inline_content: commit
+        committed_seq: plan.assigned_seq,
+        commit_id: plan.commit_id.clone(),
+        committed_by: plan.actor_id.clone(),
+        semantic_commit_fingerprint: plan.semantic_identity.clone(),
+        committed_at_ms: plan.committed_at_ms,
+        message: plan.message.clone(),
+        inline_content: plan
             .inline_content
             .iter()
             .map(|value| WalInlineContent {
@@ -20,8 +19,8 @@ pub(crate) fn wal_payload_from_prepared_commit(commit: &PreparedCommit) -> WalCo
                 offset: 0,
                 bytes: value.bytes().to_vec(),
             })
-            .chain(prepared.appended.iter().cloned())
+            .chain(plan.appended.iter().cloned())
             .collect(),
-        deltas: prepared.deltas.clone(),
+        deltas: plan.deltas.clone(),
     }
 }

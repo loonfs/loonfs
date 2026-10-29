@@ -30,8 +30,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub async fn load_wal_tail_usage(&self) -> Result<NamespaceWalTailUsage> {
         let loaded = self
             .load_read_anchor(crate::test_support::observed_now())
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
+            .await?;
         super::control::ensure_namespace_live(
             &loaded.read_state.namespace_id,
             loaded.read_state.status,

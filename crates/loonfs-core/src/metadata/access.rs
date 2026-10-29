@@ -2,11 +2,10 @@
 //! resolved from the inode's own access row and its ancestors' rows up to
 //! the nearest boundary.
 
-use super::visibility::MetadataVisibilityReads;
+use super::visibility::{AncestorWalk, MetadataVisibilityReads};
 use crate::error::{CoreError, Result};
 use loonfs_types::format::manifest::{AccessRevisionRecord, TombstoneRowAction};
 use loonfs_types::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID};
-use std::collections::BTreeSet;
 
 /// The access rows the inheritance walk visits, nearest first.
 ///
@@ -51,14 +50,26 @@ where
     CoreError: From<R::Error>,
 {
     let mut rows = Vec::new();
-    let mut visited = BTreeSet::new();
-    let mut current = inode_id;
+    let mut walk = AncestorWalk::new(inode_id);
+    let mut last = inode_id;
     loop {
-        if !visited.insert(current) {
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "access inheritance cycle revisits inode `{current}`"
-            )));
-        }
+        let Some(current) = walk.next(reads).await? else {
+            // A recoverable deletion's root has no current binding, and its
+            // `set` event's saved parent repairs that one edge.
+            match reads.find_hiding_subtree_tombstone(last).await? {
+                Some(tombstone) if tombstone.committed_seq > reads.retention_floor_seq() => {
+                    match tombstone.action {
+                        TombstoneRowAction::Set { deleted_binding } => {
+                            walk.continue_at(deleted_binding.parent_inode_id);
+                            continue;
+                        }
+                        TombstoneRowAction::Revoke { .. } => break,
+                    }
+                }
+                Some(_) | None => break,
+            }
+        };
+        last = current;
         let mut boundary = false;
         if let Some(row) = reads.find_access_row(current).await? {
             boundary = row.boundary;
@@ -67,21 +78,6 @@ where
         if boundary || current == ROOT_INODE_ID {
             break;
         }
-        let parent = match reads.current_parent_binding_for_child(current).await? {
-            Some(binding) => binding.parent_inode_id,
-            None => match reads.find_hiding_subtree_tombstone(current).await? {
-                Some(tombstone) if tombstone.committed_seq > reads.retention_floor_seq() => {
-                    match tombstone.action {
-                        TombstoneRowAction::Set { deleted_binding } => {
-                            deleted_binding.parent_inode_id
-                        }
-                        TombstoneRowAction::Revoke { .. } => break,
-                    }
-                }
-                Some(_) | None => break,
-            },
-        };
-        current = parent;
     }
     Ok(AccessChain { rows })
 }
@@ -330,6 +326,9 @@ mod tests {
         .await
         .expect_err("inheritance cycle");
         assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
-        assert_matches!(error, CoreError::NamespaceCorrupt(_));
+        assert_matches!(
+            error,
+            CoreError::VisiblePath(crate::metadata::VisiblePathError::ParentBindingCycle { .. })
+        );
     }
 }

@@ -30,10 +30,7 @@ pub(super) async fn classify_read_result<T>(
     let namespace = core.namespace_store(&context.read_basis.head.namespace_id);
     match source {
         ReadSource::Head => {
-            let current = namespace
-                .load_current_manifest()
-                .await
-                .map_err(CoreError::from)?;
+            let current = namespace.load_current_manifest().await?;
             let expected_manifest_no = context.read_basis.basis.manifest_no();
             let actual_manifest_no = current.payload().manifest_no;
             if actual_manifest_no > expected_manifest_no {
