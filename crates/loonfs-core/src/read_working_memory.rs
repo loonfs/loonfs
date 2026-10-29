@@ -73,8 +73,19 @@ impl ReadWorkingMemory {
     }
 
     fn report(&self) {
-        if let Some(observer) = &self.observer {
-            observer.in_use(self.in_use());
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        loop {
+            let bytes = self.in_use();
+            observer.in_use(bytes);
+            // A report that read the counter earlier can set the gauge after
+            // a newer report did; re-reading leaves the gauge current. Each
+            // pass repeats only because another reservation or release
+            // changed the counter meanwhile.
+            if self.in_use() == bytes {
+                break;
+            }
         }
     }
 }
@@ -82,7 +93,49 @@ impl ReadWorkingMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Barrier;
+    use std::sync::{Barrier, Mutex};
+
+    /// An observer that holds its first report until the test releases it,
+    /// and records every reported value in order.
+    struct HeldFirstReport {
+        reported: Mutex<Vec<usize>>,
+        reports: AtomicUsize,
+        first_report_entered: Barrier,
+        first_report_released: Barrier,
+    }
+
+    impl ReadWorkingMemoryObserver for HeldFirstReport {
+        fn in_use(&self, bytes: usize) {
+            if self.reports.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.first_report_entered.wait();
+                self.first_report_released.wait();
+            }
+            self.reported.lock().expect("reported values").push(bytes);
+        }
+
+        fn reservation_failed(&self) {}
+    }
+
+    #[test]
+    fn a_report_that_finishes_after_a_newer_one_leaves_the_gauge_current() {
+        let observer = Arc::new(HeldFirstReport {
+            reported: Mutex::new(Vec::new()),
+            reports: AtomicUsize::new(0),
+            first_report_entered: Barrier::new(2),
+            first_report_released: Barrier::new(2),
+        });
+        let pool = ReadWorkingMemory::new(4096, Some(Arc::clone(&observer) as _));
+        std::thread::scope(|scope| {
+            scope.spawn(|| assert!(pool.try_reserve(100)));
+            // The first reservation read 100 bytes and is inside its report.
+            observer.first_report_entered.wait();
+            assert!(pool.try_reserve(200));
+            // The newer report set 300; now the held report sets 100.
+            observer.first_report_released.wait();
+        });
+        let reported = observer.reported.lock().expect("reported values");
+        assert_eq!(reported.as_slice(), &[300, 100, 300]);
+    }
 
     #[test]
     fn concurrent_reservations_share_one_limit_and_release_every_byte() {
