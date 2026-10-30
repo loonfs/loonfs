@@ -773,6 +773,7 @@ mod tests {
                 commit_id: crate::test_support::binding_commit_id(),
                 action: if set {
                     crate::metadata::TombstoneRowAction::Set {
+                        root_kind: loonfs_types::InodeKind::File,
                         deleted_binding: loonfs_types::format::manifest::DeletedBinding {
                             parent_inode_id: InodeId(7),
                             name_key: NameKey::parse("a.txt").expect("name key"),

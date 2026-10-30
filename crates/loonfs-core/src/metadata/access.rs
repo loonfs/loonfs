@@ -59,7 +59,9 @@ where
             match reads.find_hiding_subtree_tombstone(last).await? {
                 Some(tombstone) if tombstone.committed_seq > reads.retention_floor_seq() => {
                     match tombstone.action {
-                        TombstoneRowAction::Set { deleted_binding } => {
+                        TombstoneRowAction::Set {
+                            deleted_binding, ..
+                        } => {
                             walk.continue_at(deleted_binding.parent_inode_id);
                             continue;
                         }
@@ -211,6 +213,7 @@ mod tests {
             delta_index: 0,
             commit_id: commit_id.clone(),
             action: TombstoneRowAction::Set {
+                root_kind: InodeKind::Directory,
                 deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(5),
                     name_key: NameKey::for_display_name(&display_name),

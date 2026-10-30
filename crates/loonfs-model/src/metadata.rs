@@ -155,9 +155,12 @@ pub struct DeletedBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubtreeTombstoneAction {
-    /// Deletes the subtree rooted at the record's inode and records its
-    /// removed binding.
-    Set { deleted_binding: DeletedBinding },
+    /// Deletes the subtree rooted at the record's inode and records the
+    /// root's kind and its removed binding.
+    Set {
+        root_kind: InodeKind,
+        deleted_binding: DeletedBinding,
+    },
     /// Cancels exactly the deletion recorded at `target`.
     Revoke { target: DeltaPosition },
 }
@@ -257,6 +260,7 @@ impl MetadataState {
                 WalDelta::TombstoneSubtree {
                     delta_index,
                     root_inode_id,
+                    root_kind,
                     deleted_binding,
                 } => {
                     metadata_state
@@ -269,6 +273,7 @@ impl MetadataState {
                             committed_at_ms,
                             committed_by: actor.clone(),
                             action: SubtreeTombstoneAction::Set {
+                                root_kind: *root_kind,
                                 deleted_binding: DeletedBinding {
                                     parent_inode_id: deleted_binding.parent_inode_id,
                                     name_key: deleted_binding.name_key.as_str().to_owned(),
@@ -448,6 +453,7 @@ mod tests {
                     WalDelta::TombstoneSubtree {
                         delta_index: 1,
                         root_inode_id: InodeId(2),
+                        root_kind: InodeKind::File,
                         deleted_binding: loonfs_types::format::manifest::DeletedBinding {
                             parent_inode_id: ROOT_INODE_ID,
                             name_key: NameKey::parse("report.txt").expect("valid name key"),
@@ -475,6 +481,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 SubtreeTombstoneAction::Set {
+                    root_kind: InodeKind::File,
                     deleted_binding: DeletedBinding {
                         parent_inode_id: ROOT_INODE_ID,
                         name_key: "report.txt".to_owned(),

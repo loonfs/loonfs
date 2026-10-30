@@ -9,7 +9,7 @@ use crate::error::CoreError;
 use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
-use crate::metadata::{MetadataState, MetadataView};
+use crate::metadata::MetadataView;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
@@ -268,7 +268,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 )
             })?;
         let head_seq = projection.head.seq;
-        let tail_state = projection.tail_with_deletion_inodes().await?;
+        let tail_state = projection.tail_state.merged_rows();
         // A WAL fold keeps existing runs and writes the WAL delta as one new delta
         // run. Compaction merges delta runs into the base separately.
         //
@@ -471,30 +471,6 @@ pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
 impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
     pub(super) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
         MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state)
-    }
-
-    pub(super) async fn tail_with_deletion_inodes(&self) -> Result<MetadataState> {
-        let mut tail = self.tail_state.merged_rows();
-        let view = self.metadata_view();
-        for tombstone in self.tail_state.subtree_tombstones() {
-            if tail
-                .inode_at_seq(tombstone.root_inode_id, self.head.seq)
-                .is_some()
-            {
-                continue;
-            }
-            let inode = view
-                .inode_at_seq(tombstone.root_inode_id)
-                .await?
-                .ok_or_else(|| {
-                    CoreError::NamespaceCorrupt(format!(
-                        "deletion root inode `{}` is missing",
-                        tombstone.root_inode_id
-                    ))
-                })?;
-            tail.push_inode_record(inode);
-        }
-        Ok(tail)
     }
 }
 

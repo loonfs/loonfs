@@ -167,9 +167,9 @@ impl MetadataRow {
             .expect("a binding row should use a binding family"),
             Self::FileRevision(record) => lookup_keys::revision_probe(record.inode_id),
             Self::Tombstone(record) => lookup_keys::tombstone_probe(record.root_inode_id),
-            // The family is only ever range-scanned in key order, never
-            // probed for one deletion, so the filter key is the row key.
-            Self::ActiveDeletion(_) => self.row_key_for_family(family),
+            Self::ActiveDeletion(record) => {
+                lookup_keys::active_deletion_probe(record.deletion_seq, record.root_inode_id)
+            }
             Self::CommitReceipt(record) => lookup_keys::commit_receipt_probe(&record.commit_id),
             Self::Commit(_) => self.row_key_for_family(family),
             Self::ContentLayout(record) => lookup_keys::content_layout_probe(&record.content_id),
@@ -385,6 +385,16 @@ pub mod lookup_keys {
     /// rank the family defines.
     pub(super) const ACTIVE_DELETION_RANK_LISTED: u32 = 1;
 
+    /// Builds the Bloom filter probe for one deletion's listed and removed
+    /// rows.
+    pub(super) fn active_deletion_probe(deletion_seq: ChangeSeq, root_inode_id: InodeId) -> String {
+        format!(
+            "{ACTIVE_DELETION_ROW_PREFIX}{:020}-{}",
+            deletion_seq.0,
+            root_inode_id.body()
+        )
+    }
+
     /// Builds an active-deletion row key.
     pub(super) fn active_deletion_row_key(
         deletion_seq: ChangeSeq,
@@ -392,9 +402,8 @@ pub mod lookup_keys {
         sort_rank: u32,
     ) -> String {
         format!(
-            "{ACTIVE_DELETION_ROW_PREFIX}{:020}-{}-{sort_rank:010}",
-            deletion_seq.0,
-            root_inode_id.body()
+            "{}-{sort_rank:010}",
+            active_deletion_probe(deletion_seq, root_inode_id)
         )
     }
 
@@ -418,7 +427,7 @@ pub mod lookup_keys {
 
     /// Selects one chain in the Bloom filter.
     pub fn content_layout_probe(content_id: &ContentId) -> String {
-        format!("{CONTENT_LAYOUT_ROW_PREFIX}{content_id}")
+        format!("{CONTENT_LAYOUT_ROW_PREFIX}{}", content_id.body())
     }
 
     /// Selects the rows for one content identity.
@@ -672,6 +681,7 @@ mod tests {
                 delta_index,
                 commit_id: row_commit_id(),
                 action: TombstoneRowAction::Set {
+                    root_kind: crate::InodeKind::File,
                     deleted_binding: deleted_binding(),
                 },
                 committed_at_ms: 12_000,
@@ -708,6 +718,39 @@ mod tests {
         assert!(at(12, 1)
             .row_key_for_family(MetadataRowFamily::DirentryBinds)
             .starts_with(&edge));
+    }
+
+    #[test]
+    fn a_deletions_listed_and_removed_rows_share_one_filter_key() {
+        let row = |action| {
+            MetadataRow::ActiveDeletion(ActiveDeletionRecord {
+                root_inode_id: InodeId(42),
+                deletion_seq: ChangeSeq(12),
+                action,
+            })
+        };
+        let listed = row(ActiveDeletionRowAction::Listed {
+            inode_kind: crate::InodeKind::File,
+            deleted_at_ms: 12_000,
+            deleted_by: crate::ActorId::loonfs(),
+            deleted_binding: deleted_binding(),
+        });
+        let removed = row(ActiveDeletionRowAction::Removed {
+            removed_seq: ChangeSeq(15),
+        });
+
+        let filter_key = listed.filter_key_for_family(MetadataRowFamily::ActiveDeletions);
+        assert_eq!(
+            filter_key,
+            "active-deletion-00000000000000000012-0000000000000000000000001a"
+        );
+        assert_eq!(
+            removed.filter_key_for_family(MetadataRowFamily::ActiveDeletions),
+            filter_key
+        );
+        for row in [listed, removed] {
+            assert!(row.row_key().starts_with(&format!("{filter_key}-")));
+        }
     }
 
     #[test]
@@ -876,6 +919,7 @@ mod tests {
                     delta_index: 0,
                     commit_id: row_commit_id(),
                     action: TombstoneRowAction::Set {
+                        root_kind: crate::InodeKind::File,
                         deleted_binding: deleted_binding(),
                     },
                     committed_at_ms: 12_000,
@@ -989,6 +1033,7 @@ mod tests {
                         delta_index: 3,
                         commit_id: row_commit_id(),
                         action: TombstoneRowAction::Set {
+                            root_kind: crate::InodeKind::File,
                             deleted_binding: deleted_binding(),
                         },
                         committed_at_ms: 12_000,

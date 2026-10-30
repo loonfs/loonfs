@@ -107,21 +107,14 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     let projection = namespace
         .load_manifest_projection(crate::test_support::observed_now())
         .await?;
-    let tail_state = projection.tail_with_deletion_inodes().await?;
     let tail_rows = projection.tail_state.merged_rows();
     let mut metadata_state = MetadataStateBuilder::default();
     for family in ApiMetadataRowFamily::ALL {
         let mut rows = projection.manifest_segments.scan_prefix(family, "").await?;
-        let state = if family == ApiMetadataRowFamily::ActiveDeletions {
-            &tail_state
-        } else {
-            &tail_rows
-        };
-        rows.extend(manifest_rows_for_family(state, family));
+        rows.extend(manifest_rows_for_family(&tail_rows, family));
         rows.sort_by_key(|row| row.row_key_for_family(family));
         append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)?;
     }
-    drop(tail_state);
     Ok((projection.head, metadata_state.build()))
 }
 

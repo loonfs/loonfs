@@ -170,6 +170,14 @@ macro_rules! string_id {
             pub fn generate() -> Self {
                 Self(generated_id($prefix))
             }
+
+            /// Returns the ID's 26-character body, the spelling after its
+            /// prefix and underscore, which row keys use.
+            pub fn body(&self) -> &str {
+                self.0
+                    .strip_prefix(concat!($prefix, "_"))
+                    .expect("a generated id should start with its prefix")
+            }
         }
     };
 }

@@ -105,6 +105,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         WalDelta::TombstoneSubtree {
             delta_index: 2,
             root_inode_id: InodeId(7),
+            root_kind: InodeKind::File,
             deleted_binding: deleted_binding(ROOT_INODE_ID, "deleted"),
         },
         WalDelta::AppendAttributesRevision {
@@ -430,6 +431,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         &[WalDelta::TombstoneSubtree {
             delta_index: 0,
             root_inode_id: InodeId(2),
+            root_kind: InodeKind::Directory,
             deleted_binding: deleted_binding(ROOT_INODE_ID, "renamed"),
         }],
     );

@@ -120,6 +120,7 @@ struct NormalizedTombstone {
 #[derive(Debug, PartialEq, Eq)]
 enum NormalizedTombstoneAction {
     Set {
+        root_kind: InodeKind,
         deleted_binding: NormalizedBinding,
     },
     Revoke {
@@ -507,6 +508,7 @@ fn delete(
         WalDelta::TombstoneSubtree {
             delta_index: delta_index.saturating_add(1),
             root_inode_id: inode_id,
+            root_kind: kind,
             deleted_binding: DeletedBinding {
                 parent_inode_id,
                 name_key: name_key(display_name),
@@ -2146,15 +2148,17 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 committed_at_ms: tombstone.committed_at_ms,
                 committed_by: tombstone.committed_by.clone(),
                 action: match &tombstone.action {
-                    CoreTombstoneAction::Set { deleted_binding } => {
-                        NormalizedTombstoneAction::Set {
-                            deleted_binding: NormalizedBinding {
-                                parent_inode_id: deleted_binding.parent_inode_id.0,
-                                name_key: deleted_binding.name_key.as_str().to_owned(),
-                                display_name: deleted_binding.display_name.as_str().to_owned(),
-                            },
-                        }
-                    }
+                    CoreTombstoneAction::Set {
+                        root_kind,
+                        deleted_binding,
+                    } => NormalizedTombstoneAction::Set {
+                        root_kind: *root_kind,
+                        deleted_binding: NormalizedBinding {
+                            parent_inode_id: deleted_binding.parent_inode_id.0,
+                            name_key: deleted_binding.name_key.as_str().to_owned(),
+                            display_name: deleted_binding.display_name.as_str().to_owned(),
+                        },
+                    },
                     CoreTombstoneAction::Revoke { target } => NormalizedTombstoneAction::Revoke {
                         target_seq: target.seq.0,
                         target_delta_index: target.delta_index,
@@ -2245,15 +2249,17 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 committed_at_ms: tombstone.committed_at_ms,
                 committed_by: tombstone.committed_by.clone(),
                 action: match &tombstone.action {
-                    ModelTombstoneAction::Set { deleted_binding } => {
-                        NormalizedTombstoneAction::Set {
-                            deleted_binding: NormalizedBinding {
-                                parent_inode_id: deleted_binding.parent_inode_id.0,
-                                name_key: deleted_binding.name_key.clone(),
-                                display_name: deleted_binding.display_name.clone(),
-                            },
-                        }
-                    }
+                    ModelTombstoneAction::Set {
+                        root_kind,
+                        deleted_binding,
+                    } => NormalizedTombstoneAction::Set {
+                        root_kind: *root_kind,
+                        deleted_binding: NormalizedBinding {
+                            parent_inode_id: deleted_binding.parent_inode_id.0,
+                            name_key: deleted_binding.name_key.clone(),
+                            display_name: deleted_binding.display_name.clone(),
+                        },
+                    },
                     ModelTombstoneAction::Revoke { target } => NormalizedTombstoneAction::Revoke {
                         target_seq: target.seq.0,
                         target_delta_index: target.delta_index,

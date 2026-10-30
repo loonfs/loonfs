@@ -483,6 +483,7 @@ fn delete_deltas(
         WalDelta::TombstoneSubtree {
             delta_index: numbering.reserve_delta_index()?,
             root_inode_id: inode.inode_id,
+            root_kind: inode.inode_kind,
             deleted_binding: DeletedBinding {
                 parent_inode_id: binding.parent_inode_id,
                 name_key: binding.name_key.clone(),

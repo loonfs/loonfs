@@ -112,7 +112,7 @@ impl<'a> ContentSweep<'a> {
         for body_prefix in generated_id_body_prefixes(self.shard_width) {
             let id_prefix = format!("con_{body_prefix}");
             let mut keys = ChargedSet::new(&sweep.live.memory);
-            let _ = scan_layout_extents(sweep, &self.segments, &id_prefix, |_, extent| {
+            let _ = scan_layout_extents(sweep, &self.segments, &body_prefix, |_, extent| {
                 if extent.content_id.as_str().starts_with(&id_prefix) {
                     keys.insert(extent_object_key(extent))?;
                 }
@@ -179,11 +179,11 @@ fn distinct_layout_segments(live: &LiveSet) -> Result<(Vec<ScanDescriptor<'_>>, 
 async fn scan_layout_extents<S: ObjectStore>(
     sweep: &Sweep<'_, S>,
     segments: &[ScanDescriptor<'_>],
-    id_prefix: &str,
+    body_prefix: &str,
     mut visit: impl FnMut(&ContentLayoutRecord, &ContentExtent) -> Result<ControlFlow<()>>,
 ) -> Result<ControlFlow<()>> {
     let prefix = format!(
-        "{}{id_prefix}",
+        "{}{body_prefix}",
         MetadataRowFamily::ContentLayouts.row_key_prefix()
     );
     let upper_bound = string_prefix_upper_bound(&prefix);

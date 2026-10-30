@@ -157,6 +157,7 @@ mod tests {
             delta_index: 0,
             commit_id: CommitId::parse("c_foreign_tombstone").expect("commit id"),
             action: TombstoneRowAction::Set {
+                root_kind: loonfs_types::InodeKind::File,
                 deleted_binding: loonfs_types::format::manifest::DeletedBinding {
                     parent_inode_id: ROOT_INODE_ID,
                     name_key: loonfs_types::NameKey::parse("foreign").expect("valid name key"),

@@ -170,11 +170,27 @@ A reference that keeps a namespace's content objects from being deleted. There a
 
 ### Metadata segment
 
-An immutable object that stores sorted metadata rows from one row family (for example, directory bindings), in blocks that can be read independently.
+An immutable object that stores sorted metadata rows from one [row family](#row-family) (for example, directory bindings), in blocks that can be read independently.
 
 ### Run
 
 The set of metadata segments written together by one fold or compaction, identified by a run number. A manifest lists the runs that make up the namespace.
+
+### Row family
+
+A set of metadata rows with one key grammar, such as `revisions` (a file's revisions, keyed by inode ID) or `direntry_binds` (directory bindings, keyed by parent). Each family is an [entity header](#entity-header), a [history family](#history-family), or a [query index](#query-index), and every family follows the rules in [Row families](format.md#19-row-families).
+
+### Entity header
+
+A row family with one immutable row for each inode or commit, written when the inode or commit is created. The `inodes` family stores each inode's kind and creation attribution, and the `commits` family stores each commit record.
+
+### History family
+
+A row family that stores the versions of one mutable part of an entity, such as a file's revisions or an inode's attributes, keyed by the entity and then by version, newest first. A row of a history family is a "history row", and it records the sequence, ID, actor, and time of its commit.
+
+### Query index
+
+A row family that stores a second key over facts that another family stores, for a read that the other family's key can't serve. For example, `commit_receipts` is keyed by commit ID, so a retry finds its original commit's sequence without scanning `commits`, which is keyed by sequence.
 
 ### Family group
 
