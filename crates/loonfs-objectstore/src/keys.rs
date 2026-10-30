@@ -26,47 +26,52 @@ pub(crate) const UPLOAD_OUTCOME_SUFFIX: &str = ".outcome.json";
 pub(crate) const CONTENT_DIRECTORY: &str = "content";
 pub(crate) const TEMPORARY_DIRECTORY: &str = "temporary";
 
+// Each key is one `format!` whose text is literal, so the String is sized
+// once. A key is built on every segment block lookup, cache hit or not, so a
+// key that went through the prefix builders cost three formats and about
+// eight allocator calls. `layout.rs` parses keys back with the constants
+// above, and its tests cover the round trip.
+
 /// Builds the listing prefix containing every durable object owned by one namespace.
 pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{NAMESPACES_DIRECTORY}/{namespace_id}/")
+    format!("namespaces/{namespace_id}/")
 }
 
 /// Builds the listing prefix containing every object one extension owns in
 /// one namespace.
 pub fn extension_prefix(namespace_id: &NamespaceId, name: &str) -> String {
-    format!("{}extensions/{name}/", namespace_prefix(namespace_id))
+    format!("namespaces/{namespace_id}/extensions/{name}/")
 }
 
 /// Builds the immutable object key for a numbered WAL object.
 pub fn wal_object(namespace_id: &NamespaceId, wal_no: &WalNo) -> String {
-    format!("{}{:020}{WAL_SUFFIX}", wal_prefix(namespace_id), wal_no.0)
+    format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0)
 }
 
 /// Builds the listing prefix for numbered WAL objects.
 pub fn wal_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}{WAL_DIRECTORY}/", namespace_prefix(namespace_id))
+    format!("namespaces/{namespace_id}/wal/")
 }
 
 /// Builds the starting point for numbered manifest discovery.
 pub fn hint(namespace_id: &NamespaceId) -> String {
-    format!("{}{HINT_NAME}", namespace_prefix(namespace_id))
+    format!("namespaces/{namespace_id}/hint.json")
 }
 
 /// Builds the listing prefix containing numbered namespace manifests.
 pub fn metadata_manifest_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}{MANIFEST_DIRECTORY}/", namespace_prefix(namespace_id))
+    format!("namespaces/{namespace_id}/manifests/")
 }
 
 /// Builds the listing prefix containing metadata segment objects owned by one namespace.
 pub fn metadata_segment_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}{SEGMENT_DIRECTORY}/", namespace_prefix(namespace_id))
+    format!("namespaces/{namespace_id}/segments/")
 }
 
 /// Builds the immutable manifest key for one namespace manifest number.
 pub fn metadata_manifest_object(namespace_id: &NamespaceId, manifest_no: &ManifestNo) -> String {
     format!(
-        "{}{:020}{MANIFEST_SUFFIX}",
-        metadata_manifest_prefix(namespace_id),
+        "namespaces/{namespace_id}/manifests/{:020}.json.zst",
         manifest_no.0
     )
 }
@@ -76,10 +81,7 @@ pub fn metadata_segment(
     namespace_id: &NamespaceId,
     metadata_segment_id: &MetadataSegmentId,
 ) -> String {
-    format!(
-        "{}{metadata_segment_id}{SEGMENT_SUFFIX}",
-        metadata_segment_prefix(namespace_id)
-    )
+    format!("namespaces/{namespace_id}/segments/{metadata_segment_id}.sst.zst")
 }
 
 /// Derives a segment key from its owner and generated identity.
@@ -89,26 +91,23 @@ pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
 
 /// Builds a pin key with its manifest number in the id.
 pub fn pin(namespace_id: &NamespaceId, pin_id: &PinId) -> String {
-    format!("{}{pin_id}{PIN_SUFFIX}", pin_prefix(namespace_id))
+    format!("namespaces/{namespace_id}/pins/{pin_id}.json")
 }
 
 /// Builds the listing prefix containing pins for one namespace.
 pub fn pin_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}{PIN_DIRECTORY}/", namespace_prefix(namespace_id))
+    format!("namespaces/{namespace_id}/pins/")
 }
 
 /// Builds the listing prefix containing the upload session and outcome
 /// records for one namespace.
 pub fn upload_session_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}{UPLOAD_DIRECTORY}/", namespace_prefix(namespace_id))
+    format!("namespaces/{namespace_id}/uploads/")
 }
 
 /// Builds the key of the record that starts one upload session.
 pub fn upload_session(namespace_id: &NamespaceId, upload_id: &UploadId) -> String {
-    format!(
-        "{}{upload_id}{UPLOAD_SESSION_SUFFIX}",
-        upload_session_prefix(namespace_id)
-    )
+    format!("namespaces/{namespace_id}/uploads/{upload_id}.json")
 }
 
 /// Builds the key of the record of how one upload session ended.
@@ -116,23 +115,17 @@ pub fn upload_session(namespace_id: &NamespaceId, upload_id: &UploadId) -> Strin
 /// The key sorts directly after the session record's key, so a listing of
 /// the uploads prefix returns a session's two records next to each other.
 pub fn upload_outcome(namespace_id: &NamespaceId, upload_id: &UploadId) -> String {
-    format!(
-        "{}{upload_id}{UPLOAD_OUTCOME_SUFFIX}",
-        upload_session_prefix(namespace_id)
-    )
+    format!("namespaces/{namespace_id}/uploads/{upload_id}.outcome.json")
 }
 
 /// Builds the listing prefix containing every content object one namespace owns.
 pub fn content_prefix(owner_namespace_id: &NamespaceId) -> String {
-    format!(
-        "{}{CONTENT_DIRECTORY}/",
-        namespace_prefix(owner_namespace_id)
-    )
+    format!("namespaces/{owner_namespace_id}/content/")
 }
 
 /// Builds the immutable content-object key for one content identity.
 pub fn content_blob(owner_namespace_id: &NamespaceId, content_id: &ContentId) -> String {
-    format!("{}{content_id}", content_prefix(owner_namespace_id))
+    format!("namespaces/{owner_namespace_id}/content/{content_id}")
 }
 
 /// Builds the immutable object key for one run of chain bytes.
@@ -142,18 +135,14 @@ pub fn content_span(
     start: u64,
     end: u64,
 ) -> String {
-    format!(
-        "{}-{start:020}-{end:020}",
-        content_blob(owner_namespace_id, content_id)
-    )
+    format!("namespaces/{owner_namespace_id}/content/{content_id}-{start:020}-{end:020}")
 }
 
 /// Builds a fresh key for a temporary object that an assembly writes and
 /// deletes under one namespace.
 pub fn temporary_object(namespace_id: &NamespaceId) -> String {
     format!(
-        "{}{}",
-        temporary_prefix(namespace_id),
+        "namespaces/{namespace_id}/temporary/{}",
         loonfs_types::generated_id("tmp")
     )
 }
@@ -161,7 +150,7 @@ pub fn temporary_object(namespace_id: &NamespaceId) -> String {
 /// Builds the listing prefix for the temporary objects that an assembly writes
 /// and deletes under one namespace.
 pub fn temporary_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}{TEMPORARY_DIRECTORY}/", namespace_prefix(namespace_id))
+    format!("namespaces/{namespace_id}/temporary/")
 }
 
 /// Builds the listing prefix containing the objects of every store probe run.
