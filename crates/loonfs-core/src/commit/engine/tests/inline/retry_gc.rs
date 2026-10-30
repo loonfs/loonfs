@@ -146,7 +146,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .expect("original reference");
     assert_matches!(
         entry.kind,
-        PathEntryKind::File { content_ref, .. }
+        PathEntryKind::File { content_ref: Some(content_ref), .. }
             if content_ref == *original.content_ref()
     );
 }

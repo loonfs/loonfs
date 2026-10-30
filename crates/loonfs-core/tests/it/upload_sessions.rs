@@ -205,8 +205,12 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
             let entry = resolve_path(&store, &namespace_id, path.as_str())
                 .await
                 .expect("entry");
-            let PathEntryKind::File { content_ref, .. } = entry.kind else {
-                panic!("expected file")
+            let PathEntryKind::File {
+                content_ref: Some(content_ref),
+                ..
+            } = entry.kind
+            else {
+                panic!("expected a stat of a file")
             };
             assert_eq!(
                 content_ref.checksum,
@@ -1034,8 +1038,12 @@ mod direct_multipart {
         let entry = resolve_path(&store, &session.namespace_id, "/multipart")
             .await
             .expect("entry");
-        let PathEntryKind::File { content_ref, .. } = entry.kind else {
-            panic!("expected file")
+        let PathEntryKind::File {
+            content_ref: Some(content_ref),
+            ..
+        } = entry.kind
+        else {
+            panic!("expected a stat of a file")
         };
         let whole = [session.payload.as_slice(), b"tail"].concat();
         assert_eq!(

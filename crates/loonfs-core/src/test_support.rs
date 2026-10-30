@@ -22,6 +22,57 @@ pub fn content_writes() -> crate::PermitPool {
     )
 }
 
+/// The commit ID of the binding rows that tests build.
+#[cfg(test)]
+pub(crate) fn binding_commit_id() -> loonfs_types::CommitId {
+    loonfs_types::CommitId::parse("c_binding_row").expect("a static commit id should parse")
+}
+
+/// The revision summary of the bound file rows that tests build: the first
+/// revision of an empty file.
+#[cfg(test)]
+pub(crate) fn revision_summary() -> loonfs_types::format::manifest::RevisionSummary {
+    loonfs_types::format::manifest::RevisionSummary {
+        revision_no: loonfs_types::RevisionNo(1),
+        size_bytes: 0,
+        revision_committed_by: loonfs_types::ActorId::loonfs(),
+        revision_committed_at_ms: 0,
+    }
+}
+
+/// The bind event that binds file `child` as `name` under `parent` at
+/// sequence `seq`.
+#[cfg(test)]
+pub(crate) fn binding_row(
+    parent: u64,
+    name: &str,
+    child: u64,
+    seq: u64,
+) -> loonfs_types::format::manifest::DirentryBindingRecord {
+    let position = loonfs_types::format::manifest::DeltaPosition {
+        seq: loonfs_types::ChangeSeq(seq),
+        delta_index: 0,
+    };
+    loonfs_types::format::manifest::DirentryBindingRecord {
+        parent_inode_id: loonfs_types::InodeId(u128::from(parent)),
+        name_key: loonfs_types::NameKey::parse(name).expect("valid name key"),
+        child_inode_id: loonfs_types::InodeId(u128::from(child)),
+        child_kind: loonfs_types::InodeKind::File,
+        child_created_by: loonfs_types::ActorId::loonfs(),
+        child_created_at_ms: 4_200,
+        committed_seq: position.seq,
+        delta_index: position.delta_index,
+        commit_id: binding_commit_id(),
+        committed_by: loonfs_types::ActorId::loonfs(),
+        committed_at_ms: 4_200,
+        bind_position: position,
+        state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            display_name: loonfs_types::DisplayName::parse(name).expect("valid display name"),
+            revision: Some(revision_summary()),
+        },
+    }
+}
+
 /// Builds the record of a service-proxied upload session with new IDs.
 #[cfg(test)]
 pub(crate) fn proxied_upload_session(

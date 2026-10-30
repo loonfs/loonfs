@@ -143,7 +143,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             entry.kind = PathEntryKind::File {
                 revision_no: revision.revision_no,
                 size_bytes: revision.content_ref.size_bytes,
-                content_ref: revision.content_ref,
+                content_ref: Some(revision.content_ref),
                 revision_committed_by: revision.committed_by,
                 revision_committed_at_ms: revision.committed_at_ms,
             };
@@ -257,12 +257,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let entry = self
             .resolve_file_content(absolute_path, revision_no, access)
             .await?;
-        let PathEntryKind::File {
-            revision_no,
-            content_ref,
-            ..
-        } = entry.kind
-        else {
+        let content_ref = file_content_ref(&entry)?;
+        let PathEntryKind::File { revision_no, .. } = entry.kind else {
             return Err(CoreError::ExpectedFile {
                 target: entry.path.to_string(),
                 kind: InodeKind::Directory,
@@ -328,9 +324,13 @@ pub(crate) fn ensure_within_read_limit(
     }
 }
 
+/// Returns the content reference of a file entry that a stat built, which
+/// always includes it.
 pub(crate) fn file_content_ref(entry: &PathEntry) -> Result<ContentRef> {
     match &entry.kind {
-        PathEntryKind::File { content_ref, .. } => Ok(content_ref.clone()),
+        PathEntryKind::File { content_ref, .. } => Ok(content_ref
+            .clone()
+            .expect("a stat entry should include its content reference")),
         // Core builds entries from stored kinds, so an unknown kind never reaches here.
         PathEntryKind::Directory {} | PathEntryKind::Unknown => Err(CoreError::ExpectedFile {
             target: entry.path.to_string(),

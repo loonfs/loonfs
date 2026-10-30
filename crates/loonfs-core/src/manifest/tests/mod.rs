@@ -359,21 +359,12 @@ fn merge_rows_with_retention(
         for (family, row_key, row) in merged {
             let row_locality = locality_of(family, &row_key, cluster.locality);
             if locality.as_deref() != Some(row_locality) {
-                if let Some((family, row)) = operator.close_group(floor_seq)? {
-                    kept.entry(family).or_default().push(row);
-                }
+                operator.close_group();
                 locality = Some(row_locality.to_owned());
             }
-            if let Some((family, row)) = operator.take_floor_value_before(&row, floor_seq)? {
+            if let Some((family, row)) = operator.push(family, row, floor_seq)? {
                 kept.entry(family).or_default().push(row);
             }
-            let survivor = operator.push(family, row, floor_seq)?;
-            if let Some((family, row)) = survivor {
-                kept.entry(family).or_default().push(row);
-            }
-        }
-        if let Some((family, row)) = operator.close_group(floor_seq)? {
-            kept.entry(family).or_default().push(row);
         }
         for (family, rows) in kept {
             rows_by_family.insert(family, rows);

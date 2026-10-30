@@ -97,6 +97,7 @@ fn wal_create_directory(
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
+            revision: None,
         },
     ]
 }
@@ -124,10 +125,20 @@ fn wal_create_file(
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
+            revision: Some(crate::test_support::revision_summary()),
         },
         WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),
             inode_id,
+            parent_inode_id: loonfs_types::ROOT_INODE_ID,
+            name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+            display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: loonfs_types::ChangeSeq(1),
+                delta_index: 0,
+            },
+            child_created_by: loonfs_types::ActorId::loonfs(),
+            child_created_at_ms: 0,
             revision_no: RevisionNo(1),
             content_ref,
             layout: None,
@@ -145,6 +156,15 @@ fn wal_append_revision(
     vec![WalDelta::AppendFileRevision {
         delta_index,
         inode_id,
+        parent_inode_id: loonfs_types::ROOT_INODE_ID,
+        name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+        display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+        bind_position: loonfs_types::format::manifest::DeltaPosition {
+            seq: loonfs_types::ChangeSeq(1),
+            delta_index: 0,
+        },
+        child_created_by: loonfs_types::ActorId::loonfs(),
+        child_created_at_ms: 0,
         revision_no,
         content_ref,
         layout: None,
@@ -449,7 +469,7 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
         name_key: NameKey::parse("docs").expect("valid name key"),
         display_name: test_display_name("docs"),
         child_inode_id: InodeId(2),
-        position: loonfs_types::format::manifest::DeltaPosition {
+        bind_position: loonfs_types::format::manifest::DeltaPosition {
             seq: ChangeSeq(1),
             delta_index: 1,
         },
@@ -499,7 +519,7 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
             name_key: NameKey::parse("missing.txt").expect("valid name key"),
             display_name: test_display_name("missing.txt"),
             child_inode_id: InodeId(9),
-            position: loonfs_types::format::manifest::DeltaPosition {
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
                 seq: ChangeSeq(1),
                 delta_index: 0,
             },
@@ -845,6 +865,15 @@ async fn restore_revision_overflow_is_rejected() {
     deltas[2] = WalDelta::AppendFileRevision {
         delta_index: 2,
         inode_id: InodeId(2),
+        parent_inode_id: loonfs_types::ROOT_INODE_ID,
+        name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+        display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+        bind_position: loonfs_types::format::manifest::DeltaPosition {
+            seq: loonfs_types::ChangeSeq(1),
+            delta_index: 0,
+        },
+        child_created_by: loonfs_types::ActorId::loonfs(),
+        child_created_at_ms: 0,
         revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         content_ref: content_ref("content-max"),
         layout: None,

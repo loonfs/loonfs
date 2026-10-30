@@ -83,6 +83,15 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         WalDelta::AppendFileRevision {
             delta_index: 1,
             inode_id: InodeId(7),
+            parent_inode_id: loonfs_types::ROOT_INODE_ID,
+            name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+            display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: loonfs_types::ChangeSeq(1),
+                delta_index: 0,
+            },
+            child_created_by: loonfs_types::ActorId::loonfs(),
+            child_created_at_ms: 0,
             revision_no: RevisionNo(1),
             content_ref: ContentRef::blob_v1(
                 loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
@@ -165,6 +174,7 @@ fn bind_direntry_replay_uses_persisted_name_key() {
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
+            revision: Some(crate::test_support::revision_summary()),
         }],
     );
 
@@ -205,6 +215,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
+                revision: Some(crate::test_support::revision_summary()),
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::File,
@@ -212,6 +223,13 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(1),
             delta_index: 0,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(1),
+                delta_index: 0,
+            },
         }],
         Vec::new(),
         Vec::new(),
@@ -266,6 +284,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse("docs")
                         .expect("valid display name"),
+                    revision: None,
                 },
                 child_inode_id: InodeId(2),
                 child_kind: loonfs_types::InodeKind::Directory,
@@ -273,6 +292,13 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(1),
                 delta_index: 0,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
             },
             DirentryBindingRecord {
                 parent_inode_id: InodeId(2),
@@ -280,6 +306,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse("report.txt")
                         .expect("valid display name"),
+                    revision: Some(crate::test_support::revision_summary()),
                 },
                 child_inode_id: InodeId(3),
                 child_kind: loonfs_types::InodeKind::File,
@@ -287,6 +314,13 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
                 delta_index: 0,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(2),
+                    delta_index: 0,
+                },
             },
         ],
         Vec::new(),
@@ -366,6 +400,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
+            revision: None,
         }],
     );
     assert!(metadata_state
@@ -450,6 +485,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse("report")
                         .expect("valid display name"),
+                    revision: Some(crate::test_support::revision_summary()),
                 },
                 child_inode_id: InodeId(2),
                 child_kind: loonfs_types::InodeKind::File,
@@ -457,6 +493,13 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(1),
                 delta_index: 0,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
             },
             DirentryBindingRecord {
                 parent_inode_id: ROOT_INODE_ID,
@@ -467,6 +510,13 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
                 delta_index: 0,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(2),
+                    delta_index: 0,
+                },
                 state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
             },
             DirentryBindingRecord {
@@ -475,6 +525,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse("report")
                         .expect("valid display name"),
+                    revision: Some(crate::test_support::revision_summary()),
                 },
                 child_inode_id: InodeId(3),
                 child_kind: loonfs_types::InodeKind::File,
@@ -482,6 +533,13 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
                 delta_index: 1,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(2),
+                    delta_index: 1,
+                },
             },
         ],
         Vec::new(),
@@ -536,6 +594,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
+                revision: Some(crate::test_support::revision_summary()),
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::File,
@@ -543,6 +602,13 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(1),
             delta_index: 0,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(1),
+                delta_index: 0,
+            },
         }],
         Vec::new(),
         Vec::new(),
@@ -854,6 +920,7 @@ fn churned_binding_state() -> MetadataState {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
             WalDelta::CreateInode {
                 delta_index: 2,
@@ -870,6 +937,7 @@ fn churned_binding_state() -> MetadataState {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
         ],
     );
@@ -904,6 +972,7 @@ fn churned_binding_state() -> MetadataState {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
             WalDelta::UnbindDirentry {
                 delta_index: 2,
@@ -943,6 +1012,7 @@ fn churned_binding_state() -> MetadataState {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
         ],
     );
@@ -1073,6 +1143,7 @@ async fn view_binding_lookups_match_a_row_scan_at_every_seq() {
                 child_kind: InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
         ],
     );
@@ -1135,6 +1206,7 @@ fn has_visible_children_sees_through_unbinds() {
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("doc.txt")
                     .expect("valid display name"),
+                revision: Some(crate::test_support::revision_summary()),
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::File,
@@ -1142,6 +1214,13 @@ fn has_visible_children_sees_through_unbinds() {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(2),
             delta_index: 0,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(2),
+                delta_index: 0,
+            },
         }],
         Vec::new(),
         Vec::new(),
@@ -1176,6 +1255,13 @@ fn has_visible_children_sees_through_unbinds() {
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(3),
                 delta_index: 0,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(3),
+                    delta_index: 0,
+                },
                 state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
             }],
         ]

@@ -215,13 +215,14 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         ))
     }
 
-    /// Returns up to `limit` rows of `prefix` from the newest run that has a
-    /// row for that prefix.
+    /// Returns up to `limit` rows of `prefix` at or after `lower_bound` from
+    /// the newest run that has a row in that range.
     ///
     /// A lookup for the newest fact about one key prefix (the latest revision
-    /// of an inode, the newest version of a directory slot, or the newest
-    /// attribute or access revision) finds the same fact here as in the merge
-    /// of every run, for two reasons:
+    /// of an inode, the newest value of a directory slot, a child's newest
+    /// binding, the newest tombstone event of a root, or the newest attribute
+    /// or access revision) finds the same fact here as in the merge of every
+    /// run, for two reasons:
     ///
     /// - Each run covers its own range of commit sequences, and `scan_runs`
     ///   lists the runs newest first, so every row of a run is newer than
@@ -237,12 +238,16 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     ///   and "Runs cover separate sequence ranges" in [Row retention during
     ///   a base compaction](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction).
     /// - A later commit assigns an inode a higher revision, attribute
-    ///   revision, or access revision number, and a later version of a
-    ///   directory slot has a higher position. See [Metadata rows and row
+    ///   revision, or access revision number, and a later value of a
+    ///   directory edge or a later tombstone event has a higher position. See
+    ///   [Metadata rows and row
     ///   keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
     ///
-    /// So the newest run with a row for the prefix has the newest fact, and
-    /// the older runs can only add older facts.
+    /// So the newest run with a row in the range has the newest fact in it,
+    /// and the older runs can only add older facts. A lookup that walks the
+    /// edges of a slot or a child moves `lower_bound` past each edge it has
+    /// read, and the newest fact of the whole prefix is in the run that the
+    /// first page reads, so every later page can only add older facts.
     ///
     /// The lookup checks the candidate segments' filters in every run at
     /// once, as the merge does, and then reads the admitted runs one at a
@@ -257,16 +262,17 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         &self,
         family: MetadataRowFamily,
         prefix: &str,
+        lower_bound: &str,
         filter_probe: &str,
         limit: usize,
         readahead: Readahead,
-    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let upper_bound = string_prefix_upper_bound(prefix);
         let upper_bound = upper_bound.as_deref();
         let mut candidates = Vec::new();
         let mut run_ends = Vec::with_capacity(self.scan_runs.len());
         for run in self.scan_runs.iter() {
-            self.push_run_candidates(&mut candidates, run, family, prefix, upper_bound)?;
+            self.push_run_candidates(&mut candidates, run, family, lower_bound, upper_bound)?;
             run_ends.push(candidates.len());
         }
         let admissions = self.filter_admissions(&candidates, filter_probe).await?;
@@ -282,10 +288,10 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
                 continue;
             }
             let page = self
-                .merge_segment_rows(admitted, prefix, upper_bound, limit, readahead, true)
+                .merge_segment_rows(admitted, lower_bound, upper_bound, limit, readahead, true)
                 .await?;
             if !page.is_empty() {
-                return Ok(strip_row_keys(page));
+                return Ok(page);
             }
         }
         Ok(Vec::new())

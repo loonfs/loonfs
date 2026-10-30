@@ -46,5 +46,6 @@ pub(crate) struct ResolvedBinding {
     pub name_key: NameKey,
     pub display_name: DisplayName,
     pub child_inode_id: InodeId,
-    pub position: DeltaPosition,
+    /// Position of the bind event that established the binding.
+    pub bind_position: DeltaPosition,
 }

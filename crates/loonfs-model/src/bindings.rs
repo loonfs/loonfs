@@ -152,6 +152,14 @@ mod tests {
             child_kind: kind,
             child_created_by: ActorId::loonfs(),
             child_created_at_ms: 0,
+            revision: (kind == InodeKind::File).then(|| {
+                loonfs_types::format::manifest::RevisionSummary {
+                    revision_no: loonfs_types::RevisionNo(1),
+                    size_bytes: 0,
+                    revision_committed_by: ActorId::loonfs(),
+                    revision_committed_at_ms: 0,
+                }
+            }),
         }
     }
 

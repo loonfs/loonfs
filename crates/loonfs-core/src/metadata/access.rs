@@ -180,7 +180,11 @@ mod tests {
             builder.push_direntry_binding(DirentryBindingRecord {
                 parent_inode_id: InodeId(parent),
                 name_key: NameKey::for_display_name(&display_name),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                    display_name,
+                    revision: matches!(child, 4 | 7 | 8)
+                        .then(crate::test_support::revision_summary),
+                },
                 child_inode_id: InodeId(child),
                 child_kind: if matches!(child, 4 | 7 | 8) {
                     InodeKind::File
@@ -191,6 +195,13 @@ mod tests {
                 child_created_at_ms: 1_000,
                 committed_seq: ChangeSeq(1),
                 delta_index: 0,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
             });
         }
         let display_name = DisplayName::parse("old").expect("display name");
@@ -309,13 +320,23 @@ mod tests {
             builder.push_direntry_binding(DirentryBindingRecord {
                 parent_inode_id,
                 name_key: NameKey::for_display_name(&display_name),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                    display_name,
+                    revision: None,
+                },
                 child_inode_id,
                 child_kind: InodeKind::Directory,
                 child_created_by: ActorId::loonfs(),
                 child_created_at_ms: 1_000,
                 committed_seq: ChangeSeq(1),
                 delta_index: 0,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
             });
         }
         let state = builder.build();

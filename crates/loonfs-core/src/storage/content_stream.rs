@@ -378,12 +378,12 @@ mod tests {
             kind: loonfs_types::PathEntryKind::File {
                 revision_no: loonfs_types::RevisionNo(1),
                 size_bytes: 0,
-                content_ref: ContentRef::blob_v1(
+                content_ref: Some(ContentRef::blob_v1(
                     loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                     loonfs_types::ContentId::generate(),
                     b"",
                     loonfs_types::ChecksumAlgorithm::Crc64nvme,
-                ),
+                )),
                 revision_committed_by: loonfs_types::ActorId::loonfs(),
                 revision_committed_at_ms: 1,
             },

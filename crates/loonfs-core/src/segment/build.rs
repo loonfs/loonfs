@@ -255,6 +255,9 @@ pub(crate) struct MetadataSegmentWriter<'a> {
     family: MetadataRowFamily,
     namespace_id: &'a NamespaceId,
     builder: SegmentBlocksBuilder,
+    /// The parent filter key that the open segment's last row added, so a
+    /// run of rows under one parent adds it once.
+    last_parent_filter_key: Option<String>,
     segments: Vec<MetadataSegmentRef>,
 }
 
@@ -264,11 +267,20 @@ impl<'a> MetadataSegmentWriter<'a> {
             family,
             namespace_id,
             builder: SegmentBlocksBuilder::default(),
+            last_parent_filter_key: None,
             segments: Vec::new(),
         }
     }
 
     pub(crate) fn push(&mut self, row: MetadataRow, fold_encoded_row: &mut impl FnMut(&[u8])) {
+        // Rows arrive in key order, so a parent's rows are adjacent, and
+        // comparing with the previous row's parent adds each parent once.
+        if let Some(parent_filter_key) = row.parent_filter_key_for_family(self.family) {
+            if self.last_parent_filter_key.as_ref() != Some(&parent_filter_key) {
+                self.builder.push_filter_key(&parent_filter_key);
+                self.last_parent_filter_key = Some(parent_filter_key);
+            }
+        }
         let encoded = self
             .builder
             .push_with_encoded_row(
@@ -308,6 +320,9 @@ impl<'a> MetadataSegmentWriter<'a> {
         puts: &mut MetadataSegmentPuts<'_, S>,
     ) -> Result<()> {
         puts.wait_for_capacity(0).await?;
+        // The next segment has a filter of its own, which needs the parent
+        // filter key of its first row.
+        self.last_parent_filter_key = None;
         let built = std::mem::take(&mut self.builder)
             .build()
             .expect("a metadata segment should encode");

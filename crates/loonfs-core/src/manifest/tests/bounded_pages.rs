@@ -34,6 +34,7 @@ pub(super) fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow
                 name_key: NameKey::parse(&name).expect("name"),
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
+                    revision: Some(crate::test_support::revision_summary()),
                 },
                 child_inode_id: InodeId(u128::from(index as u64 + 2)),
                 child_kind: loonfs_types::InodeKind::File,
@@ -41,6 +42,13 @@ pub(super) fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(sequence),
                 delta_index: 0,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(sequence),
+                    delta_index: 0,
+                },
             })
         })
         .collect()
@@ -314,7 +322,9 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
 async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
+    // One edge's rows sort newest first.
     let expected: Vec<_> = (1..=1024)
+        .rev()
         .flat_map(|sequence| rows(1, 1, sequence))
         .collect();
     let mut segment_rows = rows(0, 1, 1);
@@ -488,7 +498,11 @@ impl SegmentBlockCache for DecodeCountingBlocks {
 async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_cache() {
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
-    let expected: Vec<_> = (1..=96).flat_map(|sequence| rows(1, 1, sequence)).collect();
+    // One edge's rows sort newest first.
+    let expected: Vec<_> = (1..=96)
+        .rev()
+        .flat_map(|sequence| rows(1, 1, sequence))
+        .collect();
     let mut segment_rows = rows(0, 1, 1);
     segment_rows.extend(expected.clone());
     segment_rows.extend(rows(2, 1024, 1));
@@ -726,6 +740,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         binding.name_key = NameKey::parse(&name).expect("name");
         binding.state = loonfs_types::format::manifest::DirentryBindingState::Bound {
             display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
+            revision: Some(crate::test_support::revision_summary()),
         };
     }
     let mut descriptor = segment(&store, &expected).await;

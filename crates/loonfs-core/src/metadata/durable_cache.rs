@@ -14,16 +14,16 @@ use std::sync::{Arc, Mutex};
 /// candidates — is composed per lookup on top.
 ///
 /// Callers filter the cached vectors by their own visible sequence and keep
-/// the newest row. A binding vector contains the manifest's rows from the
-/// newest run that has any rows for the key. That run includes the key's
-/// newest manifest row, so its rows are enough for a view at or after the
-/// manifest's head. A binding or tombstone vector contains only the newest
-/// row of the key from each WAL tail chunk, because a caller whose view is at
-/// or after the chunk's last commit keeps no other row of that chunk. Every
-/// view that shares a cache is at or after the sequence at which the durable
-/// layers were loaded (see [`super::MetadataView::with_durable_cache`]),
-/// which is at or after the manifest's head and the last commit of every WAL
-/// tail chunk.
+/// the newest row. A binding vector contains the manifest's newest row of
+/// each edge of the key, and a tombstone vector contains the manifest's
+/// newest event of the root. Those rows include the key's newest manifest
+/// row, so they're enough for a view at or after the manifest's head. A
+/// binding or tombstone vector contains only the newest row of the key from
+/// each WAL tail chunk, because a caller whose view is at or after the
+/// chunk's last commit keeps no other row of that chunk. Every view that
+/// shares a cache is at or after the sequence at which the durable layers
+/// were loaded (see [`super::MetadataView::with_durable_cache`]), which is at
+/// or after the manifest's head and the last commit of every WAL tail chunk.
 #[derive(Debug, Default)]
 pub(crate) struct DurableVisibilityCache {
     inner: Mutex<DurableVisibilityCacheInner>,

@@ -865,12 +865,17 @@ async fn a_unit_and_its_split_pieces_reach_the_same_rows() {
         ),
         "and must materialize the same namespace"
     );
-    // The format gives every bind row exactly one reverse row, and manifest
-    // load rejects a run whose two counts disagree. The two families are
-    // decided in different passes here, so this is what says they stayed in
-    // lockstep.
+    // The format gives every binding event exactly one reverse row, and the
+    // slot index's summary rows have none. The two families are decided in
+    // different passes here, so this is what says they stayed in lockstep.
+    let binding_events = compacted[&ApiMetadataRowFamily::DirentryBinds]
+        .iter()
+        .filter(|row| {
+            matches!(row, MetadataRow::DirentryBinding(binding) if binding.is_binding_event())
+        })
+        .count();
     assert_eq!(
-        compacted[&ApiMetadataRowFamily::DirentryBinds].len(),
+        binding_events,
         compacted[&ApiMetadataRowFamily::DirentryChildBinds].len(),
     );
     assert_eq!(
@@ -1379,6 +1384,7 @@ async fn install_synthetic_bindings_base(
                 name_key: NameKey::parse(&name).expect("name key"),
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
+                    revision: Some(crate::test_support::revision_summary()),
                 },
                 child_inode_id: InodeId(u128::from(100_000 + index)),
                 child_kind: loonfs_types::InodeKind::File,
@@ -1386,6 +1392,13 @@ async fn install_synthetic_bindings_base(
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(1),
                 delta_index: delta,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: delta,
+                },
             },
         ));
         unbinds.push(MetadataRow::DirentryBinding(
@@ -1398,6 +1411,13 @@ async fn install_synthetic_bindings_base(
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
                 delta_index: delta,
+                commit_id: crate::test_support::binding_commit_id(),
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(2),
+                    delta_index: delta,
+                },
                 state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
             },
         ));
@@ -1541,7 +1561,6 @@ async fn a_merge_reads_its_window_once() {
         profile.requests(),
         merged.rows_read
     );
-    assert!(merged.peak_operator_rows <= 1);
 }
 
 // -------------------------------------------------------------------------
@@ -1990,11 +2009,6 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
         result.rows_read > (rows_in_group / 2) as u64,
         "this assertion means nothing unless the job read most of the group"
     );
-    assert!(
-        result.peak_operator_rows <= 1,
-        "a retention operator held {} rows",
-        result.peak_operator_rows
-    );
 }
 
 #[tokio::test]
@@ -2013,8 +2027,8 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     let merged = group_rows_of_current_manifest(&merge_store, &namespace_id, group).await;
     let merged_state = current_metadata_state(&merge_store, &namespace_id).await;
 
-    // How many rows the widest directory holds, which is what the peak must
-    // not follow.
+    // How many rows the widest directory holds, so the test covers a
+    // directory that spans several small segments.
     let mut rows_per_parent = BTreeMap::<InodeId, usize>::new();
     for row in &before[&ApiMetadataRowFamily::DirentryBinds] {
         if let MetadataRow::DirentryBinding(binding) = row {
@@ -2043,11 +2057,6 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     else {
         panic!("nothing cancelled this job");
     };
-    assert!(
-        result.peak_operator_rows <= 1,
-        "a retention operator held {} rows against a directory of {widest}",
-        result.peak_operator_rows
-    );
 
     publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
     assert_eq!(

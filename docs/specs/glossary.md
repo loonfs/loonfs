@@ -80,7 +80,7 @@ The link between a parent directory, a name, and a child inode, which places an 
 
 ### Binding version
 
-An opaque token that identifies an item's current directory binding. Moving, renaming, or undeleting an item produces a new binding version. Clients pass it as a precondition on moves and deletes, so the change fails if the item was moved or renamed after the client read it.
+An opaque token that identifies an item's current directory binding. It encodes the position of the bind that established the binding (the binding rows' `bind_position`), so moving, renaming, or undeleting an item produces a new binding version, and writing the item's content or attributes doesn't. Clients pass it as a precondition on moves and deletes, so the change fails if the item was moved or renamed after the client read it.
 
 ### Path
 
@@ -97,6 +97,10 @@ The value LoonFS uses to compare and look up sibling names, the same way in ever
 ### Revision
 
 One committed version of a file's contents. Each file revision is assigned a monotonically increasing number that's scoped to its file, so revision numbers are unrelated to the namespace's sequence numbers.
+
+### Revision summary
+
+The fields of a file's current revision that a directory listing reports: the revision number, the size, and the actor and time of the commit that published the revision. LoonFS copies the summary into the bound rows of the file's directory binding. A bind of a file includes it, and each new revision writes a "summary row" under the file's binding with the new summary, so a listing reads the summary from the binding rows instead of from the file's revisions. The summary doesn't include the content reference. See [Directory bindings](format.md#13-directory-bindings).
 
 ### Tombstone
 

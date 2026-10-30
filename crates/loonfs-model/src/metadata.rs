@@ -4,7 +4,9 @@
 //! Inodes, file revisions, tombstones, and stored attribute and access revisions copy
 //! the commit ID, actor, and timestamp from the WAL. Directory bindings do
 //! not copy the child's kind or attribution; the model reads both from the
-//! child's inode row. The initial root inode uses
+//! child's inode row. The model stores no revision summary under a binding,
+//! and no summary row for a revision, so it reads a file's current revision
+//! from the file's revision rows. The initial root inode uses
 //! `ActorId::loonfs()`, and the initial empty attribute state has no
 //! actor or timestamp because it is not stored as a revision.
 
@@ -230,7 +232,7 @@ impl MetadataState {
                     revision_no,
                     content_ref,
                     layout,
-                    append_offset: _,
+                    ..
                 } => {
                     if let Some(layout) = layout {
                         metadata_state.content_layouts.push(ContentLayoutRecord {
@@ -420,6 +422,12 @@ mod tests {
                     child_kind: loonfs_types::InodeKind::File,
                     child_created_by: loonfs_types::ActorId::loonfs(),
                     child_created_at_ms: 4_200,
+                    revision: Some(loonfs_types::format::manifest::RevisionSummary {
+                        revision_no: RevisionNo(1),
+                        size_bytes: 0,
+                        revision_committed_by: loonfs_types::ActorId::loonfs(),
+                        revision_committed_at_ms: 4_200,
+                    }),
                 }],
             )
             .expect("a single bind should keep the bindings consistent");

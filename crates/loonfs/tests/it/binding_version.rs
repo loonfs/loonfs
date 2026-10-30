@@ -4,6 +4,8 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_types::FilesystemChange;
 use tempfile::tempdir;
 
+/// Checks that a file's binding version, as a stat and a listing report it,
+/// stays the same across a content write and changes on a move.
 #[test]
 fn binding_version_changes_on_move_but_not_content_update() {
     let temp_dir = tempdir().expect("tempdir");
@@ -49,6 +51,17 @@ fn binding_version_changes_on_move_but_not_content_update() {
             .binding_version,
         Some(created.clone()),
         "new content does not rebind the name"
+    );
+    // The listing reads the summary row that the second revision wrote
+    // under the file's binding, which keeps the bind's version.
+    assert_eq!(
+        fs.list_path_blocking(&namespace_id, "/docs")
+            .expect("list the parent directory")
+            .first()
+            .expect("the file is the directory's only child")
+            .binding_version,
+        Some(created.clone()),
+        "a listing after new content reports the same version"
     );
 
     let moved_at = fs

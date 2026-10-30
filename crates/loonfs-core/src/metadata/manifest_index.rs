@@ -63,116 +63,177 @@ pub(crate) async fn commits_after_page<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-pub(super) struct ManifestDirentryBindCandidate {
-    pub(super) row_key: String,
-    pub(super) record: DirentryBindingRecord,
-}
-
-pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Sized>(
+/// One page of a directory's `direntry_binds` rows from `lower_bound`, with
+/// each row's stored key.
+///
+/// The scan probes each segment's filter with the parent's probe, so it
+/// skips the segments of a run that has no row under the parent.
+pub(crate) async fn direntry_binds_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
-    start_after_name_key: Option<&NameKey>,
-    start_after_row_key: Option<&str>,
+    lower_bound: &str,
     limit: usize,
-) -> Result<Vec<ManifestDirentryBindCandidate>> {
-    let parent_prefix = lookup_keys::direntry_parent_prefix(parent_inode_id);
-    let lower_bound = if let Some(row_key) = start_after_row_key {
-        lookup_keys::after_row_key(row_key)
-    } else if let Some(name_key) = start_after_name_key {
-        let exact_name_prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key);
-        string_prefix_upper_bound(&exact_name_prefix).unwrap_or(exact_name_prefix)
-    } else {
-        parent_prefix.clone()
-    };
-    let upper_bound = string_prefix_upper_bound(&parent_prefix);
+) -> Result<Vec<(String, DirentryBindingRecord)>> {
+    let upper_bound =
+        string_prefix_upper_bound(&lookup_keys::direntry_parent_prefix(parent_inode_id));
     segments
-        .scan_range_page_with_keys(
+        .scan_range_page_with_keys_for_lookup(
             MetadataRowFamily::DirentryBinds,
-            &lower_bound,
+            lower_bound,
             upper_bound.as_deref(),
             limit,
+            &lookup_keys::direntry_parent_probe(parent_inode_id),
         )
         .await?
         .into_iter()
-        .map(|(row_key, row)| {
-            Ok(ManifestDirentryBindCandidate {
-                record: direntry_binding_from_manifest_row(row)?,
-                row_key,
-            })
-        })
+        .map(|(row_key, row)| Ok((row_key, direntry_binding_from_manifest_row(row)?)))
         .collect()
 }
 
-/// The versions of one directory slot that its newest version at
-/// `visible_seq` can be among.
+/// The first row at or below `visible_seq` of each edge of one directory
+/// slot, which the slot's value at that sequence is among.
 pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
     name_key: &NameKey,
     visible_seq: ChangeSeq,
 ) -> Result<Vec<DirentryBindingRecord>> {
-    newest_fact_rows(
+    newest_edge_rows(
         segments,
         MetadataRowFamily::DirentryBinds,
         &lookup_keys::direntry_bind_prefix(parent_inode_id, name_key),
         &lookup_keys::direntry_bind_probe(parent_inode_id, name_key),
+        slot_edge_end,
         Readahead::Disabled,
         visible_seq,
     )
-    .await?
-    .into_iter()
-    .map(direntry_binding_from_manifest_row)
-    .collect()
+    .await
 }
 
-/// The binding versions of one child that its newest binding at
-/// `visible_seq` can be among.
+/// The first binding event at or below `visible_seq` of each edge of one
+/// child, which the child's binding at that sequence is among.
 pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     child_inode_id: InodeId,
     visible_seq: ChangeSeq,
 ) -> Result<Vec<DirentryBindingRecord>> {
-    newest_fact_rows(
+    newest_edge_rows(
         segments,
         MetadataRowFamily::DirentryChildBinds,
         &lookup_keys::direntry_child_prefix(child_inode_id),
         &lookup_keys::direntry_child_probe(child_inode_id),
+        child_edge_end,
         Readahead::Enabled,
         visible_seq,
     )
-    .await?
-    .into_iter()
-    .map(direntry_binding_from_manifest_row)
-    .collect()
+    .await
 }
 
-/// The rows of `prefix` that its newest fact at `visible_seq` can be among:
-/// the rows of the newest run that has any, when the read sees every row of
-/// the manifest, and the rows of every run otherwise.
-async fn newest_fact_rows<S: ObjectStore + ?Sized>(
+/// Rows one page of an edge walk reads. An edge's first row at or below the
+/// read's sequence is usually the edge's first row, so a page covers a few
+/// edges, and an edge with more rows costs one more page.
+const EDGE_WALK_PAGE_ROWS: usize = 16;
+
+/// Returns the key just past every row of `record`'s edge in the slot index,
+/// where a scan that has read the edge's value resumes.
+pub(crate) fn slot_edge_end(record: &DirentryBindingRecord) -> String {
+    let edge_prefix = lookup_keys::direntry_bind_edge_prefix(
+        record.parent_inode_id,
+        &record.name_key,
+        record.child_inode_id,
+    );
+    string_prefix_upper_bound(&edge_prefix).expect("an edge prefix should end in a hyphen")
+}
+
+/// Returns the key just past every row of `record`'s edge in the child index.
+fn child_edge_end(record: &DirentryBindingRecord) -> String {
+    let edge_prefix = lookup_keys::direntry_child_bind_edge_prefix(
+        record.child_inode_id,
+        record.parent_inode_id,
+        &record.name_key,
+    );
+    string_prefix_upper_bound(&edge_prefix).expect("an edge prefix should end in a hyphen")
+}
+
+/// The first row at or below `visible_seq` of each edge under `prefix`, in
+/// key order.
+///
+/// Both binding families sort an edge's rows newest first, so the walk takes
+/// an edge's first row at or below the sequence and then starts its next
+/// page past the edge, without reading the edge's older rows. A file whose
+/// edge has ten thousand summary rows costs one row to resolve.
+///
+/// A read that sees every row of the manifest reads the newest run that has
+/// a row in the remaining range, as
+/// [`VerifiedMetadataSegments::scan_prefix_in_newest_run_for_lookup`]
+/// describes, and a read below a run's sequence merges every run.
+async fn newest_edge_rows<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     family: MetadataRowFamily,
     prefix: &str,
     filter_probe: &str,
+    edge_end: fn(&DirentryBindingRecord) -> String,
     readahead: Readahead,
     visible_seq: ChangeSeq,
-) -> Result<Vec<MetadataRow>> {
-    let rows = if segments.every_row_is_visible_at(visible_seq) {
-        segments
-            .scan_prefix_in_newest_run_for_lookup(
-                family,
-                prefix,
-                filter_probe,
-                usize::MAX,
-                readahead,
-            )
-            .await?
-    } else {
-        segments
-            .scan_prefix_for_lookup(family, prefix, filter_probe, readahead)
-            .await?
-    };
-    Ok(rows)
+) -> Result<Vec<DirentryBindingRecord>> {
+    let newest_run_only = segments.every_row_is_visible_at(visible_seq);
+    let upper_bound = string_prefix_upper_bound(prefix);
+    let mut lower_bound = prefix.to_owned();
+    let mut edges: Vec<DirentryBindingRecord> = Vec::new();
+    loop {
+        let page = if newest_run_only {
+            segments
+                .scan_prefix_in_newest_run_for_lookup(
+                    family,
+                    prefix,
+                    &lower_bound,
+                    filter_probe,
+                    EDGE_WALK_PAGE_ROWS,
+                    readahead,
+                )
+                .await?
+        } else {
+            segments
+                .scan_range_page_with_keys_for_lookup(
+                    family,
+                    &lower_bound,
+                    upper_bound.as_deref(),
+                    EDGE_WALK_PAGE_ROWS,
+                    filter_probe,
+                )
+                .await?
+        };
+        let full = page.len() == EDGE_WALK_PAGE_ROWS;
+        let Some(mut next_lower_bound) = page
+            .last()
+            .map(|(row_key, _)| lookup_keys::after_row_key(row_key))
+        else {
+            break;
+        };
+        let mut read_edge_end: Option<String> = None;
+        for (row_key, row) in page {
+            if read_edge_end
+                .as_deref()
+                .is_some_and(|end| row_key.as_str() < end)
+            {
+                continue;
+            }
+            let record = direntry_binding_from_manifest_row(row)?;
+            if record.committed_seq > visible_seq {
+                continue;
+            }
+            read_edge_end = Some(edge_end(&record));
+            edges.push(record);
+        }
+        if !full {
+            break;
+        }
+        if let Some(end) = read_edge_end {
+            next_lower_bound = next_lower_bound.max(end);
+        }
+        lower_bound = next_lower_bound;
+    }
+    Ok(edges)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,10 +264,12 @@ pub(super) async fn latest_revision_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
 ) -> Result<Option<RevisionRecord>> {
+    let prefix = lookup_keys::revision_prefix(inode_id);
     segments
         .scan_prefix_in_newest_run_for_lookup(
             MetadataRowFamily::Revisions,
-            &lookup_keys::revision_prefix(inode_id),
+            &prefix,
+            &prefix,
             &lookup_keys::revision_probe(inode_id),
             1,
             Readahead::Enabled,
@@ -214,7 +277,7 @@ pub(super) async fn latest_revision_by_inode<S: ObjectStore + ?Sized>(
         .await?
         .into_iter()
         .next()
-        .map(revision_from_manifest_row)
+        .map(|(_, row)| revision_from_manifest_row(row))
         .transpose()
 }
 
@@ -298,23 +361,23 @@ pub(super) async fn active_deletions_page<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
+/// The root's newest tombstone event at or below `visible_seq`, which
+/// decides whether the root hides its subtree at that sequence.
+pub(super) async fn newest_tombstone_for_root<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     root_inode_id: InodeId,
-) -> Result<Vec<SubtreeTombstoneRecord>> {
-    let filter_probe = lookup_keys::tombstone_probe(root_inode_id);
-    let prefix = lookup_keys::tombstone_prefix(root_inode_id);
-    segments
-        .scan_prefix_for_lookup(
-            MetadataRowFamily::Tombstones,
-            &prefix,
-            &filter_probe,
-            Readahead::Enabled,
-        )
-        .await?
-        .into_iter()
-        .map(tombstone_from_manifest_row)
-        .collect()
+    visible_seq: ChangeSeq,
+) -> Result<Option<SubtreeTombstoneRecord>> {
+    newest_row_by_inode(
+        segments,
+        MetadataRowFamily::Tombstones,
+        lookup_keys::tombstone_prefix(root_inode_id),
+        lookup_keys::tombstone_probe(root_inode_id),
+        visible_seq,
+        tombstone_from_manifest_row,
+        |record| record.committed_seq,
+    )
+    .await
 }
 
 pub(super) async fn content_layout<S: ObjectStore + ?Sized>(
@@ -413,10 +476,11 @@ pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// The newest whole-state row of `inode_id` at or below `visible_seq` in
-/// a family whose keys invert the revision, the sequence, and the delta
-/// index, so an ascending prefix scan reads one inode's rows newest first
-/// and the first row at or below the sequence is the result.
+/// The newest row of `inode_id` at or below `visible_seq` in a family whose
+/// keys sort one inode's rows newest first (a whole-state family, which
+/// inverts the revision, the sequence, and the delta index, or
+/// `tombstones`, which inverts the sequence and the delta index), so the
+/// first row at or below the sequence is the result.
 ///
 /// A read that sees every row of the manifest takes the first row of the
 /// newest run that has one. A read below a run's sequence merges every run,
@@ -438,6 +502,7 @@ where
             .scan_prefix_in_newest_run_for_lookup(
                 family,
                 &prefix,
+                &prefix,
                 &filter_probe,
                 1,
                 Readahead::Enabled,
@@ -445,7 +510,7 @@ where
             .await?
             .into_iter()
             .next()
-            .map(decode)
+            .map(|(_, row)| decode(row))
             .transpose();
     }
     let upper_bound = string_prefix_upper_bound(&prefix);

@@ -676,13 +676,23 @@ async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_curre
         builder.push_direntry_binding(crate::metadata::DirentryBindingRecord {
             parent_inode_id,
             name_key: loonfs_types::NameKey::for_display_name(&display_name),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                display_name,
+                revision: None,
+            },
             child_inode_id,
             child_kind: InodeKind::Directory,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 1_000,
             committed_seq: ChangeSeq(1),
             delta_index: 0,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(1),
+                delta_index: 0,
+            },
         });
     }
     let segments = crate::test_support::namespace_store(&store, &namespace_id)

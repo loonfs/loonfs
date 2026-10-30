@@ -2040,7 +2040,10 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
-        max_decoded_input_rows_per_step: NonZeroUsize::new(6)
+        // The bindings rows of the two oldest runs: the directory's bind
+        // and the first file's bind in both indexes, and two files' summary
+        // rows and the second file's bind in both indexes.
+        max_decoded_input_rows_per_step: NonZeroUsize::new(8)
             .expect("test row budget should be nonzero"),
         ..MetadataRunPolicy::default()
     };

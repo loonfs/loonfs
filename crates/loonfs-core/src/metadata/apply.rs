@@ -6,9 +6,9 @@ use super::{
     DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     TombstoneRowAction,
 };
-use loonfs_types::format::manifest::DirentryBindingState;
+use loonfs_types::format::manifest::{DeltaPosition, DirentryBindingState, RevisionSummary};
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta};
-use loonfs_types::{ActorId, ChangeSeq, CommitId};
+use loonfs_types::{ActorId, ChangeSeq, CommitId, InodeKind};
 
 impl MetadataState {
     pub fn apply_committed_wal_deltas(
@@ -88,6 +88,7 @@ impl MetadataState {
                 child_kind,
                 child_created_by,
                 child_created_at_ms,
+                revision,
             } => {
                 self.push_direntry_binding_record(DirentryBindingRecord {
                     parent_inode_id: *parent_inode_id,
@@ -98,8 +99,16 @@ impl MetadataState {
                     child_created_at_ms: *child_created_at_ms,
                     committed_seq,
                     delta_index: *delta_index,
+                    commit_id: commit_id.clone(),
+                    committed_by: actor.clone(),
+                    committed_at_ms,
+                    bind_position: DeltaPosition {
+                        seq: committed_seq,
+                        delta_index: *delta_index,
+                    },
                     state: DirentryBindingState::Bound {
                         display_name: display_name.clone(),
+                        revision: revision.clone(),
                     },
                 });
             }
@@ -111,6 +120,7 @@ impl MetadataState {
                 child_kind,
                 child_created_by,
                 child_created_at_ms,
+                target,
                 ..
             } => {
                 self.push_direntry_binding_record(DirentryBindingRecord {
@@ -122,12 +132,22 @@ impl MetadataState {
                     child_created_at_ms: *child_created_at_ms,
                     committed_seq,
                     delta_index: *delta_index,
+                    commit_id: commit_id.clone(),
+                    committed_by: actor.clone(),
+                    committed_at_ms,
+                    bind_position: *target,
                     state: DirentryBindingState::Unbound,
                 });
             }
             WalDelta::AppendFileRevision {
                 delta_index,
                 inode_id,
+                parent_inode_id,
+                name_key,
+                display_name,
+                bind_position,
+                child_created_by,
+                child_created_at_ms,
                 revision_no,
                 content_ref,
                 layout,
@@ -151,6 +171,31 @@ impl MetadataState {
                     committed_by: actor.clone(),
                     delta_index: *delta_index,
                     content_ref: content_ref.clone(),
+                });
+                // The summary row of the file's edge, which the slot index
+                // stores and the child index doesn't.
+                self.push_direntry_binding_record(DirentryBindingRecord {
+                    parent_inode_id: *parent_inode_id,
+                    name_key: name_key.clone(),
+                    child_inode_id: *inode_id,
+                    child_kind: InodeKind::File,
+                    child_created_by: child_created_by.clone(),
+                    child_created_at_ms: *child_created_at_ms,
+                    committed_seq,
+                    delta_index: *delta_index,
+                    commit_id: commit_id.clone(),
+                    committed_by: actor.clone(),
+                    committed_at_ms,
+                    bind_position: *bind_position,
+                    state: DirentryBindingState::Bound {
+                        display_name: display_name.clone(),
+                        revision: Some(RevisionSummary {
+                            revision_no: *revision_no,
+                            size_bytes: content_ref.size_bytes,
+                            revision_committed_by: actor.clone(),
+                            revision_committed_at_ms: committed_at_ms,
+                        }),
+                    },
                 });
             }
             WalDelta::TombstoneSubtree {

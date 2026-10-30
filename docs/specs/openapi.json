@@ -3591,7 +3591,7 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "The file's current content."
+            "description": "The file's current content. It's present on entry reads (a stat by\npath or by inode) and absent from directory listings."
           },
           "created_at_ms": {
             "description": "The time the inode was created, in Unix milliseconds.",
@@ -3658,7 +3658,6 @@
         "required": [
           "revision_no",
           "size_bytes",
-          "content_ref",
           "revision_committed_by",
           "revision_committed_at_ms",
           "inode_kind",

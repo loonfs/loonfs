@@ -1402,7 +1402,7 @@ Returns one authoritative path entry, addressed by path or by inode ID. Enum val
 }
 ```
 
-Every entry includes `created_by` and `created_at_ms` from its inode row. File entries also include `revision_committed_by` and `revision_committed_at_ms` from their current revision row. These stamps are informational. Sequence numbers determine order, and no validity rule reads the stamps. In v0, directories have a creation time but no modification time, and a rename or move changes neither the attribution nor the time.
+Every entry includes `created_by` and `created_at_ms` from its inode row. File entries also include `revision_committed_by` and `revision_committed_at_ms` from their current revision row, and `content_ref`, the current revision's content reference. The `content_ref` field is present on entry reads, which are these two routes, and a directory listing leaves it out (see [`GET /filesystem/entries`](#65-get-filesystementries-and-get-inodesinode_idchildren)). These stamps are informational. Sequence numbers determine order, and no validity rule reads the stamps. In v0, directories have a creation time but no modification time, and a rename or move changes neither the attribution nor the time.
 
 A newer server might report an `inode_kind` that this document doesn't define. A client MUST tolerate an `inode_kind` it doesn't know. It treats such an entry as opaque, so it reads the fields that every entry includes (such as `display_name`, `inode_id`, `path`, and `binding_version`) and ignores any field that belongs to that kind.
 
@@ -1422,7 +1422,7 @@ Why are the attribute fields siblings of the entry's other fields, instead of on
 
 ### 6.5 `GET /filesystem/entries` and `GET /inodes/{inode_id}/children`
 
-Lists the children of a directory, or, with `recursive=true`, its whole subtree, addressed by path or by inode ID. The response envelope identifies the listing target and the head the listing was read from, so an empty directory still reports which state it observed, and the response can grow without changing the shape of `entries`. The path route identifies its target as `path`, and the inode route identifies it as `parent_inode_id`. Each entry is a full path entry, in the same shape that `GET /filesystem/entry` returns (directory entries omit file-only fields).
+Lists the children of a directory, or, with `recursive=true`, its whole subtree, addressed by path or by inode ID. The response envelope identifies the listing target and the head the listing was read from, so an empty directory still reports which state it observed, and the response can grow without changing the shape of `entries`. The path route identifies its target as `path`, and the inode route identifies it as `parent_inode_id`. Each entry has the shape that `GET /filesystem/entry` returns (directory entries omit file-only fields), except that a file entry leaves out `content_ref`. A listing reports each file's `revision_no`, `size_bytes`, `revision_committed_by`, and `revision_committed_at_ms` from the file's directory binding, so it reads no revision of any file. A client that needs a file's content reference reads the file's entry.
 
 A directory listing returns entries in canonical `name_key` order, and a recursive listing returns them in the depth-first order described below. Concatenating the pages in cursor order produces the complete listing in that same order, and clients MUST NOT re-sort the combined pages. The listing target is required on every page (the `path` query parameter on the path route, or the `inode_id` route segment on the inode route). The cursor records the resume position, but the request target determines what's being listed. Responses include `next_cursor` only when another page is available.
 
@@ -1468,17 +1468,11 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
       "head_seq": 418,
       "parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
       "display_name": "report.txt",
+      "binding_version": "opaque-token",
       "revision_no": 7,
       "revision_committed_by": "render-worker",
       "revision_committed_at_ms": 1752624000000,
-      "size_bytes": 19482,
-      "content_ref": {
-        "kind": "blob_v1",
-        "owner_namespace_id": "demo",
-        "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
-        "size_bytes": 19482,
-        "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
-      }
+      "size_bytes": 19482
     },
     {
       "namespace_id": "demo",
@@ -1489,12 +1483,15 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
       "inode_kind": "dir",
       "head_seq": 418,
       "parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
-      "display_name": "slides"
+      "display_name": "slides",
+      "binding_version": "opaque-token"
     }
   ],
   "next_cursor": "7b2e2e2e7d"
 }
 ```
+
+Why doesn't a listing report a file's content reference? A listing reads each file's revision summary from the file's directory binding, where LoonFS copies the summary each time the file gets a new revision. The copy leaves out the content reference, so a listing of a large directory reads small binding rows and no revision rows. Downloads and content reads return the reference with the bytes, and a client that needs the reference without the bytes reads the file's entry.
 
 Why does a recursive listing walk depth first? A depth-first walk's position is one name key per level, so the cursor stays small. A breadth-first walk would need the cursor to record every directory it has found but not listed yet, and that list grows with the width of the tree.
 

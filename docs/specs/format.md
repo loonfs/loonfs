@@ -85,23 +85,43 @@ The directory state at sequence 18 and the file's contents at sequence 19 are re
 
 ### 1.3 Directory bindings
 
-A "directory binding" places an item in the tree. It links a "directory slot", which is a parent inode and a name key (`parent_inode_id`, `name_key`), to one child inode. A slot is either bound to a child or unbound. A bound slot stores:
+A "directory binding" places an item in the tree. It links a "directory slot", which is a parent inode and a name key (`parent_inode_id`, `name_key`), to one child inode. A parent, a name key, and a child together are an "edge". A slot is either bound to a child or unbound. A bound slot stores:
 
-- the display name (`display_name`), exactly as the caller provided it, and
-- the child's kind and creation attribution, which never change for the life of the inode.
+- the display name (`display_name`), exactly as the caller provided it,
+- the child's kind and creation attribution, which never change for the life of the inode, and
+- for a file, a "revision summary" (`revision`) of the file's current revision: its revision number, its size, and the actor and time of the commit that published it.
 
 LoonFS compares sibling names by their name key, which is derived from the display name (see [Names and paths](#14-names-and-paths)).
 
-Each binding change writes a directory binding row (`direntry_binding`). The row records its own position in the namespace history: the sequence number of its commit (`committed_seq`) and its position within that commit (`delta_index`). To find a slot's value at sequence `N`, a reader takes the slot's row with the greatest position whose sequence is at or below `N`. If that row is unbound, or the slot has no such row, the name is available. When one commit changes a slot more than once, the last change wins.
+Each binding change writes a directory binding row (`direntry_binding`). The row records its position in the namespace history: the sequence number of its commit (`committed_seq`) and its position within that commit (`delta_index`). Like every history row, it also records its commit's ID, actor, and time (`commit_id`, `committed_by`, `committed_at_ms`). The row also stores the position of the bind that established the edge's current binding (`bind_position`). A bind row's `bind_position` is its own position, and an unbind row's `bind_position` is the position of the bind that it removes.
 
-LoonFS stores the same binding rows in two indexes, so it can look them up from either side:
+LoonFS stores binding rows in two indexes, so it can look them up from either side:
 
-- `direntry_binds` orders the rows by slot, to find the child at a name.
-- `direntry_child_binds` orders the rows by child, to find a child's current parent (using the same rule).
+- `direntry_binds`, the "slot index", orders the rows by parent, name key, and child, to find the child at a name and to list a directory.
+- `direntry_child_binds`, the "child index", orders the rows by child, parent, and name key, to find a child's current parent.
+
+Both indexes sort one edge's rows newest first. An edge's value at sequence `N` is the first of its rows, in key order, whose `committed_seq` is at or below `N`, so at the head it's the edge's first row. A slot's value at `N` is the newest of its edges' values, and a child's binding at `N` is the newest of its edges' values in the child index. If a slot's value is unbound, or the slot has no row at or below `N`, the name is available. When one commit changes an edge more than once, the last change wins.
+
+Two kinds of delta write rows to the slot index:
+
+1. A bind (`bind_direntry`) writes a bound row to both indexes, and an unbind (`unbind_direntry`) writes an unbound row to both. These rows are "binding events". A bind of a file includes the file's current revision summary, and the bound row stores that summary.
+2. A file revision (`append_file_revision`) writes the revision's row to `revisions`, and a bound row under the file's current edge to the slot index alone. This "summary row" copies the edge's display name and the file's creation attribution, keeps the edge's `bind_position`, and stores the new revision's summary. Its position is the revision delta's position, so a summary row is a bound row whose position isn't its `bind_position`.
+
+So the child index stores the binding events, and the slot index stores the same binding events and the summary rows. Every revision has a current edge to write under, because LoonFS refuses a revision of a file that has no current binding (a deleted or disconnected file). When one commit binds a file and writes its revision, both deltas write a slot-index row with the same summary, and the later delta wins.
 
 Commit validation allows at most one child per slot and at most one parent per child. A bind MUST refer to a child that has no current binding, unless the same operation removes that binding first. A move removes the child's old binding before it binds the new one. Because of these rules, the two indexes agree at every read sequence.
 
-A bind writes a bound value to both indexes. An unbind writes an unbound value to both, with the parent, name key, and child from its WAL delta. The WAL delta also identifies the bind it removes, by sequence and delta index, and validation checks that this bind is the current binding. (The materialized row stores only the unbind's own position.) An unbound value acts as a tombstone for older values of its slot or child, and [Row retention during a base compaction](#103-row-retention-during-a-base-compaction) defines when it can be removed.
+The unbind's WAL delta identifies the bind it removes, by sequence and delta index, and validation checks that this bind is the current binding. An unbound value acts as a tombstone for older values of its edge, and [Row retention during a base compaction](#103-row-retention-during-a-base-compaction) defines when it can be removed. The API's binding version encodes a binding's `bind_position`, so writing a file's content doesn't change its binding version, and moving the file does.
+
+A directory listing scans the parent's prefix of the slot index once, in name order. For each edge, it takes the edge's first row at or below the read's sequence and then skips the edge's older rows. A bound value is an entry, and an unbound value is nothing. A file's entry reports the revision number, size, and revision attribution from the row's revision summary, and the child's kind and creation attribution from the row, so the listing reads no revision row and no inode row. A bound file row without a revision summary is corrupt.
+
+For example, suppose `/docs/a.txt` is bound at sequence 10 and written at sequences 12 and 15, and `/docs/b.txt` is bound at sequence 11 and unbound at sequence 14. In key order, the slot index stores `a.txt`'s summary rows at 15 and 12 and its bind at 10, and then `b.txt`'s unbind at 14 and its bind at 11. A listing at sequence 13 reports `a.txt` with the revision written at 12 and `b.txt` from its bind at 11. A listing at the head reports `a.txt` with the revision written at 15, and nothing for `b.txt`.
+
+Why does the binding row copy the revision summary? A listing reports each file's current revision. If it read the revision from `revisions`, it would make one lookup for each file, keyed by the file's inode ID, in rows stored far from the directory's binding rows. The delta that changes a file's current revision writes the copy in the same commit, so the copy can't fall behind the revision, and a read at any sequence finds the summary as of that sequence. The copy leaves out the content reference, which a stat reads from `revisions`.
+
+Why do histories sort newest first? A read wants an edge's newest value at or below its sequence. With the newest row first, that's the first row at or below the sequence, so the read stops there instead of reading the edge's older rows. This matters most in the slot index, where a file that was written ten thousand times has ten thousand summary rows under its edge until retention removes the old ones.
+
+Why does a `direntry_binds` filter contain a parent probe? Each fold writes one run that covers every directory that its commits changed, so a run's `direntry_binds` segment can cover a directory's key range without containing any of its rows. The segment's filter contains the probe `direntry-bind-{parent_inode_id_body}` of each parent that has rows in the segment (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)), so a listing skips such a segment after reading its filter, without reading its index or data.
 
 ### 1.4 Names and paths
 
@@ -570,9 +590,9 @@ For example, after another writer takes over the namespace, an `eventual` read i
 
 At sequence `N`, a reader ignores events after `N`. A visible inode MUST have been created at or before `N`, and it MUST NOT be hidden by a tombstone on itself or on an ancestor. A tombstone hides its root and the root's descendants at `N` when its latest event at or below `N` is a `set` (see [File and subtree deletion](#16-file-and-subtree-deletion)). For example, a file in a directory whose deletion has expired stays hidden, even though nobody can undelete the directory anymore.
 
-A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version identifies the child, and an unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index.
+A directory edge's value at `N` is its first row in key order at or below `N`, which is its newest row at or below `N`, because each edge's rows sort newest first. A slot's value is the newest of its edges' values. A bound value identifies the child, and an unbound value, or no value, means the slot is empty. Parent lookup applies the same rule to the child index.
 
-Resolving a path takes one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created at or before `N` and no tombstone hides it. Each binding row includes a copy of the child inode's kind and creation attribution. Those never change for the life of an inode, so listings and path resolution read them from the binding instead of from the child's inode row. User pins apply these rules through their pinned manifests, at their captured sequences.
+Resolving a path takes one slot-index lookup per component, and a lookup reads each edge of the slot as far as the edge's first row at or below `N`. A listing reads the parent's binding rows alone, in one scan of the parent's prefix in name order. It takes each edge's value and includes a bound entry if no tombstone hides the child. Each binding row includes a copy of the child inode's kind and creation attribution, which never change for the life of an inode, and a bound file row includes the file's revision summary at the row's sequence (see [Directory bindings](#13-directory-bindings)). So listings and path resolution don't read the child's inode row, a listing doesn't read the file's revision rows, and a listing reports no content reference. User pins apply these rules through their pinned manifests, at their captured sequences.
 
 A file's current content is its latest revision committed at or before `N`. Its attributes are the latest applicable complete attribute revision, or the initial empty map when there's no applicable attribute row. Listing recoverable deletions uses the derived active-deletion state, while evaluating a tombstone at a past sequence uses the tombstone events.
 
@@ -580,7 +600,7 @@ A file's current content is its latest revision committed at or before `N`. Its 
 
 A reader resolves a path from the root directory's inode. It maps each component to its name key (see [Names and paths](#14-names-and-paths)) and follows the active binding. If a component isn't visible, the path doesn't exist. (The current format has no mount points to traverse.)
 
-A directory listing resolves the visible child bindings, and it uses committed revision metadata for file sizes and content-reference summaries. It MUST NOT fetch and verify every file's content object just to list a directory.
+A directory listing reads the parent's binding rows in one scan, and it reports each file's revision number, size, and revision attribution from the revision summary in the file's binding row. It doesn't report a file's content reference, which a read of the file's entry by path or by inode returns. It MUST NOT fetch and verify every file's content object just to list a directory.
 
 A path-based revision read first resolves the current inode at that path, and then it looks up the requested revision of that inode. It isn't a request for every file that has ever been at the path. An inode-based revision read reads the retained history of that inode directly, so it can read a file that has no current path, such as a file under a recoverable deletion.
 
@@ -906,9 +926,9 @@ The WAL stores the resulting metadata changes ("deltas"), not the original reque
 | Delta | Records |
 | --- | --- |
 | `create_inode` | A new inode. |
-| `bind_direntry` | A new directory binding. |
+| `bind_direntry` | A new directory binding, with the file's current revision summary when the child is a file. |
 | `unbind_direntry` | A removed directory binding. |
-| `append_file_revision` | A new file revision. |
+| `append_file_revision` | A new file revision, with the file's current binding, under which replay writes the revision's summary row. |
 | `tombstone_subtree` | A deletion (a tombstone `set` event). |
 | `revoke_subtree_tombstone` | An undelete (a tombstone `revoke` event). |
 | `append_attributes_revision` | A new attribute revision. |
@@ -1314,7 +1334,7 @@ These rules apply only when the selected inputs include the group's oldest run. 
 | Family | Rows kept or removed |
 | --- | --- |
 | `inodes` | Keep every inode row, except the row of an inode that an expired deletion hides (see below). |
-| `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child), keep every version above the floor and the newest version at or below it. Drop that floor version too if it's unbound. Remove every version of an edge whose parent an expired deletion hides. |
+| `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child) and each kind of row (binding events, and the summary rows that the slot index alone stores), keep every row above the floor and the newest row at or below it. If the edge's newest binding event at or below the floor is unbound, drop the edge's rows of both kinds at or below the floor. Remove every row of an edge whose parent an expired deletion hides. |
 | `revisions` | For each file, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of a file that an expired deletion hides. |
 | `tombstones` | Keep every `set` and `revoke` event. |
 | `active_deletions` | Remove a cancelled `listed` and `removed` pair together, and remove the `listed` row of a deletion at or below the acknowledged floor. A deletion above the acknowledged floor keeps its `listed` row, even at or below the retention floor. |
@@ -1323,7 +1343,7 @@ These rules apply only when the selected inputs include the group's oldest run. 
 | `attributes` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of an inode that an expired deletion hides. |
 | `access` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of an inode that an expired deletion hides. |
 
-An unbound binding version acts as a tombstone, and it MUST stay while it hides older versions of its edge. Only a bottom-anchored compaction can drop it, and that compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every history row, including unbound versions at or below the floor, but it can drop superseded layout rows, because the longest layout covers every shorter prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
+Summary rows are versions of their edge for retention. The slot index keeps an edge's newest summary row at or below the floor next to the edge's newest binding event at or below it, and the child index keeps the same binding event. An unbound binding version acts as a tombstone, and it MUST stay while it hides older versions of its edge. Only a bottom-anchored compaction can drop it, and that compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every history row, including unbound versions at or below the floor, but it can drop superseded layout rows, because the longest layout covers every shorter prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
 
 A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row in its basis refers to. It checks each chain against a Bloom filter, which can err only toward keeping a row, and a later compaction drops what the filter kept. Every compaction scans the basis's revisions once before it merges layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID, up to `MAX_BLOOM_FILTER_BYTES` (64 MiB), and its expected count is the sum of the revision segments' `row_count`. Above that size, the filter has fewer bits per ID and uses fewer hash positions, so it reports more false positives, and a later compaction drops more of what it kept.
 
@@ -1331,7 +1351,7 @@ A deletion has expired in a compaction's [metadata basis](#41-resolving-the-meta
 
 Before such a compaction merges, it builds a "kept inode filter", which is a Bloom filter of every inode that's visible or under a recoverable deletion in the basis. To build the filter, the compaction:
 
-1. Walks the basis's directory tree from the root inode, depth first, with one cursor for each directory between the root and the directory that it's reading. It reads each directory's children from `direntry_binds`, and it inserts and follows the child of each edge whose newest version is bound.
+1. Walks the basis's directory tree from the root inode, depth first, with one cursor for each directory between the root and the directory that it's reading. It reads each directory's children from `direntry_binds`, and it inserts and follows the child of each edge whose first row, which is its newest version, is bound.
 2. Walks the subtree of every recoverable deletion the same way, starting at the deletion's root. It reads those roots from the `listed` rows in `active_deletions` that have no `removed` row and whose deletion sequence is above the acknowledged floor.
 
 Deleting an item unbinds it, so the first walk doesn't reach a deleted subtree. An expired deletion isn't a starting point for the second walk, and its root is unbound, so neither walk reaches the inodes that the deletion hides. A deletion inside another deletion is the older of the two (see [File and subtree deletion](#16-file-and-subtree-deletion)), so no recoverable deletion is inside an expired one, and the two walks reach every ancestor through which the rights on an item under a recoverable deletion are evaluated. The merge removes a row whose inode isn't in the filter, and it applies the rules in the table to a row whose inode is in the filter. The two binding indexes are merged in one compaction against the same filter, so the compaction keeps or removes each binding event the same way in both indexes. The walk reads the slot-index rows of every directory it reaches, so each of these compactions reads the bindings of the visible and recoverable tree once more.
@@ -1344,7 +1364,7 @@ Why can a base compaction remove every row of a hidden inode, and not just the o
 
 Why does the compaction find hidden inodes by walking the tree, and not by a flag on each row? A tombstone on a directory is one row that hides the whole subtree, so no row below the directory records that it's hidden, and a flag on every row would turn one deletion into a write for every descendant. The visible tree and a hidden subtree can each have more inodes than fit in memory, so the compaction uses a filter whose size is set before the walk starts, and which can err only toward keeping a row.
 
-Each binding event appears in both indexes, and both indexes group their rows by edge, so compaction keeps or removes each event in both indexes the same way. Row counts and row digests verify that the two indexes agree, and every event above the floor stays.
+Each binding event appears in both indexes, both indexes group their rows by edge, and the rule judges binding events apart from summary rows, so compaction keeps or removes each binding event in both indexes the same way. The merge's row digests cover the binding events of both indexes and verify that they agree, a manifest's row counts verify that each run's slot index has at least as many rows as its child index, and every event above the floor stays.
 
 A binding row's position comes from the delta that published it, so a later bind doesn't depend on an earlier unbound value. Attribute and access revisions keep a cleared floor state, because the next update is validated against its revision number.
 
@@ -1853,15 +1873,15 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 | Delta kind | Fields after `kind` |
 | --- | --- |
 | `create_inode` | `delta_index`, `inode_id`, `inode_kind` |
-| `bind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms` |
+| `bind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `revision?` |
 | `unbind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `target` |
-| `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref`, `layout?`, `append_offset?` |
+| `append_file_revision` | `delta_index`, `inode_id`, `parent_inode_id`, `name_key`, `display_name`, `bind_position`, `child_created_by`, `child_created_at_ms`, `revision_no`, `content_ref`, `layout?`, `append_offset?` |
 | `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_binding` |
 | `revoke_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
 | `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
-A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes or revokes. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear. A revision delta's `append_offset` is present only when an append produced the revision, and it's the base revision's `size_bytes`, so it's less than the delta's own `content_ref.size_bytes`.
+A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes or revokes. A bind's `revision` is the child's revision summary, `{revision_no, size_bytes, revision_committed_by, revision_committed_at_ms}`. It's present exactly when `child_kind` is `file`, and encoding and decoding refuse a file bind without it and a directory bind with it (`InvalidWalBind`). A revision delta's `parent_inode_id`, `name_key`, `display_name`, `child_created_by`, `child_created_at_ms`, and `bind_position` describe the file's current binding, which replay copies into the revision's summary row (see [Directory bindings](#13-directory-bindings)). A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear. A revision delta's `append_offset` is present only when an append produced the revision, and it's the base revision's `size_bytes`, so it's less than the delta's own `content_ref.size_bytes`.
 
 A revision delta's `layout` follows these rules:
 
@@ -1886,12 +1906,12 @@ WAL replay applies these normalized records in sequence and delta order. It does
 
 ### A.6 Metadata rows and row keys
 
-Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and the row-family ordering are separate, so the same `direntry_binding` row appears in both binding families.
+Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and the row-family ordering are separate, so the same `direntry_binding` row of a binding event appears in both binding families.
 
 | Row kind | Fields after `kind` |
 | --- | --- |
 | `inode` | `inode_id`, `inode_kind`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms` |
-| `direntry_binding` | `parent_inode_id`, `name_key`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `committed_seq`, `delta_index`, `state` |
+| `direntry_binding` | `parent_inode_id`, `name_key`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `committed_seq`, `delta_index`, `commit_id`, `committed_by`, `committed_at_ms`, `bind_position`, `state` |
 | `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms`, `delta_index`, `content_ref` |
 | `tombstone` | `root_inode_id`, `committed_seq`, `delta_index`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
@@ -1903,7 +1923,9 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 
 A `commit` row is the WAL commit record from [WAL records](#a5-wal-records), without its inline content. The `inline_content` field is left out, and a row that includes one is invalid.
 
-For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"kind":"unbound"}`. Both binding families store the complete row.
+For a directory binding, `state` is `{"kind":"bound","display_name":...,"revision"?:...}` or `{"kind":"unbound"}`. A bound file row's `revision` is the file's revision summary, `{revision_no, size_bytes, revision_committed_by, revision_committed_at_ms}`, and a directory row has none. `bind_position` is a `DeltaPosition` value, `{seq, delta_index}`. Both binding families store the complete row.
+
+The two binding families store the same binding events, and the slot index also stores summary rows (see [Directory bindings](#13-directory-bindings)). A slot-index row is a summary row when it's bound and its position isn't its `bind_position`, and an unbound row is always a binding event. Index parity checks compare binding events alone, so they leave summary rows out.
 
 For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke target is a `DeltaPosition` value, `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`, and a revoke action is `{"kind":"revoke","target":...}`.
 
@@ -1916,10 +1938,10 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | Family | Row key |
 | --- | --- |
 | `inodes` | `inode-{inode_id_body}` |
-| `direntry_binds` | `direntry-bind-{parent_inode_id_body}-{name_key_hex}-{child_inode_id_body}-{committed_seq:020}-{delta_index:010}` |
-| `direntry_child_binds` | `direntry-child-bind-{child_inode_id_body}-{parent_inode_id_body}-{name_key_hex}-{committed_seq:020}-{delta_index:010}` |
+| `direntry_binds` | `direntry-bind-{parent_inode_id_body}-{name_key_hex}-{child_inode_id_body}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
+| `direntry_child_binds` | `direntry-child-bind-{child_inode_id_body}-{parent_inode_id_body}-{name_key_hex}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `revisions` | `revision-{inode_id_body}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
-| `tombstones` | `tombstone-{root_inode_id_body}-{committed_seq:020}-{delta_index:010}` |
+| `tombstones` | `tombstone-{root_inode_id_body}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id_body}-{sort_rank:010}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
 | `commits` | `commit-{committed_seq:020}` |
@@ -1927,23 +1949,23 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `attributes` | `attribute-{inode_id_body}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id_body}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
-The two binding families contain the same edge events in two orders (an edge is a parent, a name key, and a child):
+The two binding families store the binding events in two orders (an edge is a parent, a name key, and a child):
 
-- The slot index sorts a slot's rows by child, and then by position, oldest first.
-- The child index sorts a child's rows by parent, then by name key, and then by position, oldest first.
+- The slot index sorts a slot's rows by child, and then by position, newest first.
+- The child index sorts a child's rows by parent, then by name key, and then by position, newest first.
 
-So key order isn't position order within a slot or a child, and a read selects the greatest visible position among a slot's rows or a child's rows.
+An edge's value at sequence `N` is the first row in key order whose `committed_seq` is at or below `N`, and a tombstone series' value at `N` is found the same way, because the `tombstones` keys also sort one root's events newest first. A slot's or a child's value is the newest of its edges' values, because key order sorts a slot's edges by child and a child's edges by parent and name key, not by position.
 
-Compaction groups both families by edge. While it scans one edge, it keeps at most one candidate floor row. It also tracks the last edge bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index. Commit validation enforces one child per slot and one parent per child (see [Directory bindings](#13-directory-bindings)), so a second child bound in one slot at the floor, or a second parent bound for one child at the floor, is corruption, and compaction refuses it.
+Compaction groups both families by edge, and it decides each row as it arrives, without keeping a row back. It also tracks the last edge bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index. Commit validation enforces one child per slot and one parent per child (see [Directory bindings](#13-directory-bindings)), so a second child bound in one slot at the floor, or a second parent bound for one child at the floor, is corruption, and compaction refuses it.
 
-Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
+Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. It scans an edge's binding rows and a root's tombstone events newest first too, because their keys subtract the sequence and the delta index from the maximum values. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
 
 Bloom filters use these keys, which aren't always full row keys:
 
 | Family | Filter key |
 | --- | --- |
 | `inodes` | The complete row key |
-| `direntry_binds` | `direntry-bind-{parent_inode_id_body}-{name_key_hex}` |
+| `direntry_binds` | `direntry-bind-{parent_inode_id_body}-{name_key_hex}` for each row, which a slot lookup probes, and `direntry-bind-{parent_inode_id_body}` once for each run of consecutive rows with the same parent in the segment, which a directory listing probes |
 | `direntry_child_binds` | `direntry-child-bind-{child_inode_id_body}` |
 | `revisions` | `revision-{inode_id_body}` |
 | `tombstones` | `tombstone-{root_inode_id_body}` |

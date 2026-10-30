@@ -5,9 +5,9 @@ use super::super::{CommitValidationError, ResolvedBinding};
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::error::{CoreError, Result};
-use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use crate::metadata::{DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::DeltaPosition;
+use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 
 use loonfs_types::{
     AccessRevisionNo, AttributesRevisionNo, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey,
@@ -215,7 +215,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             .current_parent_binding_for_child(child_inode_id)
             .await?
         {
-            Some(current) if Some(current.position()) != unbinding => {
+            Some(current) if Some(current.bind_position) != unbinding => {
                 Err(CoreError::NamespaceCorrupt(format!(
                     "a commit binds inode `{child_inode_id}`, which is already bound as `{}` under \
                      parent inode `{}`",
@@ -241,7 +241,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         if existing.parent_inode_id != expected.parent_inode_id
             || existing.name_key != expected.name_key
             || existing.child_inode_id != expected.child_inode_id
-            || existing.position() != expected.position
+            || existing.bind_position != expected.bind_position
         {
             return Err(CommitValidationError::BindingPreconditionMismatch {
                 target: format!(
@@ -278,6 +278,51 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             .into());
         }
         Ok(())
+    }
+
+    /// Returns the current binding of the file whose revision an operation
+    /// writes. The revision delta includes the binding's edge, and replay
+    /// writes the new revision's summary row under that edge
+    /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
+    /// A file with no current binding is deleted or disconnected, and can't
+    /// take a revision.
+    pub(super) async fn resolve_current_binding(
+        &self,
+        inode_id: InodeId,
+        operand: CommitOperand,
+    ) -> Result<DirentryBindingRecord> {
+        Ok(self
+            .view()
+            .current_parent_binding_for_child(inode_id)
+            .await?
+            .ok_or(CommitValidationError::InodeMissing { operand, inode_id })?)
+    }
+
+    /// Returns the revision summary that a bind of `inode` copies into the
+    /// new edge, which is `None` for a directory.
+    pub(super) async fn resolve_revision_summary(
+        &self,
+        inode: &InodeRecord,
+    ) -> Result<Option<RevisionSummary>> {
+        if inode.inode_kind == InodeKind::Directory {
+            return Ok(None);
+        }
+        let revision = self
+            .view()
+            .latest_revision_record(inode.inode_id)
+            .await?
+            .ok_or_else(|| {
+                CoreError::NamespaceCorrupt(format!(
+                    "file `{}` has no revision to copy into its binding",
+                    inode.inode_id
+                ))
+            })?;
+        Ok(Some(RevisionSummary {
+            revision_no: revision.revision_no,
+            size_bytes: revision.content_ref.size_bytes,
+            revision_committed_by: revision.committed_by,
+            revision_committed_at_ms: revision.committed_at_ms,
+        }))
     }
 
     pub(super) async fn resolve_restore_source_revision(
