@@ -16,6 +16,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_types::{next_public_ordinal, ChangeSeq, ContentRef};
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 
 /// Working view of one publish attempt.
 ///
@@ -167,6 +168,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         let mut deltas = Vec::new();
         let mut appended: Vec<AppendedContent> = Vec::new();
         let mut pieces = CommitPieces::new(self);
+        let mut next_create_no = NonZeroU32::MIN;
         for value in candidate.inline_content() {
             pieces.insert_piece(
                 value.content_ref(),
@@ -183,7 +185,8 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 view: self.planning_view(authorizer, validation.view()),
                 pieces: &pieces,
                 content_writes: self.content_writes,
-                committed_at_ms: self.committed_at_ms,
+                committed_seq,
+                next_create_no: &mut next_create_no,
             }
             .plan(operation)
             .await

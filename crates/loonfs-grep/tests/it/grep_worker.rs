@@ -37,7 +37,7 @@ use loonfs_types::{
 };
 use std::assert_matches;
 use std::collections::BTreeSet;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -1124,9 +1124,8 @@ async fn grep_built_through_seq(
 }
 
 /// Returns the paths of a response's matches in path order. A response lists
-/// its matches in inode ID order, and a test can't predict the order of the
-/// IDs that its commits generate, so it compares the paths in an order it can
-/// predict.
+/// its matches in inode ID order, and a test doesn't rely on how LoonFS orders
+/// inode IDs, so it compares the paths in path order.
 fn matched_paths(response: &GrepResponse) -> Vec<String> {
     let mut paths: Vec<String> = response
         .matches
@@ -2158,7 +2157,10 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
             .expect("path scope query")
             .matches
     );
-    inode_scope.scope = GrepScope::Inode(loonfs_types::InodeId::generate(0));
+    inode_scope.scope = GrepScope::Inode(loonfs_types::InodeId::generate(
+        ChangeSeq(1_000),
+        NonZeroU32::MIN,
+    ));
     let error = new_query(&store, &namespace_id, &inode_scope)
         .await
         .expect_err("a missing inode scope must remain a missing inode");

@@ -1,23 +1,27 @@
 //! The inode ID type, its spellings, and the root directory's ID.
 
 use crate::id_macros::validation_error;
+use crate::ChangeSeq;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
+use std::num::NonZeroU32;
 use thiserror::Error;
 
 /// The identity of a file or directory within a namespace.
 ///
-/// An inode ID is a version 7 UUID, whose top 48 bits are the inode's
-/// creation time in milliseconds since the Unix epoch and whose other bits
-/// are random, except the root directory's [`ROOT_INODE_ID`], which is all
-/// zero bits. An inode keeps its ID when it's renamed, and a fork keeps the
-/// IDs of the inodes it inherits. Row keys sort by inode ID, but no rule
-/// depends on the order of two IDs.
+/// An inode ID is a 128-bit number. Its high 64 bits are the low 32 bits of
+/// the creating commit's `committed_seq` and the inode's create number within
+/// that commit, and its low 64 bits are random. The high word orders IDs, and
+/// the low word identifies them. The root directory's [`ROOT_INODE_ID`] is
+/// all zero bits, and no generated ID is, because create numbers start at 1.
+/// An inode keeps its ID when it's renamed, and a fork keeps the IDs of the
+/// inodes it inherits. Row keys sort by inode ID, but no rule depends on the
+/// order of two IDs.
 ///
 /// An inode ID uses the spelling of every generated ID: `Display` writes the
 /// public form, `ino_` and the 26-character body, such as
-/// `ino_01k087hae0ep1tzg4zw1ghyvqb`, and [`InodeId::parse`] reads it. Serde
+/// `ino_000000r0000013kje0d47gc8kw`, and [`InodeId::parse`] reads it. Serde
 /// writes the body to a human-readable format and the 16 big-endian bytes to
 /// a binary format, and a public API field uses [`public`] to write the
 /// public form instead.
@@ -34,7 +38,7 @@ const PREFIX: &str = "ino_";
 pub const PATTERN: &str = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$";
 
 /// The public inode ID that OpenAPI shows as an example.
-pub const EXAMPLE: &str = "ino_01k087hae0ep1tzg4zw1ghyvqb";
+pub const EXAMPLE: &str = "ino_000000r0000013kje0d47gc8kw";
 
 /// The OpenAPI description for public inode IDs.
 pub const DESCRIPTION: &str =
@@ -50,11 +54,18 @@ validation_error!(
 );
 
 impl InodeId {
-    /// Generates the ID of an inode created at `created_at_ms`, which is
-    /// never [`ROOT_INODE_ID`] because a version 7 UUID has nonzero version
-    /// bits.
-    pub fn generate(created_at_ms: u64) -> Self {
-        Self(crate::ids::random_uuid_v7(created_at_ms))
+    /// Generates the ID of the inode with create number `create_no` in the
+    /// commit at `committed_seq`.
+    ///
+    /// The ID's top 32 bits are the low 32 bits of `committed_seq`, so they
+    /// wrap after 2^32 commits. The next 32 bits are `create_no`, which is 1
+    /// for the first inode that the commit creates and is never 0, so no
+    /// generated ID is [`ROOT_INODE_ID`]. The low 64 bits are random.
+    pub fn generate(committed_seq: ChangeSeq, create_no: NonZeroU32) -> Self {
+        let seq_bits = (u128::from(committed_seq.0) & u128::from(u32::MAX)) << 96;
+        let create_no_bits = u128::from(create_no.get()) << 64;
+        let random_bits = u128::from(crate::ids::random_u64());
+        Self(seq_bits | create_no_bits | random_bits)
     }
 
     /// Parses a public inode ID, `ino_` followed by the 26-character body.
@@ -173,7 +184,7 @@ impl utoipa::PartialSchema for InodeId {
 impl utoipa::ToSchema for InodeId {}
 
 /// Serde support for public API fields, which write an inode ID's public
-/// form, such as `ino_01k087hae0ep1tzg4zw1ghyvqb`.
+/// form, such as `ino_000000r0000013kje0d47gc8kw`.
 pub mod public {
     use super::InodeId;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -217,45 +228,82 @@ pub mod public {
 #[cfg(test)]
 mod tests {
     use super::{InodeId, EXAMPLE, INVALID_REASON, ROOT_INODE_ID};
+    use crate::ChangeSeq;
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeSet;
+    use std::num::NonZeroU32;
 
-    /// The ID that [`EXAMPLE`] spells, generated at 2025-07-15T23:43:20Z.
-    const SAMPLE: InodeId = InodeId(0x0198_1078_a9c0_7583_afc0_9fe0_611f_6eeb);
+    /// The ID that [`EXAMPLE`] spells, create number 2 in the commit at
+    /// sequence 12, with a fixed random word.
+    const SAMPLE: InodeId = InodeId(0x0000_000c_0000_0002_39c9_c069_0f06_227c);
+
+    fn create_no(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).expect("a test's create number should be nonzero")
+    }
+
+    /// Returns the sequence and the create number in `id`'s high word.
+    fn high_word(id: InodeId) -> (u32, u32) {
+        let seq = u32::try_from(id.0 >> 96).expect("the top 32 bits fit in a `u32`");
+        let create_no = u32::try_from((id.0 >> 64) & u128::from(u32::MAX))
+            .expect("32 masked bits fit in a `u32`");
+        (seq, create_no)
+    }
 
     #[test]
-    fn generated_ids_are_version_7_uuids_that_begin_with_the_creation_time() {
-        let created_at_ms = 1_752_623_000_000;
-        let ids: BTreeSet<InodeId> = (0..1_000)
-            .map(|_| InodeId::generate(created_at_ms))
-            .collect();
-        assert_eq!(ids.len(), 1_000, "IDs generated in one millisecond differ");
-        for id in &ids {
-            let bytes = id.to_be_bytes();
-            assert_eq!(id.0 >> 80, u128::from(created_at_ms), "{id}");
-            assert_eq!(bytes[6] >> 4, 7, "version 7: {id}");
-            assert_eq!(bytes[8] >> 6, 0b10, "RFC 9562 variant: {id}");
-        }
-        let later = InodeId::generate(created_at_ms + 1);
+    fn generated_ids_order_by_commit_then_create_number() {
+        let first = InodeId::generate(ChangeSeq(7), create_no(2));
+        let next_in_commit = InodeId::generate(ChangeSeq(7), create_no(3));
+        let next_commit = InodeId::generate(ChangeSeq(8), NonZeroU32::MIN);
+        assert!(first < next_in_commit, "{first} < {next_in_commit}");
         assert!(
-            ids.iter().all(|id| *id < later),
-            "a later millisecond sorts after"
+            next_in_commit < next_commit,
+            "{next_in_commit} < {next_commit}"
         );
-        assert!(!ids.contains(&ROOT_INODE_ID));
-        assert_ne!(InodeId::generate(0), ROOT_INODE_ID);
-        assert_eq!(
-            InodeId::generate(u64::MAX).0 >> 80,
-            (1 << 48) - 1,
-            "only the low 48 bits of the time are kept"
-        );
+    }
+
+    #[test]
+    fn the_high_word_records_the_sequence_and_the_create_number() {
+        for (committed_seq, number, seq) in [
+            (ChangeSeq(1), 1, 1),
+            (ChangeSeq(418), 7, 418),
+            (ChangeSeq(u64::from(u32::MAX)), u32::MAX, u32::MAX),
+            (ChangeSeq((1 << 32) + 5), 2, 5),
+        ] {
+            let id = InodeId::generate(committed_seq, create_no(number));
+            assert_eq!(high_word(id), (seq, number), "{committed_seq}");
+        }
+    }
+
+    #[test]
+    fn ids_generated_for_one_create_number_differ_in_the_random_word() {
+        let ids: BTreeSet<InodeId> = (0..1_000)
+            .map(|_| InodeId::generate(ChangeSeq(12), NonZeroU32::MIN))
+            .collect();
+        assert_eq!(ids.len(), 1_000);
+        assert!(ids.iter().all(|id| high_word(*id) == (12, 1)));
+    }
+
+    #[test]
+    fn no_generated_id_is_the_root() {
+        for committed_seq in [ChangeSeq(0), ChangeSeq(1), ChangeSeq(1 << 32)] {
+            let id = InodeId::generate(committed_seq, NonZeroU32::MIN);
+            assert_ne!(id, ROOT_INODE_ID);
+            assert_ne!(id.0 >> 64, 0, "{committed_seq}: the high word isn't zero");
+        }
     }
 
     #[test]
     fn spellings_round_trip_and_keep_numeric_order() {
         assert_eq!(SAMPLE.to_string(), EXAMPLE);
-        assert_eq!(SAMPLE.body().to_string(), "01k087hae0ep1tzg4zw1ghyvqb");
-        assert_eq!(SAMPLE.0 >> 80, 1_752_623_000_000);
-        assert_eq!(SAMPLE.to_be_bytes()[..2], [0x01, 0x98], "big-endian bytes");
+        assert_eq!(SAMPLE.body().to_string(), "000000r0000013kje0d47gc8kw");
+        assert_eq!(
+            SAMPLE.to_be_bytes(),
+            [
+                0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x02, 0x39, 0xc9, 0xc0, 0x69, 0x0f, 0x06,
+                0x22, 0x7c,
+            ],
+            "the sequence, the create number, and the random word, most significant first"
+        );
         assert_eq!(InodeId::from_be_bytes(SAMPLE.to_be_bytes()), SAMPLE);
         for (id, public) in [
             (ROOT_INODE_ID, "ino_00000000000000000000000000"),
@@ -291,29 +339,29 @@ mod tests {
     fn parse_applies_the_generated_id_rules() {
         for body in [
             "",
-            "01k087hae0ep1tzg4zw1ghyvq",
-            "01k087hae0ep1tzg4zw1ghyvqb0",
-            "01K087HAE0EP1TZG4ZW1GHYVQB",
-            "81k087hae0ep1tzg4zw1ghyvqb",
-            "01k087hae0ep1tzg4zw1ghyvqi",
-            "ino_01k087hae0ep1tzg4zw1gh",
+            "000000r0000013kje0d47gc8k",
+            "000000r0000013kje0d47gc8kw0",
+            "000000R0000013KJE0D47GC8KW",
+            "800000r0000013kje0d47gc8kw",
+            "000000r0000013kje0d47gc8ki",
+            "ino_000000r0000013kje0d47g",
         ] {
             assert_eq!(InodeId::parse_body(body), None, "{body:?}");
         }
         for value in [
             "ino_42",
-            "ino_01k087hae0ep1tzg4zw1ghyvq",
-            "ino_01k087hae0ep1tzg4zw1ghyvqb0",
-            "ino_01981078a9c07583afc09fe0611f6eeb",
-            "ino_01K087HAE0EP1TZG4ZW1GHYVQB",
-            "ino_81k087hae0ep1tzg4zw1ghyvqb",
-            "ino_01k087hae0ep1tzg4zw1ghyvqi",
-            "INO_01k087hae0ep1tzg4zw1ghyvqb",
-            "Ino_01k087hae0ep1tzg4zw1ghyvqb",
-            "01k087hae0ep1tzg4zw1ghyvqb",
+            "ino_000000r0000013kje0d47gc8k",
+            "ino_000000r0000013kje0d47gc8kw0",
+            "ino_0000000c0000000239c9c0690f06227c",
+            "ino_000000R0000013KJE0D47GC8KW",
+            "ino_800000r0000013kje0d47gc8kw",
+            "ino_000000r0000013kje0d47gc8ki",
+            "INO_000000r0000013kje0d47gc8kw",
+            "Ino_000000r0000013kje0d47gc8kw",
+            "000000r0000013kje0d47gc8kw",
             "ino_",
-            " ino_01k087hae0ep1tzg4zw1ghyvqb",
-            "ino_01k087hae0ep1tzg4zw1ghyvqb ",
+            " ino_000000r0000013kje0d47gc8kw",
+            "ino_000000r0000013kje0d47gc8kw ",
             "",
         ] {
             let error = InodeId::parse(value).expect_err(value);
@@ -329,7 +377,7 @@ mod tests {
     #[test]
     fn serde_writes_the_body_to_json_and_bytes_to_cbor() {
         let json = serde_json::to_string(&SAMPLE).expect("encode JSON");
-        assert_eq!(json, r#""01k087hae0ep1tzg4zw1ghyvqb""#);
+        assert_eq!(json, r#""000000r0000013kje0d47gc8kw""#);
         assert_eq!(
             serde_json::from_str::<InodeId>(&json).expect("decode JSON"),
             SAMPLE
@@ -424,7 +472,7 @@ mod tests {
         );
         for json in [
             r#"{"inode_id":42}"#.to_owned(),
-            r#"{"inode_id":"01k087hae0ep1tzg4zw1ghyvqb"}"#.to_owned(),
+            r#"{"inode_id":"000000r0000013kje0d47gc8kw"}"#.to_owned(),
             format!(r#"{{"inode_id":"{EXAMPLE}","parent_inode_id":42}}"#),
             format!(r#"{{"inode_id":"{EXAMPLE}","parent_inode_id":"00000000000000000000000000"}}"#),
         ] {

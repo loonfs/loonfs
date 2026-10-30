@@ -116,11 +116,10 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     assert!(child_inode_keys.len() >= 6);
     let revision_keys = family_keys(&store, &namespace_id, MetadataRowFamily::Revisions).await;
     assert!(revision_keys.len() >= 6);
-    // Inode IDs created in one millisecond are in random order, so a child
-    // inode segment's key range can include the directory's own ID, and a
-    // Bloom filter false positive can make the directory's own lookup read
-    // that segment. A one-entry page of the directory reads the same segments
-    // for the directory's lookup.
+    // A child inode segment's key range can include the directory's own ID,
+    // and a Bloom filter false positive can make the directory's own lookup
+    // read that segment. A one-entry page of the directory reads the same
+    // segments for the directory's lookup.
     let one_entry = Arc::new(RecordingStore::metadata_segments(store.clone()));
     LoonFs::builder_with_store(one_entry.clone())
         .read_only()

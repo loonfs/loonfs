@@ -16,10 +16,11 @@ use crate::error::{CoreError, Result};
 use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    CommitFingerprintInput, ContentId, DestinationBehavior, FileContent, InlineContentIdentity,
-    NamespaceId,
+    ChangeSeq, CommitFingerprintInput, ContentId, DestinationBehavior, FileContent,
+    InlineContentIdentity, InodeId, NamespaceId,
 };
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 /// Computes the semantic fingerprint of a mutation request.
 ///
@@ -43,17 +44,29 @@ pub(crate) fn commit_fingerprint(
 }
 
 /// The planning of one operation: the planning view, the commit's pieces,
-/// where content writes go, and the commit time.
+/// where content writes go, and the commit's sequence and next create number,
+/// from which new inode IDs are built.
 pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
     pub(super) view: PlanningView<'p, S>,
     pub(super) pieces: &'p CommitPieces<'p, S>,
     pub(super) content_writes: ContentWrites<'p, S>,
-    /// The commit's `committed_at_ms`, which is the creation time of every
-    /// inode that the operation creates.
-    pub(super) committed_at_ms: u64,
+    /// The sequence that the commit is assigned.
+    pub(super) committed_seq: ChangeSeq,
+    /// The create number of the next inode that the commit creates, shared by
+    /// every operation in the commit.
+    pub(super) next_create_no: &'p mut NonZeroU32,
 }
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+    /// Generates the ID of the next inode that the commit creates.
+    pub(super) fn next_inode_id(&mut self) -> InodeId {
+        let create_no = *self.next_create_no;
+        *self.next_create_no = create_no
+            .checked_add(1)
+            .expect("a commit should create fewer inodes than its 32-bit delta positions allow");
+        InodeId::generate(self.committed_seq, create_no)
+    }
+
     /// Plans `operation`, mapping its path or inode address onto the one
     /// planner for its kind.
     pub(super) async fn plan(

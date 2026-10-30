@@ -15,7 +15,6 @@ use crate::metadata::ResolvedVisiblePath;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AccessRight, AccessRights, AttributesRevisionNo, BindingVersion, DestinationPrecondition,
-    InodeId,
 };
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
@@ -242,7 +241,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 if expected_destination.is_some() {
                     return Err(CoreError::PathNotFound(path));
                 }
-                let child_inode_id = InodeId::generate(self.committed_at_ms);
+                let child_inode_id = self.next_inode_id();
                 ops.push(CommitOperation::CreateFile {
                     child_inode_id,
                     parent_inode_id,

@@ -1536,7 +1536,11 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
             "--namespace",
             "demo",
             "--inode",
-            &loonfs_types::InodeId::generate(0).to_string(),
+            &loonfs_types::InodeId::generate(
+                loonfs_types::ChangeSeq(1_000),
+                std::num::NonZeroU32::MIN,
+            )
+            .to_string(),
         ]);
         assert_failure(&missing);
         assert_eq!(json_error(&missing)["code"], "inode_not_found");

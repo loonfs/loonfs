@@ -772,9 +772,9 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    // Inode IDs created in one millisecond are in random order, so the walk
-    // order decides which file plays alpha. Two matches in alpha, so a
-    // one-match page fills before the walk reaches bravo.
+    // The test doesn't rely on how LoonFS orders inode IDs, so the walk order
+    // decides which file plays alpha. Two matches in alpha, so a one-match
+    // page fills before the walk reaches bravo.
     let [alpha, bravo] = create_in_walk_order(&namespace, ["/alpha.txt", "/bravo.txt"]).await;
     replace_file(&namespace, &alpha, b"needle one\nneedle two\n").await;
     let blobs_before_bravo = content_blob_keys(&store).await;
@@ -883,9 +883,9 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    // Inode IDs created in one millisecond are in random order, so the walk
-    // order decides which file plays each part: alpha first, the oversized
-    // bravo next, and charlie last.
+    // The test doesn't rely on how LoonFS orders inode IDs, so the walk order
+    // decides which file plays each part: alpha first, the oversized bravo
+    // next, and charlie last.
     let [alpha, bravo, charlie] =
         create_in_walk_order(&namespace, ["/alpha.txt", "/bravo.big", "/charlie.txt"]).await;
     replace_file(&namespace, &alpha, b"a needle in alpha\n").await;

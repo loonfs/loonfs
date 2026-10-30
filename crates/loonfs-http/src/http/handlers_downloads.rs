@@ -116,7 +116,7 @@ pub(super) async fn create_download(
         description = "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that an unexpired snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_01k087hae0ep1tzg4zw1ghyvqb")
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw")
         ),
         request_body = CreateDownloadByInodeRequest,
         responses(
@@ -175,7 +175,7 @@ pub(super) async fn create_download_by_inode(
         description = "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_01k087hae0ep1tzg4zw1ghyvqb"),
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
             ("revision_no" = loonfs_types::RevisionNo, Path, description = "The revision number.")
         ),
         request_body = CreateRevisionDownloadByInodeRequest,

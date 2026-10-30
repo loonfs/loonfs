@@ -9,11 +9,12 @@ use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, ErrorResponse, InodeId,
-    RevisionNo,
+    ChangeSeq, DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, ErrorResponse,
+    InodeId, RevisionNo,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -270,12 +271,19 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     for result in [
         harness
             .client
-            .stat_by_inode(&namespace, InodeId::generate(0))
+            .stat_by_inode(
+                &namespace,
+                InodeId::generate(ChangeSeq(1_000), NonZeroU32::MIN),
+            )
             .await
             .map(|_| ()),
         harness
             .client
-            .read_file_revision_by_inode(&namespace, InodeId::generate(0), RevisionNo(1))
+            .read_file_revision_by_inode(
+                &namespace,
+                InodeId::generate(ChangeSeq(1_000), NonZeroU32::MIN),
+                RevisionNo(1),
+            )
             .await
             .map(|_| ()),
     ] {
@@ -518,7 +526,10 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     assert_api_code(
         harness
             .client
-            .list_by_inode(&namespace, InodeId::generate(0))
+            .list_by_inode(
+                &namespace,
+                InodeId::generate(ChangeSeq(1_000), NonZeroU32::MIN),
+            )
             .page()
             .await,
         404,

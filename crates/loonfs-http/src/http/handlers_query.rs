@@ -41,7 +41,7 @@ pub(super) struct GrepQuery {
         feature = "openapi",
         param(
             pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-            example = "ino_01k087hae0ep1tzg4zw1ghyvqb"
+            example = "ino_000000r0000013kje0d47gc8kw"
         )
     )]
     inode_id: Option<String>,

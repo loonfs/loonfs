@@ -72,7 +72,7 @@ A condition on the namespace's current state that has to be true for a mutation 
 
 ### Inode
 
-The identity of a file or directory, along with its kind and creation metadata. An inode's ID doesn't change when the item is renamed or moved within its namespace. Deleting a file and creating a new one at the same path creates a new inode. An inode ID is a 128-bit version 7 UUID whose top 48 bits are the inode's creation time in milliseconds and whose other bits are random, such as `ino_01k087hae0ep1tzg4zw1ghyvqb`, except the root directory's ID, which is all zero bits (see [Namespaces and identity](format.md#11-namespaces-and-identity)).
+The identity of a file or directory, along with its kind and creation metadata. An inode's ID doesn't change when the item is renamed or moved within its namespace. Deleting a file and creating a new one at the same path creates a new inode. An inode ID is a 128-bit number, such as `ino_000000r0000013kje0d47gc8kw`. Its high 64 bits are the low 32 bits of the creating commit's sequence and the inode's create number, which is 1 for the first inode that the commit creates, and its low 64 bits are random. The root directory's ID is all zero bits (see [Namespaces and identity](format.md#11-namespaces-and-identity)).
 
 ### Directory binding (direntry)
 

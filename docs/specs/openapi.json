@@ -2912,7 +2912,7 @@
       },
       "InodeId": {
         "description": "The stable ID of one inode within a namespace. An inode's ID doesn't change.",
-        "example": "ino_01k087hae0ep1tzg4zw1ghyvqb",
+        "example": "ino_000000r0000013kje0d47gc8kw",
         "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
       },
@@ -7095,7 +7095,7 @@
           },
           {
             "description": "An inode that limits matches to its descendants. It can't be combined with `path_prefix`.",
-            "example": "ino_01k087hae0ep1tzg4zw1ghyvqb",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "query",
             "name": "inode_id",
             "required": false,
@@ -7255,7 +7255,7 @@
           },
           {
             "description": "The inode ID.",
-            "example": "ino_01k087hae0ep1tzg4zw1ghyvqb",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
@@ -7388,7 +7388,7 @@
           },
           {
             "description": "The directory's inode ID.",
-            "example": "ino_01k087hae0ep1tzg4zw1ghyvqb",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
@@ -7568,7 +7568,7 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_01k087hae0ep1tzg4zw1ghyvqb",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
@@ -7772,7 +7772,7 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_01k087hae0ep1tzg4zw1ghyvqb",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
@@ -7904,7 +7904,7 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_01k087hae0ep1tzg4zw1ghyvqb",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
@@ -8055,7 +8055,7 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_01k087hae0ep1tzg4zw1ghyvqb",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
@@ -8259,7 +8259,7 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_01k087hae0ep1tzg4zw1ghyvqb",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,

@@ -7,8 +7,8 @@ use loonfs::{
     PutFileOptions, ReadFileStreamOptions, RevisionNo, StreamRange, Writable,
 };
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::ROOT_INODE_ID;
-use std::num::NonZeroU64;
+use loonfs_types::{ChangeSeq, ROOT_INODE_ID};
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -199,11 +199,14 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
 
     for error in [
         namespace
-            .stat_by_inode(InodeId::generate(0))
+            .stat_by_inode(InodeId::generate(ChangeSeq(1_000), NonZeroU32::MIN))
             .await
             .expect_err("unknown inode stat"),
         namespace
-            .read_file_revision_by_inode(InodeId::generate(0), RevisionNo(1))
+            .read_file_revision_by_inode(
+                InodeId::generate(ChangeSeq(1_000), NonZeroU32::MIN),
+                RevisionNo(1),
+            )
             .await
             .expect_err("unknown inode content"),
     ] {

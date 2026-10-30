@@ -297,7 +297,8 @@ async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
 }
 
 /// Checks that a fork keeps the IDs of the inodes it inherits, and that the
-/// inodes that the fork and its source create later have IDs of their own.
+/// inodes that the fork and its source create later have IDs of their own,
+/// even when both create an inode at the same sequence and create number.
 #[tokio::test]
 async fn a_fork_keeps_inherited_inode_ids_and_generates_its_own() {
     let temp_dir = tempdir().expect("tempdir");
@@ -323,20 +324,26 @@ async fn a_fork_keeps_inherited_inode_ids_and_generates_its_own() {
         assert_eq!(fork, source, "{path} keeps its inode ID in the fork");
         assert!(ids.insert(source), "{path} has an ID of its own");
     }
+    let mut created = Vec::new();
     for namespace_id in [&source_namespace_id, &fork_namespace_id] {
         NamespaceFixture::new(&store, namespace_id, &context)
             .write_file_bytes("/docs/new.txt", b"new", None)
             .await
             .expect("create a file after the fork");
-        let created = resolve_path(&store, namespace_id, "/docs/new.txt")
+        let inode_id = resolve_path(&store, namespace_id, "/docs/new.txt")
             .await
             .expect("created path")
             .inode_id;
         assert!(
-            ids.insert(created),
+            ids.insert(inode_id),
             "a file created in `{namespace_id}` after the fork has a new ID"
         );
+        created.push(inode_id);
     }
+    // Both files are the first inode that the next commit after the fork
+    // point creates, so the two IDs have the same high word, and the random
+    // low word keeps them apart.
+    assert_eq!(created[0].0 >> 64, created[1].0 >> 64);
 }
 
 async fn head_state<S: ObjectStore + ?Sized>(

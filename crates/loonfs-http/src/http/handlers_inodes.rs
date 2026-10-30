@@ -113,7 +113,7 @@ pub(super) struct StatInodeQuery {
         description = "Returns the path entry for a visible inode, from the current state or an unexpired snapshot. An unknown or hidden inode returns `inode_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("inode_id" = String, Path, description = "The inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_01k087hae0ep1tzg4zw1ghyvqb"),
+            ("inode_id" = String, Path, description = "The inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
             StatInodeQuery
         ),
         responses(
@@ -198,7 +198,7 @@ pub(super) struct ListInodeChildrenQuery {
         description = "Lists one page of a directory's children, in canonical name key order, from the current state or an unexpired snapshot. The request identifies the directory by its inode ID, so a listing and its later pages stay on the same directory even if the directory is renamed or moved at the same time.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("inode_id" = String, Path, description = "The directory's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_01k087hae0ep1tzg4zw1ghyvqb"),
+            ("inode_id" = String, Path, description = "The directory's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
             ListInodeChildrenQuery
         ),
         responses(
@@ -254,7 +254,7 @@ pub(super) async fn list_inode_children(
         description = "Returns the retained revisions of a file inode. The file doesn't need a current path.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_01k087hae0ep1tzg4zw1ghyvqb"),
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
             LivePageQuery
         ),
         responses(
@@ -303,7 +303,7 @@ pub(super) async fn list_file_revisions_by_inode(
         description = "Reads and verifies the current revision of a visible file inode, wherever the inode is bound, or the revision that an unexpired snapshot captured. A `Range` header asks for one byte range of the file instead. An unknown or hidden inode returns `inode_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_01k087hae0ep1tzg4zw1ghyvqb"),
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
             InodeContentQuery,
             ("Range" = Option<String>, Header, nullable = false, description = "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.")
         ),
@@ -357,7 +357,7 @@ pub(super) async fn get_file_content_by_inode(
         description = "Reads and verifies one retained file revision by inode ID and revision number. A `Range` header asks for one byte range of the revision instead.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_01k087hae0ep1tzg4zw1ghyvqb"),
+            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
             ("revision_no" = loonfs_types::RevisionNo, Path, description = "The revision number."),
             InodeRevisionContentQuery,
             ("Range" = Option<String>, Header, nullable = false, description = "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.")
