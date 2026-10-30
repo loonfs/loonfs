@@ -25,7 +25,15 @@ impl InodeId {
     /// Generates a random inode ID, which is never [`ROOT_INODE_ID`] because
     /// a version 4 UUID has nonzero version bits.
     pub fn generate() -> Self {
-        Self(crate::ids::random_uuid_v4())
+        // Benchmark variant: the top 48 bits are the Unix time in
+        // milliseconds and the remaining 80 bits are random, so IDs sort by
+        // creation time while staying unique across namespaces.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u128)
+            .unwrap_or(1);
+        let random = crate::ids::random_uuid_v4() & ((1_u128 << 80) - 1);
+        Self((now_ms << 80) | random)
     }
 
     /// Builds an inode ID from its 16 bytes, most significant first.
