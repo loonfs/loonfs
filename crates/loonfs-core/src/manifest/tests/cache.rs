@@ -541,10 +541,10 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
 
     assert_eq!(rows.len(), 1, "beta's bind should still be found");
     let stats = cache.stats();
-    // The probe contains `/docs`'s random inode ID, so the delta segment's
-    // filter rejects it in most runs of the test and admits it by a false
-    // positive in the others. The lookup records a skip in the first case and
-    // a false positive in the second.
+    // The probe contains `/docs`'s inode ID, whose low bits are random, so the
+    // delta segment's filter rejects it in most runs of the test and admits it
+    // by a false positive in the others. The lookup records a skip in the
+    // first case and a false positive in the second.
     let delta_bind = segments
         .manifest()
         .payload()

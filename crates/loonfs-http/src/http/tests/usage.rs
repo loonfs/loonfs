@@ -10,7 +10,7 @@ use futures::StreamExt as _;
 use http_body_util::BodyExt as _;
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::{public_inode_id, NamespaceId};
+use loonfs_types::NamespaceId;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -102,7 +102,7 @@ async fn fixture(name: &str) -> Fixture {
         state,
         usage,
         namespace_id,
-        file_inode: public_inode_id::encode(file_inode),
+        file_inode: file_inode.to_string(),
     }
 }
 

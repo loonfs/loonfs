@@ -472,7 +472,7 @@ fn assert_api_spec_error_codes_are_registered(spec: &str) {
             continue;
         }
         // Valid inode IDs are examples, not error codes.
-        if loonfs_types::public_inode_id::decode(token).is_ok() {
+        if loonfs_types::InodeId::parse(token).is_ok() {
             continue;
         }
         assert!(

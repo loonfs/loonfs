@@ -97,6 +97,7 @@ Why doesn't LoonFS panic on bad bytes too? The durable state is stored in shared
 - **Define every ID, sequence, and validated string as a newtype** with `string_id!` or `numeric_id!`, so one kind of ID can't be passed as another.
 
 - **Generate a random ID through `ids::generated_id`**, as a prefix, an underscore, and the 26-character lowercase Crockford base 32 encoding of a version 4 UUID, such as `con_3s0drmj8em84yb4mnetqkz2j0x`. To encode the UUID, add two zero bits in front of its 128 bits and write each group of 5 bits as one character of `0123456789abcdefghjkmnpqrstvwxyz`. A parser rejects uppercase letters and a first character greater than `7`, so each UUID has exactly one spelling.
+  An inode ID is a version 7 UUID instead, whose top 48 bits are the inode's creation time in milliseconds, so the inodes that one commit creates have neighboring row keys.
 
 - **Parse an ID where the error can identify the input**, such as the CLI flag or the query parameter.
 
@@ -104,7 +105,7 @@ Why doesn't LoonFS panic on bad bytes too? The durable state is stored in shared
 
 - **Represent a time as a `u64` number of milliseconds, with the unit in the name (`_ms`).** Use a `Duration` only to pass a time to a library function that expects a `Duration`.
 
-Why this ID alphabet? It leaves out `i`, `l`, and `o`, which are easy to confuse with `1` and `0`, and `u`, which makes it less likely that an ID spells a word by accident. A version 4 UUID is random, so generating one doesn't read the clock, and the ID doesn't reveal when it was created.
+Why this ID alphabet? It leaves out `i`, `l`, and `o`, which are easy to confuse with `1` and `0`, and `u`, which makes it less likely that an ID spells a word by accident. Generating an ID doesn't read the clock, and an ID doesn't reveal when it was created, except an inode ID, which begins with its creation time.
 
 ### Limits
 

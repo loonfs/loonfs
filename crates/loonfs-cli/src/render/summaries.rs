@@ -2,10 +2,6 @@
 
 use super::*;
 
-pub(super) fn public_inode_id(inode_id: loonfs_types::InodeId) -> String {
-    loonfs_types::public_inode_id::encode(inode_id)
-}
-
 /// Overall result of an object-store probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoreProbeRunOutcome {
@@ -113,9 +109,8 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
             ..
         } => match cursor_inode_id {
             Some(inode_id) => format!(
-                "backfilling toward seq {}, walked through inode {}",
-                captured_seq.0,
-                public_inode_id(*inode_id)
+                "backfilling toward seq {}, walked through inode {inode_id}",
+                captured_seq.0
             ),
             None => format!("backfilling toward seq {}, not yet started", captured_seq.0),
         },
@@ -228,11 +223,7 @@ pub(super) fn event_descriptor(event: &loonfs_types::FilesystemChange) -> String
             inode_id,
             revision_no,
             ..
-        } => format!(
-            "write inode {} rev #{}",
-            public_inode_id(*inode_id),
-            revision_no.0
-        ),
+        } => format!("write inode {inode_id} rev #{}", revision_no.0),
         FilesystemChange::Moved {
             source_display_name,
             destination_display_name,
@@ -249,19 +240,14 @@ pub(super) fn event_descriptor(event: &loonfs_types::FilesystemChange) -> String
             attributes_revision_no,
             ..
         } => format!(
-            "attributes inode {} rev #{}",
-            public_inode_id(*inode_id),
+            "attributes inode {inode_id} rev #{}",
             attributes_revision_no.0
         ),
         FilesystemChange::AccessChanged {
             inode_id,
             access_revision_no,
             ..
-        } => format!(
-            "access inode {} rev #{}",
-            public_inode_id(*inode_id),
-            access_revision_no.0
-        ),
+        } => format!("access inode {inode_id} rev #{}", access_revision_no.0),
         FilesystemChange::Unknown => "unknown event".to_owned(),
     }
 }

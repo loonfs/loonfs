@@ -581,11 +581,11 @@ fn openapi_documents_current_server_paths() {
         );
         assert_eq!(
             parameter.pointer("/schema/pattern").and_then(Value::as_str),
-            Some(loonfs_types::public_inode_id::PATTERN)
+            Some(loonfs_types::inode_id::PATTERN)
         );
         assert_eq!(
             parameter.get("example").and_then(Value::as_str),
-            Some(loonfs_types::public_inode_id::EXAMPLE)
+            Some(loonfs_types::inode_id::EXAMPLE)
         );
     }
 
@@ -1436,11 +1436,11 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
     assert_eq!(inode_id.get("type").and_then(Value::as_str), Some("string"));
     assert_eq!(
         inode_id.get("pattern").and_then(Value::as_str),
-        Some(loonfs_types::public_inode_id::PATTERN)
+        Some(loonfs_types::inode_id::PATTERN)
     );
     assert_eq!(
         inode_id.get("example").and_then(Value::as_str),
-        Some(loonfs_types::public_inode_id::EXAMPLE)
+        Some(loonfs_types::inode_id::EXAMPLE)
     );
 
     // Each flattened status variant must use the capped run number schema.
@@ -1500,7 +1500,7 @@ fn openapi_describes_inode_ids_as_non_null_strings() {
             schema_matches(schema, schemas, |schema| {
                 schema.get("type").and_then(Value::as_str) == Some("string")
                     && schema.get("pattern").and_then(Value::as_str)
-                        == Some(loonfs_types::public_inode_id::PATTERN)
+                        == Some(loonfs_types::inode_id::PATTERN)
             }),
             "inode ID at {location} must use the public string format: {schema}"
         );

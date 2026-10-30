@@ -161,8 +161,8 @@ async fn fold_wal_and_advance_retention(
 }
 
 /// Clears what differs between the responses of two namespaces that contain
-/// the same files: the namespace ID, and the random inode IDs, which also set
-/// the order of the matches.
+/// the same files: the namespace ID, and the inode IDs, which each namespace
+/// generates separately and which also set the order of the matches.
 fn normalize_namespace(mut response: GrepResponse) -> GrepResponse {
     response.namespace_id = NamespaceId::parse("normalized").expect("namespace id");
     for found in &mut response.matches {
@@ -1124,8 +1124,9 @@ async fn grep_built_through_seq(
 }
 
 /// Returns the paths of a response's matches in path order. A response lists
-/// its matches in inode ID order, and inode IDs are random, so a test compares
-/// the paths in an order it can predict.
+/// its matches in inode ID order, and a test can't predict the order of the
+/// IDs that its commits generate, so it compares the paths in an order it can
+/// predict.
 fn matched_paths(response: &GrepResponse) -> Vec<String> {
     let mut paths: Vec<String> = response
         .matches
@@ -2157,7 +2158,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
             .expect("path scope query")
             .matches
     );
-    inode_scope.scope = GrepScope::Inode(loonfs_types::InodeId::generate());
+    inode_scope.scope = GrepScope::Inode(loonfs_types::InodeId::generate(0));
     let error = new_query(&store, &namespace_id, &inode_scope)
         .await
         .expect_err("a missing inode scope must remain a missing inode");

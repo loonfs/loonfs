@@ -36,7 +36,7 @@ pub struct Commit {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectoryBinding {
     /// The parent directory that contains the entry.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub parent_inode_id: InodeId,
     /// The name key that lookups use to find the entry.
     pub name_key: NameKey,
@@ -60,11 +60,11 @@ pub enum FilesystemChange {
         schema(title = "FilesystemChangeDirectoryCreated")
     )]
     DirectoryCreated {
-        /// The newly allocated inode, unique within the namespace.
-        #[serde(with = "crate::public_inode_id")]
+        /// The new inode, unique within the namespace.
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The directory that the new entry was bound under.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         parent_inode_id: InodeId,
         /// The display name of the new entry.
         display_name: DisplayName,
@@ -74,11 +74,11 @@ pub enum FilesystemChange {
     /// A file and its first revision were created.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeFileCreated"))]
     FileCreated {
-        /// The newly allocated inode, unique within the namespace.
-        #[serde(with = "crate::public_inode_id")]
+        /// The new inode, unique within the namespace.
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The directory that the new entry was bound under.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         parent_inode_id: InodeId,
         /// The display name of the new entry.
         display_name: DisplayName,
@@ -94,7 +94,7 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeContentChanged"))]
     ContentChanged {
         /// The file inode whose history advanced.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The file's new revision number, which is higher than the number of every earlier
         /// revision.
@@ -116,15 +116,15 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeMoved"))]
     Moved {
         /// The inode whose binding changed.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The directory that contained the removed binding.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         source_parent_inode_id: InodeId,
         /// The display name of the removed binding.
         source_display_name: DisplayName,
         /// The directory that contains the new binding.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         destination_parent_inode_id: InodeId,
         /// The display name of the new binding.
         destination_display_name: DisplayName,
@@ -135,7 +135,7 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
     Deleted {
         /// The inode at the root of the deleted subtree.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The directory binding that the deletion removed.
         deleted_binding: DirectoryBinding,
@@ -144,10 +144,10 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeUndeleted"))]
     Undeleted {
         /// The recovered inode.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The directory that the recovered entry was bound under.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         parent_inode_id: InodeId,
         /// The display name of the recovered binding.
         display_name: DisplayName,
@@ -161,7 +161,7 @@ pub enum FilesystemChange {
     )]
     AttributesChanged {
         /// The inode whose attributes changed.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The inode's new attribute revision.
         attributes_revision_no: AttributesRevisionNo,
@@ -175,7 +175,7 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeAccessChanged"))]
     AccessChanged {
         /// The inode whose access row changed.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The access revision that the update published.
         access_revision_no: AccessRevisionNo,
@@ -230,7 +230,7 @@ pub enum CommitPrecondition {
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionFileRevision"))]
     FileRevision {
         /// The inode whose state the caller read.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The content revision that the caller observed.
         expected_revision_no: RevisionNo,
@@ -241,7 +241,7 @@ pub enum CommitPrecondition {
         /// The absolute path to check, which can be the root.
         path: AbsolutePath,
         /// The inode that the path must be bound to.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         expected_inode_id: InodeId,
         /// The binding version that the path must also have, if set. This check detects an inode
         /// that was moved away from the path and then back.
@@ -253,7 +253,7 @@ pub enum CommitPrecondition {
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionInodeBinding"))]
     InodeBinding {
         /// The inode whose binding the caller read.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The binding version that the caller observed.
         expected_binding_version: BindingVersion,
@@ -265,7 +265,7 @@ pub enum CommitPrecondition {
     )]
     AttributesRevision {
         /// The inode whose state the caller read.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The attribute revision that the caller observed.
         expected_attributes_revision_no: AttributesRevisionNo,
@@ -277,7 +277,7 @@ pub enum CommitPrecondition {
     )]
     AccessRevision {
         /// The inode whose state the caller read.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
         /// The access revision that the caller observed.
         expected_access_revision_no: AccessRevisionNo,
@@ -292,7 +292,7 @@ pub enum CommitPrecondition {
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionNameAbsence"))]
     NameAbsence {
         /// The directory to check.
-        #[serde(with = "crate::public_inode_id")]
+        #[serde(with = "crate::inode_id::public")]
         parent_inode_id: InodeId,
         /// The name to check.
         display_name: DisplayName,

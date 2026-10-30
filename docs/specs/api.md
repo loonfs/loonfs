@@ -298,7 +298,7 @@ Generated SDKs use schema names as public type names:
 
 Namespace-owned resources include `namespace_id`.
 
-Revision numbers, change sequences, attribute revisions, manifest numbers, writer epochs, and grep run numbers are JSON integers from 0 through 9007199254740991 (`2^53 - 1`). Implementations MUST reject larger input values and MUST NOT store a larger value. `inode_id` isn't an ordinal, and it can use the full `u64` range.
+Revision numbers, change sequences, attribute revisions, manifest numbers, writer epochs, and grep run numbers are JSON integers from 0 through 9007199254740991 (`2^53 - 1`). Implementations MUST reject larger input values and MUST NOT store a larger value.
 
 Each field-name suffix has one meaning:
 
@@ -346,9 +346,9 @@ Reads take and release slots as follows:
 
 ### 4.1 Public inode identity
 
-Public APIs represent an inode ID as a string, such as `ino_1z5ae0x2rx99qswz2v78egz3kc`. The value MUST start with the lowercase prefix `ino_`, followed by 26 lowercase Crockford base 32 characters, the same spelling that every generated ID uses, so the first character is `0` through `7`. JSON numbers, uppercase letters, characters outside the alphabet, and suffixes of any other length are invalid. In every namespace, `ino_00000000000000000000000000` identifies the namespace root.
+Public APIs represent an inode ID as a string, such as `ino_01k087hae0ep1tzg4zw1ghyvqb`. The value MUST start with the lowercase prefix `ino_`, followed by 26 lowercase Crockford base 32 characters, the same spelling that every generated ID uses, so the first character is `0` through `7`. JSON numbers, uppercase letters, characters outside the alphabet, and suffixes of any other length are invalid. In every namespace, `ino_00000000000000000000000000` identifies the namespace root.
 
-An inode ID is unique only within its namespace, so an inode is identified by `namespace_id` and `inode_id` together. (A fork's inherited inodes keep the IDs they have in the source namespace.) Clients MUST treat the ID as an opaque value, and they MUST NOT create IDs or infer anything from their characters, such as which inode is older.
+An inode ID is unique only within its namespace, so an inode is identified by `namespace_id` and `inode_id` together. (A fork's inherited inodes keep the IDs they have in the source namespace.) Clients MUST treat the ID as an opaque value, and they MUST NOT create IDs or infer anything from an ID's characters, such as which of two inodes is older or when an inode was created. The storage format puts an inode's creation time at the start of its ID (see [Namespaces and identity](format.md#11-namespaces-and-identity)), but the API doesn't guarantee that layout.
 
 ### 4.2 Checksums
 
@@ -765,7 +765,7 @@ For example:
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_4ftpkg838mgadzce9rhe61rxc6","checkpoint_id":"pin_00000000000000000009-0000000000000009","next_run_no":1,"reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_01k087hae0ee88g7k3q541mcva","checkpoint_id":"pin_00000000000000000009-0000000000000009","next_run_no":1,"reorganize_pending":false}
 ```
 
 So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `next_run_no` is the run number that the index allocates next, and `reorganize_pending` reports whether a partitioned segment reorganization is in progress. A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.
@@ -1376,12 +1376,12 @@ Returns one authoritative path entry, addressed by path or by inode ID. Enum val
 {
   "namespace_id": "demo",
   "path": "/docs/report.txt",
-  "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+  "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
   "created_by": "usr_8f3c",
   "created_at_ms": 1752623000000,
   "inode_kind": "file",
   "head_seq": 418,
-  "parent_inode_id": "ino_7r435jpehkgd54aqq765ennskv",
+  "parent_inode_id": "ino_01k087hae0fjw8k2p172qhcnh8",
   "display_name": "report.txt",
   "binding_version": "opaque-token",
   "revision_no": 7,
@@ -1461,12 +1461,12 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
     {
       "namespace_id": "demo",
       "path": "/docs/report.txt",
-      "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+      "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
       "created_by": "usr_8f3c",
       "created_at_ms": 1752623000000,
       "inode_kind": "file",
       "head_seq": 418,
-      "parent_inode_id": "ino_7r435jpehkgd54aqq765ennskv",
+      "parent_inode_id": "ino_01k087hae0fjw8k2p172qhcnh8",
       "display_name": "report.txt",
       "revision_no": 7,
       "revision_committed_by": "render-worker",
@@ -1483,12 +1483,12 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
     {
       "namespace_id": "demo",
       "path": "/docs/slides",
-      "inode_id": "ino_4a3cdrz4rnh6m6aq01hyqnbb8k",
+      "inode_id": "ino_01k087hae0ec4vg2kp7yrbg6ex",
       "created_by": "usr_8f3c",
       "created_at_ms": 1752623000000,
       "inode_kind": "dir",
       "head_seq": 418,
-      "parent_inode_id": "ino_7r435jpehkgd54aqq765ennskv",
+      "parent_inode_id": "ino_01k087hae0fjw8k2p172qhcnh8",
       "display_name": "slides"
     }
   ],
@@ -1518,13 +1518,13 @@ Each entry includes the inode ID and the deletion sequence that `undelete` requi
   "head_seq": 418,
   "entries": [
     {
-      "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+      "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
       "inode_kind": "file",
       "deletion_seq": 417,
       "deleted_at_ms": 1752625000000,
       "deleted_by": "usr_8f3c",
       "deleted_binding": {
-        "parent_inode_id": "ino_7r435jpehkgd54aqq765ennskv",
+        "parent_inode_id": "ino_01k087hae0fjw8k2p172qhcnh8",
         "name_key": "report.txt",
         "display_name": "report.txt"
       }
@@ -1552,11 +1552,11 @@ For example, a revision listing returns:
 ```json
 {
   "namespace_id": "demo",
-  "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+  "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
   "head_seq": 418,
   "revisions": [
     {
-      "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+      "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
       "revision_no": 7,
       "committed_seq": 418,
       "committed_at_ms": 1752624000000,
@@ -1622,7 +1622,7 @@ A representative request:
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "preconditions": [
     { "kind": "namespace_head", "expected_head_seq": 42 },
-    { "kind": "file_revision", "inode_id": "ino_7r435jpehkgd54aqq765ennskv", "expected_revision_no": 3 }
+    { "kind": "file_revision", "inode_id": "ino_01k087hae0fjw8k2p172qhcnh8", "expected_revision_no": 3 }
   ],
   "operations": [
     {
@@ -1799,9 +1799,9 @@ For example:
     },
     {
       "kind": "move_by_inode",
-      "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+      "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
       "expected_binding_version": "opaque-token",
-      "destination_parent_inode_id": "ino_3pvx51eatz8fwtfkh9qgprm191",
+      "destination_parent_inode_id": "ino_01k087hae0eb4bw344m564k7g2",
       "destination_display_name": "january.pdf",
       "behavior": "replace"
     }
@@ -1824,8 +1824,8 @@ A representative response:
   "events": [
     {
       "kind": "file_created",
-      "inode_id": "ino_4a3cdrz4rnh6m6aq01hyqnbb8k",
-      "parent_inode_id": "ino_3pvx51eatz8fwtfkh9qgprm191",
+      "inode_id": "ino_01k087hae0ec4vg2kp7yrbg6ex",
+      "parent_inode_id": "ino_01k087hae0eb4bw344m564k7g2",
       "display_name": "january.pdf",
       "revision_no": 1,
       "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } }
@@ -1872,7 +1872,7 @@ It also accepts `undelete`, which recovers a deleted file or subtree by binding 
   "operations": [
     {
       "kind": "undelete",
-      "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+      "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
       "deletion_seq": 17,
       "destination_path": "/docs/report.txt"
     }
@@ -1904,7 +1904,7 @@ The endpoint also accepts `update_attributes`, which writes and removes attribut
         "tags": "draft,review"
       },
       "remove": ["stage"],
-      "expected_inode_id": "ino_7r435jpehkgd54aqq765ennskv",
+      "expected_inode_id": "ino_01k087hae0fjw8k2p172qhcnh8",
       "expected_attributes_revision_no": 3
     }
   ]
@@ -1960,7 +1960,7 @@ A wrong `expected_inode_id` returns `path_conflict`, like the delete preconditio
         "prn_finance": ["read", "history"],
         "prn_ada": ["read", "history", "write", "create", "remove", "share", "manage"]
       },
-      "expected_inode_id": "ino_0a9nqn1v476yp6pabnbxtstaq2",
+      "expected_inode_id": "ino_01k087hae0ev9t97vmrgt32ptb",
       "expected_access_revision_no": 2
     }
   ]
@@ -2249,7 +2249,7 @@ The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions
 ```json
 {
   "namespace_id": "demo",
-  "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+  "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
@@ -2316,7 +2316,7 @@ One request operation can apply several semantic operations. For example, a put 
       "events": [
         {
           "kind": "content_changed",
-          "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+          "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
           "revision_no": 8,
           "content_ref": {
             "kind": "blob_v1",
@@ -2352,7 +2352,7 @@ Directory and file creation use separate event shapes. A file creation always in
 ```json
 {
   "kind": "directory_created",
-  "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+  "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
   "parent_inode_id": "ino_00000000000000000000000000",
   "display_name": "docs",
   "binding_version": "opaque-token"
@@ -2360,7 +2360,7 @@ Directory and file creation use separate event shapes. A file creation always in
 
 {
   "kind": "file_created",
-  "inode_id": "ino_4a3cdrz4rnh6m6aq01hyqnbb8k",
+  "inode_id": "ino_01k087hae0ec4vg2kp7yrbg6ex",
   "parent_inode_id": "ino_00000000000000000000000000",
   "display_name": "report.txt",
   "binding_version": "opaque-token",
@@ -2380,7 +2380,7 @@ A `content_changed` event for an append includes `append_offset`, the offset whe
 ```json
 {
   "kind": "content_changed",
-  "inode_id": "ino_6mnhvwb5eg5dsbf1btb4zcbwm9",
+  "inode_id": "ino_01k087hae0e2g9vya9g40mka81",
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
@@ -2492,7 +2492,7 @@ Representative response:
   "matches": [
     {
       "path": "/src/search.rs",
-      "inode_id": "ino_1z5ae0x2rx99qswz2v78egz3kc",
+      "inode_id": "ino_01k087hae0ep1tzg4zw1ghyvqb",
       "revision_no": 3,
       "line_number": 17,
       "byte_offset": 512,

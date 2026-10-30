@@ -150,9 +150,8 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
     let raw: Value = serde_json::from_reader(
         raw_agent()
             .get(&format!(
-                "{}/v0/namespaces/{namespace}/inodes/{}/revisions",
+                "{}/v0/namespaces/{namespace}/inodes/{inode_id}/revisions",
                 harness.server_url,
-                loonfs_types::public_inode_id::encode(inode_id)
             ))
             .set("authorization", "Bearer test-token")
             .call()
@@ -271,12 +270,12 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     for result in [
         harness
             .client
-            .stat_by_inode(&namespace, InodeId::generate())
+            .stat_by_inode(&namespace, InodeId::generate(0))
             .await
             .map(|_| ()),
         harness
             .client
-            .read_file_revision_by_inode(&namespace, InodeId::generate(), RevisionNo(1))
+            .read_file_revision_by_inode(&namespace, InodeId::generate(0), RevisionNo(1))
             .await
             .map(|_| ()),
     ] {
@@ -378,7 +377,7 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
         .await
         .expect("stat directory")
         .inode_id;
-    let public_parent_inode_id = loonfs_types::public_inode_id::encode(parent_inode_id);
+    let public_parent_inode_id = parent_inode_id.to_string();
 
     let first: Value = serde_json::from_reader(
         raw_agent()
@@ -519,7 +518,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     assert_api_code(
         harness
             .client
-            .list_by_inode(&namespace, InodeId::generate())
+            .list_by_inode(&namespace, InodeId::generate(0))
             .page()
             .await,
         404,

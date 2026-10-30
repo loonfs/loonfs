@@ -1119,7 +1119,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
             "path": FIRST_FILE,
             "content_ref": second.content_ref.clone(),
             "behavior": "replace",
-            "expected_inode_id": loonfs_types::public_inode_id::encode(observed.inode_id)
+            "expected_inode_id": observed.inode_id.to_string()
         });
         put[precondition] = serde_json::json!(1);
         serde_json::json!({

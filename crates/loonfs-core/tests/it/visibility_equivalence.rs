@@ -6,6 +6,7 @@
 use crate::common::read_context;
 use loonfs_core::content::prepare_stored_content;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::kept_inodes::compact_groups_without_false_positives;
 use loonfs_core::test_support::namespace_store;
 use loonfs_core::{
     CompactionUnitOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
@@ -18,7 +19,7 @@ use loonfs_types::Commit;
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
-    NamespaceId, PageRequest, RevisionNo,
+    MetadataFamilyGroup, NamespaceId, PageRequest, RevisionNo,
 };
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -951,6 +952,17 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
                 .expect("a commit after the advance");
             harness.engine.fold_wal().await.expect("fold the commit");
             let inode_rows = harness.inode_rows().await;
+            // The low bits of an inode ID are random, so the kept inode
+            // filter could keep one of the four rows by a false positive. The
+            // inodes group merges with a seed whose filter keeps none of
+            // them, and the engine then compacts the other groups.
+            compact_groups_without_false_positives(
+                harness.store.as_ref(),
+                harness.namespace_id(),
+                &[MetadataFamilyGroup::Inodes],
+                &[old, grave, deep, dead],
+            )
+            .await;
             drain_compaction(&harness, &expected, "after retention").await;
             assert_eq!(harness.inode_rows().await, inode_rows - 4);
         }

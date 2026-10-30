@@ -320,12 +320,12 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         inode_ids.push(entry.inode_id);
     }
 
-    // Each stat reads three segments: the first run's bindings for the
-    // parent directories, the run with the file's binding, and the run with
-    // its newest revision. The file's keys contain random inode IDs, so a
-    // newer run's inline filter can admit a key by a false positive, and the
-    // newest-first lookup then reads that run's segment too. The batch runs
-    // are the newest `RUNS` delta runs, oldest first.
+    // Each stat reads three segments: the first run's bindings for the parent
+    // directories, the run with the file's binding, and the run with its
+    // newest revision. The file's keys contain its inode ID, whose low bits
+    // are random, so a newer run's inline filter can admit a key by a false
+    // positive, and the newest-first lookup then reads that run's segment too.
+    // The batch runs are the newest `RUNS` delta runs, oldest first.
     let directory = LoonFs::builder_with_store(store.clone())
         .read_only()
         .build()

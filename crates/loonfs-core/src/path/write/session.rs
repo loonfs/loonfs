@@ -183,6 +183,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 view: self.planning_view(authorizer, validation.view()),
                 pieces: &pieces,
                 content_writes: self.content_writes,
+                committed_at_ms: self.committed_at_ms,
             }
             .plan(operation)
             .await

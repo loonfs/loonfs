@@ -121,7 +121,7 @@ impl Client {
         inode_id: InodeId,
         options: &StatOptions,
     ) -> Result<PathEntry> {
-        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let inode_id = inode_id.to_string();
         let mut query =
             QueryBuilder::new(self.namespace_url(namespace_id, &format!("/inodes/{inode_id}")));
         query.push("include_attributes", options.include_attributes);
@@ -168,7 +168,7 @@ impl Client {
         request: PageRequest<String>,
         options: &ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
-        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let inode_id = inode_id.to_string();
         let mut query = QueryBuilder::new(
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/children")),
         );
@@ -251,7 +251,7 @@ impl Client {
         request: PageRequest<String>,
         options: &ListFileRevisionsOptions,
     ) -> Result<ListFileRevisionsResponse> {
-        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let inode_id = inode_id.to_string();
         let mut query = QueryBuilder::new(
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/revisions")),
         );
@@ -577,7 +577,7 @@ impl Client {
         inode_id: InodeId,
         options: &ReadFileOptions,
     ) -> String {
-        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let inode_id = inode_id.to_string();
         let mut query = QueryBuilder::new(
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/content")),
         );
@@ -592,7 +592,7 @@ impl Client {
         revision_no: RevisionNo,
         options: &ReadFileOptions,
     ) -> String {
-        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let inode_id = inode_id.to_string();
         let mut query = QueryBuilder::new(self.namespace_url(
             namespace_id,
             &format!("/inodes/{inode_id}/revisions/{revision_no}/content"),

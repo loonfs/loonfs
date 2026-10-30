@@ -53,15 +53,17 @@ Across namespaces, two pairs of values identify items and commit positions:
 - An item is identified by `(namespace_id, inode_id)`.
 - A commit position is identified by `(namespace_id, committed_seq)`.
 
-An inode ID is a 128-bit number. The public API writes it as `ino_` followed by the 26-character spelling that every generated ID uses (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)), such as `ino_1z5ae0x2rx99qswz2v78egz3kc`. Durable records store the same 128 bits (see [Field conventions](#121-field-conventions)).
+An inode ID is a 128-bit number. The public API writes it as `ino_` followed by the 26-character spelling that every generated ID uses (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)), such as `ino_01k087hae0ep1tzg4zw1ghyvqb`. Durable records store the same 128 bits (see [Field conventions](#121-field-conventions)).
 
 A "fork" is a new namespace that starts from a retained view of another namespace. It starts with the same files and shares their stored objects, and later commits only change the fork. [Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks) describes how the shared objects are kept.
 
-Every namespace's root directory has the inode ID whose 128 bits are all zero (`ino_00000000000000000000000000`), and a new namespace starts at sequence 0. When LoonFS creates any other inode, it generates the inode's ID from a random version 4 UUID, which is never all zeros. Renaming a file doesn't change its inode ID, but deleting a file and creating another one at the same path creates a new inode with a new ID. Inode IDs aren't assigned in order, so comparing two IDs doesn't tell which inode is older.
+Every namespace's root directory has the inode ID whose 128 bits are all zero (`ino_00000000000000000000000000`), and a new namespace starts at sequence 0. Every other inode ID is a version 7 UUID, as defined in [RFC 9562](https://www.rfc-editor.org/rfc/rfc9562). Its top 48 bits are the inode's creation time in milliseconds since the Unix epoch, which is the `committed_at_ms` of the commit that creates the inode. Of its other 80 bits, 74 are random, and 6 are the version and variant bits that every version 7 UUID has, so a generated ID is never all zero bits. Renaming a file doesn't change its inode ID, but deleting a file and creating another one at the same path creates a new inode with a new ID. No rule in LoonFS depends on the order of two IDs. (A writer whose clock runs behind can create an inode whose ID is lower than an older inode's ID, and that ID is valid.)
 
 Version 1 of the format defines two inode kinds, `dir` and `file`. ([Reserved functionality](#125-reserved-functionality) reserves a third kind, `link`.) An inode row records only the item's kind and creation metadata. The item's current parent and name are stored as directory bindings, and its contents are stored as file revisions, so neither the path nor the current content reference is stored on the inode row.
 
-Why are inode IDs random? A fork keeps the inode IDs of the inodes that it inherits, and after the fork, the fork and its source create inodes independently. Two random version 4 UUIDs are equal with negligible probability, so an inode ID that one of the two namespaces generates doesn't collide with an ID that the other generates. For the same reason, LoonFS doesn't check a new inode ID against the existing inodes.
+Why does an inode ID begin with its creation time? Most metadata rows are keyed by inode ID (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)), so an inode's ID determines where its rows are stored. With the time prefix, the rows of inodes that are created together, such as the files that one commit creates, are stored in the same blocks of a [metadata segment](glossary.md#metadata-segment), so reading them loads fewer blocks. The inodes that the commits in one [run](glossary.md#run) create have nearby IDs, so when a run's rows are mostly about new inodes, its inode-keyed segments cover a narrow key range, and a lookup skips each run whose key range can't contain the key. If every bit of an inode ID were random, the segments of every run would cover almost the whole key range, and a lookup couldn't skip any run by its key range.
+
+Why are the other 74 bits random? A fork keeps the inode IDs of the inodes that it inherits, and after the fork, the fork and its source create inodes independently. Two IDs generated in the same millisecond are equal only if their 74 random bits are equal, which has negligible probability, so an inode ID that one of the two namespaces generates doesn't collide with an ID that the other generates. For the same reason, LoonFS doesn't check a new inode ID against the existing inodes.
 
 ### 1.2 Commits and revisions
 
@@ -73,7 +75,7 @@ For example, a file might go through the following history (the sequence values 
 
 | Namespace sequence | Operation | Result |
 | --- | --- | --- |
-| 17 | Create `/reports/Report.txt` | Create an inode with a new random ID, bind the name, and publish file revision `1`. |
+| 17 | Create `/reports/Report.txt` | Create an inode with a new ID, bind the name, and publish file revision `1`. |
 | 18 | Rename it to `/reports/Final.txt` | Keep the inode ID and revision `1`, and replace the directory binding. |
 | 19 | Replace its contents | Keep the inode ID, and publish revision `2`. |
 | 20 | Delete `/reports/Final.txt` | Remove the binding, and record a deletion for the inode. |
@@ -307,7 +309,7 @@ Other objects use generated IDs:
 
 - A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies the pinned manifest, and the random suffix distinguishes separate user and fork pins on the same manifest. The durable record calls it `pin_id`, the API calls it a `checkpoint_id`, and a user pin's ID is also its `snapshot_id`.
 - A content ID is `con_` followed by the 26-character lowercase Crockford base 32 spelling of a random version 4 UUID. The spelling adds two zero bits in front of the UUID's 128 bits and writes each group of 5 bits as one character of `0123456789abcdefghjkmnpqrstvwxyz`, so the first character is `0` through `7`.
-- An inode ID is `ino_` followed by the same 26-character spelling of a random version 4 UUID, except the root directory's ID, which is all zero bits (`ino_00000000000000000000000000`). See [Namespaces and identity](#11-namespaces-and-identity).
+- An inode ID is `ino_` followed by the same 26-character spelling of a version 7 UUID whose top 48 bits are the inode's creation time, except the root directory's ID, which is all zero bits (`ino_00000000000000000000000000`). See [Namespaces and identity](#11-namespaces-and-identity).
 - A metadata segment ID is also generated, instead of being derived from the segment's position in publication history.
 
 A collision at a newly generated immutable key MUST NOT overwrite the existing bytes.
@@ -759,7 +761,7 @@ Why use epochs instead of a lease? With a lease, a new writer would have to wait
 
 ### 6.2 Validation
 
-Before it plans new mutations, the writer rebuilds the metadata state from a verified basis and the visible WAL. It resolves paths and inode references, checks content admission, evaluates preconditions, and generates a random ID for each inode that a request creates.
+Before it plans new mutations, the writer rebuilds the metadata state from a verified basis and the visible WAL. It resolves paths and inode references, checks content admission, evaluates preconditions, and generates an ID for each inode that a request creates, with the commit's `committed_at_ms` as the ID's time prefix (see [Namespaces and identity](#11-namespaces-and-identity)).
 
 The operations in one request are evaluated in order, and later operations see the tentative effects of earlier ones. When several requests share a publication batch, the writer chooses their order, and it evaluates each one against the requests accepted before it.
 

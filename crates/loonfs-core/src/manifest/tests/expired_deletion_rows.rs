@@ -4,8 +4,11 @@
 use super::active_deletions::inode_id_of;
 use super::*;
 use crate::compaction::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
-use crate::namespace::control::LoadedManifest;
 use crate::storage::content_admission::PreparedContent;
+use crate::test_support::kept_inodes::{
+    compact_groups_without_false_positives, compact_with_seed, seeded_kept_inode_filter,
+    seeded_manifest,
+};
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, DeleteDirectoryBehavior,
     InodeKind, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -337,86 +340,6 @@ const INODE_FAMILIES: [ApiMetadataRowFamily; 6] = [
     ApiMetadataRowFamily::DirentryBinds,
     ApiMetadataRowFamily::DirentryChildBinds,
 ];
-
-/// An inode row for `inode_id`, which a kept inode filter keeps exactly when
-/// it keeps every row that the inode owns.
-fn inode_probe(inode_id: InodeId) -> MetadataRow {
-    MetadataRow::Inode(crate::metadata::InodeRecord {
-        inode_id,
-        inode_kind: InodeKind::File,
-        committed_seq: ChangeSeq(1),
-        commit_id: CommitId::parse("c_probe").expect("commit id"),
-        committed_by: loonfs_types::ActorId::loonfs(),
-        committed_at_ms: 1_000,
-    })
-}
-
-/// Merges every run of each of `groups` into one base run, with each merge's
-/// kept inode filter seeded so that it keeps no row that `hidden` inodes own.
-///
-/// Inode IDs are random, so a filter seeded by the next run number could keep
-/// a hidden inode's row by a false positive. Choosing the seed makes every
-/// merge remove every hidden row, so an assertion after it doesn't depend on
-/// the IDs that a run of the test drew.
-async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    groups: &[MetadataFamilyGroup],
-    hidden: &[InodeId],
-) {
-    for &group in groups {
-        // Each merge takes at most `MAX_COMPACTION_INPUT_RUNS` runs, so a
-        // group with more runs needs more than one merge.
-        let mut merged_every_run = false;
-        for _ in 0..8 {
-            let current = crate::test_support::namespace_store(store, namespace_id)
-                .load_current_manifest()
-                .await
-                .expect("load the current manifest");
-            let payload = current.payload();
-            let mut runs = runs_newest_first(payload)
-                .into_iter()
-                .filter(|run| plan::group_run_descriptors(run, group).next().is_some())
-                .collect::<Vec<_>>();
-            runs.sort_by_key(|run| (run.tier != RunTier::Base, run.run_seq));
-            merged_every_run = runs.len() <= crate::limits::MAX_COMPACTION_INPUT_RUNS;
-            if runs.is_empty() {
-                break;
-            }
-            runs.truncate(crate::limits::MAX_COMPACTION_INPUT_RUNS);
-            let spec = MetadataCompactionSpec::new(
-                group,
-                runs.iter().map(|run| run.run_no).collect(),
-                runs.iter()
-                    .flat_map(|run| plan::group_run_descriptors(run, group))
-                    .map(|descriptor| descriptor.row_count)
-                    .sum(),
-                MergePlacement::Base {
-                    output_seq: payload.head_seq,
-                },
-                payload.retention_floor_seq,
-            );
-            let mut seed = None;
-            for offset in 0..64 {
-                let candidate = RunNo(payload.next_run_no.0 + offset);
-                let filter = seeded_kept_inode_filter(store, namespace_id, candidate).await;
-                if hidden
-                    .iter()
-                    .all(|inode_id| !filter.keeps(&inode_probe(*inode_id)))
-                {
-                    seed = Some(candidate);
-                    break;
-                }
-            }
-            let seed = seed.expect("a seed whose kept inode filter keeps no hidden row");
-            compact_with_seed(store, namespace_id, &spec, seed).await;
-            if merged_every_run {
-                break;
-            }
-        }
-        assert!(merged_every_run, "{group:?} merges into one base run");
-    }
-}
 
 /// One inode's state at `seq`: its inode row, and its newest revision,
 /// attribute row, and access row.
@@ -1061,9 +984,10 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
         )
         .expect("plan the group");
         assert_matches!(spec.placement(), MergePlacement::Base { .. });
-        // Inode IDs are random, so the test seeds this variant's filter with a
-        // run number whose filter has no false positive for the hidden
-        // revision, and the merge then removes the revision in every run.
+        // The low bits of an inode ID are random, so the test seeds this
+        // variant's filter with a run number whose filter has no false
+        // positive for the hidden revision, and the merge then removes the
+        // revision in every run.
         let mut seeded = false;
         for offset in 0..64 {
             basis.manifest =
@@ -1115,61 +1039,6 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
     }
 }
 
-/// The current manifest with `next_run_no` set to `seed`, which seeds the
-/// kept inode filter of a compaction over it.
-fn seeded_manifest(current: &LoadedManifest, seed: RunNo) -> Arc<NamespaceManifestEnvelope> {
-    let mut payload = current.payload().clone();
-    payload.next_run_no = seed;
-    Arc::new(encode_manifest(payload).into_envelope())
-}
-
-/// Merges `spec` over the current manifest with its kept inode filter seeded
-/// by `seed`, and publishes the output.
-async fn compact_with_seed<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    spec: &MetadataCompactionSpec,
-    seed: RunNo,
-) {
-    let current = crate::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the current manifest");
-    let mut basis = super::super::metadata_basis_from_manifest(store, None, &current).segments;
-    basis.manifest = seeded_manifest(&current, seed);
-    let input_keys = input_segment_keys(&basis.scan_runs, spec).expect("the spec's runs");
-    let cancellation = MetadataCompactionCancellation::default();
-    let merged = run_metadata_compaction(
-        &basis,
-        &crate::cache::MetadataSegmentCache::unshared(0),
-        namespace_id,
-        spec,
-        MetadataRunPolicy::default(),
-        &cancellation,
-    )
-    .await
-    .expect("merge")
-    .expect("not cancelled");
-    drop(basis);
-    let timer = crate::test_support::std_timer();
-    let outcome = crate::test_support::namespace_store(store, namespace_id)
-        .finalize_metadata_compaction(
-            None,
-            spec,
-            &input_keys,
-            merged,
-            &cancellation,
-            &CompactionPublication {
-                compactor_epoch: loonfs_types::CompactorEpoch(0),
-                compaction: OperationClock::start(0, Arc::clone(&timer)),
-                publication: OperationClock::start(0, timer),
-            },
-        )
-        .await
-        .expect("publish the merge");
-    assert_matches!(outcome, CompactionUnitOutcome::Published { .. });
-}
-
 /// Whether the kept inode filter that `seed` seeds over the current manifest
 /// keeps `row`.
 async fn seed_keeps<S: ObjectStore + ?Sized>(
@@ -1181,38 +1050,6 @@ async fn seed_keeps<S: ObjectStore + ?Sized>(
     seeded_kept_inode_filter(store, namespace_id, seed)
         .await
         .keeps(row)
-}
-
-/// The kept inode filter of a base compaction of the inodes group over the
-/// current manifest, seeded by `seed`.
-async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    seed: RunNo,
-) -> KeptInodeFilter {
-    let current = crate::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the current manifest");
-    let mut basis = super::super::metadata_basis_from_manifest(store, None, &current).segments;
-    basis.manifest = seeded_manifest(&current, seed);
-    load_kept_inode_filter(
-        &basis,
-        namespace_id,
-        &MetadataCompactionSpec::new(
-            MetadataFamilyGroup::Inodes,
-            vec![RunNo(0)],
-            0,
-            MergePlacement::Base {
-                output_seq: current.payload().head_seq,
-            },
-            ChangeSeq(0),
-        ),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("build the filter")
-    .expect("not cancelled")
 }
 
 /// Checks that a false positive in the kept inode filter keeps a hidden
@@ -1272,9 +1109,9 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         })
         .expect("the inodes base run");
     assert_eq!(base.tier, RunTier::Base);
-    // Inode IDs are random, so the filter that the next run number seeds can
-    // also keep the row. The test takes the first later seed whose filter
-    // doesn't.
+    // The low bits of an inode ID are random, so the filter that the next run
+    // number seeds can also keep the row. The test takes the first later seed
+    // whose filter doesn't.
     let mut later_seed = None;
     for offset in 0..64 {
         let candidate = RunNo(payload.next_run_no.0 + offset);
@@ -1462,8 +1299,8 @@ async fn a_base_compaction_walks_the_tree_once_the_acknowledged_floor_is_above_z
     assert!(matches!(filter, KeptInodeFilter::Reached(_)));
     // A Bloom filter keeps every inode that the walk inserted, whatever its
     // seed, so the recoverable file is kept by every filter. The hidden file
-    // isn't inserted, so some seed's filter rejects it. (Inode IDs are random,
-    // so one filter can keep it by a false positive.)
+    // isn't inserted, so some seed's filter rejects it. (The low bits of an
+    // inode ID are random, so one filter can keep it by a false positive.)
     assert!(
         filter.keeps(&revision(recoverable)),
         "a recoverably deleted file keeps its rows"

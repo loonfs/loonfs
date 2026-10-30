@@ -270,7 +270,7 @@ fn human_trash(listing: &TrashListing) -> String {
             render_actor(&entry.deleted_by),
             entry.inode_kind,
             entry.deleted_binding.display_name,
-            public_inode_id(entry.inode_id),
+            entry.inode_id,
             entry.deletion_seq.0,
         ));
     }
@@ -327,7 +327,7 @@ fn human_path_entry_details(entry: &PathEntry) -> String {
         lines.push(format!("name: {display_name}"));
     }
     lines.extend([
-        format!("inode: {}", public_inode_id(entry.inode_id)),
+        format!("inode: {}", entry.inode_id),
         format!("kind: {}", entry.inode_kind()),
         format!("seq: {}", entry.head_seq.0),
         format!("created_by: {}", render_actor(&entry.created_by)),

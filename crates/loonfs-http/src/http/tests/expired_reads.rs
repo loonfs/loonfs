@@ -11,7 +11,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_types::{public_inode_id, ErrorCode, ErrorResponse};
+use loonfs_types::{ErrorCode, ErrorResponse};
 use std::sync::Arc;
 use tower::ServiceExt as _;
 
@@ -85,10 +85,7 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
         advanced.response.retention_floor_seq,
         deletion.committed_seq
     );
-    (
-        public_inode_id::encode(inodes[0]),
-        public_inode_id::encode(inodes[1]),
-    )
+    (inodes[0].to_string(), inodes[1].to_string())
 }
 
 #[tokio::test]

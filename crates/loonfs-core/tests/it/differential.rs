@@ -1307,7 +1307,8 @@ async fn reads_at_or_above_the_retention_floor_match_the_model_after_compaction(
             .expect("statistics");
         // A base compaction keeps every row of a visible or recoverable inode,
         // and a kept inode filter false positive can keep an expired inode's
-        // row too (inode IDs are random), so the count is within that bound.
+        // row too (the low bits of an inode ID are random), so the count is
+        // within that bound.
         assert!(
             (kept_rows..=kept_rows + expired_inodes).contains(&statistics.inode_record_count),
             "inode rows at head {head_seq}: {} outside {kept_rows}..={}",

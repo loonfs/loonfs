@@ -134,7 +134,7 @@ pub enum WalDelta {
     CreateInode {
         /// Stable position of this delta within its commit, used in row ordering and identity.
         delta_index: u32,
-        /// The new inode's randomly generated ID.
+        /// The new inode's generated ID.
         inode_id: InodeId,
         /// File-or-directory classification established at creation.
         inode_kind: InodeKind,

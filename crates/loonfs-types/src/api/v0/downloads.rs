@@ -121,7 +121,7 @@ pub struct CreateDownloadByInodeResponse {
     /// The namespace that was read.
     pub namespace_id: NamespaceId,
     /// The file inode being read.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The revision being read.
     pub revision_no: RevisionNo,

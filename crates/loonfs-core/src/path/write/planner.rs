@@ -43,11 +43,14 @@ pub(crate) fn commit_fingerprint(
 }
 
 /// The planning of one operation: the planning view, the commit's pieces,
-/// and where content writes go.
+/// where content writes go, and the commit time.
 pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
     pub(super) view: PlanningView<'p, S>,
     pub(super) pieces: &'p CommitPieces<'p, S>,
     pub(super) content_writes: ContentWrites<'p, S>,
+    /// The commit's `committed_at_ms`, which is the creation time of every
+    /// inode that the operation creates.
+    pub(super) committed_at_ms: u64,
 }
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {

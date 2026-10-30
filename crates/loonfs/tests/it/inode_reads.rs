@@ -199,11 +199,11 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
 
     for error in [
         namespace
-            .stat_by_inode(InodeId::generate())
+            .stat_by_inode(InodeId::generate(0))
             .await
             .expect_err("unknown inode stat"),
         namespace
-            .read_file_revision_by_inode(InodeId::generate(), RevisionNo(1))
+            .read_file_revision_by_inode(InodeId::generate(0), RevisionNo(1))
             .await
             .expect_err("unknown inode content"),
     ] {

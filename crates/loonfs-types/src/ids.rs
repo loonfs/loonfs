@@ -49,9 +49,11 @@ validation_error!(
 /// Crockford base 32 spelling of a random version 4 UUID, such as
 /// `upl_3s0drmj8em84yb4mnetqkz2j0x`.
 ///
-/// Ids in the id inventory generate through their newtype `generate()`
-/// constructors; this helper stays public for free-form generated labels
-/// (for example a server's per-request id) that have no validated id type.
+/// Every generated ID type has a `generate()` constructor that calls this
+/// function, except `InodeId`, whose `generate()` draws a version 7 UUID
+/// through `random_uuid_v7`. This function stays public for free-form
+/// generated labels that have no validated ID type, such as a server's
+/// per-request ID.
 pub fn generated_id(prefix: &'static str) -> String {
     format!(
         "{prefix}_{}",
@@ -82,6 +84,16 @@ pub fn generated_id_body_prefixes(width: usize) -> impl ExactSizeIterator<Item =
 pub(crate) fn random_uuid_v4() -> u128 {
     let mut bytes = random_bytes::<16>();
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    u128::from_be_bytes(bytes)
+}
+
+/// Draws a version 7 UUID whose top 48 bits are the low 48 bits of
+/// `created_at_ms`, a time in milliseconds since the Unix epoch.
+pub(crate) fn random_uuid_v7(created_at_ms: u64) -> u128 {
+    let mut bytes = random_bytes::<16>();
+    bytes[..6].copy_from_slice(&created_at_ms.to_be_bytes()[2..]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     u128::from_be_bytes(bytes)
 }

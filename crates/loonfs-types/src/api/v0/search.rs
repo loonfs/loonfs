@@ -70,7 +70,7 @@ pub struct GrepMatch {
     #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
     /// The matched file's durable inode ID.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The matched revision, which is the file's newest revision visible to the search.
     pub revision_no: RevisionNo,
@@ -128,7 +128,7 @@ pub enum GrepIndexStatus {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            with = "crate::public_inode_id::option"
+            with = "crate::inode_id::public::option"
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         cursor_inode_id: Option<InodeId>,

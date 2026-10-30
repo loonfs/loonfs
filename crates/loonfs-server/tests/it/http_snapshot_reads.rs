@@ -712,10 +712,8 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         ),
         (
             get_bytes(&format!(
-                "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/content?snapshot_id={}",
-                harness.server_url,
-                loonfs_types::public_inode_id::encode(inode_id),
-                live.snapshot_id
+                "{}/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/1/content?snapshot_id={}",
+                harness.server_url, live.snapshot_id
             ))
             .map(|_| serde_json::Value::Null),
             "snapshot_id",
@@ -723,9 +721,8 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         (
             post_json::<serde_json::Value>(
                 &format!(
-                    "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/downloads",
+                    "{}/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/1/downloads",
                     harness.server_url,
-                    loonfs_types::public_inode_id::encode(inode_id),
                 ),
                 serde_json::json!({"snapshot_id": live.snapshot_id}),
             ),

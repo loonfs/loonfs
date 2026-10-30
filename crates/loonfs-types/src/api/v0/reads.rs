@@ -23,7 +23,7 @@ pub struct PathEntry {
     #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
     /// The entry's stable inode ID.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The actor that created this inode, as the application supplied it.
     pub created_by: ActorId,
@@ -38,7 +38,7 @@ pub struct PathEntry {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::public_inode_id::option"
+        with = "crate::inode_id::public::option"
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub parent_inode_id: Option<InodeId>,
@@ -239,7 +239,7 @@ pub struct ListInodeChildrenResponse {
     /// The namespace that was read.
     pub namespace_id: NamespaceId,
     /// The directory inode whose children were returned.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub parent_inode_id: InodeId,
     /// The namespace head sequence that this listing was read at.
     pub head_seq: ChangeSeq,
@@ -256,7 +256,7 @@ pub struct ListInodeChildrenResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {
     /// The inode that the deletion hides.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// Whether the deleted root is a file or a directory. A newer server can return another kind.
     #[cfg_attr(feature = "openapi", schema(value_type = InodeKind))]
@@ -292,7 +292,7 @@ pub struct ListTrashResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FileRevision {
     /// The file inode that this revision belongs to.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The revision number within the file inode.
     pub revision_no: RevisionNo,
@@ -316,7 +316,7 @@ pub struct ListFileRevisionsResponse {
     /// The namespace that was read.
     pub namespace_id: NamespaceId,
     /// The file inode whose revisions were returned.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The namespace head sequence that the read used.
     pub head_seq: ChangeSeq,

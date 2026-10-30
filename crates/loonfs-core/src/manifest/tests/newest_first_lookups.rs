@@ -475,8 +475,8 @@ async fn delta_segments_admitting(
 
 /// A filler key that exactly one delta segment's filter admits by a false
 /// positive, and one that no delta segment's filter admits, for each of two
-/// families. The keys contain random inode IDs, so a key can also meet more
-/// than one false positive, and the test skips such a key.
+/// families. The keys contain inode IDs, whose low bits are random, so a key
+/// can also meet more than one false positive, and the test skips such a key.
 struct FalsePositiveKeys {
     binding: NameKey,
     plain_binding: NameKey,

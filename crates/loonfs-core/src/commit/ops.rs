@@ -24,8 +24,8 @@ pub(crate) enum NewChild {
 pub(crate) enum CommitOperation {
     /// Create a directory under a parent inode.
     CreateDirectory {
-        /// The random inode ID that planning generates once, and that
-        /// validation passes through unchanged.
+        /// The inode ID that planning generates once, and that validation
+        /// passes through unchanged.
         child_inode_id: InodeId,
         /// Visible directory that will own the new binding.
         parent_inode_id: InodeId,
@@ -34,8 +34,8 @@ pub(crate) enum CommitOperation {
     },
     /// Create a file under a parent inode.
     CreateFile {
-        /// The random inode ID that planning generates once, and that
-        /// validation passes through unchanged.
+        /// The inode ID that planning generates once, and that validation
+        /// passes through unchanged.
         child_inode_id: InodeId,
         /// Visible directory that will own the new binding.
         parent_inode_id: InodeId,

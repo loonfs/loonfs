@@ -381,8 +381,9 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
             .expect("created path");
         children.push((entry.inode_id, path));
     }
-    // The moved child must sort before the slot's earlier child, and inode
-    // IDs are random, so the child with the lower ID is the one that moves.
+    // The moved child must sort before the slot's earlier child, and the test
+    // can't choose inode IDs, so the child with the lower ID is the one that
+    // moves.
     children.sort_unstable();
     let [(moved, moved_path), (_, replaced_path)] = children[..] else {
         panic!("two children");

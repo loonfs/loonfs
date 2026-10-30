@@ -242,7 +242,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 if expected_destination.is_some() {
                     return Err(CoreError::PathNotFound(path));
                 }
-                let child_inode_id = InodeId::generate();
+                let child_inode_id = InodeId::generate(self.committed_at_ms);
                 ops.push(CommitOperation::CreateFile {
                     child_inode_id,
                     parent_inode_id,

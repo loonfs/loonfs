@@ -58,7 +58,7 @@ key:      gram-{six lowercase hex characters}-{first inode ID, 26-character spel
 payload:  a packed batch of (inode_id, revision_no) pairs
 ```
 
-The writer's target is about 256 postings per row. The batch stores its count as an unsigned varint, and then each pair as the inode ID's 16 bytes followed by the revision number as an unsigned varint. Inode IDs are random, so the difference between two consecutive IDs is as wide as an ID, and the batch stores each ID whole. The pairs are ordered, and the rows for a gram are read together.
+The writer's target is about 256 postings per row. The batch stores its count as an unsigned varint, and then each pair as the inode ID's 16 bytes followed by the revision number as an unsigned varint. An inode ID has 74 random bits after its time prefix (see [Namespaces and identity](../specs/format.md#11-namespaces-and-identity)), so storing the difference between two consecutive IDs would save only a few bytes for each posting, and the batch stores each ID whole. The pairs are ordered, and the rows for a gram are read together.
 
 Batching reduces the overhead of each row, and it keeps using the same segment and iteration code as other sorted rows. Readers take the union of posting batches from different runs, so reorganization doesn't need to combine every posting for a gram into one large payload to stay correct.
 

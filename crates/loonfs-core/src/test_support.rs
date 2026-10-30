@@ -150,6 +150,7 @@ pub fn content_head<S: ObjectStore + ?Sized>(
 }
 
 mod content_write;
+pub mod kept_inodes;
 pub mod ops;
 
 use crate::engine::NamespaceWriterEngine;
@@ -179,8 +180,7 @@ pub fn namespace_store<S>(store: S, namespace_id: &NamespaceId) -> NamespaceStor
 }
 
 /// Returns the inode ID of the item visible at `absolute_path` in the
-/// namespace's current view, for a test that needs the random ID a commit
-/// generated.
+/// namespace's current view, for a test that needs the ID a commit generated.
 #[cfg(test)]
 pub(crate) async fn visible_inode_id<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,

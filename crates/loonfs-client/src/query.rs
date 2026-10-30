@@ -38,7 +38,7 @@ impl Client {
                 query.push("path_prefix", path_prefix.as_str());
             }
             GrepScope::Inode(inode_id) => {
-                query.push("inode_id", loonfs_types::public_inode_id::encode(*inode_id));
+                query.push("inode_id", inode_id.to_string());
             }
         }
         query.push("allow_scan", request.allow_scan);

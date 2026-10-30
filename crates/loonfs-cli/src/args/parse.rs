@@ -5,7 +5,7 @@ use loonfs_types::{
 };
 
 pub(crate) fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
-    loonfs_types::public_inode_id::decode(value).map_err(|error| error.to_string())
+    InodeId::parse(value).map_err(|error| error.to_string())
 }
 
 /// Parses a decimal ordinal and checks that it is a public integer.

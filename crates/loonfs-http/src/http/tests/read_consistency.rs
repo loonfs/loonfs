@@ -88,7 +88,7 @@ async fn fixture(name: &str, consistency: Option<ReadConsistency>) -> Fixture {
         _directory: directory,
         recording,
         router,
-        file_inode: loonfs_types::public_inode_id::encode(file_inode),
+        file_inode: file_inode.to_string(),
     }
 }
 

@@ -1536,7 +1536,7 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
             "--namespace",
             "demo",
             "--inode",
-            &loonfs_types::InodeId::generate().to_string(),
+            &loonfs_types::InodeId::generate(0).to_string(),
         ]);
         assert_failure(&missing);
         assert_eq!(json_error(&missing)["code"], "inode_not_found");
@@ -2158,7 +2158,7 @@ fn mkdir_parents_is_idempotent_over_an_existing_directory_in_both_modes() {
         assert_eq!(again_data["target"], "demo:/a/b");
         assert!(again_data["inode_id"]
             .as_str()
-            .is_some_and(|inode_id| { loonfs_types::public_inode_id::decode(inode_id).is_ok() }));
+            .is_some_and(|inode_id| { loonfs_types::InodeId::parse(inode_id).is_ok() }));
 
         // Without -p the conflict still surfaces.
         let strict = harness.run(&["--json", "mkdir", "/a/b", "--profile", profile]);
