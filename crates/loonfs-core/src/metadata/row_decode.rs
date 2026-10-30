@@ -7,8 +7,8 @@
 use crate::error::{CoreError, Result};
 use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord,
+    ContentLayoutRecord, DirentryBindingRecord, DirentryRevisionRecord, InodeRecord,
+    RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_types::format::manifest::MetadataRow;
 use loonfs_types::format::wal::WalCommitPayload;
@@ -35,6 +35,15 @@ pub(crate) fn direntry_binding_from_manifest_row(
     match row {
         MetadataRow::DirentryBinding(record) => Ok(record),
         other => Err(foreign_row("direntry_binding", &other)),
+    }
+}
+
+pub(crate) fn direntry_revision_from_manifest_row(
+    row: MetadataRow,
+) -> Result<DirentryRevisionRecord> {
+    match row {
+        MetadataRow::DirentryRevision(record) => Ok(record),
+        other => Err(foreign_row("direntry_revision", &other)),
     }
 }
 
@@ -127,6 +136,11 @@ mod tests {
         assert!(message.contains("`direntry_binding`"), "{message}");
         assert!(message.contains("inode-00000000000000000007"), "{message}");
 
+        assert_matches!(
+            direntry_revision_from_manifest_row(foreign())
+                .expect_err("a directory entry revision decoder should reject a foreign row"),
+            CoreError::NamespaceCorrupt(_)
+        );
         assert_matches!(
             revision_from_manifest_row(foreign())
                 .expect_err("a revision decoder should reject a foreign row"),

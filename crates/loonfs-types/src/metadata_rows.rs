@@ -20,6 +20,10 @@ pub enum MetadataRowFamily {
     DirentryBinds,
     /// Re-indexes directory bindings by child for parent discovery.
     DirentryChildBinds,
+    /// Stores a copy of each bound file's current revision under its
+    /// directory edge, ordered like the slot index, so a directory listing
+    /// reads its children's revisions with one scan of the parent.
+    DirentryRevisions,
     /// Stores file revisions newest-first within each inode.
     Revisions,
     /// Stores set and revoke events used to determine active subtree tombstones.
@@ -48,10 +52,11 @@ pub enum MetadataRowFamily {
 
 impl MetadataRowFamily {
     /// Every row family in serialized declaration order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Inodes,
         Self::DirentryBinds,
         Self::DirentryChildBinds,
+        Self::DirentryRevisions,
         Self::Revisions,
         Self::Tombstones,
         Self::ActiveDeletions,
@@ -68,6 +73,7 @@ impl MetadataRowFamily {
             Self::Inodes => "inodes",
             Self::DirentryBinds => "direntry_binds",
             Self::DirentryChildBinds => "direntry_child_binds",
+            Self::DirentryRevisions => "direntry_revisions",
             Self::Revisions => "revisions",
             Self::Tombstones => "tombstones",
             Self::ActiveDeletions => "active_deletions",
@@ -84,7 +90,8 @@ impl MetadataRowFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataFamilyGroup {
-    /// Directory bindings, their child index, and unbinds.
+    /// Directory bindings, their child index, unbinds, and the revisions
+    /// stored under each file's edge.
     Bindings,
     /// File revisions.
     Revisions,
@@ -139,6 +146,7 @@ impl MetadataFamilyGroup {
             Self::Bindings => &[
                 MetadataRowFamily::DirentryBinds,
                 MetadataRowFamily::DirentryChildBinds,
+                MetadataRowFamily::DirentryRevisions,
             ],
             Self::Revisions => &[MetadataRowFamily::Revisions],
             Self::Inodes => &[MetadataRowFamily::Inodes],
@@ -165,6 +173,9 @@ pub enum MetadataRow {
     Inode(InodeRecord),
     /// Stores the value of a directory slot at one delta position.
     DirentryBinding(DirentryBindingRecord),
+    /// Stores a bound file's current revision under its directory edge at
+    /// one delta position.
+    DirentryRevision(DirentryRevisionRecord),
     /// Publishes one immutable content revision for a file inode.
     FileRevision(RevisionRecord),
     /// Changes whether one root inode has an active subtree tombstone.
@@ -260,6 +271,58 @@ impl DirentryBindingRecord {
     pub fn is_bound(&self) -> bool {
         matches!(self.state, DirentryBindingState::Bound { .. })
     }
+}
+
+/// A bound file's current revision, stored under the file's directory edge
+/// at one delta position.
+///
+/// See [directory bindings](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirentryRevisionRecord {
+    /// Directory containing the edge.
+    pub parent_inode_id: InodeId,
+    /// Canonical component of the edge's name.
+    pub name_key: NameKey,
+    /// File the edge binds.
+    pub child_inode_id: InodeId,
+    /// The file's current revision number.
+    pub revision_no: RevisionNo,
+    /// The file's current content.
+    pub content_ref: ContentRef,
+    /// Actor of the commit that published the current revision.
+    pub revision_committed_by: crate::ActorId,
+    /// Unix milliseconds of the commit that published the current revision.
+    pub revision_committed_at_ms: u64,
+    /// Commit that wrote this row.
+    pub committed_seq: ChangeSeq,
+    /// Order within the commit.
+    pub delta_index: u32,
+}
+
+impl DirentryRevisionRecord {
+    /// Returns the position used to order the edge's versions.
+    pub fn position(&self) -> DeltaPosition {
+        DeltaPosition {
+            seq: self.committed_seq,
+            delta_index: self.delta_index,
+        }
+    }
+}
+
+/// A file's current revision, as a bind delta includes it for the file's new
+/// directory edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirentryRevision {
+    /// The file's current revision number.
+    pub revision_no: RevisionNo,
+    /// The file's current content.
+    pub content_ref: ContentRef,
+    /// Actor of the commit that published the current revision.
+    pub revision_committed_by: crate::ActorId,
+    /// Unix milliseconds of the commit that published the current revision.
+    pub revision_committed_at_ms: u64,
 }
 
 /// An unbound value hides older values of the slot or child.

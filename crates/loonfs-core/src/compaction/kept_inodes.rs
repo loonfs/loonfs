@@ -62,9 +62,10 @@ impl KeptInodeFilter {
             MetadataRow::AttributesRevision(record) => record.inode_id,
             MetadataRow::AccessRevision(record) => record.inode_id,
             // A hidden directory's edges are hidden with it. Both binding
-            // indexes test an edge by its parent, so they keep or remove each
-            // binding event together.
+            // indexes and the revisions stored under an edge test the edge by
+            // its parent, so they keep or remove each edge's rows together.
             MetadataRow::DirentryBinding(record) => record.parent_inode_id,
+            MetadataRow::DirentryRevision(record) => record.parent_inode_id,
             MetadataRow::Tombstone(_)
             | MetadataRow::ActiveDeletion(_)
             | MetadataRow::CommitReceipt(_)

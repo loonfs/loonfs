@@ -15,6 +15,7 @@ impl MetadataRowFamily {
             Self::Inodes => lookup_keys::INODE_ROW_PREFIX,
             Self::DirentryBinds => lookup_keys::DIRENTRY_BIND_ROW_PREFIX,
             Self::DirentryChildBinds => lookup_keys::DIRENTRY_CHILD_BIND_ROW_PREFIX,
+            Self::DirentryRevisions => lookup_keys::DIRENTRY_REVISION_ROW_PREFIX,
             Self::Revisions => lookup_keys::REVISION_ROW_PREFIX,
             Self::Tombstones => lookup_keys::TOMBSTONE_ROW_PREFIX,
             Self::ActiveDeletions => lookup_keys::ACTIVE_DELETION_ROW_PREFIX,
@@ -57,6 +58,7 @@ impl MetadataRow {
         self.row_key_for_family(match self {
             Self::Inode(_) => MetadataRowFamily::Inodes,
             Self::DirentryBinding(_) => MetadataRowFamily::DirentryBinds,
+            Self::DirentryRevision(_) => MetadataRowFamily::DirentryRevisions,
             Self::FileRevision(_) => MetadataRowFamily::Revisions,
             Self::Tombstone(_) => MetadataRowFamily::Tombstones,
             Self::ActiveDeletion(_) => MetadataRowFamily::ActiveDeletions,
@@ -92,6 +94,7 @@ impl MetadataRow {
                     ))
                 }
                 MetadataRowFamily::Inodes
+                | MetadataRowFamily::DirentryRevisions
                 | MetadataRowFamily::Revisions
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
@@ -102,6 +105,13 @@ impl MetadataRow {
                 | MetadataRowFamily::Access => None,
             }
             .expect("a binding row should use a binding family"),
+            Self::DirentryRevision(record) => lookup_keys::direntry_revision_row_key(
+                record.parent_inode_id,
+                &record.name_key,
+                record.child_inode_id,
+                record.committed_seq,
+                record.delta_index,
+            ),
             Self::FileRevision(record) => lookup_keys::revision_row_key(
                 record.inode_id,
                 record.revision_no,
@@ -155,6 +165,7 @@ impl MetadataRow {
                     Some(lookup_keys::direntry_child_probe(record.child_inode_id))
                 }
                 MetadataRowFamily::Inodes
+                | MetadataRowFamily::DirentryRevisions
                 | MetadataRowFamily::Revisions
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
@@ -165,6 +176,9 @@ impl MetadataRow {
                 | MetadataRowFamily::Access => None,
             }
             .expect("a binding row should use a binding family"),
+            Self::DirentryRevision(record) => {
+                lookup_keys::direntry_revision_probe(record.parent_inode_id, &record.name_key)
+            }
             Self::FileRevision(record) => lookup_keys::revision_probe(record.inode_id),
             Self::Tombstone(record) => lookup_keys::tombstone_probe(record.root_inode_id),
             // The family is only ever range-scanned in key order, never
@@ -207,6 +221,7 @@ pub mod lookup_keys {
 
     pub(super) const DIRENTRY_BIND_ROW_PREFIX: &str = "direntry-bind-";
     pub(super) const DIRENTRY_CHILD_BIND_ROW_PREFIX: &str = "direntry-child-bind-";
+    pub(super) const DIRENTRY_REVISION_ROW_PREFIX: &str = "direntry-revision-";
     pub(super) const TOMBSTONE_ROW_PREFIX: &str = "tombstone-";
     pub(super) const CONTENT_LAYOUT_ROW_PREFIX: &str = "content-layout-";
     pub(super) const COMMIT_RECEIPT_ROW_PREFIX: &str = "commit-receipt-";
@@ -291,6 +306,43 @@ pub mod lookup_keys {
             direntry_child_prefix(child_inode_id),
             parent_inode_id.0,
             hex_encode_row_key_component(name_key),
+            committed_seq.0
+        )
+    }
+
+    /// Builds the prefix for the revisions stored under one parent's edges.
+    pub fn direntry_revision_parent_prefix(parent_inode_id: InodeId) -> String {
+        format!("{DIRENTRY_REVISION_ROW_PREFIX}{:020}-", parent_inode_id.0)
+    }
+
+    /// Builds the Bloom filter probe for the revisions stored under one
+    /// parent/name slot.
+    pub fn direntry_revision_probe(parent_inode_id: InodeId, name_key: &NameKey) -> String {
+        format!(
+            "{}{}",
+            direntry_revision_parent_prefix(parent_inode_id),
+            hex_encode_row_key_component(name_key.as_str())
+        )
+    }
+
+    /// Builds the prefix for the revisions stored under one parent/name slot.
+    pub fn direntry_revision_prefix(parent_inode_id: InodeId, name_key: &NameKey) -> String {
+        format!("{}-", direntry_revision_probe(parent_inode_id, name_key))
+    }
+
+    /// Builds a row key for one version of the revision stored under a
+    /// file's edge.
+    pub fn direntry_revision_row_key(
+        parent_inode_id: InodeId,
+        name_key: &NameKey,
+        child_inode_id: InodeId,
+        committed_seq: ChangeSeq,
+        delta_index: u32,
+    ) -> String {
+        format!(
+            "{}{:020}-{:020}-{delta_index:010}",
+            direntry_revision_prefix(parent_inode_id, name_key),
+            child_inode_id.0,
             committed_seq.0
         )
     }
@@ -504,13 +556,33 @@ mod tests {
     use crate::metadata_rows::{
         AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction,
         AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord, DeletedBinding,
-        DirentryBindingRecord, DirentryBindingState, InodeRecord, MetadataRow, MetadataRowFamily,
-        RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+        DirentryBindingRecord, DirentryBindingState, DirentryRevisionRecord, InodeRecord,
+        MetadataRow, MetadataRowFamily, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
     };
     use crate::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId};
 
     fn row_commit_id() -> CommitId {
         CommitId::parse("c_metadata_row").expect("commit id")
+    }
+
+    fn direntry_revision_row(actor: crate::ActorId) -> MetadataRow {
+        MetadataRow::DirentryRevision(DirentryRevisionRecord {
+            parent_inode_id: InodeId(9),
+            name_key: NameKey::parse("report.txt").expect("valid name key"),
+            child_inode_id: InodeId(42),
+            revision_no: crate::RevisionNo(7),
+            content_ref: crate::ContentRef::blob_v1(
+                crate::NamespaceId::parse("demo").expect("namespace id"),
+                crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
+                    .expect("valid content id"),
+                b"direntry revision sample",
+                crate::ChecksumAlgorithm::Crc64nvme,
+            ),
+            revision_committed_by: actor,
+            revision_committed_at_ms: 12_000,
+            committed_seq: ChangeSeq(17),
+            delta_index: 3,
+        })
     }
 
     fn deleted_binding() -> DeletedBinding {
@@ -576,6 +648,44 @@ mod tests {
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryChildBinds),
             "direntry-child-bind-00000000000000000042-00000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
+        );
+    }
+
+    #[test]
+    fn direntry_revision_row_keys_follow_the_slot_index_order() {
+        let row = direntry_revision_row(crate::ActorId::loonfs());
+        let key = row.row_key();
+        assert_eq!(
+            key,
+            "direntry-revision-00000000000000000009-7265706f72742e747874-00000000000000000042-00000000000000000017-0000000003"
+        );
+        assert_eq!(
+            row.row_key_for_family(MetadataRowFamily::DirentryRevisions),
+            key
+        );
+        let name_key = NameKey::parse("report.txt").expect("valid name key");
+        assert!(key.starts_with(&lookup_keys::direntry_revision_parent_prefix(InodeId(9))));
+        assert!(key.starts_with(&lookup_keys::direntry_revision_prefix(
+            InodeId(9),
+            &name_key
+        )));
+        assert_eq!(
+            row.filter_key_for_family(MetadataRowFamily::DirentryRevisions),
+            lookup_keys::direntry_revision_probe(InodeId(9), &name_key)
+        );
+        // The key after the family prefix is the slot index's key for the
+        // same edge and position, so both families sort one parent's edges
+        // the same way.
+        let bind_key = lookup_keys::direntry_bind_row_key(
+            InodeId(9),
+            &name_key,
+            InodeId(42),
+            ChangeSeq(17),
+            3,
+        );
+        assert_eq!(
+            key.strip_prefix(MetadataRowFamily::DirentryRevisions.row_key_prefix()),
+            bind_key.strip_prefix(MetadataRowFamily::DirentryBinds.row_key_prefix())
         );
     }
 
@@ -728,7 +838,7 @@ mod tests {
                 crate::ChecksumAlgorithm::Crc64nvme,
             ),
         });
-        let rows: [(MetadataRowFamily, MetadataRow); 9] = [
+        let rows: [(MetadataRowFamily, MetadataRow); 10] = [
             (
                 MetadataRowFamily::Inodes,
                 MetadataRow::Inode(InodeRecord {
@@ -742,6 +852,10 @@ mod tests {
             ),
             (MetadataRowFamily::DirentryBinds, bind.clone()),
             (MetadataRowFamily::DirentryChildBinds, bind),
+            (
+                MetadataRowFamily::DirentryRevisions,
+                direntry_revision_row(crate::ActorId::loonfs()),
+            ),
             (MetadataRowFamily::Revisions, revision),
             (
                 MetadataRowFamily::ContentLayouts,
@@ -838,6 +952,10 @@ mod tests {
                         committed_by: actor.clone(),
                         committed_at_ms: 3_000,
                     }),
+                ),
+                (
+                    MetadataRowFamily::DirentryRevisions,
+                    direntry_revision_row(actor.clone()),
                 ),
                 (
                     MetadataRowFamily::Revisions,

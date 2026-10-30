@@ -5,7 +5,7 @@ use super::*;
 use crate::error::CoreError;
 use crate::segment::VerifiedMetadataSegments;
 use loonfs_test_support::stores::MemoryStore;
-use loonfs_types::format::manifest::DeletedBinding;
+use loonfs_types::format::manifest::{DeletedBinding, DirentryRevision};
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_types::ChecksumAlgorithm;
 use loonfs_types::ContentId;
@@ -82,6 +82,8 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         WalDelta::AppendFileRevision {
             delta_index: 1,
             inode_id: InodeId(7),
+            parent_inode_id: InodeId(1),
+            name_key: name_key("revised"),
             revision_no: RevisionNo(1),
             content_ref: ContentRef::blob_v1(
                 loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
@@ -134,6 +136,21 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
 
     assert_eq!(state.inodes()[0].commit_id, owning_commit_id);
     assert_eq!(state.revisions()[0].commit_id, owning_commit_id);
+    // The revision stored under the file's edge records the commit's actor
+    // and timestamp, and no commit ID.
+    assert_matches!(
+        state.direntry_revisions(),
+        [DirentryRevisionRecord {
+            parent_inode_id: InodeId(1),
+            child_inode_id: InodeId(7),
+            revision_no: RevisionNo(1),
+            revision_committed_at_ms: 4_200,
+            committed_seq: ChangeSeq(9),
+            delta_index: 1,
+            ..
+        }]
+    );
+    assert_eq!(state.direntry_revisions()[0].revision_committed_by, actor());
     assert_eq!(state.subtree_tombstones()[0].commit_id, owning_commit_id);
     assert_eq!(state.attributes_revisions()[0].commit_id, owning_commit_id);
     assert_matches!(
@@ -164,6 +181,17 @@ fn bind_direntry_replay_uses_persisted_name_key() {
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
+            revision: Some(DirentryRevision {
+                revision_no: RevisionNo(3),
+                content_ref: ContentRef::blob_v1(
+                    loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+                    ContentId::generate(),
+                    b"bound",
+                    loonfs_types::ChecksumAlgorithm::Crc64nvme,
+                ),
+                revision_committed_by: ActorId::parse("writer").expect("actor"),
+                revision_committed_at_ms: 1_000,
+            }),
         }],
     );
 
@@ -175,6 +203,24 @@ fn bind_direntry_replay_uses_persisted_name_key() {
         "Report.TXT"
     );
     assert_eq!(bind.delta_index, 7);
+    // The bind stores the file's revision under the new edge, at the bind's
+    // own position and with the revision's attribution.
+    assert_matches!(
+        applied.direntry_revisions(),
+        [DirentryRevisionRecord {
+            parent_inode_id: InodeId(1),
+            child_inode_id: InodeId(2),
+            revision_no: RevisionNo(3),
+            revision_committed_at_ms: 1_000,
+            committed_seq: ChangeSeq(1),
+            delta_index: 7,
+            ..
+        }]
+    );
+    assert_eq!(
+        applied.direntry_revisions()[0].name_key.as_str(),
+        "persisted-key"
+    );
 }
 
 #[test]
@@ -212,6 +258,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
             committed_seq: ChangeSeq(1),
             delta_index: 0,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -295,6 +342,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     assert_eq!(metadata_state.indexed_seq(), ChangeSeq(2));
@@ -357,6 +405,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
+            revision: None,
         }],
     );
     assert!(metadata_state
@@ -478,6 +527,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     assert_eq!(
@@ -538,6 +588,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     let resolved = metadata_state
@@ -556,6 +607,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
 fn find_commit_receipt_returns_latest_matching_receipt() {
     let commit_id = CommitId::parse("same-commit").expect("valid commit id");
     let metadata_state = MetadataState::from_rows(
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -841,6 +893,7 @@ fn churned_binding_state() -> MetadataState {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
             WalDelta::CreateInode {
                 delta_index: 2,
@@ -857,6 +910,7 @@ fn churned_binding_state() -> MetadataState {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
         ],
     );
@@ -891,6 +945,7 @@ fn churned_binding_state() -> MetadataState {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
             WalDelta::UnbindDirentry {
                 delta_index: 2,
@@ -930,6 +985,7 @@ fn churned_binding_state() -> MetadataState {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
         ],
     );
@@ -943,6 +999,7 @@ fn churned_binding_state_rebuilt() -> MetadataState {
     MetadataState::from_rows(
         incremental.inodes().to_vec(),
         incremental.direntry_binds().to_vec(),
+        incremental.direntry_revisions().to_vec(),
         incremental.revisions().to_vec(),
         incremental.subtree_tombstones().to_vec(),
         incremental.commit_receipts().to_vec(),
@@ -1060,6 +1117,7 @@ async fn view_binding_lookups_match_a_row_scan_at_every_seq() {
                 child_kind: InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
+                revision: None,
             },
         ],
     );
@@ -1137,6 +1195,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
     let base = crate::wal::ProjectedWalTail::from_rows(state.clone());
     let view = MetadataView::in_memory(&manifest, &base, None, ChangeSeq(2));
@@ -1167,6 +1226,7 @@ fn has_visible_children_sees_through_unbinds() {
             }],
         ]
         .concat(),
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),

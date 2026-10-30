@@ -152,6 +152,7 @@ mod tests {
             child_kind: kind,
             child_created_by: ActorId::loonfs(),
             child_created_at_ms: 0,
+            revision: None,
         }
     }
 

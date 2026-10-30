@@ -645,7 +645,8 @@ async fn a_listing_reads_only_the_slot_binding_family() {
         MetadataFamilyGroup::Bindings.families(),
         &[
             ApiMetadataRowFamily::DirentryBinds,
-            ApiMetadataRowFamily::DirentryChildBinds
+            ApiMetadataRowFamily::DirentryChildBinds,
+            ApiMetadataRowFamily::DirentryRevisions,
         ]
     );
 }

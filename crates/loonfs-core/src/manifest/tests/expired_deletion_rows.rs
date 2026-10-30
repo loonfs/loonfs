@@ -296,6 +296,9 @@ fn row_inodes(row: &MetadataRow) -> Vec<InodeId> {
         MetadataRow::DirentryBinding(record) => {
             vec![record.parent_inode_id, record.child_inode_id]
         }
+        MetadataRow::DirentryRevision(record) => {
+            vec![record.parent_inode_id, record.child_inode_id]
+        }
         MetadataRow::Tombstone(record) => vec![record.root_inode_id],
         MetadataRow::ActiveDeletion(record) => vec![record.root_inode_id],
         MetadataRow::CommitReceipt(_) | MetadataRow::Commit(_) | MetadataRow::ContentLayout(_) => {

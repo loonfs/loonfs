@@ -187,11 +187,15 @@ async fn commit_piece(
         whole,
         store.checksum_algorithm(),
     );
-    crate::test_support::namespace_store(store, namespace_id)
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let (parent_inode_id, name_key) = namespace.current_edge(file.0).await;
+    namespace
         .append_wal_commit(
             vec![WalDelta::AppendFileRevision {
                 delta_index: 0,
                 inode_id: file.0,
+                parent_inode_id,
+                name_key,
                 revision_no: file.1,
                 content_ref: content_ref.clone(),
                 layout,

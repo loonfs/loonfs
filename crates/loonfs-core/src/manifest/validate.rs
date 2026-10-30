@@ -257,7 +257,8 @@ fn validate_run_index_parity(
                 MetadataRowFamily::DirentryChildBinds => direntry_child_bind_rows = rows,
                 MetadataRowFamily::Commits => commit_rows = rows,
                 MetadataRowFamily::CommitReceipts => commit_receipt_rows = rows,
-                MetadataRowFamily::Revisions
+                MetadataRowFamily::DirentryRevisions
+                | MetadataRowFamily::Revisions
                 | MetadataRowFamily::Inodes
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions

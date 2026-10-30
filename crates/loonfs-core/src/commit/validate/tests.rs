@@ -96,6 +96,7 @@ fn wal_create_directory(
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
+            revision: None,
         },
     ]
 }
@@ -107,6 +108,8 @@ fn wal_create_file(
     display_name: String,
     content_ref: ContentRef,
 ) -> Vec<WalDelta> {
+    let name_key = NameKey::parse(loonfs_types::name_key_for_display_name(&display_name))
+        .expect("derived name key");
     vec![
         WalDelta::CreateInode {
             delta_index,
@@ -116,17 +119,24 @@ fn wal_create_file(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(&display_name))
-                .expect("derived name key"),
+            name_key: name_key.clone(),
             display_name: test_display_name(display_name),
             child_inode_id: inode_id,
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
+            revision: Some(loonfs_types::format::manifest::DirentryRevision {
+                revision_no: RevisionNo(1),
+                content_ref: content_ref.clone(),
+                revision_committed_by: loonfs_test_support::test_actor(),
+                revision_committed_at_ms: 4_200,
+            }),
         },
         WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),
             inode_id,
+            parent_inode_id,
+            name_key,
             revision_no: RevisionNo(1),
             content_ref,
             layout: None,
@@ -135,15 +145,21 @@ fn wal_create_file(
     ]
 }
 
+/// A revision of the file bound as `display_name` under `parent_inode_id`.
 fn wal_append_revision(
     delta_index: u32,
     inode_id: InodeId,
+    parent_inode_id: InodeId,
+    display_name: &str,
     revision_no: RevisionNo,
     content_ref: ContentRef,
 ) -> Vec<WalDelta> {
     vec![WalDelta::AppendFileRevision {
         delta_index,
         inode_id,
+        parent_inode_id,
+        name_key: NameKey::parse(loonfs_types::name_key_for_display_name(display_name))
+            .expect("derived name key"),
         revision_no,
         content_ref,
         layout: None,
@@ -399,7 +415,14 @@ async fn stale_revision_precondition_is_rejected() {
             "readme.txt".to_owned(),
             content_ref("content-1"),
         ),
-        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
+        wal_append_revision(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt",
+            RevisionNo(2),
+            content_ref("content-2"),
+        ),
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
     let request = planned(vec![CommitOperation::ReplaceFile {
@@ -670,7 +693,14 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             "readme.txt".to_owned(),
             content_ref("content-1"),
         ),
-        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
+        wal_append_revision(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt",
+            RevisionNo(2),
+            content_ref("content-2"),
+        ),
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
@@ -774,7 +804,14 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
             "readme.txt".to_owned(),
             expected.clone(),
         ),
-        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
+        wal_append_revision(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt",
+            RevisionNo(2),
+            content_ref("content-2"),
+        ),
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
@@ -858,6 +895,8 @@ async fn restore_revision_overflow_is_rejected() {
     deltas[2] = WalDelta::AppendFileRevision {
         delta_index: 2,
         inode_id: InodeId(2),
+        parent_inode_id: InodeId(1),
+        name_key: NameKey::parse("overflow.txt").expect("valid name key"),
         revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         content_ref: content_ref("content-max"),
         layout: None,

@@ -37,6 +37,8 @@ fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -
             delta: WalDelta::AppendFileRevision {
                 delta_index: 0,
                 inode_id: InodeId(2),
+                parent_inode_id: loonfs_types::ROOT_INODE_ID,
+                name_key: loonfs_types::NameKey::parse("file").expect("name key"),
                 revision_no: RevisionNo(seq),
                 content_ref: reference.clone(),
                 layout: None,

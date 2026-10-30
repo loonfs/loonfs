@@ -497,11 +497,15 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
             )
             .await
             .expect("direct upload");
-        crate::test_support::namespace_store(&store, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let (parent_inode_id, name_key) = namespace.current_edge(inode_id).await;
+        namespace
             .append_wal_commit(
                 vec![WalDelta::AppendFileRevision {
                     delta_index: 0,
                     inode_id,
+                    parent_inode_id,
+                    name_key,
                     revision_no: RevisionNo(revision_no),
                     content_ref: ContentRef {
                         kind: ContentRefKind::BlobV1,

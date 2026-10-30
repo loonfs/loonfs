@@ -197,7 +197,10 @@ async fn namespace_with_a_frozen_base(
         .await
         .expect("create the namespace");
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
-    for index in 0..24 {
+    // The base stays within four times the size of one delta run of
+    // `sustained_writes`, so a window over the base and those runs is one
+    // size tier.
+    for index in 0..20 {
         write_and_fold(
             writer,
             maintenance,
@@ -208,7 +211,7 @@ async fn namespace_with_a_frozen_base(
     }
     // Churn: every rename retires one binding and creates another, and a
     // bottom-anchored rebuild below the floor drops the retired pair.
-    for index in 0..12 {
+    for index in 0..10 {
         namespace
             .move_path(
                 &format!("/docs/file-{index}.txt"),

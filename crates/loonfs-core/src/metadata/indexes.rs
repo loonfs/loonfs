@@ -3,7 +3,8 @@
 
 use super::{
     AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
-    DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+    DirentryBindingRecord, DirentryRevisionRecord, InodeRecord, MetadataState, RevisionRecord,
+    SubtreeTombstoneRecord,
 };
 use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
 use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey};
@@ -48,6 +49,10 @@ impl MetadataIndexes {
 
         for binding in &state.direntry_binds {
             indexes.record_binding(binding);
+        }
+
+        for revision in &state.direntry_revisions {
+            indexes.record_direntry_revision(revision);
         }
 
         for revision in &state.revisions {
@@ -188,6 +193,13 @@ impl MetadataIndexes {
             record.clone(),
             DirentryBindingRecord::position,
         );
+    }
+
+    /// Directory entry revisions contribute only the seq watermark, like
+    /// revisions: a listing scans the rows of one parent, which stay
+    /// tail-sized in memory because the manifest segments serve the bulk.
+    pub(super) fn record_direntry_revision(&mut self, record: &DirentryRevisionRecord) {
+        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
     }
 
     /// Revisions contribute only the seq watermark: no read consults an

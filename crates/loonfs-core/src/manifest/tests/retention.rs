@@ -92,8 +92,25 @@ fn metadata_states_equivalent_ignoring_content_identity(
                                         }
                                     }
                                 }
+                                if let loonfs_types::format::wal::WalDelta::BindDirentry {
+                                    revision: Some(revision),
+                                    ..
+                                } = &mut delta.delta
+                                {
+                                    revision.content_ref.content_id =
+                                        loonfs_types::ContentId::parse(
+                                            "con_00000000000000000000000000",
+                                        )
+                                        .expect("placeholder content id");
+                                }
                             }
                             MetadataRow::Commit(record)
+                        }
+                        MetadataRow::DirentryRevision(mut record) => {
+                            record.content_ref.content_id =
+                                loonfs_types::ContentId::parse("con_00000000000000000000000000")
+                                    .expect("placeholder content id");
+                            MetadataRow::DirentryRevision(record)
                         }
                         MetadataRow::ContentLayout(mut record) => {
                             record.content_id =
@@ -2040,7 +2057,7 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
-        max_decoded_input_rows_per_step: NonZeroUsize::new(6)
+        max_decoded_input_rows_per_step: NonZeroUsize::new(10)
             .expect("test row budget should be nonzero"),
         ..MetadataRunPolicy::default()
     };

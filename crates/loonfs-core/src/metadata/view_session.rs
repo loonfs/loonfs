@@ -389,25 +389,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(revision)
     }
 
-    pub(crate) async fn preload_revision_heads(
-        &mut self,
-        file_inode_ids: &[InodeId],
-    ) -> Result<()> {
-        let mut pending: Vec<_> = file_inode_ids
-            .iter()
-            .copied()
-            .filter(|inode_id| !self.latest_revision_head_cache.contains_key(inode_id))
-            .collect();
-        pending.sort_unstable();
-        pending.dedup();
-        let base = &self.base;
-        let loaded =
-            preload_inode_groups(&pending, |inode_id| base.latest_revision_record(inode_id))
-                .await?;
-        self.latest_revision_head_cache.extend(loaded);
-        Ok(())
-    }
-
     pub(crate) async fn preload_access_rows(
         &mut self,
         children: &[VisibleChildEntry],

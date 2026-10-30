@@ -242,6 +242,9 @@ pub(crate) fn append_rows_to_metadata(
             MetadataRowFamily::DirentryChildBinds => {
                 row_decode::direntry_binding_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
+            MetadataRowFamily::DirentryRevisions => metadata_state.push_direntry_revision(
+                row_decode::direntry_revision_from_manifest_row(row.clone()).map_err(mismatch)?,
+            ),
             MetadataRowFamily::Revisions => metadata_state.push_revision(
                 row_decode::revision_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),

@@ -25,7 +25,9 @@ use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, MetadataRow};
+use loonfs_types::format::manifest::{
+    DeletedBinding, DeltaPosition, DirentryRevision, MetadataRow,
+};
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::StdMonotonicTimer;
@@ -34,7 +36,7 @@ use loonfs_types::{
     Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId, ContentId, ContentRef,
     DisplayName, InodeId, InodeKind, NameKey, PageRequest, RevisionNo, ROOT_INODE_ID,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 type NormalizedInode = (u64, &'static str, u64, CommitId, ActorId, u64);
@@ -139,6 +141,16 @@ struct NormalizedBinding {
 struct ListingEntry {
     binding: NormalizedDirectoryBinding,
     child_kind: InodeKind,
+    revision: Option<ListedRevision>,
+}
+
+/// The current revision of a file, as a listing reports it.
+#[derive(Debug, PartialEq, Eq)]
+struct ListedRevision {
+    revision_no: RevisionNo,
+    content_ref: ContentRef,
+    committed_by: ActorId,
+    committed_at_ms: u64,
 }
 
 /// A path lookup outcome in the shape of core's answer.
@@ -268,14 +280,12 @@ fn create_file(
             display_name,
             created_in,
         ),
-        WalDelta::AppendFileRevision {
-            delta_index: delta_index.saturating_add(2),
+        revision(
+            delta_index.saturating_add(2),
             inode_id,
-            revision_no: RevisionNo(1),
+            RevisionNo(1),
             content_ref,
-            layout: None,
-            append_offset: None,
-        },
+        ),
     ]
 }
 
@@ -285,14 +295,103 @@ fn append_revision(
     revision_no: RevisionNo,
     content_ref: ContentRef,
 ) -> Vec<WalDelta> {
-    vec![WalDelta::AppendFileRevision {
+    vec![revision(delta_index, inode_id, revision_no, content_ref)]
+}
+
+/// A file revision whose edge [`with_edges_and_revisions`] fills in.
+fn revision(
+    delta_index: u32,
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+    content_ref: ContentRef,
+) -> WalDelta {
+    WalDelta::AppendFileRevision {
         delta_index,
         inode_id,
+        parent_inode_id: ROOT_INODE_ID,
+        name_key: name_key("edge-filled-at-replay"),
         revision_no,
         content_ref,
         layout: None,
         append_offset: None,
-    }]
+    }
+}
+
+/// Fills the fields that commit validation derives from earlier state: the
+/// current edge each file revision is stored under, and the current revision
+/// each bind of a file includes. The scenarios write their deltas by hand,
+/// so they leave these fields to this function.
+fn with_edges_and_revisions(
+    commits: Vec<(ActorId, u64, Vec<WalDelta>)>,
+) -> Vec<(ActorId, u64, Vec<WalDelta>)> {
+    let mut edges: HashMap<InodeId, (InodeId, NameKey)> = HashMap::new();
+    let mut revisions: HashMap<InodeId, DirentryRevision> = HashMap::new();
+    commits
+        .into_iter()
+        .map(|(actor, committed_at_ms, mut deltas)| {
+            let summary = |revision_no: RevisionNo, content_ref: &ContentRef| DirentryRevision {
+                revision_no,
+                content_ref: content_ref.clone(),
+                revision_committed_by: actor.clone(),
+                revision_committed_at_ms: committed_at_ms,
+            };
+            // A create binds a file before the file's first revision, in the
+            // same commit.
+            let mut created: HashMap<InodeId, DirentryRevision> = HashMap::new();
+            for delta in &deltas {
+                if let WalDelta::AppendFileRevision {
+                    inode_id,
+                    revision_no,
+                    content_ref,
+                    ..
+                } = delta
+                {
+                    created
+                        .entry(*inode_id)
+                        .or_insert_with(|| summary(*revision_no, content_ref));
+                }
+            }
+            for delta in &mut deltas {
+                match delta {
+                    WalDelta::BindDirentry {
+                        parent_inode_id,
+                        name_key,
+                        child_inode_id,
+                        child_kind,
+                        revision,
+                        ..
+                    } => {
+                        if *child_kind == InodeKind::File {
+                            *revision = revisions
+                                .get(child_inode_id)
+                                .or_else(|| created.get(child_inode_id))
+                                .cloned();
+                        }
+                        edges.insert(*child_inode_id, (*parent_inode_id, name_key.clone()));
+                    }
+                    WalDelta::UnbindDirentry { child_inode_id, .. } => {
+                        edges.remove(child_inode_id);
+                    }
+                    WalDelta::AppendFileRevision {
+                        inode_id,
+                        parent_inode_id,
+                        name_key,
+                        revision_no,
+                        content_ref,
+                        ..
+                    } => {
+                        (*parent_inode_id, *name_key) = edges
+                            .get(inode_id)
+                            .cloned()
+                            .expect("a scenario writes revisions of bound files");
+                        revisions.insert(*inode_id, summary(*revision_no, content_ref));
+                    }
+                    _ => {}
+                }
+            }
+            (actor, committed_at_ms, deltas)
+        })
+        .collect()
 }
 
 fn bind(
@@ -313,6 +412,7 @@ fn bind(
         child_kind: kind,
         child_created_by,
         child_created_at_ms,
+        revision: None,
     }
 }
 
@@ -956,18 +1056,18 @@ fn repeated_content_in_one_commit_emits_one_publication() {
 fn appends_record_revision_checksums_and_the_chain_head() {
     let content_id = ContentId::generate();
     let namespace_id = content_ref("unused").owner_namespace_id;
-    let appended = |delta_index, revision_no, bytes: &[u8]| WalDelta::AppendFileRevision {
-        delta_index,
-        inode_id: InodeId(2),
-        revision_no: RevisionNo(revision_no),
-        content_ref: ContentRef::blob_v1(
-            namespace_id.clone(),
-            content_id.clone(),
-            bytes,
-            loonfs_types::ChecksumAlgorithm::Crc64nvme,
-        ),
-        layout: None,
-        append_offset: None,
+    let appended = |delta_index, revision_no, bytes: &[u8]| {
+        revision(
+            delta_index,
+            InodeId(2),
+            RevisionNo(revision_no),
+            ContentRef::blob_v1(
+                namespace_id.clone(),
+                content_id.clone(),
+                bytes,
+                loonfs_types::ChecksumAlgorithm::Crc64nvme,
+            ),
+        )
     };
     let mut first = create_file(
         0,
@@ -1422,6 +1522,7 @@ struct EntryAnswer {
     created_at_ms: u64,
     parent_inode_id: Option<InodeId>,
     display_name: Option<String>,
+    revision: Option<ListedRevision>,
 }
 
 /// Asks core every question of the retention scenario at the namespace's
@@ -1547,6 +1648,23 @@ fn durable_entry(entry: loonfs_types::PathEntry) -> EntryAnswer {
         created_at_ms: entry.created_at_ms,
         parent_inode_id: entry.parent_inode_id,
         display_name: entry.display_name.map(|name| name.to_string()),
+        revision: match entry.kind {
+            loonfs_types::PathEntryKind::File {
+                revision_no,
+                content_ref,
+                revision_committed_by,
+                revision_committed_at_ms,
+                ..
+            } => Some(ListedRevision {
+                revision_no,
+                content_ref,
+                committed_by: revision_committed_by,
+                committed_at_ms: revision_committed_at_ms,
+            }),
+            loonfs_types::PathEntryKind::Directory {} | loonfs_types::PathEntryKind::Unknown => {
+                None
+            }
+        },
     }
 }
 
@@ -1583,6 +1701,7 @@ fn model_entry(
         display_name: binding
             .and_then(|binding| binding.display_name)
             .map(|name| name.to_string()),
+        revision: model_current_revision(model, inode_id, seq),
     })
 }
 
@@ -1613,7 +1732,7 @@ fn assert_core_matches_model(paths: &[&str], commits: &[Vec<WalDelta>]) -> Model
             (actor, committed_at_ms, deltas.clone())
         })
         .collect();
-    assert_attributed_commits_match_model(paths, &commits)
+    assert_attributed_commits_match_model(paths, &with_edges_and_revisions(commits))
 }
 
 /// Replays `commits` through core and the model, compares their visibility
@@ -1770,10 +1889,55 @@ fn core_listing(
         .into_iter()
         .filter_map(|name_key| core.visible_child(parent_inode_id, name_key, seq))
         .map(|binding| ListingEntry {
+            revision: core_edge_revision(core, &binding, seq),
             binding: core_binding(&binding),
             child_kind: binding.child_kind,
         })
         .collect()
+}
+
+/// The revision core stores under a bound edge: the edge's newest
+/// `direntry_revisions` row at or below `seq`.
+fn core_edge_revision(
+    core: &CoreMetadataState,
+    binding: &CoreBindingRecord,
+    seq: ChangeSeq,
+) -> Option<ListedRevision> {
+    core.direntry_revisions()
+        .iter()
+        .filter(|row| {
+            row.parent_inode_id == binding.parent_inode_id
+                && row.name_key == binding.name_key
+                && row.child_inode_id == binding.child_inode_id
+                && row.committed_seq <= seq
+        })
+        .max_by_key(|row| row.position())
+        .map(|row| ListedRevision {
+            revision_no: row.revision_no,
+            content_ref: row.content_ref.clone(),
+            committed_by: row.revision_committed_by.clone(),
+            committed_at_ms: row.revision_committed_at_ms,
+        })
+}
+
+/// The model's current revision of `inode_id` at `seq`, read from the
+/// file's revision rows.
+fn model_current_revision(
+    model: &ModelMetadataState,
+    inode_id: InodeId,
+    seq: ChangeSeq,
+) -> Option<ListedRevision> {
+    model
+        .revisions
+        .iter()
+        .filter(|row| row.inode_id == inode_id && row.committed_seq <= seq)
+        .max_by_key(|row| row.revision_no)
+        .map(|row| ListedRevision {
+            revision_no: row.revision_no,
+            content_ref: row.content_ref.clone(),
+            committed_by: row.committed_by.clone(),
+            committed_at_ms: row.committed_at_ms,
+        })
 }
 
 fn model_listing(
@@ -1786,6 +1950,7 @@ fn model_listing(
         .expect("the model should answer for a state it accepted")
         .into_iter()
         .map(|entry| ListingEntry {
+            revision: model_current_revision(model, entry.child.inode_id, seq),
             binding: model_binding(entry.binding),
             child_kind: entry.child.inode_kind,
         })

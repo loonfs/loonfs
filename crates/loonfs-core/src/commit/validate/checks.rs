@@ -5,9 +5,9 @@ use super::super::{CommitValidationError, ResolvedBinding};
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::error::{CoreError, Result};
-use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use crate::metadata::{DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::DeltaPosition;
+use loonfs_types::format::manifest::{DeltaPosition, DirentryRevision};
 
 use loonfs_types::{
     AccessRevisionNo, AttributesRevisionNo, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey,
@@ -278,6 +278,49 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             .into());
         }
         Ok(())
+    }
+
+    /// Returns the current binding of the file whose revision an operation
+    /// writes. The revision's delta includes the binding's edge, and replay
+    /// stores the revision under that edge
+    /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
+    pub(super) async fn resolve_current_binding(
+        &self,
+        inode_id: InodeId,
+        operand: CommitOperand,
+    ) -> Result<DirentryBindingRecord> {
+        Ok(self
+            .view()
+            .current_parent_binding_for_child(inode_id)
+            .await?
+            .ok_or(CommitValidationError::InodeMissing { operand, inode_id })?)
+    }
+
+    /// Returns the current revision that a bind of `inode` includes, which is
+    /// `None` for a directory.
+    pub(super) async fn resolve_bind_revision(
+        &self,
+        inode: &InodeRecord,
+    ) -> Result<Option<DirentryRevision>> {
+        if inode.inode_kind == InodeKind::Directory {
+            return Ok(None);
+        }
+        let revision = self
+            .view()
+            .latest_revision_record(inode.inode_id)
+            .await?
+            .ok_or_else(|| {
+                CoreError::NamespaceCorrupt(format!(
+                    "file `{}` has no revision to bind",
+                    inode.inode_id
+                ))
+            })?;
+        Ok(Some(DirentryRevision {
+            revision_no: revision.revision_no,
+            content_ref: revision.content_ref,
+            revision_committed_by: revision.committed_by,
+            revision_committed_at_ms: revision.committed_at_ms,
+        }))
     }
 
     pub(super) async fn resolve_restore_source_revision(

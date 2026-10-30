@@ -10,7 +10,7 @@ For example, in a measurement of that WAL-search path, one replay in a namespace
 
 A commit row is the WAL commit record without its inline content, in the same encoding. The change feed maps a row to events the same way it maps a WAL record.
 
-The family shares a compaction group with `commit_receipts`, the same way the two binding families share the bindings group. Both families contain one row per commit, the same fold writes both, and the same rule removes both at the same floor. So a receipt always has its commit row, and a replay always has its events.
+The family shares a compaction group with `commit_receipts`, the same way the binding families share the bindings group. Both families contain one row per commit, the same fold writes both, and the same rule removes both at the same floor. So a receipt always has its commit row, and a replay always has its events.
 
 ## Writing
 

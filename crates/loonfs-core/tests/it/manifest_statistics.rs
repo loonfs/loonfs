@@ -37,7 +37,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             .await
             .expect("activity");
         assert_eq!(initial.activity, ManifestActivity::default());
-        assert_eq!(initial.segments_by_family.len(), 11);
+        assert_eq!(initial.segments_by_family.len(), 12);
         assert!(initial.segments_by_family.values().all(|count| *count == 0));
         assert_eq!(
             (initial.inode_record_count, initial.metadata_stored_bytes),
@@ -263,6 +263,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
             (MetadataRowFamily::Inodes, 1),
             (MetadataRowFamily::DirentryBinds, 1),
             (MetadataRowFamily::DirentryChildBinds, 1),
+            (MetadataRowFamily::DirentryRevisions, 2),
             (MetadataRowFamily::Revisions, 2),
             (MetadataRowFamily::Tombstones, 0),
             (MetadataRowFamily::ActiveDeletions, 0),

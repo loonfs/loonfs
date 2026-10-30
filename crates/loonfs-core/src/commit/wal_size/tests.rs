@@ -93,10 +93,18 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor.clone(),
                 child_created_at_ms: 0,
+                revision: Some(loonfs_types::format::manifest::DirentryRevision {
+                    revision_no: RevisionNo(MAX_PUBLIC_INTEGER - 1),
+                    content_ref: content_ref.clone(),
+                    revision_committed_by: actor.clone(),
+                    revision_committed_at_ms: 0,
+                }),
             },
             WalDelta::AppendFileRevision {
                 delta_index: 3,
                 inode_id: InodeId(2),
+                parent_inode_id: InodeId(1),
+                name_key: NameKey::parse("source").expect("key"),
                 revision_no: RevisionNo(MAX_PUBLIC_INTEGER - 1),
                 content_ref: content_ref.clone(),
                 layout: Some(loonfs_types::ContentLayout {
@@ -134,10 +142,18 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor.clone(),
                 child_created_at_ms: 0,
+                revision: Some(loonfs_types::format::manifest::DirentryRevision {
+                    revision_no: RevisionNo(MAX_PUBLIC_INTEGER - MAX_COMMIT_OPERATIONS as u64),
+                    content_ref: log_ref.clone(),
+                    revision_committed_by: actor.clone(),
+                    revision_committed_at_ms: 0,
+                }),
             },
             WalDelta::AppendFileRevision {
                 delta_index: 7,
                 inode_id: InodeId(3),
+                parent_inode_id: InodeId(1),
+                name_key: NameKey::parse("log").expect("key"),
                 revision_no: RevisionNo(MAX_PUBLIC_INTEGER - MAX_COMMIT_OPERATIONS as u64),
                 content_ref: log_ref.clone(),
                 layout: Some(loonfs_types::ContentLayout {
