@@ -207,6 +207,10 @@ impl ProjectedWalTail {
                 .flat_map(MetadataState::direntry_binds)
                 .cloned()
                 .collect(),
+            rows()
+                .flat_map(MetadataState::direntry_revisions)
+                .cloned()
+                .collect(),
             rows().flat_map(MetadataState::revisions).cloned().collect(),
             rows()
                 .flat_map(MetadataState::subtree_tombstones)
@@ -421,6 +425,8 @@ mod tests {
                 delta: WalDelta::AppendFileRevision {
                     delta_index: 0,
                     inode_id: InodeId(2),
+                    parent_inode_id: loonfs_types::ROOT_INODE_ID,
+                    name_key: loonfs_types::NameKey::parse("file").expect("name key"),
                     revision_no: RevisionNo(seq),
                     content_ref: ContentRef::blob_v1(
                         namespace_id.clone(),

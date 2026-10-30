@@ -12,8 +12,9 @@ A directory binding row (`direntry_binding`) contains the parent's inode ID (`pa
 | --- | --- | --- |
 | `direntry_binds` | Parent, name, child, committed sequence, delta index | Parent and name |
 | `direntry_child_binds` | Child, parent, name, committed sequence, delta index | Child |
+| `direntry_revisions` | Parent, name, child, committed sequence, delta index | Parent and name |
 
-The two indexes contain the same records, which are the same edge events in two different orders. An "edge" is a parent, a name, and a child. Within one edge, positions sort oldest first in both indexes. Each bind and each unbind writes one record to each index. The unbind delta in the WAL identifies the exact bind it removes. LoonFS checks that reference when it validates the commit, before materialization, so the unbound row needs to store just its own position.
+The `direntry_revisions` family isn't an index of binding rows. It stores a copy of each bound file's current revision under the file's edge (a [directory entry revision](../specs/glossary.md#directory-entry-revision)), in the slot index's order, so a listing reads its children's revisions with one scan of the parent. The two indexes contain the same records, which are the same edge events in two different orders. An "edge" is a parent, a name, and a child. Within one edge, positions sort oldest first in both indexes. Each bind and each unbind writes one record to each index. The unbind delta in the WAL identifies the exact bind it removes. LoonFS checks that reference when it validates the commit, before materialization, so the unbound row needs to store just its own position.
 
 ## Reads
 
@@ -33,16 +34,16 @@ This section describes which binding rows compaction keeps and removes.
 
 An unbound value is a tombstone for the older values of its edge. It must stay while an excluded run might still contain those older values. A compaction that excludes the group's oldest run keeps every row.
 
-A "bottom-anchored" compaction includes the oldest run. It groups the rows of both indexes by edge, and for each edge, it keeps every version above the floor and the newest version at or below the floor. If that floor value is unbound, the compaction removes it, together with every older version of the edge. A child that left a slot by the floor has an unbind as its newest floor value there, so the compaction removes all of that edge's rows at or below the floor.
+A "bottom-anchored" compaction includes the oldest run. It groups the rows of both indexes by edge, and for each edge, it keeps every version above the floor and the newest version at or below the floor. If that floor value is unbound, the compaction removes it, together with every older version of the edge. A child that left a slot by the floor has an unbind as its newest floor value there, so the compaction removes all of that edge's rows at or below the floor. The compaction reads an edge's `direntry_revisions` rows right after the edge's slot-index rows. It keeps every revision above the floor, and it keeps the newest revision at or below the floor only while the edge's floor value is bound, so an edge that loses its binding rows loses its revision rows in the same compaction.
 
 Because the input is sorted, the compaction buffers at most one floor value for each edge. It also tracks the last edge that's bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index. It refuses a second child bound in one slot at the floor, or a second parent bound for one child at the floor, as corruption.
 
 For example, suppose inode 7 moves from `/a` to `/b` at sequence 20, and the floor is at 20. A bottom-anchored compaction produces:
 
-| Edge | Value at the floor | Retained rows in each index |
-| --- | --- | --- |
-| `/a` to inode 7 | Unbound | None |
-| `/b` to inode 7 | Bound | The bound value |
+| Edge | Value at the floor | Retained rows in each index | Retained `direntry_revisions` rows, if inode 7 is a file |
+| --- | --- | --- | --- |
+| `/a` to inode 7 | Unbound | None | None |
+| `/b` to inode 7 | Bound | The bound value | The newest revision at or below the floor |
 
 Every event above the floor stays in both indexes. Both indexes group their rows by edge, so compaction keeps or removes each edge's rows the same way in both indexes, and both indexes keep the same set of events. The row-count and digest checks verify that the two indexes agree.
 

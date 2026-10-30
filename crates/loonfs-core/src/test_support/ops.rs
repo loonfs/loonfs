@@ -18,6 +18,8 @@ use loonfs_types::{
     AbsolutePath, ActorId, ChangeSeq, Commit, CommitId, DeleteDirectoryBehavior,
     DestinationBehavior, NamespaceMetadata, RevisionNo,
 };
+#[cfg(test)]
+use loonfs_types::{InodeId, NameKey};
 
 /// The actor every test commit records. It's the actor that
 /// `loonfs_test_support::test_actor` returns, spelled here because the
@@ -277,6 +279,24 @@ impl<S: ObjectStore> NamespaceStore<S> {
         self.raise_hint(current, None)
             .await
             .expect("raise the hint");
+    }
+
+    /// Returns the parent and name key of the current binding of
+    /// `inode_id`, which a revision delta that a test writes with
+    /// [`Self::append_wal_commit`] includes. A test hook.
+    #[cfg(test)]
+    pub(crate) async fn current_edge(&self, inode_id: InodeId) -> (InodeId, NameKey) {
+        let view = self
+            .load_current_metadata_view()
+            .await
+            .expect("load the current metadata view");
+        let binding = view
+            .metadata_view()
+            .current_parent_binding_for_child(inode_id)
+            .await
+            .expect("read the current binding")
+            .expect("the inode is bound");
+        (binding.parent_inode_id, binding.name_key)
     }
 
     /// Publishes `deltas` and `inline_content` as one commit in the next WAL

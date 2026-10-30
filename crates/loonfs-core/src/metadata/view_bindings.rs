@@ -10,8 +10,8 @@ use crate::metadata::view::latest_visible_binding;
 use crate::metadata::view::MetadataView;
 use crate::metadata::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, ActiveDeletionRange,
-    ActiveDeletionRecord, DirentryBindingRecord, MetadataState, RecoverableDeletion,
-    SubtreeTombstoneRecord,
+    ActiveDeletionRecord, DirentryBindingRecord, DirentryRevisionRecord, MetadataState,
+    RecoverableDeletion, SubtreeTombstoneRecord,
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
@@ -162,6 +162,37 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             })
             .map(|record| {
                 let row_key = lookup_keys::direntry_bind_row_key(
+                    record.parent_inode_id,
+                    &record.name_key,
+                    record.child_inode_id,
+                    record.committed_seq,
+                    record.delta_index,
+                );
+                (row_key, record.clone())
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
+        candidates
+    }
+
+    /// Returns the revision rows that the row states contain under the edges
+    /// of `parent_inode_id` whose name keys are from `first_name_key`
+    /// through `last_name_key`, with their row keys, in row-key order.
+    pub(super) fn tail_direntry_revision_candidates(
+        &self,
+        parent_inode_id: InodeId,
+        first_name_key: &NameKey,
+        last_name_key: &NameKey,
+    ) -> Vec<(String, DirentryRevisionRecord)> {
+        let mut candidates = self
+            .row_states()
+            .flat_map(MetadataState::direntry_revisions)
+            .filter(|revision| {
+                revision.parent_inode_id == parent_inode_id
+                    && (first_name_key..=last_name_key).contains(&&revision.name_key)
+            })
+            .map(|record| {
+                let row_key = lookup_keys::direntry_revision_row_key(
                     record.parent_inode_id,
                     &record.name_key,
                     record.child_inode_id,

@@ -444,6 +444,19 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .create_snapshot("options")
         .await
         .expect("snapshot");
+    // A later revision and a deletion don't change what the snapshot lists.
+    namespace_writer
+        .put_file_with_options(
+            "/file",
+            b"after the snapshot",
+            &loonfs_test_support::test_actor(),
+            &loonfs::PutFileOptions {
+                behavior: loonfs::DestinationBehavior::Replace,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("replace");
     namespace_writer
         .delete_path("/file", &loonfs_test_support::test_actor())
         .await
@@ -489,6 +502,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .await
         .expect("snapshot children");
     assert_eq!(paths.entries.len(), 1);
+    assert_eq!(paths.entries[0].kind, before.kind);
     assert_eq!(paths.entries, inodes.entries);
     assert_eq!(paths.head_seq, snapshot.captured_seq);
 }

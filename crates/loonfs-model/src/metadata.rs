@@ -4,7 +4,9 @@
 //! Inodes, file revisions, tombstones, and stored attribute and access revisions copy
 //! the commit ID, actor, and timestamp from the WAL. Directory bindings do
 //! not copy the child's kind or attribution; the model reads both from the
-//! child's inode row. The initial root inode uses
+//! child's inode row. The model stores no revision under a directory edge,
+//! and it reads a file's current revision from the file's revision rows.
+//! The initial root inode uses
 //! `ActorId::loonfs()`, and the initial empty attribute state has no
 //! actor or timestamp because it is not stored as a revision.
 
@@ -227,6 +229,8 @@ impl MetadataState {
                 WalDelta::AppendFileRevision {
                     delta_index,
                     inode_id,
+                    parent_inode_id: _,
+                    name_key: _,
                     revision_no,
                     content_ref,
                     layout,
@@ -420,6 +424,7 @@ mod tests {
                     child_kind: loonfs_types::InodeKind::File,
                     child_created_by: loonfs_types::ActorId::loonfs(),
                     child_created_at_ms: 4_200,
+                    revision: None,
                 }],
             )
             .expect("a single bind should keep the bindings consistent");

@@ -12,9 +12,10 @@ use loonfs_types::format::control::{ForkBasis, ManifestRef, WriterBlock};
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord, InodeRecord,
-    MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestEnvelope,
-    NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord,
+    DirentryRevision, DirentryRevisionRecord, InodeRecord, MetadataRow, MetadataRunRef,
+    MetadataSegmentRef, NamespaceAccess, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
@@ -264,6 +265,7 @@ impl HeapBytes for MetadataRow {
         match self {
             MetadataRow::Inode(record) => record.heap_bytes(),
             MetadataRow::DirentryBinding(record) => record.heap_bytes(),
+            MetadataRow::DirentryRevision(record) => record.heap_bytes(),
             MetadataRow::FileRevision(record) => record.heap_bytes(),
             MetadataRow::Tombstone(record) => record.heap_bytes(),
             MetadataRow::ActiveDeletion(record) => record.heap_bytes(),
@@ -287,6 +289,20 @@ impl HeapBytes for DirentryBindingRecord {
         self.name_key.heap_bytes()
             + self.child_created_by.heap_bytes()
             + self.display_name().map_or(0, HeapBytes::heap_bytes)
+    }
+}
+
+impl HeapBytes for DirentryRevisionRecord {
+    fn heap_bytes(&self) -> usize {
+        self.name_key.heap_bytes()
+            + self.content_ref.heap_bytes()
+            + self.revision_committed_by.heap_bytes()
+    }
+}
+
+impl HeapBytes for DirentryRevision {
+    fn heap_bytes(&self) -> usize {
+        self.content_ref.heap_bytes() + self.revision_committed_by.heap_bytes()
     }
 }
 
@@ -364,19 +380,26 @@ impl HeapBytes for WalCommitDelta {
                 name_key,
                 display_name,
                 child_created_by,
+                revision,
                 ..
+            } => {
+                name_key.heap_bytes()
+                    + display_name.heap_bytes()
+                    + child_created_by.heap_bytes()
+                    + revision.heap_bytes()
             }
-            | WalDelta::UnbindDirentry {
+            WalDelta::UnbindDirentry {
                 name_key,
                 display_name,
                 child_created_by,
                 ..
             } => name_key.heap_bytes() + display_name.heap_bytes() + child_created_by.heap_bytes(),
             WalDelta::AppendFileRevision {
+                name_key,
                 content_ref,
                 layout,
                 ..
-            } => content_ref.heap_bytes() + layout.heap_bytes(),
+            } => name_key.heap_bytes() + content_ref.heap_bytes() + layout.heap_bytes(),
             WalDelta::TombstoneSubtree {
                 deleted_binding, ..
             } => deleted_binding.heap_bytes(),

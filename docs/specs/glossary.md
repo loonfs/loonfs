@@ -82,6 +82,10 @@ The link between a parent directory, a name, and a child inode, which places an 
 
 An opaque token that identifies an item's current directory binding. Moving, renaming, or undeleting an item produces a new binding version. Clients pass it as a precondition on moves and deletes, so the change fails if the item was moved or renamed after the client read it.
 
+### Directory entry revision
+
+A metadata row that stores a copy of a file's current revision (its revision number, its content reference, and the actor and time of the commit that wrote the revision) under the file's directory binding. A directory listing reads these rows with one scan of the directory, instead of reading each file's own revision rows. For example, renaming `/a.txt` to `/b.txt` writes a directory entry revision row under the new binding with the file's current revision, and the next write to `/b.txt` writes another row under that binding. See [Directory bindings](format.md#13-directory-bindings).
+
 ### Path
 
 An absolute name, like `/reports/final.txt`, that LoonFS resolves by following directory bindings from the root.
@@ -174,7 +178,7 @@ The set of metadata segments written together by one fold or compaction, identif
 
 ### Family group
 
-A set of related metadata row families that compaction always processes together, so that they stay consistent. For example, the two directory binding indexes form one group, and commits and commit receipts form another.
+A set of related metadata row families that compaction always processes together, so that they stay consistent. For example, the two directory binding indexes and the directory entry revisions form one group, and commits and commit receipts form another.
 
 ### Fold
 

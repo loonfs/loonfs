@@ -6,6 +6,7 @@
 
 pub(crate) mod access;
 mod apply;
+mod child_revisions;
 mod children_page;
 mod durable_cache;
 mod indexes;
@@ -26,7 +27,8 @@ pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
 pub use self::rows::MetadataState;
 pub use loonfs_types::format::manifest::{
     AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
-    DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    DirentryBindingRecord, DirentryRevisionRecord, InodeRecord, RevisionRecord,
+    SubtreeTombstoneRecord, TombstoneRowAction,
 };
 
 pub(crate) use self::children_page::VisibleChildEntry;

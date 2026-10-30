@@ -8,7 +8,7 @@ use crate::commit::validate::checks::CommitNumbering;
 use crate::error::Result;
 use crate::metadata::InodeRecord;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::DeletedBinding;
+use loonfs_types::format::manifest::{DeletedBinding, DirentryRevision};
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
     next_public_ordinal, AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo,
@@ -143,9 +143,17 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         self.ensure_child_unbound(child_inode_id, None).await?;
         self.ensure_not_covered_by_tombstone(parent_inode_id, CommitOperand::CreateParent)
             .await?;
-        let inode_kind = match child {
-            NewChild::Directory => InodeKind::Directory,
-            NewChild::File(_) => InodeKind::File,
+        let (inode_kind, revision) = match &child {
+            NewChild::Directory => (InodeKind::Directory, None),
+            NewChild::File(content_ref) => (
+                InodeKind::File,
+                Some(DirentryRevision {
+                    revision_no: RevisionNo(1),
+                    content_ref: content_ref.clone(),
+                    revision_committed_by: self.actor_id.clone(),
+                    revision_committed_at_ms: self.committed_at_ms,
+                }),
+            ),
         };
         let mut deltas = vec![
             WalDelta::CreateInode {
@@ -156,18 +164,21 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             WalDelta::BindDirentry {
                 delta_index: self.numbering.reserve_delta_index()?,
                 parent_inode_id,
-                name_key,
+                name_key: name_key.clone(),
                 display_name: display_name.clone(),
                 child_inode_id,
                 child_kind: inode_kind,
                 child_created_by: self.actor_id.clone(),
                 child_created_at_ms: self.committed_at_ms,
+                revision,
             },
         ];
         if let NewChild::File(content_ref) = child {
             deltas.push(WalDelta::AppendFileRevision {
                 delta_index: self.numbering.reserve_delta_index()?,
                 inode_id: child_inode_id,
+                parent_inode_id,
+                name_key,
                 revision_no: RevisionNo(1),
                 content_ref,
                 layout: None,
@@ -189,9 +200,14 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         let revision_no = next_revision_no(inode_id, base_revision_no)?;
         self.ensure_not_covered_by_tombstone(inode_id, CommitOperand::ReplaceTarget)
             .await?;
+        let edge = self
+            .resolve_current_binding(inode_id, CommitOperand::ReplaceTarget)
+            .await?;
         Ok(vec![WalDelta::AppendFileRevision {
             delta_index: self.numbering.reserve_delta_index()?,
             inode_id,
+            parent_inode_id: edge.parent_inode_id,
+            name_key: edge.name_key,
             revision_no,
             content_ref: content_ref.clone(),
             layout: None,
@@ -213,9 +229,14 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         let revision_no = next_revision_no(inode_id, base_revision_no)?;
         self.ensure_not_covered_by_tombstone(inode_id, CommitOperand::RestoreTarget)
             .await?;
+        let edge = self
+            .resolve_current_binding(inode_id, CommitOperand::RestoreTarget)
+            .await?;
         Ok(vec![WalDelta::AppendFileRevision {
             delta_index: self.numbering.reserve_delta_index()?,
             inode_id,
+            parent_inode_id: edge.parent_inode_id,
+            name_key: edge.name_key,
             revision_no,
             content_ref: source_revision.content_ref,
             layout: None,
@@ -270,6 +291,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             CommitOperand::RenameTargetParent,
         )
         .await?;
+        let revision = self.resolve_bind_revision(&inode).await?;
         Ok(vec![
             unbind_delta(&mut self.numbering, source_binding, &inode)?,
             WalDelta::BindDirentry {
@@ -281,6 +303,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 child_kind: inode.inode_kind,
                 child_created_by: inode.committed_by,
                 child_created_at_ms: inode.committed_at_ms,
+                revision,
             },
         ])
     }
@@ -338,6 +361,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         self.ensure_child_unbound(inode_id, None).await?;
         self.ensure_not_covered_by_tombstone(parent_inode_id, CommitOperand::UndeleteTarget)
             .await?;
+        let revision = self.resolve_bind_revision(&inode).await?;
         Ok(vec![
             WalDelta::RevokeSubtreeTombstone {
                 delta_index: self.numbering.reserve_delta_index()?,
@@ -353,6 +377,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 child_kind: inode.inode_kind,
                 child_created_by: inode.committed_by,
                 child_created_at_ms: inode.committed_at_ms,
+                revision,
             },
         ])
     }

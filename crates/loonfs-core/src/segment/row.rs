@@ -32,6 +32,12 @@ pub(crate) fn manifest_rows_for_family(
             .cloned()
             .map(MetadataRow::DirentryBinding)
             .collect::<Vec<_>>(),
+        MetadataRowFamily::DirentryRevisions => metadata_state
+            .direntry_revisions()
+            .iter()
+            .cloned()
+            .map(MetadataRow::DirentryRevision)
+            .collect::<Vec<_>>(),
         MetadataRowFamily::Revisions => metadata_state
             .revisions()
             .iter()
@@ -122,6 +128,7 @@ pub(crate) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
     match row {
         MetadataRow::Inode(record) => record.committed_seq,
         MetadataRow::DirentryBinding(record) => record.committed_seq,
+        MetadataRow::DirentryRevision(record) => record.committed_seq,
         MetadataRow::FileRevision(record) => record.committed_seq,
         MetadataRow::Tombstone(record) => record.committed_seq,
         // A removal marker belongs to the run of the undelete that produced
@@ -143,6 +150,7 @@ pub(crate) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
     match row {
         MetadataRow::Inode(_) => "inode",
         MetadataRow::DirentryBinding(_) => "direntry_binding",
+        MetadataRow::DirentryRevision(_) => "direntry_revision",
         MetadataRow::FileRevision(_) => "file_revision",
         MetadataRow::Tombstone(_) => "tombstone",
         MetadataRow::ActiveDeletion(_) => "active_deletion",

@@ -102,7 +102,9 @@ impl<S: ObjectStore + ?Sized> LoadedMetadataView<'_, S> {
                     )
                     .await?;
                 frame.scanned_to_end = children.len() <= wanted;
-                frame.unreturned = self.readable_children(session, children, access).await?;
+                frame.unreturned = self
+                    .scanned_children(session, frame.directory.inode_id, children, access)
+                    .await?;
                 frame.unreturned.reverse();
             }
             let Some(scanned) = frame.unreturned.pop() else {

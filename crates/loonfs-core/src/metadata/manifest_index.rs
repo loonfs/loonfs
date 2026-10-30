@@ -4,14 +4,15 @@
 use super::row_decode::{
     access_revision_from_manifest_row, active_deletion_from_manifest_row,
     attributes_revision_from_manifest_row, commit_from_manifest_row,
-    commit_receipt_from_manifest_row, direntry_binding_from_manifest_row, inode_from_manifest_row,
-    revision_from_manifest_row, tombstone_from_manifest_row,
+    commit_receipt_from_manifest_row, direntry_binding_from_manifest_row,
+    direntry_revision_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
+    tombstone_from_manifest_row,
 };
 use crate::error::Result;
 use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord,
+    ContentLayoutRecord, DirentryBindingRecord, DirentryRevisionRecord, InodeRecord,
+    RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::segment::{Readahead, VerifiedMetadataSegments};
 use loonfs_objectstore::ObjectStore;
@@ -100,6 +101,27 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
                 row_key,
             })
         })
+        .collect()
+}
+
+/// One key-ordered page of the `direntry_revisions` family in
+/// `[lower_bound, upper_bound)`, with each row's stored key.
+pub(super) async fn direntry_revisions_page<S: ObjectStore + ?Sized>(
+    segments: &VerifiedMetadataSegments<'_, S>,
+    lower_bound: &str,
+    upper_bound: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(String, DirentryRevisionRecord)>> {
+    segments
+        .scan_range_page_with_keys(
+            MetadataRowFamily::DirentryRevisions,
+            lower_bound,
+            upper_bound,
+            limit,
+        )
+        .await?
+        .into_iter()
+        .map(|(row_key, row)| Ok((row_key, direntry_revision_from_manifest_row(row)?)))
         .collect()
 }
 

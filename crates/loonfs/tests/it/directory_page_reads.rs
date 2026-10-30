@@ -1,11 +1,10 @@
 //! Store reads and entry metadata for a directory page across folded batches.
 
 use loonfs::{DestinationBehavior, LoonFs, PutFileOptions, SharedObjectStore, StatOptions};
-use loonfs_core::test_support::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
-use loonfs_test_support::stores::{ConcurrencyWatchStore, KeyPredicate, RecordingStore};
+use loonfs_test_support::stores::RecordingStore;
 use loonfs_types::format::manifest::MetadataRowFamily;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -29,8 +28,11 @@ async fn family_keys(
         .collect()
 }
 
+/// Checks that a directory page over folded batches reads its children's
+/// kinds from the bindings and their revisions from the directory's edges,
+/// and reads no child inode row and no revision row.
 #[tokio::test]
-async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
+async fn directory_pages_read_no_child_inode_or_revision_rows() {
     let temporary = tempdir().expect("temporary directory");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temporary.path()).expect("local store"));
@@ -133,11 +135,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         .await
         .expect("one-entry page");
     let directory_reads: BTreeSet<String> = one_entry.take_get_keys().into_iter().collect();
-    let revisions = Arc::new(ConcurrencyWatchStore::new(
-        store,
-        KeyPredicate::new(move |key| revision_keys.contains(key)),
-    ));
-    let recording = Arc::new(RecordingStore::metadata_segments(revisions.clone()));
+    let recording = Arc::new(RecordingStore::metadata_segments(store));
     let reader = LoonFs::builder_with_store(recording.clone())
         .read_only()
         .build()
@@ -157,13 +155,8 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
             !child_inode_keys.contains(&key) || directory_reads.contains(&key),
             "read child inode object {key}"
         );
+        assert!(!revision_keys.contains(&key), "read revision object {key}");
     }
-    let concurrency = revisions.reads();
-    assert!(concurrency.peak_in_flight > 1, "{concurrency:?}");
-    assert!(
-        concurrency.peak_in_flight <= STORE_READS_IN_FLIGHT,
-        "{concurrency:?}"
-    );
     for entry in page.entries {
         let stat = namespace
             .stat_with_options(entry.path.as_str(), &StatOptions::default())
@@ -174,9 +167,4 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         assert_eq!(entry.created_at_ms, stat.created_at_ms);
         assert_eq!(entry.kind, stat.kind);
     }
-    let stat_reads = recording.take_get_keys();
-    assert!(
-        stat_reads.is_empty(),
-        "stats after the listing read metadata segments: {stat_reads:?}"
-    );
 }

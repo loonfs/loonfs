@@ -381,6 +381,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             );
             let tail = Arc::new(ProjectedWalTail::from_rows(rows));
             cache.insert_tail(key.clone(), Arc::clone(&tail));
@@ -665,6 +666,7 @@ mod tests {
                 .collect();
             let rows = MetadataState::from_rows(
                 rows,
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),

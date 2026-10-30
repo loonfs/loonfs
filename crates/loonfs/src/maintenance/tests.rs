@@ -197,6 +197,9 @@ async fn namespace_with_a_frozen_base(
         .await
         .expect("create the namespace");
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    // The base stays within four times the size of one delta run of
+    // `sustained_writes`, so a window over the base and those runs is one
+    // size tier.
     for index in 0..16 {
         write_and_fold(
             writer,

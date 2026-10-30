@@ -3,8 +3,8 @@
 
 use super::{
     AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
-    DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
-    TombstoneRowAction,
+    DirentryBindingRecord, DirentryRevisionRecord, InodeRecord, MetadataState, RevisionRecord,
+    SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_types::format::manifest::DirentryBindingState;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta};
@@ -88,6 +88,7 @@ impl MetadataState {
                 child_kind,
                 child_created_by,
                 child_created_at_ms,
+                revision,
             } => {
                 self.push_direntry_binding_record(DirentryBindingRecord {
                     parent_inode_id: *parent_inode_id,
@@ -102,6 +103,19 @@ impl MetadataState {
                         display_name: display_name.clone(),
                     },
                 });
+                if let Some(revision) = revision {
+                    self.push_direntry_revision_record(DirentryRevisionRecord {
+                        parent_inode_id: *parent_inode_id,
+                        name_key: name_key.clone(),
+                        child_inode_id: *child_inode_id,
+                        revision_no: revision.revision_no,
+                        content_ref: revision.content_ref.clone(),
+                        revision_committed_by: revision.revision_committed_by.clone(),
+                        revision_committed_at_ms: revision.revision_committed_at_ms,
+                        committed_seq,
+                        delta_index: *delta_index,
+                    });
+                }
             }
             WalDelta::UnbindDirentry {
                 delta_index,
@@ -128,6 +142,8 @@ impl MetadataState {
             WalDelta::AppendFileRevision {
                 delta_index,
                 inode_id,
+                parent_inode_id,
+                name_key,
                 revision_no,
                 content_ref,
                 layout,
@@ -151,6 +167,17 @@ impl MetadataState {
                     committed_by: actor.clone(),
                     delta_index: *delta_index,
                     content_ref: content_ref.clone(),
+                });
+                self.push_direntry_revision_record(DirentryRevisionRecord {
+                    parent_inode_id: *parent_inode_id,
+                    name_key: name_key.clone(),
+                    child_inode_id: *inode_id,
+                    revision_no: *revision_no,
+                    content_ref: content_ref.clone(),
+                    revision_committed_by: actor.clone(),
+                    revision_committed_at_ms: committed_at_ms,
+                    committed_seq,
+                    delta_index: *delta_index,
                 });
             }
             WalDelta::TombstoneSubtree {

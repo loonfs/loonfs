@@ -3,7 +3,7 @@
 
 use crate::digest::{sha256_digest, SHA256_DIGEST_BYTES};
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
-use crate::metadata_rows::{DeletedBinding, DeltaPosition};
+use crate::metadata_rows::{DeletedBinding, DeltaPosition, DirentryRevision};
 use crate::{
     AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitFingerprint,
     CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
@@ -31,6 +31,16 @@ pub enum WalCodecError {
         /// Content whose entry violates a rule or exceeds the WAL object total.
         content_id: ContentId,
         /// Format rule violated by the entry.
+        reason: &'static str,
+    },
+    /// Reports a bind whose revision does not match its child's kind.
+    #[error("invalid WAL bind in commit `{seq}` for child inode `{child_inode_id}`: {reason}")]
+    InvalidWalBind {
+        /// Commit containing the rejected delta.
+        seq: ChangeSeq,
+        /// Child the rejected bind places.
+        child_inode_id: InodeId,
+        /// Format rule violated by the bind.
         reason: &'static str,
     },
     /// Reports a layout that does not cover its revision's reference.
@@ -157,6 +167,11 @@ pub enum WalDelta {
         child_created_by: crate::ActorId,
         /// Unix milliseconds of the child's creating commit.
         child_created_at_ms: u64,
+        /// The file's current revision, which replay stores under the new
+        /// edge. Present exactly when the child is a file
+        /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<DirentryRevision>,
     },
     /// Removes one exact historical directory binding without affecting a later rebind.
     UnbindDirentry {
@@ -186,6 +201,12 @@ pub enum WalDelta {
         delta_index: u32,
         /// File inode receiving the revision.
         inode_id: InodeId,
+        /// Directory of the file's current edge, under which replay stores
+        /// the new revision
+        /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
+        parent_inode_id: InodeId,
+        /// Canonical component of the file's current edge.
+        name_key: NameKey,
         /// Monotonic per-file revision number validated against visible history.
         revision_no: RevisionNo,
         /// Content of the new revision. Uploaded bytes are durable before
@@ -409,6 +430,7 @@ pub(crate) fn encode_wal_payload_cbor(
 ) -> Result<Vec<u8>, WalCodecError> {
     validate_wal_inline_content(payload)?;
     validate_wal_revision_layouts(payload)?;
+    validate_wal_bind_revisions(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
@@ -474,6 +496,7 @@ fn decode_wal_object_envelope_zstd_with_limit(
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
     validate_wal_inline_content(&payload)?;
     validate_wal_revision_layouts(&payload)?;
+    validate_wal_bind_revisions(&payload)?;
 
     Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
@@ -605,6 +628,33 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), WalCo
     Ok(())
 }
 
+fn validate_wal_bind_revisions(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
+    for record in &payload.records {
+        for delta in &record.deltas {
+            let WalDelta::BindDirentry {
+                child_inode_id,
+                child_kind,
+                revision,
+                ..
+            } = &delta.delta
+            else {
+                continue;
+            };
+            let reason = match (child_kind, revision) {
+                (InodeKind::File, Some(_)) | (InodeKind::Directory, None) => continue,
+                (InodeKind::File, None) => "a file bind requires the file's revision",
+                (InodeKind::Directory, Some(_)) => "a directory bind can't include a revision",
+            };
+            return Err(WalCodecError::InvalidWalBind {
+                seq: record.committed_seq,
+                child_inode_id: *child_inode_id,
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -686,6 +736,8 @@ mod tests {
                         delta: WalDelta::AppendFileRevision {
                             delta_index: 0,
                             inode_id: InodeId(2),
+                            parent_inode_id: crate::ROOT_INODE_ID,
+                            name_key: NameKey::parse("file.txt").expect("name key"),
                             revision_no: RevisionNo(index as u64 + 1),
                             content_ref: ContentRef::blob_v1(
                                 namespace_id.clone(),
@@ -1000,6 +1052,72 @@ mod tests {
                 }
                 assert_matches!(decoded, Err(WalCodecError::InvalidWalRevisionLayout { .. }));
                 assert_matches!(encoded, Err(WalCodecError::InvalidWalRevisionLayout { .. }));
+            }
+        }
+    }
+
+    /// Checks that a bind includes a revision exactly when its child is a
+    /// file, on both the write and the read side.
+    #[test]
+    fn a_bind_includes_a_revision_exactly_when_its_child_is_a_file() {
+        let revision = DirentryRevision {
+            revision_no: RevisionNo(1),
+            content_ref: ContentRef::blob_v1(
+                NamespaceId::parse("bounded").expect("namespace"),
+                ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
+                b"bytes",
+                crate::ChecksumAlgorithm::Crc64nvme,
+            ),
+            revision_committed_by: crate::ActorId::parse("test").expect("actor"),
+            revision_committed_at_ms: 0,
+        };
+        for (child_kind, revision, rejected) in [
+            (InodeKind::File, Some(revision.clone()), None),
+            (InodeKind::Directory, None, None),
+            (
+                InodeKind::File,
+                None,
+                Some("a file bind requires the file's revision"),
+            ),
+            (
+                InodeKind::Directory,
+                Some(revision),
+                Some("a directory bind can't include a revision"),
+            ),
+        ] {
+            let mut payload = inline_wal_object(&[0]);
+            let record = &mut payload.records[0];
+            record.inline_content.clear();
+            record.deltas = vec![WalCommitDelta {
+                semantic_operation_index: 0,
+                delta: WalDelta::BindDirentry {
+                    delta_index: 0,
+                    parent_inode_id: crate::ROOT_INODE_ID,
+                    name_key: NameKey::parse("child").expect("name key"),
+                    display_name: DisplayName::parse("child").expect("display name"),
+                    child_inode_id: InodeId(2),
+                    child_kind,
+                    child_created_by: crate::ActorId::parse("test").expect("actor"),
+                    child_created_at_ms: 0,
+                    revision,
+                },
+            }];
+            let decoded = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload));
+            let encoded = encode_wal_object_envelope_zstd(payload);
+            match rejected {
+                None => {
+                    assert!(decoded.is_ok(), "{child_kind:?}: {decoded:?}");
+                    assert!(encoded.is_ok(), "{child_kind:?}");
+                }
+                Some(expected) => {
+                    for error in [decoded.err(), encoded.err()] {
+                        assert_matches!(
+                            error,
+                            Some(WalCodecError::InvalidWalBind { reason, child_inode_id, .. })
+                            if reason == expected && child_inode_id == InodeId(2)
+                        );
+                    }
+                }
             }
         }
     }
