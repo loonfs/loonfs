@@ -662,25 +662,30 @@ fn recursive_get_reports_drift_across_listing_pages() {
     // lists `inner` on its own, and that listing returns `deeper` (as it
     // would for a directory deeper than the first listing descends).
     let (server_url, server) = json_response_server(vec![
-        directory("/docs", "ino_2", "ino_1", 20),
+        directory(
+            "/docs",
+            "ino_00000000000000000000000002",
+            "ino_00000000000000000000000000",
+            20,
+        ),
         serde_json::json!({
             "namespace_id": "demo",
             "path": "/docs",
             "head_seq": 20,
-            "entries": [directory("/docs/sub", "ino_3", "ino_2", 20)],
+            "entries": [directory("/docs/sub", "ino_00000000000000000000000003", "ino_00000000000000000000000002", 20)],
             "next_cursor": "after-sub",
         }),
         serde_json::json!({
             "namespace_id": "demo",
             "path": "/docs",
             "head_seq": 21,
-            "entries": [directory("/docs/sub/inner", "ino_4", "ino_3", 21)],
+            "entries": [directory("/docs/sub/inner", "ino_00000000000000000000000004", "ino_00000000000000000000000003", 21)],
         }),
         serde_json::json!({
             "namespace_id": "demo",
             "path": "/docs/sub/inner",
             "head_seq": 21,
-            "entries": [directory("/docs/sub/inner/deeper", "ino_5", "ino_4", 21)],
+            "entries": [directory("/docs/sub/inner/deeper", "ino_00000000000000000000000005", "ino_00000000000000000000000004", 21)],
         }),
         serde_json::json!({
             "namespace_id": "demo",

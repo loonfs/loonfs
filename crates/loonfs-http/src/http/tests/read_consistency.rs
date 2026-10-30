@@ -184,11 +184,11 @@ impl Fixture {
             ),
             LiveRead::get(format!("{namespace}/changes?after_seq=0"), true),
             LiveRead::get(
-                format!("{namespace}/inodes/ino_1?include_attributes=false"),
+                format!("{namespace}/inodes/ino_00000000000000000000000000?include_attributes=false"),
                 true,
             ),
             LiveRead::get(
-                format!("{namespace}/inodes/ino_1/children?include_attributes=false"),
+                format!("{namespace}/inodes/ino_00000000000000000000000000/children?include_attributes=false"),
                 true,
             ),
             LiveRead::get(format!("{namespace}/inodes/{file}/content"), true),
@@ -338,7 +338,7 @@ async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() 
         true,
     );
     let children = LiveRead::get(
-        "/v0/namespaces/demo/inodes/ino_1/children?include_attributes=false".to_owned(),
+        "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/children?include_attributes=false".to_owned(),
         true,
     );
     for (setting, unset_confirms) in [(None, false), (Some(ReadConsistency::Strong), true)] {

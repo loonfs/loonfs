@@ -388,7 +388,7 @@ mod tests {
             message: Some("import the reports".to_owned()),
             events: vec![FilesystemChange::DirectoryCreated {
                 inode_id: InodeId(43),
-                parent_inode_id: InodeId(1),
+                parent_inode_id: crate::ROOT_INODE_ID,
                 display_name: crate::DisplayName::parse("docs").expect("valid display name"),
                 binding_version: binding_version(),
             }],
@@ -405,8 +405,8 @@ mod tests {
                 "message": "import the reports",
                 "events": [{
                     "kind": "directory_created",
-                    "inode_id": "ino_43",
-                    "parent_inode_id": "ino_1",
+                    "inode_id": "ino_0000000000000000000000001b",
+                    "parent_inode_id": "ino_00000000000000000000000000",
                     "display_name": "docs",
                     "binding_version": binding_version(),
                 }],
@@ -425,7 +425,7 @@ mod tests {
             message: None,
             events: vec![FilesystemChange::DirectoryCreated {
                 inode_id: InodeId(43),
-                parent_inode_id: InodeId(1),
+                parent_inode_id: crate::ROOT_INODE_ID,
                 display_name: crate::DisplayName::parse("docs").expect("valid display name"),
                 binding_version: binding_version(),
             }],
@@ -441,8 +441,8 @@ mod tests {
                 "committed_at_ms": 1_752_624_000_000_u64,
                 "events": [{
                     "kind": "directory_created",
-                    "inode_id": "ino_43",
-                    "parent_inode_id": "ino_1",
+                    "inode_id": "ino_0000000000000000000000001b",
+                    "parent_inode_id": "ino_00000000000000000000000000",
                     "display_name": "docs",
                     "binding_version": binding_version(),
                 }],
@@ -463,20 +463,20 @@ mod tests {
         let version = binding_version();
         let directory_created = FilesystemChange::DirectoryCreated {
             inode_id: InodeId(2),
-            parent_inode_id: InodeId(1),
+            parent_inode_id: crate::ROOT_INODE_ID,
             display_name: crate::DisplayName::parse("Docs").expect("valid display name"),
             binding_version: version.clone(),
         };
         assert_eq!(
             serde_json::to_string(&directory_created).expect("serialize directory-created event"),
             format!(
-                r#"{{"kind":"directory_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"Docs","binding_version":"{version}"}}"#
+                r#"{{"kind":"directory_created","inode_id":"ino_00000000000000000000000002","parent_inode_id":"ino_00000000000000000000000000","display_name":"Docs","binding_version":"{version}"}}"#
             )
         );
 
         let file_created = FilesystemChange::FileCreated {
             inode_id: InodeId(2),
-            parent_inode_id: InodeId(1),
+            parent_inode_id: crate::ROOT_INODE_ID,
             display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
             binding_version: version.clone(),
             revision_no: crate::RevisionNo(1),
@@ -485,11 +485,11 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&file_created).expect("serialize file-created event"),
             format!(
-                r#"{{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","binding_version":"{version}","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
+                r#"{{"kind":"file_created","inode_id":"ino_00000000000000000000000002","parent_inode_id":"ino_00000000000000000000000000","display_name":"a.txt","binding_version":"{version}","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
             )
         );
 
-        let missing_content_ref = r#"{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","revision_no":1}"#;
+        let missing_content_ref = r#"{"kind":"file_created","inode_id":"ino_00000000000000000000000002","parent_inode_id":"ino_00000000000000000000000000","display_name":"a.txt","revision_no":1}"#;
         serde_json::from_str::<FilesystemChange>(missing_content_ref)
             .expect_err("an event without its content ref should be rejected");
 
@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&content_changed).expect("serialize content changed event"),
             format!(
-                r#"{{"kind":"content_changed","inode_id":"ino_2","revision_no":3,"content_ref":{sample_content_ref_json}}}"#
+                r#"{{"kind":"content_changed","inode_id":"ino_00000000000000000000000002","revision_no":3,"content_ref":{sample_content_ref_json}}}"#
             )
         );
         let appended = FilesystemChange::ContentChanged {
@@ -512,7 +512,7 @@ mod tests {
             append_offset: Some(3),
         };
         let appended_json = format!(
-            r#"{{"kind":"content_changed","inode_id":"ino_2","revision_no":4,"content_ref":{sample_content_ref_json},"append_offset":3}}"#
+            r#"{{"kind":"content_changed","inode_id":"ino_00000000000000000000000002","revision_no":4,"content_ref":{sample_content_ref_json},"append_offset":3}}"#
         );
         assert_eq!(
             serde_json::to_string(&appended).expect("serialize appended event"),
@@ -526,7 +526,7 @@ mod tests {
 
         let moved = FilesystemChange::Moved {
             inode_id: InodeId(2),
-            source_parent_inode_id: InodeId(1),
+            source_parent_inode_id: crate::ROOT_INODE_ID,
             source_display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
             destination_parent_inode_id: InodeId(3),
             destination_display_name: crate::DisplayName::parse("b.txt")
@@ -536,10 +536,10 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<FilesystemChange>(serde_json::json!({
                 "kind": "moved",
-                "inode_id": "ino_2",
-                "source_parent_inode_id": "ino_1",
+                "inode_id": "ino_00000000000000000000000002",
+                "source_parent_inode_id": "ino_00000000000000000000000000",
                 "source_display_name": "a.txt",
-                "destination_parent_inode_id": "ino_3",
+                "destination_parent_inode_id": "ino_00000000000000000000000003",
                 "destination_display_name": "b.txt",
                 "binding_version": version
             }))
@@ -549,33 +549,33 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&moved).expect("serialize moved event"),
             format!(
-                r#"{{"kind":"moved","inode_id":"ino_2","source_parent_inode_id":"ino_1","source_display_name":"a.txt","destination_parent_inode_id":"ino_3","destination_display_name":"b.txt","binding_version":"{version}"}}"#
+                r#"{{"kind":"moved","inode_id":"ino_00000000000000000000000002","source_parent_inode_id":"ino_00000000000000000000000000","source_display_name":"a.txt","destination_parent_inode_id":"ino_00000000000000000000000003","destination_display_name":"b.txt","binding_version":"{version}"}}"#
             )
         );
 
         let deleted = FilesystemChange::Deleted {
             inode_id: InodeId(2),
             deleted_binding: super::DirectoryBinding {
-                parent_inode_id: InodeId(1),
+                parent_inode_id: crate::ROOT_INODE_ID,
                 name_key: crate::NameKey::parse("a.txt").expect("valid name key"),
                 display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
             },
         };
         assert_eq!(
             serde_json::to_string(&deleted).expect("serialize deleted event"),
-            r#"{"kind":"deleted","inode_id":"ino_2","deleted_binding":{"parent_inode_id":"ino_1","name_key":"a.txt","display_name":"a.txt"}}"#
+            r#"{"kind":"deleted","inode_id":"ino_00000000000000000000000002","deleted_binding":{"parent_inode_id":"ino_00000000000000000000000000","name_key":"a.txt","display_name":"a.txt"}}"#
         );
 
         let undeleted = FilesystemChange::Undeleted {
             inode_id: InodeId(2),
-            parent_inode_id: InodeId(1),
+            parent_inode_id: crate::ROOT_INODE_ID,
             display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
             binding_version: version.clone(),
         };
         assert_eq!(
             serde_json::to_string(&undeleted).expect("serialize undeleted event"),
             format!(
-                r#"{{"kind":"undeleted","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","binding_version":"{version}"}}"#
+                r#"{{"kind":"undeleted","inode_id":"ino_00000000000000000000000002","parent_inode_id":"ino_00000000000000000000000000","display_name":"a.txt","binding_version":"{version}"}}"#
             )
         );
 
@@ -590,7 +590,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&attributes_changed).expect("serialize attributes event"),
-            r#"{"kind":"attributes_changed","inode_id":"ino_2","attributes_revision_no":4,"attributes":{"owner":"ada"}}"#
+            r#"{"kind":"attributes_changed","inode_id":"ino_00000000000000000000000002","attributes_revision_no":4,"attributes":{"owner":"ada"}}"#
         );
 
         // A clear is a real event carrying the empty map, not an absence.
@@ -601,7 +601,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&cleared).expect("serialize cleared attributes event"),
-            r#"{"kind":"attributes_changed","inode_id":"ino_2","attributes_revision_no":5,"attributes":{}}"#
+            r#"{"kind":"attributes_changed","inode_id":"ino_00000000000000000000000002","attributes_revision_no":5,"attributes":{}}"#
         );
 
         let access_changed = FilesystemChange::AccessChanged {
@@ -613,7 +613,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&access_changed).expect("serialize access event"),
-            r#"{"kind":"access_changed","inode_id":"ino_2","access_revision_no":3,"boundary":true,"grants":{"prn_ada":["read","write"]}}"#
+            r#"{"kind":"access_changed","inode_id":"ino_00000000000000000000000002","access_revision_no":3,"boundary":true,"grants":{"prn_ada":["read","write"]}}"#
         );
     }
 
@@ -632,7 +632,7 @@ mod tests {
         }))
         .expect_err("a null inode is not an absence check");
         let error = serde_json::from_value::<CommitPrecondition>(serde_json::json!({
-            "kind": "path_absence", "path": "/docs/input", "expected_inode_id": "ino_42"
+            "kind": "path_absence", "path": "/docs/input", "expected_inode_id": "ino_0000000000000000000000001a"
         }))
         .expect_err("absence accepts only a path");
         assert!(
@@ -651,7 +651,7 @@ mod tests {
                 "path": "/docs/a.txt",
                 "content_ref": sample_content_ref(),
                 "behavior": "replace",
-                "expected_inode_id": "ino_7"
+                "expected_inode_id": "ino_00000000000000000000000007"
             });
             operation[precondition] = serde_json::json!(3);
             serde_json::json!({
@@ -687,7 +687,7 @@ mod tests {
                     "path": "/docs/a.txt",
                     "content_ref": sample_content_ref(),
                     "behavior": "replace",
-                    "expected_inode_id": "ino_7",
+                    "expected_inode_id": "ino_00000000000000000000000007",
                     "expected_revision_no": expected_revision_no
                 }]
             })
@@ -726,7 +726,7 @@ mod tests {
                     "kind": "update_attributes",
                     "path": "/docs/a.txt",
                     "set": {"owner": "ada"},
-                    "expected_inode_id": "ino_7"
+                    "expected_inode_id": "ino_00000000000000000000000007"
                 }]
             })
         };

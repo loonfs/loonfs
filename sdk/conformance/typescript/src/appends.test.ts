@@ -28,7 +28,7 @@ for (const fixture of cases) {
             const [op] = body.operations;
             assert.equal(op.kind, "append_file");
             assert.equal(op.path, "/file");
-            assert.equal(op.expected_inode_id, "ino_1");
+            assert.equal(op.expected_inode_id, "ino_00000000000000000000000000");
             assert.equal(op.expected_revision_no, 1);
             assert.equal(op.behavior, undefined);
             assert.deepEqual(new Uint8Array(Buffer.from(op.inline_content, "base64")), content);
@@ -47,7 +47,7 @@ for (const fixture of cases) {
             content,
             commit_id: "stable",
             message: "original",
-            expected_inode_id: "ino_1",
+            expected_inode_id: "ino_00000000000000000000000000",
             expected_revision_no: 1,
         };
         const requestOptions = { maxRetries: 0, headers: { "Loonfs-Actor": "writer" } };

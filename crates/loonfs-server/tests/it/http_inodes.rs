@@ -7,6 +7,7 @@ use loonfs_client::AttributeChanges;
 use loonfs_client::{DeleteByInodeOptions, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, ErrorResponse, InodeId,
     RevisionNo,
@@ -231,7 +232,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .expect("create namespace");
     let root = harness
         .client
-        .stat_by_inode(&namespace, InodeId(1))
+        .stat_by_inode(&namespace, ROOT_INODE_ID)
         .await
         .expect("stat root inode");
     assert_eq!(root.path.as_str(), "/");
@@ -270,12 +271,12 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     for result in [
         harness
             .client
-            .stat_by_inode(&namespace, InodeId(u64::MAX))
+            .stat_by_inode(&namespace, InodeId::generate())
             .await
             .map(|_| ()),
         harness
             .client
-            .read_file_revision_by_inode(&namespace, InodeId(u64::MAX), RevisionNo(1))
+            .read_file_revision_by_inode(&namespace, InodeId::generate(), RevisionNo(1))
             .await
             .map(|_| ()),
     ] {
@@ -317,7 +318,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     assert_api_code(
         harness
             .client
-            .stat_by_inode(&deleted_namespace, InodeId(1))
+            .stat_by_inode(&deleted_namespace, ROOT_INODE_ID)
             .await,
         410,
         ErrorCode::NamespaceDeleted,
@@ -518,7 +519,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     assert_api_code(
         harness
             .client
-            .list_by_inode(&namespace, InodeId(u64::MAX))
+            .list_by_inode(&namespace, InodeId::generate())
             .page()
             .await,
         404,
@@ -576,35 +577,27 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
         .await
         .expect("create namespace");
     let actor = loonfs_test_support::test_actor();
-    let mut inode_27_path = None;
-    for index in 0..26 {
-        let path = NamespacePath::parse("demo", &format!("/file-{index}.txt")).expect("seed path");
-        harness
-            .client
-            .put_file(&path, b"body", &actor)
-            .await
-            .expect("seed inode");
-        inode_27_path = Some(path);
-    }
-    let inode_27_path = inode_27_path.expect("seeded file");
-    assert_eq!(
-        harness
-            .client
-            .stat(&inode_27_path)
-            .await
-            .expect("stat ino_27")
-            .inode_id,
-        InodeId(27)
-    );
+    let path = NamespacePath::parse("demo", "/file.txt").expect("seed path");
+    harness
+        .client
+        .put_file(&path, b"body", &actor)
+        .await
+        .expect("seed inode");
+    let inode_id = harness
+        .client
+        .stat(&path)
+        .await
+        .expect("stat the file")
+        .inode_id;
     for suffix in ["", "/content", "/revisions", "/revisions/1/content"] {
         raw_agent()
             .get(&format!(
-                "{}/v0/namespaces/demo/inodes/ino_27{suffix}",
+                "{}/v0/namespaces/demo/inodes/{inode_id}{suffix}",
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
             .call()
-            .expect("valid ino_27 route");
+            .expect("valid inode route");
     }
 
     let routes = [
@@ -616,7 +609,10 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
         ("GET", "/content"),
         ("POST", "/downloads"),
     ];
-    for malformed in ["27", "ino_027", "ino_0", "INO_27"] {
+    let upper = inode_id.to_string().to_uppercase();
+    let unprefixed = inode_id.body().to_string();
+    let short = &inode_id.to_string()[..29];
+    for malformed in ["27", "ino_27", upper.as_str(), unprefixed.as_str(), short] {
         for (method, suffix) in routes {
             let url = format!(
                 "{}/v0/namespaces/demo/inodes/{malformed}{suffix}",
@@ -648,9 +644,9 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
                 error.message
             );
             assert!(
-                error
-                    .message
-                    .contains("must use `ino_` followed by a nonzero u64 without leading zeroes"),
+                error.message.contains(
+                    "must use `ino_` followed by 26 lowercase Crockford base 32 characters"
+                ),
                 "{}",
                 error.message
             );

@@ -104,6 +104,7 @@ pub(crate) fn access_revision_from_manifest_row(row: MetadataRow) -> Result<Acce
 mod tests {
     use super::*;
     use loonfs_types::format::manifest::TombstoneRowAction;
+    use loonfs_types::ROOT_INODE_ID;
     use loonfs_types::{ChangeSeq, CommitId, InodeId};
     use std::assert_matches;
 
@@ -125,7 +126,10 @@ mod tests {
         assert_matches!(&error, CoreError::NamespaceCorrupt(_));
         let message = error.to_string();
         assert!(message.contains("`direntry_binding`"), "{message}");
-        assert!(message.contains("inode-00000000000000000007"), "{message}");
+        assert!(
+            message.contains("inode-00000000000000000000000007"),
+            "{message}"
+        );
 
         assert_matches!(
             revision_from_manifest_row(foreign())
@@ -148,13 +152,13 @@ mod tests {
             CoreError::NamespaceCorrupt(_)
         );
         let tombstone = MetadataRow::Tombstone(SubtreeTombstoneRecord {
-            root_inode_id: InodeId(1),
+            root_inode_id: ROOT_INODE_ID,
             committed_seq: ChangeSeq(1),
             delta_index: 0,
             commit_id: CommitId::parse("c_foreign_tombstone").expect("commit id"),
             action: TombstoneRowAction::Set {
                 deleted_binding: loonfs_types::format::manifest::DeletedBinding {
-                    parent_inode_id: InodeId(1),
+                    parent_inode_id: ROOT_INODE_ID,
                     name_key: loonfs_types::NameKey::parse("foreign").expect("valid name key"),
                     display_name: loonfs_types::DisplayName::parse("foreign")
                         .expect("valid display name"),

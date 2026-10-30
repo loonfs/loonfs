@@ -43,13 +43,16 @@ impl GrepRequest {
     /// change between builds.
     pub fn fingerprint(&self) -> u64 {
         let mut seed = xxh64(self.pattern.as_bytes(), 0);
-        let (path_prefix, inode_id) = match &self.scope {
-            GrepScope::Namespace => ("", 0),
-            GrepScope::PathPrefix(path) => (path.as_str(), 0),
-            GrepScope::Inode(inode_id) => ("", inode_id.0),
+        // The scope kind keeps a namespace scope apart from an inode scope
+        // on the root directory, whose ID is all zero bits.
+        let (scope_kind, path_prefix, inode_id) = match &self.scope {
+            GrepScope::Namespace => (0_u8, "", crate::ROOT_INODE_ID),
+            GrepScope::PathPrefix(path) => (1, path.as_str(), crate::ROOT_INODE_ID),
+            GrepScope::Inode(inode_id) => (2, "", *inode_id),
         };
+        seed = xxh64(&[scope_kind], seed);
         seed = xxh64(path_prefix.as_bytes(), seed);
-        seed = xxh64(&inode_id.to_le_bytes(), seed);
+        seed = xxh64(&inode_id.to_be_bytes(), seed);
         let flags = [
             u8::from(self.case_insensitive),
             u8::from(self.allow_stale),
@@ -110,7 +113,7 @@ pub struct GrepResponse {
 /// name because they describe the same status. Their fields differ because each type follows the
 /// conventions of its own surface. This response tags variants with `status` and writes inode IDs
 /// in their public `ino_` form, and the durable record tags variants with `kind` and writes inode
-/// IDs as numbers.
+/// IDs as their 26-character spelling without the prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -199,7 +202,7 @@ mod tests {
             serde_json::to_value(found).expect("serialize grep match"),
             serde_json::json!({
                 "path": "/docs/a.txt",
-                "inode_id": "ino_2",
+                "inode_id": InodeId(2).to_string(),
                 "revision_no": 3,
                 "line_number": 4,
                 "byte_offset": 5,
@@ -222,7 +225,7 @@ mod tests {
             serde_json::json!({
                 "status": "backfilling",
                 "captured_seq": 9,
-                "cursor_inode_id": "ino_4",
+                "cursor_inode_id": InodeId(4).to_string(),
                 "checkpoint_id": "pin_00000000000000000001-0000000000000009"
             }),
             "a backfill reports its target and its walk, never a watermark"
@@ -325,7 +328,7 @@ mod tests {
                 "namespace_id": "demo",
                 "status": "backfilling",
                 "captured_seq": 12,
-                "cursor_inode_id": "ino_4",
+                "cursor_inode_id": InodeId(4).to_string(),
                 "checkpoint_id": "pin_00000000000000000001-0000000000000009",
                 "next_run_no": 1,
                 "reorganize_pending": false

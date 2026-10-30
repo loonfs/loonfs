@@ -296,6 +296,49 @@ async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
         .expect("seed shared file");
 }
 
+/// Checks that a fork keeps the IDs of the inodes it inherits, and that the
+/// inodes that the fork and its source create later have IDs of their own.
+#[tokio::test]
+async fn a_fork_keeps_inherited_inode_ids_and_generates_its_own() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = default_writer();
+    let source_namespace_id = namespace_id("demo");
+    let fork_namespace_id = NamespaceId::parse("fork").expect("valid namespace id");
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
+    fork_namespace(&store, &source_namespace_id, &fork_namespace_id, &context)
+        .await
+        .expect("fork namespace");
+
+    let mut ids = std::collections::BTreeSet::from([loonfs_types::ROOT_INODE_ID]);
+    for path in ["/docs", "/docs/shared.txt"] {
+        let source = resolve_path(&store, &source_namespace_id, path)
+            .await
+            .expect("source path")
+            .inode_id;
+        let fork = resolve_path(&store, &fork_namespace_id, path)
+            .await
+            .expect("inherited path")
+            .inode_id;
+        assert_eq!(fork, source, "{path} keeps its inode ID in the fork");
+        assert!(ids.insert(source), "{path} has an ID of its own");
+    }
+    for namespace_id in [&source_namespace_id, &fork_namespace_id] {
+        NamespaceFixture::new(&store, namespace_id, &context)
+            .write_file_bytes("/docs/new.txt", b"new", None)
+            .await
+            .expect("create a file after the fork");
+        let created = resolve_path(&store, namespace_id, "/docs/new.txt")
+            .await
+            .expect("created path")
+            .inode_id;
+        assert!(
+            ids.insert(created),
+            "a file created in `{namespace_id}` after the fork has a new ID"
+        );
+    }
+}
+
 async fn head_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

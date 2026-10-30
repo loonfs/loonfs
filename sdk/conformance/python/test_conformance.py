@@ -1433,7 +1433,7 @@ def test_inode_addressing(cases: dict[str, ConformanceCase], harness: Harness) -
             "conf-inode-addressing-access",
             request.actor_id,
             FilesystemOperation_UpdateAccessByInode(
-                inode_id="ino_1", boundary=False, grants={}
+                inode_id="ino_00000000000000000000000000", boundary=False, grants={}
             ),
         )
     assert unrestricted.value.status_code == expected.unrestricted_access.status

@@ -15,7 +15,6 @@ use loonfs_objectstore::layout::{parse_object_key, wal_no_of, DurableObjectFamil
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{RecordedOperation, StoreCounts};
 use loonfs_types::{CompactorEpoch, ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
-use std::path::Path;
 
 /// A manifest another process publishes while a fold waits at its
 /// manifest put.
@@ -245,19 +244,6 @@ impl Writer {
 
 fn deadline() -> OperationClock {
     OperationClock::start(0, Arc::new(StdMonotonicTimer::default()))
-}
-
-fn copy_directory(from: &Path, to: &Path) {
-    for entry in std::fs::read_dir(from).expect("read directory") {
-        let entry = entry.expect("directory entry");
-        let target = to.join(entry.file_name());
-        if entry.file_type().expect("file type").is_dir() {
-            std::fs::create_dir_all(&target).expect("create directory");
-            copy_directory(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), &target).expect("copy file");
-        }
-    }
 }
 
 fn is_content(operation: &RecordedOperation) -> bool {

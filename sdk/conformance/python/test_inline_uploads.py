@@ -126,7 +126,7 @@ class Endpoint:
             op = body["operations"][0]
             assert op["path"] == "/file" and op["behavior"] == "replace"
             assert (
-                op["expected_inode_id"] == "ino_1" and op["expected_revision_no"] == 1
+                op["expected_inode_id"] == "ino_00000000000000000000000000" and op["expected_revision_no"] == 1
             )
             assert body["commit_id"] == "stable" and body["message"] == "original"
             if self.fixture["inline"]:
@@ -164,7 +164,7 @@ def publication(prepared):
         commit_id="stable",
         message="original",
         behavior="replace",
-        expected_inode_id="ino_1",
+        expected_inode_id="ino_00000000000000000000000000",
         expected_revision_no=1,
         request_options={
             "max_retries": 0,

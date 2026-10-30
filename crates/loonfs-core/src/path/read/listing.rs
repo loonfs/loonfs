@@ -128,8 +128,9 @@ fn validate_cursor_directory(
     }
     if resolved.inode_id != cursor_directory_inode_id {
         return Err(invalid_cursor(format!(
-            "cursor directory inode `{}` does not match the requested directory inode `{}`",
-            cursor_directory_inode_id.0, resolved.inode_id.0
+            "cursor directory inode `{cursor_directory_inode_id}` does not match the requested \
+             directory inode `{}`",
+            resolved.inode_id
         )));
     }
     Ok(())

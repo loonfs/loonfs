@@ -53,13 +53,15 @@ Across namespaces, two pairs of values identify items and commit positions:
 - An item is identified by `(namespace_id, inode_id)`.
 - A commit position is identified by `(namespace_id, committed_seq)`.
 
-Inode IDs are integers in storage. The public API represents the same IDs as strings, such as `ino_42`.
+An inode ID is a 128-bit number. The public API writes it as `ino_` followed by the 26-character spelling that every generated ID uses (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)), such as `ino_1z5ae0x2rx99qswz2v78egz3kc`. Durable records store the same 128 bits (see [Field conventions](#121-field-conventions)).
 
 A "fork" is a new namespace that starts from a retained view of another namespace. It starts with the same files and shares their stored objects, and later commits only change the fork. [Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks) describes how the shared objects are kept.
 
-The root directory has inode ID 1. A new namespace starts at sequence 0, with inode ID 2 as the next ID to allocate. New inode IDs are allocated in increasing order as part of metadata publication. Renaming a file doesn't change its inode ID, but deleting a file and creating another one at the same path allocates a new ID.
+Every namespace's root directory has the inode ID whose 128 bits are all zero (`ino_00000000000000000000000000`), and a new namespace starts at sequence 0. When LoonFS creates any other inode, it generates the inode's ID from a random version 4 UUID, which is never all zeros. Renaming a file doesn't change its inode ID, but deleting a file and creating another one at the same path creates a new inode with a new ID. Inode IDs aren't assigned in order, so comparing two IDs doesn't tell which inode is older.
 
 Version 1 of the format defines two inode kinds, `dir` and `file`. ([Reserved functionality](#125-reserved-functionality) reserves a third kind, `link`.) An inode row records only the item's kind and creation metadata. The item's current parent and name are stored as directory bindings, and its contents are stored as file revisions, so neither the path nor the current content reference is stored on the inode row.
+
+Why are inode IDs random? A fork keeps the inode IDs of the inodes that it inherits, and after the fork, the fork and its source create inodes independently. Two random version 4 UUIDs are equal with negligible probability, so an inode ID that one of the two namespaces generates doesn't collide with an ID that the other generates. For the same reason, LoonFS doesn't check a new inode ID against the existing inodes.
 
 ### 1.2 Commits and revisions
 
@@ -71,11 +73,11 @@ For example, a file might go through the following history (the sequence values 
 
 | Namespace sequence | Operation | Result |
 | --- | --- | --- |
-| 17 | Create `/reports/Report.txt` | Allocate inode `42`, bind the name, and publish file revision `1`. |
-| 18 | Rename it to `/reports/Final.txt` | Keep inode `42` and revision `1`, and replace the directory binding. |
-| 19 | Replace its contents | Keep inode `42`, and publish revision `2`. |
-| 20 | Delete `/reports/Final.txt` | Remove the binding, and record a deletion for inode `42`. |
-| 21 | Undelete it | Bind inode `42` again, and keep its revision history. |
+| 17 | Create `/reports/Report.txt` | Create an inode with a new random ID, bind the name, and publish file revision `1`. |
+| 18 | Rename it to `/reports/Final.txt` | Keep the inode ID and revision `1`, and replace the directory binding. |
+| 19 | Replace its contents | Keep the inode ID, and publish revision `2`. |
+| 20 | Delete `/reports/Final.txt` | Remove the binding, and record a deletion for the inode. |
+| 21 | Undelete it | Bind the same inode again, and keep its revision history. |
 
 The directory state at sequence 18 and the file's contents at sequence 19 are read from different metadata rows, and the inode row doesn't change in either case.
 
@@ -176,7 +178,7 @@ At a given sequence, the latest event for the deletion's root inode determines t
 
 A deletion's "deletion sequence" (`deletion_seq`) is the sequence of the commit that committed its `set`. A deletion has "expired" in a view when its deletion sequence is at or below the retention floor of the view's manifest (see [Advancing the retention floor](#101-advancing-the-retention-floor)), and it's "recoverable" when its `set` is the root's latest event and its deletion sequence is above that floor. An expired deletion can't be undeleted, its tombstone keeps hiding the subtree, and the trash listing leaves it out. Nothing is committed when a deletion expires. A retention advance moves the floor, and every view on the advance's manifest or a later one treats the deletions that the floor passed as expired.
 
-For example, suppose the directory `/old` (inode 7) is deleted at sequence 40, and a retention advance later moves the floor from 35 to 50. While the floor is 35, an undelete can restore `/old`. In every view on the advance's manifest or a later one, `/old` and everything below it stay hidden, the trash listing leaves the deletion out, and an undelete of the deletion returns `not_deleted`.
+For example, suppose the directory `/old` is deleted at sequence 40, and a retention advance later moves the floor from 35 to 50. While the floor is 35, an undelete can restore `/old`. In every view on the advance's manifest or a later one, `/old` and everything below it stay hidden, the trash listing leaves the deletion out, and an undelete of the deletion returns `not_deleted`.
 
 An undelete request identifies a deletion by its inode and the sequence it was committed at. Validation MUST confirm that this deletion is recoverable in the writer's basis, which means that its `set` is the root's latest event and its deletion sequence is above the basis manifest's retention floor. A request for a deletion that isn't recoverable returns `not_deleted`, and it MUST NOT cancel a later deletion. (A request can't undelete a deletion made earlier in the same request, because that deletion doesn't have a committed sequence yet.) An undelete restores the saved parent and name, unless the request provides a different destination. Only the root of a deletion can be undeleted, because the descendants it hides don't have deletions of their own. An item can't be deleted while a deletion above it hides it, so a deletion inside another deletion is always the older of the two, and no recoverable deletion is inside an expired one.
 
@@ -305,6 +307,7 @@ Other objects use generated IDs:
 
 - A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies the pinned manifest, and the random suffix distinguishes separate user and fork pins on the same manifest. The durable record calls it `pin_id`, the API calls it a `checkpoint_id`, and a user pin's ID is also its `snapshot_id`.
 - A content ID is `con_` followed by the 26-character lowercase Crockford base 32 spelling of a random version 4 UUID. The spelling adds two zero bits in front of the UUID's 128 bits and writes each group of 5 bits as one character of `0123456789abcdefghjkmnpqrstvwxyz`, so the first character is `0` through `7`.
+- An inode ID is `ino_` followed by the same 26-character spelling of a random version 4 UUID, except the root directory's ID, which is all zero bits (`ino_00000000000000000000000000`). See [Namespaces and identity](#11-namespaces-and-identity).
 - A metadata segment ID is also generated, instead of being derived from the segment's position in publication history.
 
 A collision at a newly generated immutable key MUST NOT overwrite the existing bytes.
@@ -313,7 +316,7 @@ A collision at a newly generated immutable key MUST NOT overwrite the existing b
 
 The current manifest is the source of truth for the namespace's identity, status, writer epoch, and compactor epoch. Its runs describe the materialized metadata through the head sequence (`head_seq`), and `folded_wal_no` is the last WAL number that those runs include. The WAL objects after `folded_wal_no` contain the later commits, and the highest-numbered one is the "WAL tip".
 
-Every WAL object records the head sequence and the inode allocator's high-water mark after its commits. A fence moves the WAL number and the writer epoch forward without adding a commit, and it keeps the allocator value it started from.
+Every WAL object records the head sequence after its commits. A fence moves the WAL number and the writer epoch forward without adding a commit, and it keeps the head sequence it started from.
 
 Creating or forking a namespace writes the hint before manifest 1, and nothing deletes the hint of a live namespace. So a reader that doesn't find a hint can report that the namespace doesn't exist, without listing any objects.
 
@@ -496,7 +499,7 @@ The hint is expected to lag. It's a starting point, not a statement that later o
 Each manifest that discovery loads MUST be a valid later manifest of the one loaded before it:
 
 - Its identity fields are equal.
-- Its `folded_wal_no`, both epochs, `head_seq`, retention floor, acknowledged floor, allocators, and activity counters are the same or higher.
+- Its `folded_wal_no`, both epochs, `head_seq`, retention floor, acknowledged floor, next run number, and activity counters are the same or higher.
 - It doesn't follow a namespace tombstone (a tombstone ends the probe).
 
 A publication's successor check applies the same rules to the next number (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)). A sequence of manifests that fails this check is corrupt.
@@ -509,7 +512,7 @@ A publication's successor check applies the same rules to the next number (see [
 | A required object is unreadable or invalid | An error, not absence. |
 | The current manifest is deleted | Ordinary namespace operations return `namespace_deleted`. |
 
-Every namespace has its own manifest from the moment it's installed. A new namespace's empty manifest describes root inode 1 at sequence 0. A fork's first manifest lists the source runs it inherits. Its `fork_basis` records where the fork came from and which pin keeps its basis, and readers don't follow that field to choose a different basis.
+Every namespace has its own manifest from the moment it's installed. A new namespace's empty manifest describes the root directory at sequence 0. A fork's first manifest lists the source runs it inherits. Its `fork_basis` records where the fork came from and which pin keeps its basis, and readers don't follow that field to choose a different basis.
 
 The current manifest and the unfolded WAL together make up one read view:
 
@@ -536,7 +539,7 @@ After it selects a manifest, a reader reads the WAL from `folded_wal_no + 1` upw
 Each WAL object MUST pass these checks:
 
 - A WAL object other than a fence contains contiguous commits that follow the preceding head. Its `prior_head_seq` is its first record's sequence minus one, so a first sequence of 0 is invalid. A fence's preceding head is its own `head_seq`.
-- Its namespace identity, WAL number, sequence range, allocation state, and writer epoch are valid.
+- Its namespace identity, WAL number, sequence range, and writer epoch are valid.
 - A fence contains no metadata changes.
 - Epochs don't decrease along the log, and they don't exceed the current manifest's epoch.
 
@@ -573,7 +576,7 @@ A file's current content is its latest revision committed at or before `N`. Its 
 
 ### 4.4 Paths, listings, and revision reads
 
-A reader resolves a path from root inode `1`. It maps each component to its name key (see [Names and paths](#14-names-and-paths)) and follows the active binding. If a component isn't visible, the path doesn't exist. (The current format has no mount points to traverse.)
+A reader resolves a path from the root directory's inode. It maps each component to its name key (see [Names and paths](#14-names-and-paths)) and follows the active binding. If a component isn't visible, the path doesn't exist. (The current format has no mount points to traverse.)
 
 A directory listing resolves the visible child bindings, and it uses committed revision metadata for file sizes and content-reference summaries. It MUST NOT fetch and verify every file's content object just to list a directory.
 
@@ -746,7 +749,7 @@ A writer session acquires authority lazily, before its first publication that ch
 
 When another session acquires a higher epoch, its fence prevents an older writer from extending the log from a tip it saw earlier. The stale writer's put collides, discovery finds the higher epoch, and the session returns `writer_fenced`.
 
-A fence keeps `head_seq` and `next_inode_id` unchanged and contains no commit records, so its derived `prior_head_seq` equals its `head_seq`. It moves the WAL position forward without moving the logical history forward. Concurrent attempts are ordered by the conditional creation of the next number.
+A fence keeps `head_seq` unchanged and contains no commit records, so its derived `prior_head_seq` equals its `head_seq`. It moves the WAL position forward without moving the logical history forward. Concurrent attempts are ordered by the conditional creation of the next number.
 
 A maintainer that acknowledges the retention floor of a namespace whose writer commits nothing acquires the writer epoch with the same steps, and it commits nothing after its fence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). A writer session that the maintainer's fence fences returns `writer_fenced` to its next request, like after any other takeover.
 
@@ -756,7 +759,7 @@ Why use epochs instead of a lease? With a lease, a new writer would have to wait
 
 ### 6.2 Validation
 
-Before it plans new mutations, the writer rebuilds the metadata state from a verified basis and the visible WAL. It resolves paths and inode references, checks content admission, evaluates preconditions, and allocates new inode IDs from `next_inode_id`.
+Before it plans new mutations, the writer rebuilds the metadata state from a verified basis and the visible WAL. It resolves paths and inode references, checks content admission, evaluates preconditions, and generates a random ID for each inode that a request creates.
 
 The operations in one request are evaluated in order, and later operations see the tentative effects of earlier ones. When several requests share a publication batch, the writer chooses their order, and it evaluates each one against the requests accepted before it.
 
@@ -789,7 +792,7 @@ To publish a batch, a writer:
 
 1. Resolves retained commit IDs, and then validates new requests against the discovered view and the requests accepted earlier in the batch.
 2. Keeps new commits in the writer's queue while the unfolded WAL is at its write-stop threshold (fence objects count toward that threshold), until a fold frees room. A commit that's still waiting when the [write-stop wait](#73-recovery-material-and-maintenance-policy) passes (measured from when it entered the queue) returns `maintenance_required` and isn't committed.
-3. Assigns contiguous sequences to the accepted requests, and builds one WAL object at `tip + 1`, including the resulting `next_inode_id` and, as `basis_floor_seq`, the retention floor of the manifest that the batch was validated against (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
+3. Assigns contiguous sequences to the accepted requests, and builds one WAL object at `tip + 1`, including, as `basis_floor_seq`, the retention floor of the manifest that the batch was validated against (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
 4. Checks the publication budget and the content-admission evidence immediately before the put-if-absent. If a request's evidence has expired, the writer returns that request's own error, and `stale_head` for the other accepted requests so they can be planned again. It writes no WAL object for that batch.
 5. On success, moves its [writer position](glossary.md#writer-position) to the new head and acknowledges the requests.
 
@@ -931,7 +934,7 @@ A fold changes the physical representation, not the namespace's visible history.
 
 ### 7.1 Manifests, runs, and segments
 
-A namespace manifest describes one complete set of metadata files through `head_seq`. It includes the inode allocator, the folded WAL number, the retention floor, and every metadata run needed to rebuild that state. Its `manifest_no` determines its immutable key, so only one publication can succeed at each number.
+A namespace manifest describes one complete set of metadata files through `head_seq`. It includes the folded WAL number, the next run number, the retention floor, and every metadata run needed to rebuild that state. Its `manifest_no` determines its immutable key, so only one publication can succeed at each number.
 
 A "run" is the set of segments produced together. Its `run_no` is allocated from the manifest's `next_run_no`, which advances when the run is published. A WAL fold allocates one run number across all the families it writes, and a compaction allocates one run number for its selected family group.
 
@@ -956,7 +959,6 @@ The first manifest of a namespace has these values:
 | Writer epoch, compactor epoch, folded WAL number, activity counters | 0 | 0 |
 | Fork basis | None | The pinned source manifest and the source pin's ID |
 | Runs | None | The source's runs |
-| Next inode ID | 2 | The source's |
 | Head sequence, retention floor, and acknowledged floor | 0 | The pinned source sequence |
 | Base sequence | 0 | Derived from the inherited runs |
 | Next run number | 0 | The source's |
@@ -1001,7 +1003,7 @@ Folds, validation (when it writes pending pieces to content objects), direct-dow
 Every successor manifest MUST:
 
 - keep the namespace's identity, including its access mode,
-- not lower the head sequence, the writer or compactor epoch, the folded WAL number, the retention floor, the acknowledged floor, the allocators, or the cumulative activity counters, and
+- not lower the head sequence, the writer or compactor epoch, the folded WAL number, the retention floor, the acknowledged floor, the next run number, or the cumulative activity counters, and
 - keep the activity counters exactly the same, if it's at the same head.
 
 A successor can set, change, or clear the [retention window](glossary.md#retention-window), because the window is a maintenance setting and not part of the namespace's identity. A namespace tombstone has no successor.
@@ -1142,7 +1144,7 @@ A fork starts its own history from the source's retained metadata. To create one
 
 1. Loads the target's current manifest before it writes a source pin, and continues only if the target doesn't exist. It then creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
 2. Loads and verifies the pinned manifest.
-3. Copies the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, and retention window. The inherited runs determine the same base sequence. The fork's retention floor and acknowledged floor are both the pinned manifest's head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
+3. Copies the pinned manifest's run references, head sequence, next run number, access configuration, and retention window. The inherited runs determine the same base sequence. The fork's retention floor and acknowledged floor are both the pinned manifest's head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
 4. Builds the rest of the first manifest's fields (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
 
 The fork copies no file bytes or metadata segments. Its first commit is one sequence above its initial head. The fork can itself be forked right away, because its manifest already lists its inherited runs.
@@ -1225,7 +1227,7 @@ Whatever the target, an advance MUST NOT move the floor past a commit whose `com
 
 For example, with the same commits and the head at 13, an advance at 10:01 that targets the head uses the cutoff 9:01. The walk passes commit 11 (9:00) and stops at commit 12 (9:05), so the new floor is 11. At 10:04, commit 13 (9:02) is 62 minutes old, but the walk from 11 still stops at commit 12, which is 59 minutes old, so the floor stays at 11. At 10:05, the walk passes commits 12 and 13, so the new floor is 13. A commit dated out of order can only make the floor stop earlier, because the walk stops at the first commit after the cutoff.
 
-The advance loads the current manifest. If the new floor is at or below the manifest's floor, the advance publishes nothing. Otherwise, the advance checks that the manifest's referenced segments exist, and it publishes a successor with the same runs, head summary, allocators, and authority, with `retention_floor_seq` set to the new floor. In both cases the advance returns the resulting floor, which is below the target when the default grace's cutoff stops the walk first. The floor never decreases.
+The advance loads the current manifest. If the new floor is at or below the manifest's floor, the advance publishes nothing. Otherwise, the advance checks that the manifest's referenced segments exist, and it publishes a successor with the same runs, head summary, next run number, and authority, with `retention_floor_seq` set to the new floor. In both cases the advance returns the resulting floor, which is below the target when the default grace's cutoff stops the walk first. The floor never decreases.
 
 A namespace's "retention window" (`retention_window_ms`) is an optional setting in its manifest, a positive number of milliseconds. It sets how much recent history a maintainer that advances the floor on a schedule keeps for the namespace. Such a maintainer, like the reference server's maintenance sweep, also has a window of its own. On each scheduled advance, the maintainer uses the namespace's window if the current manifest sets `retention_window_ms`, and its own window otherwise. The cutoff time is the current time minus that window. With neither window, it doesn't advance the floor. For example, if a server's window is 30 days and one namespace's window is 7 days, the server keeps 7 days of history for that namespace and 30 days for every namespace without a window.
 
@@ -1334,7 +1336,7 @@ Deleting an item unbinds it, so the first walk doesn't reach a deleted subtree. 
 
 The kept inode filter follows the layout filter's rules: two xxh64 hashes, a seed from the output run number, 10 bits per expected inode up to `MAX_BLOOM_FILTER_BYTES`, and an expected count that is the sum of the basis's `inodes` segments' `row_count`. A false positive keeps a hidden inode's rows for one compaction, and the next compaction of the group has a different output run number, so it removes them. If the walk would need more than `MAX_KEPT_INODE_WALK_DEPTH` (4,096) cursors at once, the compaction keeps every row that it would have tested, removes no hidden rows, and logs that choice. A delta-only compaction doesn't build the filter, and it removes none of these rows. A base compaction over a manifest whose `acknowledged_floor_seq` is 0 doesn't build the filter either, and it keeps every row, because no deletion in its basis has expired.
 
-For example, suppose the directory `/old` (inode 7) contains `a.txt` (inode 8), `/old` is deleted at sequence 40, and the basis manifest's floor and acknowledged floor are both 50. The walk from the root doesn't reach inode 7, because the deletion unbound `/old`, and no walk starts at inode 7, because the deletion has expired. So a base compaction of `revisions` removes every revision of `a.txt`, and a base compaction of the bindings group removes every version of the edge from inode 7 to `a.txt` and, under the binding rule, the root's unbound edge to `old`. The tombstone keeps its `set` event.
+For example, suppose the directory `/old` contains `a.txt`, `/old` is deleted at sequence 40, and the basis manifest's floor and acknowledged floor are both 50. The walk from the root doesn't reach the inode of `/old`, because the deletion unbound `/old`, and no walk starts at that inode, because the deletion has expired. So a base compaction of `revisions` removes every revision of `a.txt`, and a base compaction of the bindings group removes every version of the edge from `/old` to `a.txt` and, under the binding rule, the root's unbound edge to `old`. The tombstone keeps its `set` event.
 
 Why can a base compaction remove every row of a hidden inode, and not just the older rows that the usual rules drop? An expired deletion is at or below the acknowledged floor, and so at or below the retention floor, and LoonFS commits no change to a hidden inode, so every row of a hidden inode is at or below the floor, and the tombstone hides the inode at every retained sequence. The tombstone events stay, because family groups are compacted at different times, and the tombstone keeps the inodes hidden while some groups have removed their rows and others haven't.
 
@@ -1615,7 +1617,7 @@ Field name suffixes have these meanings:
 
 An absent optional object field is left out when it's written. A required value is written even when it's zero, false, or an empty collection. Fingerprint preimages have their own explicit absence rules (see [Appendix B](#appendix-b-semantic-commit-fingerprints)), because they aren't ordinary durable records.
 
-Durable inode IDs are integers. Public API inode strings, such as `ino_42`, don't change the stored representation. The canonical fingerprint rules identify the few places where public strings are part of the preimage.
+A durable record stores an inode ID in one encoding for each kind of container. A CBOR record stores the ID's 16 bytes, with the most significant byte first, as a 16-byte byte string, and a JSON document stores the ID's 26-character spelling (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)). Neither form includes the `ino_` prefix of the public API string. The preimage of a commit fingerprint uses the JSON form (see [Appendix B](#appendix-b-semantic-commit-fingerprints)).
 
 ### 12.2 Envelopes and checksums
 
@@ -1814,7 +1816,6 @@ A namespace manifest contains:
 | `head_seq` | The materialized head sequence (on deletion, the final namespace sequence). |
 | `activity` | The required cumulative activity counters (see [Statistics](#74-statistics)). |
 | `writer_epoch` | The current writer authority. |
-| `next_inode_id` | The first inode ID available at the recorded boundary. |
 | `next_run_no` | The next run number to allocate. |
 | `retention_floor_seq` | The earliest sequence covered by incremental replay and row retention. |
 | `acknowledged_floor_seq` | The highest `basis_floor_seq` of the WAL objects folded into the manifest, at most `retention_floor_seq` (see [Advancing the retention floor](#101-advancing-the-retention-floor)). |
@@ -1841,9 +1842,9 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`, and its tier is `del
 
 `MAX_WAL_OBJECT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every WAL object within this limit through request and batch admission, and readers refuse larger documents. A writer builds each batch so that the sum of its requests' bounds, plus the document overhead, stays within the limit. This is a format constraint, because every successful publication MUST stay readable with bounded decompression.
 
-A WAL object's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_seq`, `next_inode_id`, `basis_floor_seq`, and `records`. `basis_floor_seq` is the retention floor of the manifest that the object's commits were validated against, or that a fence was planned against (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
+A WAL object's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_seq`, `basis_floor_seq`, and `records`. `basis_floor_seq` is the retention floor of the manifest that the object's commits were validated against, or that a fence was planned against (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
 
-For a data WAL object, `prior_head_seq` is derived (with checked subtraction) from the first record's sequence, and `records` covers the sequences after it through `head_seq`, without gaps. A first sequence of 0 is invalid. The WAL number MUST match the key, and the allocation high-water mark MUST agree with replay. A fence has an empty record list and an unchanged head and allocator, so its derived `prior_head_seq` equals `head_seq`. Fences take part in WAL numbering and epoch validation, but they produce no logical changes.
+For a data WAL object, `prior_head_seq` is derived (with checked subtraction) from the first record's sequence, and `records` covers the sequences after it through `head_seq`, without gaps. A first sequence of 0 is invalid. The WAL number MUST match the key. A fence has an empty record list and an unchanged head, so its derived `prior_head_seq` equals `head_seq`. Fences take part in WAL numbering and epoch validation, but they produce no logical changes.
 
 Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, an optional `message`, `deltas`, and an optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`, which is a kind-tagged object with these fields:
 
@@ -1906,23 +1907,23 @@ For a tombstone, the top-level `committed_seq` and `delta_index` fields store th
 
 An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `removed_seq`, the sequence of the undelete that removed the deletion from the listing. These are nested action fields, not extra top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode, and a `listed` action without it fails decoding.
 
-Each row key starts with its family's prefix, followed by hyphen-separated components. Unsigned 64-bit components use 20 decimal digits, and unsigned 32-bit components use 10, with leading zeros. Variable names and commit IDs are the lowercase hexadecimal encoding of their UTF-8 bytes, so a name's own punctuation is never read as a component separator. Content-layout keys use the content ID directly.
+Each row key starts with its family's prefix, followed by hyphen-separated components. Unsigned 64-bit components use 20 decimal digits, and unsigned 32-bit components use 10, with leading zeros. An inode ID uses its 26-character spelling, the same as every other generated ID, without the `ino_` prefix (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)). Every spelling has the same width, and the alphabet is in byte order, so the byte order of two keys follows the numeric order of their inode IDs. Variable names and commit IDs are the lowercase hexadecimal encoding of their UTF-8 bytes, so a name's own punctuation is never read as a component separator. Content-layout keys use the content ID directly.
 
-In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction before the fixed-width decimal encoding. They aren't literal text in a key.
+In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction before the fixed-width decimal encoding, and a placeholder that ends in `_body` means an inode ID's 26-character spelling. They aren't literal text in a key.
 
 | Family | Row key |
 | --- | --- |
-| `inodes` | `inode-{inode_id:020}` |
-| `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{child_inode_id:020}-{committed_seq:020}-{delta_index:010}` |
-| `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{parent_inode_id:020}-{name_key_hex}-{committed_seq:020}-{delta_index:010}` |
-| `revisions` | `revision-{inode_id:020}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
-| `tombstones` | `tombstone-{root_inode_id:020}-{committed_seq:020}-{delta_index:010}` |
-| `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` |
+| `inodes` | `inode-{inode_id_body}` |
+| `direntry_binds` | `direntry-bind-{parent_inode_id_body}-{name_key_hex}-{child_inode_id_body}-{committed_seq:020}-{delta_index:010}` |
+| `direntry_child_binds` | `direntry-child-bind-{child_inode_id_body}-{parent_inode_id_body}-{name_key_hex}-{committed_seq:020}-{delta_index:010}` |
+| `revisions` | `revision-{inode_id_body}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
+| `tombstones` | `tombstone-{root_inode_id_body}-{committed_seq:020}-{delta_index:010}` |
+| `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id_body}-{sort_rank:010}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
 | `commits` | `commit-{committed_seq:020}` |
 | `content_layouts` | `content-layout-{content_id}-{u64::MAX - size_bytes:020}-{u64::MAX - committed_seq:020}` |
-| `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
-| `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
+| `attributes` | `attribute-{inode_id_body}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
+| `access` | `access-{inode_id_body}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
 The two binding families contain the same edge events in two orders (an edge is a parent, a name key, and a child):
 
@@ -1940,16 +1941,16 @@ Bloom filters use these keys, which aren't always full row keys:
 | Family | Filter key |
 | --- | --- |
 | `inodes` | The complete row key |
-| `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}` |
-| `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}` |
-| `revisions` | `revision-{inode_id:020}` |
-| `tombstones` | `tombstone-{root_inode_id:020}` |
+| `direntry_binds` | `direntry-bind-{parent_inode_id_body}-{name_key_hex}` |
+| `direntry_child_binds` | `direntry-child-bind-{child_inode_id_body}` |
+| `revisions` | `revision-{inode_id_body}` |
+| `tombstones` | `tombstone-{root_inode_id_body}` |
 | `active_deletions` | The complete row key |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}` |
 | `commits` | The complete row key |
 | `content_layouts` | `content-layout-{content_id}` |
-| `attributes` | `attribute-{inode_id:020}` |
-| `access` | `access-{inode_id:020}` |
+| `attributes` | `attribute-{inode_id_body}` |
+| `access` | `access-{inode_id_body}` |
 
 A layout row records a chain's objects as of the commit or fold that wrote its bytes. The first row under a content ID's prefix is the longest layout (the newest, among layouts of equal length), and shorter rows are superseded. Compaction keeps the first row for each ID in its inputs, subject to the pruning rule in [Row retention during a base compaction](#103-row-retention-during-a-base-compaction). A layout row's `size_bytes` is the layout's size, which can be different from the reference's size.
 
@@ -2124,7 +2125,7 @@ Every operation starts with `kind`, followed by the fields in the order below. E
 | `update_access` | `path`, `boundary`, `grants`, `expected_inode_id`, `expected_access_revision_no` |
 | `update_access_by_inode` | `inode_id`, `boundary`, `grants`, `expected_access_revision_no` |
 
-Paths use their validated canonical absolute form, and display-name fields contain one validated component. Inode IDs in these operations use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers, and binding versions keep their opaque string representation.
+Paths use their validated canonical absolute form, and display-name fields contain one validated component. Inode IDs in these operations are their 26-character spelling, without the public `ino_` prefix. Sequence and revision numbers are JSON integers, and binding versions keep their opaque string representation.
 
 Attribute `set` keys are sorted in lexicographic UTF-8 byte order, and the `remove` list is sorted and deduplicated. The order of operations isn't sorted or otherwise changed.
 
@@ -2171,7 +2172,7 @@ The precondition list comes after `message`, and it keeps the caller's order, wi
 | `path_absence` | `path` |
 | `name_absence` | `parent_inode_id`, `display_name` |
 
-Precondition inode IDs use their numeric storage representation, not public `ino_` strings. Every listed field is written, and optional fields are `null` when absent.
+Precondition inode IDs use the same 26-character spelling as operations, without the public `ino_` prefix. Every listed field is written, and optional fields are `null` when absent.
 
 Precondition sequence and revision values are JSON integers. Paths use their validated absolute spelling, display names use one validated component, and binding versions stay opaque strings. Preconditions affect request identity and validation, but they add no separate WAL field or replay delta.
 
@@ -2377,26 +2378,24 @@ For each eligible revision, the tokenizer folds ASCII letters to lowercase and t
 
 For example, `Abcd` produces the byte grams `abc` and `bcd`, represented as `616263` and `626364`. A gram is encoded as six lowercase hexadecimal characters.
 
-A row is a kind-tagged CBOR object with the kind `gram_postings`. Its fields after `kind` are `gram`, `first_inode_id`, and `postings`. The gram is a hexadecimal string, the inode ID is an integer, and `postings` is a CBOR byte string that contains the packed batch. `first_inode_id` MUST equal the first posting's inode ID. The row key is:
+A row is a kind-tagged CBOR object with the kind `gram_postings`. Its fields after `kind` are `gram`, `first_inode_id`, and `postings`. The gram is a hexadecimal string, the inode ID is a 16-byte byte string (see [Field conventions](#121-field-conventions)), and `postings` is a CBOR byte string that contains the packed batch. `first_inode_id` MUST equal the first posting's inode ID. The row key is:
 
 ```text
-gram-{gram_hex}-{first_inode_id:020}
+gram-{gram_hex}-{first_inode_id_body}
 ```
 
 Its filter key is `gram-{gram_hex}`. Several rows can contain batches for the same gram, within a segment or across segments, and a reader combines those batches.
 
-A posting identifies `(inode_id, revision_no)`, not a path. Batches are strictly ordered by that pair, and they're encoded as unsigned LEB128 values:
+A posting identifies `(inode_id, revision_no)`, not a path. Batches are strictly ordered by that pair. A batch starts with the number of postings, and each posting stores its inode ID as 16 bytes, with the most significant byte first, followed by its revision number. The count and the revision numbers are unsigned LEB128 values:
 
 ```text
-posting_count
-first_inode_id
-first_revision_no
-next_inode_id - previous_inode_id
-next_revision_no
-... repeated for the remaining postings
+posting_count   (unsigned LEB128)
+inode_id        (16 bytes)
+revision_no     (unsigned LEB128)
+... inode_id and revision_no repeated for each remaining posting
 ```
 
-Revision numbers are unsigned 32-bit absolute values, and inode IDs are unsigned 64-bit values, delta-encoded after the first. Empty batches, unordered postings, and trailing bytes after the declared batch are invalid.
+Empty batches, unordered postings, and trailing bytes after the declared batch are invalid.
 
 The segment framing is exactly the data, filter, and index format in Appendix A, with grep CBOR rows instead of metadata rows, and per-block CRCs verify ranged reads.
 

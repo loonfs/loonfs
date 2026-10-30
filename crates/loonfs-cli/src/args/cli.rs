@@ -161,8 +161,9 @@ fn selector_not_accepted(selector: &str) -> clap::Error {
 /// location is resolved.
 #[derive(Debug, Subcommand)]
 pub(crate) enum TopLevelCommand {
+    // Boxed because `Command` is far larger than the other variants.
     #[command(flatten)]
-    Configured(Command),
+    Configured(Box<Command>),
     /// Check the selected deployment without writing to it.
     Doctor(DoctorArgs),
     /// Print a shell completion script to stdout.

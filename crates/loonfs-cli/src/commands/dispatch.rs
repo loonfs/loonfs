@@ -32,7 +32,7 @@ pub(crate) async fn run(
             )
             .await
         }
-        TopLevelCommand::Configured(command) => command,
+        TopLevelCommand::Configured(command) => *command,
     };
     let config = resolve_config_location(cli.config.as_deref())
         .map_err(|error| fail(kind, None, None, error))?;

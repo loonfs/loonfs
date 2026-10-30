@@ -317,13 +317,13 @@ mod tests {
         let mut payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
             .expect("decode")
             .into_payload();
-        payload.next_inode_id = InodeId(payload.next_inode_id.0 + 1);
+        payload.head_seq = ChangeSeq(payload.head_seq.0 + 1);
         let bytes = loonfs_types::format::wal::encode_wal_object_envelope_zstd(payload)
             .expect("encode")
             .into_bytes();
         replace_object(&store, &key, Bytes::from(bytes))
             .await
-            .expect("corrupt allocation");
+            .expect("corrupt head sequence");
 
         let read = crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_metadata_view()

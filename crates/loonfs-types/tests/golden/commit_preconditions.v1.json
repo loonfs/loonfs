@@ -17,13 +17,13 @@
       },
       {
         "kind": "file_revision",
-        "inode_id": "ino_42",
+        "inode_id": "ino_0000000000000000000000001a",
         "expected_revision_no": 3
       },
       {
         "kind": "path_binding",
         "path": "/docs/input",
-        "expected_inode_id": "ino_42",
+        "expected_inode_id": "ino_0000000000000000000000001a",
         "expected_binding_version": "aaaa"
       },
       {
@@ -32,17 +32,17 @@
       },
       {
         "kind": "inode_binding",
-        "inode_id": "ino_42",
+        "inode_id": "ino_0000000000000000000000001a",
         "expected_binding_version": "aaaa"
       },
       {
         "kind": "name_absence",
-        "parent_inode_id": "ino_7",
+        "parent_inode_id": "ino_00000000000000000000000007",
         "display_name": "missing"
       },
       {
         "kind": "attributes_revision",
-        "inode_id": "ino_42",
+        "inode_id": "ino_0000000000000000000000001a",
         "expected_attributes_revision_no": 2
       }
     ],

@@ -63,7 +63,7 @@ func TestAppendSendsOneCommit(t *testing.T) {
 				if body["commit_id"] != "stable" || body["message"] != "original" || r.Header.Get("Loonfs-Actor") != "writer" {
 					t.Error("commit options changed")
 				}
-				if op["kind"] != "append_file" || op["path"] != "/file" || op["expected_inode_id"] != "ino_1" || op["expected_revision_no"] != float64(1) {
+				if op["kind"] != "append_file" || op["path"] != "/file" || op["expected_inode_id"] != "ino_00000000000000000000000000" || op["expected_revision_no"] != float64(1) {
 					t.Errorf("operation = %v", op)
 				}
 				if _, ok := op["behavior"]; ok {
@@ -81,7 +81,7 @@ func TestAppendSendsOneCommit(t *testing.T) {
 			}))
 			defer endpoint.Close()
 			client := server.NewClient(option.WithBaseURL(endpoint.URL), option.WithToken("secret"))
-			message, inode, revision := "original", "ino_1", int64(1)
+			message, inode, revision := "original", "ino_00000000000000000000000000", int64(1)
 			committed, err := client.Files.Append(context.Background(), files.AppendInput{
 				NamespaceID: "demo", Path: "/file", Content: content, CommitID: "stable",
 				Message: &message, ExpectedInodeID: &inode, ExpectedRevisionNo: &revision,

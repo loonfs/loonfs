@@ -330,8 +330,8 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
         );
         for mut operation in [
             json!({"kind": "put_file", "path": "/file"}),
-            json!({"kind": "create_file_by_inode", "parent_inode_id": "ino_1", "display_name": "file"}),
-            json!({"kind": "put_file_revision_by_inode", "inode_id": "ino_2", "expected_revision_no": 1}),
+            json!({"kind": "create_file_by_inode", "parent_inode_id": "ino_00000000000000000000000000", "display_name": "file"}),
+            json!({"kind": "put_file_revision_by_inode", "inode_id": "ino_00000000000000000000000002", "expected_revision_no": 1}),
         ] {
             let reference = loonfs_test_support::ids::content_ref(b"same");
             let missing = operation.clone();
@@ -376,7 +376,7 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
 async fn inode_inline_operations_and_overflow_staging_keep_retry_identity() {
     let harness = Harness::new(Some(4), 4).await;
     let request = json!({"commit_id": "two-files", "operations": [
-        {"kind": "create_file_by_inode", "parent_inode_id": "ino_1", "display_name": "first", "inline_content": "c2FtZQ=="},
+        {"kind": "create_file_by_inode", "parent_inode_id": "ino_00000000000000000000000000", "display_name": "first", "inline_content": "c2FtZQ=="},
         {"kind": "put_file", "path": "/second", "inline_content": "c2FtZQ=="}
     ]});
     let (status, first) = harness.commit(request.clone()).await;
@@ -411,7 +411,7 @@ async fn inode_inline_operations_and_overflow_staging_keep_retry_identity() {
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(first, replay);
     let (inode_id, _) = created_content(&first);
-    let revision = json!({"commit_id": "revision", "operations": [{"kind": "put_file_revision_by_inode", "inode_id": format!("ino_{inode_id}"), "expected_revision_no": 1, "inline_content": ""}]});
+    let revision = json!({"commit_id": "revision", "operations": [{"kind": "put_file_revision_by_inode", "inode_id": inode_id.to_string(), "expected_revision_no": 1, "inline_content": ""}]});
     let (status, first) = harness.commit(revision.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
     harness.read("/first", b"").await;

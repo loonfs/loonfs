@@ -17,6 +17,7 @@ use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{
     replace_object, FailStore, InjectedError, OperationContext, OperationKind,
 };
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
     AbsolutePath, ActorId, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
@@ -288,7 +289,7 @@ async fn batch_commit_writes_one_wal_object_and_expands_change_feed() {
     assert_matches!(
         &changes.changes[0].events[0],
         FilesystemChange::DirectoryCreated {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             display_name,
             ..
         } if display_name.as_str() == "alpha"
@@ -1212,7 +1213,7 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
             "delete-changed-precondition",
             "/changed-precondition.txt",
             Some(changed_inode),
-            Some(InodeId(1)),
+            Some(ROOT_INODE_ID),
         ),
         (
             "delete-removed-precondition",
@@ -1319,7 +1320,7 @@ async fn fresh_delete_path_expected_inode_precondition_still_matches_or_rejects(
         &store,
         &namespace_id,
         "/mismatching-precondition.txt",
-        Some(InodeId(1)),
+        Some(ROOT_INODE_ID),
         &context,
         "delete-mismatching-precondition",
     )
@@ -1335,7 +1336,7 @@ async fn fresh_delete_path_expected_inode_precondition_still_matches_or_rejects(
     assert_matches!(
         *source,
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
-            expected_inode_id: Some(InodeId(1)),
+            expected_inode_id: Some(ROOT_INODE_ID),
             actual_inode_id: Some(actual),
             ..
         }) if actual == mismatching_inode
@@ -1487,11 +1488,6 @@ async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() 
             results[2].as_ref().expect("next commit").committed_seq,
             ChangeSeq(next_seq)
         );
-        let head = namespace_store(&store, &namespace_id)
-            .load_read_state()
-            .await
-            .expect("head");
-        assert_eq!(head.next_inode_id, InodeId(next_seq + 2));
         let replay = submit_commit(&store, &namespace_id, first.clone(), &context)
             .await
             .expect("receipt resolves despite stale precondition");
@@ -1615,11 +1611,6 @@ async fn file_revision_preconditions_ignore_unrelated_commits_and_reject_rewrite
         results[6].as_ref().expect("later").committed_seq,
         ChangeSeq(6)
     );
-    let head = namespace_store(&store, &namespace_id)
-        .load_read_state()
-        .await
-        .expect("head");
-    assert_eq!(head.next_inode_id, InodeId(6));
 }
 
 #[tokio::test]
@@ -1692,7 +1683,7 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
                     },
                     CommitPrecondition::PathBinding {
                         path: AbsolutePath::root(),
-                        expected_inode_id: InodeId(1),
+                        expected_inode_id: ROOT_INODE_ID,
                         expected_binding_version: None,
                     },
                 ],
@@ -1728,7 +1719,7 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
     assert_eq!(now_bound.actual_inode_id, Some(other.inode_id));
     let root = precondition_details(&results[10], ErrorCode::PathConflict, 0);
     assert_eq!(root.expected_inode_id, None);
-    assert_eq!(root.actual_inode_id, Some(InodeId(1)));
+    assert_eq!(root.actual_inode_id, Some(ROOT_INODE_ID));
 }
 
 #[tokio::test]

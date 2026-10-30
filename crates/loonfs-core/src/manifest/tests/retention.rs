@@ -498,7 +498,7 @@ async fn commit_segment_with_index<S: ObjectStore + ?Sized>(
 
 /// A namespace whose 128 commits are folded into one segment of commit rows,
 /// which is too large to be fetched whole. Each commit has a long message, so
-/// each data block of the segment contains 15 commit rows.
+/// each data block of the segment contains 14 commit rows.
 struct LongCommitHistory {
     _temp_dir: tempfile::TempDir,
     store: RecordingStore<LocalFsStore>,
@@ -539,8 +539,8 @@ impl LongCommitHistory {
         let (segment, index) = commit_segment_with_index(&store, &namespace_id).await;
         assert_eq!(
             index[0].last_row_key,
-            lookup_keys::commit_row_key(ChangeSeq(15)),
-            "each data block contains 15 commit rows"
+            lookup_keys::commit_row_key(ChangeSeq(14)),
+            "each data block contains 14 commit rows"
         );
         store.reset();
         Self {
@@ -603,12 +603,12 @@ async fn an_advance_sends_one_get_for_each_commit_block_up_to_where_it_stops() {
         // Commit 65 is the first commit younger than the window, so the walk
         // reads commits 1 to 65, and the floor moves to commit 64.
         (RetentionTarget::Head, ChangeSeq(64), ChangeSeq(65)),
-        // The sequence ends the walk after commit 15, the last row of the
+        // The sequence ends the walk after commit 14, the last row of the
         // first block, so the walk fetches no other block.
         (
-            RetentionTarget::Seq(ChangeSeq(15)),
-            ChangeSeq(15),
-            ChangeSeq(15),
+            RetentionTarget::Seq(ChangeSeq(14)),
+            ChangeSeq(14),
+            ChangeSeq(14),
         ),
         // Commit 65 ends the walk below the sequence.
         (
@@ -654,10 +654,10 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
     let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
     let now_ms = 10 * grace_ms;
     // With no old commits, the namespace is fresh, and the walk reads commit
-    // 1. With 14 old commits, a first advance moves the floor to 14, and the
-    // walk reads commit 15, the last row of the first block, so a walk that
+    // 1. With 13 old commits, a first advance moves the floor to 13, and the
+    // walk reads commit 14, the last row of the first block, so a walk that
     // read another commit row would fetch the second block.
-    for old_commits in [0, 14] {
+    for old_commits in [0, 13] {
         let history = LongCommitHistory::new(&[
             (old_commits, now_ms - 2 * grace_ms),
             (128 - old_commits, now_ms - grace_ms / 2),
@@ -2093,29 +2093,29 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     let bounded_dir = tempdir().expect("bounded tempdir");
     let unbounded_dir = tempdir().expect("unbounded tempdir");
     let bounded_store = LocalFsStore::new(bounded_dir.path()).expect("bounded store");
-    let unbounded_store = LocalFsStore::new(unbounded_dir.path()).expect("unbounded store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    for store in [&bounded_store, &unbounded_store] {
-        bootstrap_namespace(store, &namespace_id, &context)
+    bootstrap_namespace(&bounded_store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    for index in 1..=6 {
+        let commit_id = CommitId::parse(format!("bounded-convergence-{index}")).expect("commit id");
+        crate::test_support::NamespaceFixture::new(&bounded_store, &namespace_id, &context)
+            .write_file_bytes(
+                &format!("/docs/file-{index}.txt"),
+                format!("file {index}\n").as_bytes(),
+                Some(&commit_id),
+            )
             .await
-            .expect("bootstrap");
-        for index in 1..=6 {
-            let commit_id =
-                CommitId::parse(format!("bounded-convergence-{index}")).expect("commit id");
-            crate::test_support::NamespaceFixture::new(store, &namespace_id, &context)
-                .write_file_bytes(
-                    &format!("/docs/file-{index}.txt"),
-                    format!("file {index}\n").as_bytes(),
-                    Some(&commit_id),
-                )
-                .await
-                .expect("write file");
-            create_checkpoint(store, &namespace_id, &context)
-                .await
-                .expect("create checkpoint");
-        }
+            .expect("write file");
+        create_checkpoint(&bounded_store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
     }
+    // The two compactions start from the same objects, so their results have
+    // the same inode IDs.
+    super::copy_directory(bounded_dir.path(), unbounded_dir.path());
+    let unbounded_store = LocalFsStore::new(unbounded_dir.path()).expect("unbounded store");
 
     let visible_before = load_current_projection(&bounded_store, &namespace_id)
         .await

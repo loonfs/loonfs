@@ -110,7 +110,7 @@ for (const fixture of cases) {
                 assert.equal(body.message, "original");
                 assert.equal(op.path, "/file");
                 assert.equal(op.behavior, "replace");
-                assert.equal(op.expected_inode_id, "ino_1");
+                assert.equal(op.expected_inode_id, "ino_00000000000000000000000000");
                 assert.equal(op.expected_revision_no, 1);
                 assert.equal(request.headers.get("Loonfs-Actor"), "writer");
                 if (fixture.inline) {
@@ -155,7 +155,7 @@ for (const fixture of cases) {
                 commit_id: "stable",
                 message: "original",
                 behavior: "replace" as const,
-                expected_inode_id: "ino_1",
+                expected_inode_id: "ino_00000000000000000000000000",
                 expected_revision_no: 1,
             };
             const publish = () =>

@@ -372,7 +372,7 @@ mod tests {
         PathEntry {
             namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             path: loonfs_types::AbsolutePath::parse("/file.bin").expect("absolute path"),
-            inode_id: loonfs_types::InodeId(1),
+            inode_id: loonfs_types::ROOT_INODE_ID,
             created_by: loonfs_types::ActorId::loonfs(),
             created_at_ms: 1,
             kind: loonfs_types::PathEntryKind::File {

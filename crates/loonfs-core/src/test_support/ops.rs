@@ -299,7 +299,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             wal_no,
             writer_epoch: head.writer_epoch,
             head_seq: committed_seq,
-            next_inode_id: head.next_inode_id,
             basis_floor_seq: head.basis_floor_seq,
             records: vec![WalCommitPayload {
                 committed_seq,

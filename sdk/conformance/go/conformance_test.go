@@ -2038,7 +2038,7 @@ func runInodeAddressing(t *testing.T, h *harness, testCase conformanceCase) {
 		Operations: []*loonfs.FilesystemOperation{
 			{
 				UpdateAccessByInode: &loonfs.FilesystemOperationUpdateAccessByInode{
-					InodeID:  "ino_1",
+					InodeID:  "ino_00000000000000000000000000",
 					Boundary: false,
 					Grants:   loonfs.AccessGrants{},
 				},

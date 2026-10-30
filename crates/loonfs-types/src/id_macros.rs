@@ -179,7 +179,7 @@ macro_rules! string_id {
 /// Every numeric id gets `Copy`, ordering and hashing derives, `From<u64>`,
 /// `Display` as the plain inner number, and serde as a plain number. The
 /// inner field stays public: numeric ids are constructed positionally
-/// (`InodeId(7)`) and read via `.0`.
+/// (`ChangeSeq(7)`) and read via `.0`.
 macro_rules! numeric_id {
     (
         $(#[$meta:meta])*

@@ -19,10 +19,10 @@ use loonfs_types::{
 };
 
 pub(super) struct ResolvedParents {
-    /// The directory the new entry is bound under, possibly allocated here.
+    /// The directory the new entry is bound under, possibly created here.
     pub(super) parent_inode_id: InodeId,
     /// The deepest directory that already existed, whose `create` right
-    /// covers every directory allocated below it.
+    /// covers every directory created below it.
     pub(super) deepest_existing: InodeId,
 }
 
@@ -36,7 +36,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         destination.ensure_mutation()?;
         let destination = self.view.resolve_destination(destination).await?;
         self.view.ensure_vacant_destination(&destination).await?;
-        let child_inode_id = self.allocation.allocate()?;
+        let child_inode_id = InodeId::generate();
         let parent_inode_id = destination.parent_inode_id;
         let display_name = destination.name;
         let op = match child {
@@ -81,7 +81,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             .await?;
         self.view.ensure_vacant_path(absolute_path).await?;
         let display_name = final_component(absolute_path)?;
-        let child_inode_id = self.allocation.allocate()?;
+        let child_inode_id = InodeId::generate();
         ops.push(CommitOperation::CreateDirectory {
             child_inode_id,
             parent_inode_id: parents.parent_inode_id,
@@ -278,7 +278,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 if expected_file_state.is_some() {
                     return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
                 }
-                let child_inode_id = self.allocation.allocate()?;
+                let child_inode_id = InodeId::generate();
                 ops.push(CommitOperation::CreateFile {
                     child_inode_id,
                     parent_inode_id: parents.parent_inode_id,
@@ -346,7 +346,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 creating_missing_ancestors = true;
             }
 
-            let child_inode_id = self.allocation.allocate()?;
+            let child_inode_id = InodeId::generate();
             ops.push(CommitOperation::CreateDirectory {
                 child_inode_id,
                 parent_inode_id: current_inode,

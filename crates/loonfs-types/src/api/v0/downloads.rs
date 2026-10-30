@@ -316,7 +316,7 @@ mod tests {
             serde_json::to_value(&response).expect("serialize response"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "inode_id": "ino_42",
+                "inode_id": "ino_0000000000000000000000001a",
                 "revision_no": 7,
                 "content_ref": content_ref_json(),
                 "ranges": [{

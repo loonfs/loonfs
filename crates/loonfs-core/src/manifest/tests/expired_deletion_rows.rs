@@ -338,6 +338,86 @@ const INODE_FAMILIES: [ApiMetadataRowFamily; 6] = [
     ApiMetadataRowFamily::DirentryChildBinds,
 ];
 
+/// An inode row for `inode_id`, which a kept inode filter keeps exactly when
+/// it keeps every row that the inode owns.
+fn inode_probe(inode_id: InodeId) -> MetadataRow {
+    MetadataRow::Inode(crate::metadata::InodeRecord {
+        inode_id,
+        inode_kind: InodeKind::File,
+        committed_seq: ChangeSeq(1),
+        commit_id: CommitId::parse("c_probe").expect("commit id"),
+        committed_by: loonfs_types::ActorId::loonfs(),
+        committed_at_ms: 1_000,
+    })
+}
+
+/// Merges every run of each of `groups` into one base run, with each merge's
+/// kept inode filter seeded so that it keeps no row that `hidden` inodes own.
+///
+/// Inode IDs are random, so a filter seeded by the next run number could keep
+/// a hidden inode's row by a false positive. Choosing the seed makes every
+/// merge remove every hidden row, so an assertion after it doesn't depend on
+/// the IDs that a run of the test drew.
+async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    groups: &[MetadataFamilyGroup],
+    hidden: &[InodeId],
+) {
+    for &group in groups {
+        // Each merge takes at most `MAX_COMPACTION_INPUT_RUNS` runs, so a
+        // group with more runs needs more than one merge.
+        let mut merged_every_run = false;
+        for _ in 0..8 {
+            let current = crate::test_support::namespace_store(store, namespace_id)
+                .load_current_manifest()
+                .await
+                .expect("load the current manifest");
+            let payload = current.payload();
+            let mut runs = runs_newest_first(payload)
+                .into_iter()
+                .filter(|run| plan::group_run_descriptors(run, group).next().is_some())
+                .collect::<Vec<_>>();
+            runs.sort_by_key(|run| (run.tier != RunTier::Base, run.run_seq));
+            merged_every_run = runs.len() <= crate::limits::MAX_COMPACTION_INPUT_RUNS;
+            if runs.is_empty() {
+                break;
+            }
+            runs.truncate(crate::limits::MAX_COMPACTION_INPUT_RUNS);
+            let spec = MetadataCompactionSpec::new(
+                group,
+                runs.iter().map(|run| run.run_no).collect(),
+                runs.iter()
+                    .flat_map(|run| plan::group_run_descriptors(run, group))
+                    .map(|descriptor| descriptor.row_count)
+                    .sum(),
+                MergePlacement::Base {
+                    output_seq: payload.head_seq,
+                },
+                payload.retention_floor_seq,
+            );
+            let mut seed = None;
+            for offset in 0..64 {
+                let candidate = RunNo(payload.next_run_no.0 + offset);
+                let filter = seeded_kept_inode_filter(store, namespace_id, candidate).await;
+                if hidden
+                    .iter()
+                    .all(|inode_id| !filter.keeps(&inode_probe(*inode_id)))
+                {
+                    seed = Some(candidate);
+                    break;
+                }
+            }
+            let seed = seed.expect("a seed whose kept inode filter keeps no hidden row");
+            compact_with_seed(store, namespace_id, &spec, seed).await;
+            if merged_every_run {
+                break;
+            }
+        }
+        assert!(merged_every_run, "{group:?} merges into one base run");
+    }
+}
+
 /// One inode's state at `seq`: its inode row, and its newest revision,
 /// attribute row, and access row.
 fn inode_state(state: &MetadataState, inode_id: InodeId, seq: ChangeSeq) -> String {
@@ -417,13 +497,6 @@ async fn visible_metadata_at_retained_sequences<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-fn every_group_compacts() -> MetadataRunPolicy {
-    MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataRunPolicy::default()
-    }
-}
-
 /// Checks that once a deletion expires, a base compaction of each group
 /// removes every row of the inodes it hides, with every binding under them
 /// and the trash entry, keeps the tombstone events, and leaves the visible
@@ -442,8 +515,13 @@ async fn a_base_compaction_of_each_group_removes_every_row_an_expired_deletion_h
     let views_before =
         visible_metadata_at_retained_sequences(&store, &namespace_id, &docs.every_inode()).await;
 
-    let (_, published) = drain_compaction(&store, &namespace_id, every_group_compacts()).await;
-    assert!(published >= MetadataFamilyGroup::ALL.len());
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &MetadataFamilyGroup::ALL,
+        &docs.hidden,
+    )
+    .await;
 
     let after = rows_of(&store, &namespace_id, &docs.hidden).await;
     for family in INODE_FAMILIES {
@@ -505,7 +583,13 @@ async fn a_recoverable_deletion_keeps_every_row_while_an_expired_one_loses_its_r
     let kept = [docs.recoverable.as_slice(), docs.visible.as_slice()].concat();
     let before = rows_of(&store, &namespace_id, &kept).await;
 
-    drain_compaction(&store, &namespace_id, every_group_compacts()).await;
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &MetadataFamilyGroup::ALL,
+        &docs.hidden,
+    )
+    .await;
 
     let after = rows_of(&store, &namespace_id, &kept).await;
     for family in [
@@ -695,7 +779,13 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
         ErrorCode::InodeNotFound
     );
     let before = owned_rows(&store, &namespace_id, &both).await;
-    drain_compaction(&store, &namespace_id, every_group_compacts()).await;
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &MetadataFamilyGroup::ALL,
+        &inner,
+    )
+    .await;
     assert_eq!(
         owned_rows(&store, &namespace_id, &outer).await,
         owned_rows_of(&before, &outer),
@@ -736,7 +826,8 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
         .fold_wal()
         .await
         .expect("fold the later write");
-    drain_compaction(&store, &namespace_id, every_group_compacts()).await;
+    compact_groups_without_false_positives(&store, &namespace_id, &MetadataFamilyGroup::ALL, &both)
+        .await;
     for (family, rows) in owned_rows(&store, &namespace_id, &both).await {
         assert_eq!(
             rows,
@@ -860,7 +951,13 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
         "a delta-only compaction removes no row"
     );
 
-    drain_compaction(&store, &namespace_id, every_group_compacts()).await;
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &MetadataFamilyGroup::ALL,
+        &hidden,
+    )
+    .await;
     let after = rows_of(&store, &namespace_id, &hidden).await;
     for family in [
         ApiMetadataRowFamily::Inodes,
@@ -933,6 +1030,11 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
         .load_current_manifest()
         .await
         .expect("load the current manifest");
+    let hidden_revision = family_rows(&store, &namespace_id, ApiMetadataRowFamily::Revisions)
+        .await
+        .into_iter()
+        .find(|row| matches!(row, MetadataRow::FileRevision(record) if record.inode_id == a))
+        .expect("the hidden revision");
     let policy = MetadataRunPolicy::default();
     let group = MetadataFamilyGroup::Revisions;
     // 200 million rows take the whole 64 MiB at about 2.7 bits per row.
@@ -959,6 +1061,28 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
         )
         .expect("plan the group");
         assert_matches!(spec.placement(), MergePlacement::Base { .. });
+        // Inode IDs are random, so the test seeds this variant's filter with a
+        // run number whose filter has no false positive for the hidden
+        // revision, and the merge then removes the revision in every run.
+        let mut seeded = false;
+        for offset in 0..64 {
+            basis.manifest =
+                seeded_manifest(&current, RunNo(current.payload().next_run_no.0 + offset));
+            let filter = load_kept_inode_filter(
+                &basis,
+                &namespace_id,
+                &spec,
+                &MetadataCompactionCancellation::default(),
+            )
+            .await
+            .expect("build the filter")
+            .expect("not cancelled");
+            if !filter.keeps(&hidden_revision) {
+                seeded = true;
+                break;
+            }
+        }
+        assert!(seeded, "{inode_rows:?}: a seed with no false positive");
         store.reset();
         let merged = run_metadata_compaction(
             &basis,
@@ -1148,7 +1272,18 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         })
         .expect("the inodes base run");
     assert_eq!(base.tier, RunTier::Base);
-    assert!(!seed_keeps(&store, &namespace_id, payload.next_run_no, &hidden_row).await);
+    // Inode IDs are random, so the filter that the next run number seeds can
+    // also keep the row. The test takes the first later seed whose filter
+    // doesn't.
+    let mut later_seed = None;
+    for offset in 0..64 {
+        let candidate = RunNo(payload.next_run_no.0 + offset);
+        if !seed_keeps(&store, &namespace_id, candidate, &hidden_row).await {
+            later_seed = Some(candidate);
+            break;
+        }
+    }
+    let later_seed = later_seed.expect("a later seed whose filter removes the row");
     let later = MetadataCompactionSpec::new(
         MetadataFamilyGroup::Inodes,
         vec![base.run_no],
@@ -1158,7 +1293,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         },
         payload.retention_floor_seq,
     );
-    compact_with_seed(&store, &namespace_id, &later, payload.next_run_no).await;
+    compact_with_seed(&store, &namespace_id, &later, later_seed).await;
     assert!(
         !family_rows(&store, &namespace_id, ApiMetadataRowFamily::Inodes)
             .await
@@ -1325,11 +1460,24 @@ async fn a_base_compaction_walks_the_tree_once_the_acknowledged_floor_is_above_z
         })
     };
     assert!(matches!(filter, KeptInodeFilter::Reached(_)));
+    // A Bloom filter keeps every inode that the walk inserted, whatever its
+    // seed, so the recoverable file is kept by every filter. The hidden file
+    // isn't inserted, so some seed's filter rejects it. (Inode IDs are random,
+    // so one filter can keep it by a false positive.)
     assert!(
         filter.keeps(&revision(recoverable)),
         "a recoverably deleted file keeps its rows"
     );
-    assert!(!filter.keeps(&revision(a)), "a hidden file loses its rows");
+    let mut rejected = false;
+    for seed in 0..64 {
+        let filter = seeded_kept_inode_filter(&store, &namespace_id, RunNo(seed)).await;
+        assert!(filter.keeps(&revision(recoverable)), "seed {seed}");
+        if !filter.keeps(&revision(a)) {
+            rejected = true;
+            break;
+        }
+    }
+    assert!(rejected, "a hidden file loses its rows");
 }
 
 /// Checks that a base compaction of a group that stores rows by inode still
@@ -1358,13 +1506,17 @@ async fn a_group_compacted_after_the_trash_still_removes_an_expired_deletions_ro
         "the base compaction of active_deletions removes the listed row"
     );
 
-    for group in [
-        MetadataFamilyGroup::Revisions,
-        MetadataFamilyGroup::Inodes,
-        MetadataFamilyGroup::Bindings,
-    ] {
-        compact_group(&store, &namespace_id, &context, group).await;
-    }
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &[
+            MetadataFamilyGroup::Revisions,
+            MetadataFamilyGroup::Inodes,
+            MetadataFamilyGroup::Bindings,
+        ],
+        &hidden,
+    )
+    .await;
     let after = rows_of(&store, &namespace_id, &hidden).await;
     for family in [
         ApiMetadataRowFamily::Inodes,

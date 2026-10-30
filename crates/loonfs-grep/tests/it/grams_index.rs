@@ -49,6 +49,46 @@ async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
         .collect()
 }
 
+/// Creates an empty file at each of `paths` and returns the paths in the
+/// order a grep walk visits the files, which is ascending inode ID.
+async fn create_in_walk_order<const N: usize>(
+    namespace: &loonfs::Namespace<loonfs::Writable>,
+    paths: [&str; N],
+) -> [String; N] {
+    let mut created = Vec::with_capacity(N);
+    for path in paths {
+        namespace
+            .put_file(path, b"", &loonfs_test_support::test_actor())
+            .await
+            .expect("create an empty file");
+        let inode_id = namespace.stat(path).await.expect("stat the file").inode_id;
+        created.push((inode_id, path.to_owned()));
+    }
+    created.sort();
+    created
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("one path for each file")
+}
+
+/// Replaces the contents of the file at `path`, which keeps its inode ID.
+async fn replace_file(namespace: &loonfs::Namespace<loonfs::Writable>, path: &str, bytes: &[u8]) {
+    namespace
+        .put_file_with_options(
+            path,
+            bytes,
+            &loonfs_test_support::test_actor(),
+            &loonfs::PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                ..loonfs::PutFileOptions::default()
+            },
+        )
+        .await
+        .expect("replace the file");
+}
+
 async fn drive_worker_step(
     worker: &GrepWorker<SharedObjectStore>,
     namespace_id: &NamespaceId,
@@ -732,25 +772,13 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    // Two matches in alpha, so a one-match page fills before the walk
+    // Inode IDs are random, so the walk order decides which file plays
+    // alpha. Two matches in alpha, so a one-match page fills before the walk
     // reaches bravo.
-    namespace
-        .put_file(
-            "/alpha.txt",
-            b"needle one\nneedle two\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write alpha");
+    let [alpha, bravo] = create_in_walk_order(&namespace, ["/alpha.txt", "/bravo.txt"]).await;
+    replace_file(&namespace, &alpha, b"needle one\nneedle two\n").await;
     let blobs_before_bravo = content_blob_keys(&store).await;
-    namespace
-        .put_file(
-            "/bravo.txt",
-            b"needle three\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write bravo");
+    replace_file(&namespace, &bravo, b"needle three\n").await;
     let new_blobs: Vec<String> = content_blob_keys(&store)
         .await
         .difference(&blobs_before_bravo)
@@ -795,7 +823,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .await
         .expect("a page that fills before the failed candidate must succeed");
     assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].path, "/alpha.txt");
+    assert_eq!(response.matches[0].path, alpha.as_str());
     assert_eq!(response.matches[0].line, "needle one");
     let cursor = response
         .next_cursor
@@ -855,14 +883,11 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace
-        .put_file(
-            "/alpha.txt",
-            b"a needle in alpha\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write alpha");
+    // Inode IDs are random, so the walk order decides which file plays each
+    // part: alpha first, the oversized bravo next, and charlie last.
+    let [alpha, bravo, charlie] =
+        create_in_walk_order(&namespace, ["/alpha.txt", "/bravo.big", "/charlie.txt"]).await;
+    replace_file(&namespace, &alpha, b"a needle in alpha\n").await;
     host.enable_grep_index(&namespace_id).await.expect("enable");
     for _ in 0..2 {
         drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
@@ -874,14 +899,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         b"needle\n".repeat(loonfs_types::usize_from_u64(MAX_INDEX_GRAMS_FILE_BYTES) / 7 + 1);
     assert!(oversized_bytes.len() as u64 > MAX_INDEX_GRAMS_FILE_BYTES);
     let blobs_before_bravo = content_blob_keys(&store).await;
-    namespace
-        .put_file(
-            "/bravo.big",
-            &oversized_bytes,
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write bravo");
+    replace_file(&namespace, &bravo, &oversized_bytes).await;
     let new_blobs: Vec<String> = content_blob_keys(&store)
         .await
         .difference(&blobs_before_bravo)
@@ -890,14 +908,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let [oversized_content_key] = new_blobs.as_slice() else {
         panic!("the oversized write must add exactly one content blob, got {new_blobs:?}");
     };
-    namespace
-        .put_file(
-            "/charlie.txt",
-            b"a needle in charlie\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write charlie");
+    replace_file(&namespace, &charlie, b"a needle in charlie\n").await;
     // No step after these writes: bravo and charlie stay in the unindexed
     // tail, where no gram filter screens candidates before verification.
 
@@ -908,7 +919,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .await
         .expect("first page");
     assert_eq!(page_one.matches.len(), 1);
-    assert_eq!(page_one.matches[0].path, "/alpha.txt");
+    assert_eq!(page_one.matches[0].path, alpha.as_str());
     let cursor_token = page_one
         .next_cursor
         .clone()
@@ -932,7 +943,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .await
         .expect("second page");
     assert_eq!(page_two.matches.len(), 1);
-    assert_eq!(page_two.matches[0].path, "/charlie.txt");
+    assert_eq!(page_two.matches[0].path, charlie.as_str());
     assert!(page_two.next_cursor.is_none());
     assert!(
         cursor.last_inode_id < page_two.matches[0].inode_id,

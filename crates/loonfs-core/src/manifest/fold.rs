@@ -322,7 +322,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             activity,
             head_seq,
             writer_epoch: projection.head.writer_epoch,
-            next_inode_id: projection.head.next_inode_id,
             next_run_no,
             folded_wal_no: projection.head.wal_no,
             acknowledged_floor_seq: acknowledged_floor_after_fold(projection)?,

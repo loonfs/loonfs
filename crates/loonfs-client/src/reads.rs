@@ -637,7 +637,7 @@ mod tests {
                 {
                     "namespace_id": "demo",
                     "path": "/docs/report.txt",
-                    "inode_id": "ino_42",
+                    "inode_id": "ino_0000000000000000000000001a",
                     "created_by": "usr_8f3c",
                     "created_at_ms": 1_752_623_000_000_u64,
                     "inode_kind": "file",
@@ -650,20 +650,20 @@ mod tests {
                     "revision_committed_by": "render-worker",
                     "revision_committed_at_ms": 1_752_624_000_000_u64,
                     "head_seq": 418,
-                    "parent_inode_id": "ino_7",
+                    "parent_inode_id": "ino_00000000000000000000000007",
                     "display_name": "report.txt",
                     "binding_version": "abc"
                 },
                 {
                     "namespace_id": "demo",
                     "path": "/docs/latest",
-                    "inode_id": "ino_43",
+                    "inode_id": "ino_0000000000000000000000001b",
                     "created_by": "usr_8f3c",
                     "created_at_ms": 1_752_623_000_000_u64,
                     "inode_kind": "link",
-                    "target_inode_id": "ino_42",
+                    "target_inode_id": "ino_0000000000000000000000001a",
                     "head_seq": 418,
-                    "parent_inode_id": "ino_7",
+                    "parent_inode_id": "ino_00000000000000000000000007",
                     "display_name": "latest",
                     "binding_version": "def"
                 }
@@ -673,13 +673,13 @@ mod tests {
             "namespace_id": "demo",
             "head_seq": 418,
             "entries": [{
-                "inode_id": "ino_44",
+                "inode_id": "ino_0000000000000000000000001c",
                 "inode_kind": "link",
                 "deletion_seq": 417,
                 "deleted_at_ms": 1_752_625_000_000_u64,
                 "deleted_by": "usr_8f3c",
                 "deleted_binding": {
-                    "parent_inode_id": "ino_7",
+                    "parent_inode_id": "ino_00000000000000000000000007",
                     "name_key": "old",
                     "display_name": "old"
                 }
@@ -789,7 +789,7 @@ mod tests {
         let trash = serde_json::json!({"namespace_id": "demo", "head_seq": 1, "entries": []});
         let revisions = serde_json::json!({
             "namespace_id": "demo",
-            "inode_id": "ino_2",
+            "inode_id": "ino_00000000000000000000000002",
             "head_seq": 1,
             "revisions": []
         });
@@ -877,15 +877,15 @@ mod tests {
                 "events": [
                     {
                         "kind": "link_created",
-                        "inode_id": "ino_43",
-                        "parent_inode_id": "ino_7",
+                        "inode_id": "ino_0000000000000000000000001b",
+                        "parent_inode_id": "ino_00000000000000000000000007",
                         "display_name": "latest",
                         "binding_version": "def",
-                        "target_inode_id": "ino_42"
+                        "target_inode_id": "ino_0000000000000000000000001a"
                     },
                     {
                         "kind": "content_changed",
-                        "inode_id": "ino_42",
+                        "inode_id": "ino_0000000000000000000000001a",
                         "revision_no": 8,
                         "content_ref": content_ref
                     }

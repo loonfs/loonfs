@@ -890,7 +890,7 @@ mod tests {
                 "source_path": "/docs/a.txt",
                 "destination_path": "/docs/b.txt",
                 "behavior": "replace",
-                "expected_destination_inode_id": "ino_7",
+                "expected_destination_inode_id": "ino_00000000000000000000000007",
                 "expected_destination_revision_no": 3
             })
         );
@@ -911,7 +911,7 @@ mod tests {
                 "source_path": "/docs/a.txt",
                 "destination_path": "/docs/b.txt",
                 "behavior": "replace",
-                "expected_destination_inode_id": "ino_7",
+                "expected_destination_inode_id": "ino_00000000000000000000000007",
                 "expected_destination_revision_no": 3
             })
         );
@@ -933,7 +933,7 @@ mod tests {
                 "path": "/docs/a.txt",
                 "set": {"owner": "ada"},
                 "remove": ["draft"],
-                "expected_inode_id": "ino_7",
+                "expected_inode_id": "ino_00000000000000000000000007",
                 "expected_attributes_revision_no": 3
             })
         );
@@ -1085,9 +1085,9 @@ mod tests {
 
         let move_by_inode: FilesystemOperation = serde_json::from_value(serde_json::json!({
             "kind": "move_by_inode",
-            "inode_id": "ino_7",
+            "inode_id": "ino_00000000000000000000000007",
             "expected_binding_version": "aaaa",
-            "destination_parent_inode_id": "ino_1",
+            "destination_parent_inode_id": "ino_00000000000000000000000000",
             "destination_display_name": "b.txt"
         }))
         .expect("inode move defaults behavior");
@@ -1096,7 +1096,7 @@ mod tests {
             FilesystemOperation::MoveByInode {
                 inode_id: InodeId(7),
                 expected_binding_version: BindingVersion::parse("aaaa").expect("binding version"),
-                destination_parent_inode_id: InodeId(1),
+                destination_parent_inode_id: crate::ROOT_INODE_ID,
                 destination_display_name: DisplayName::parse("b.txt").expect("display name"),
                 precondition: DestinationPrecondition::default(),
             }
@@ -1137,7 +1137,7 @@ mod tests {
                 },
                 serde_json::json!({
                     "kind": "undelete",
-                    "inode_id": "ino_7",
+                    "inode_id": "ino_00000000000000000000000007",
                     "deletion_seq": 8,
                     "destination_path": "/docs/restored"
                 }),
@@ -1191,7 +1191,7 @@ mod tests {
                     "kind": "append_file",
                     "path": "/logs/app.log",
                     "inline_content": "aGk=",
-                    "expected_inode_id": "ino_7",
+                    "expected_inode_id": "ino_00000000000000000000000007",
                     "expected_revision_no": 3
                 }),
             ),
@@ -1203,7 +1203,7 @@ mod tests {
                 },
                 serde_json::json!({
                     "kind": "append_file_by_inode",
-                    "inode_id": "ino_7",
+                    "inode_id": "ino_00000000000000000000000007",
                     "inline_content": "aGk="
                 }),
             ),
@@ -1250,7 +1250,7 @@ mod tests {
             }),
             serde_json::json!({
                 "kind": "undelete",
-                "inode_id": "ino_7",
+                "inode_id": "ino_00000000000000000000000007",
                 "deletion_seq": 8,
                 "destination_path": "relative"
             }),
@@ -1276,18 +1276,18 @@ mod tests {
             serde_json::json!({
                 "kind": "delete_path",
                 "path": "/docs/a.txt",
-                "expected_inode_id": "ino_27"
+                "expected_inode_id": "ino_0000000000000000000000000v"
             }),
             serde_json::json!({
                 "kind": "undelete",
-                "inode_id": "ino_27",
+                "inode_id": "ino_0000000000000000000000000v",
                 "deletion_seq": 8,
                 "destination_path": "/docs/restored"
             }),
             serde_json::json!({
                 "kind": "update_attributes",
                 "path": "/docs/a.txt",
-                "expected_inode_id": "ino_27"
+                "expected_inode_id": "ino_0000000000000000000000000v"
             }),
         ];
 
@@ -1324,7 +1324,7 @@ mod tests {
             "path": "/docs/secret",
             "boundary": true,
             "grants": {"prn_ada": ["read", "write"]},
-            "expected_inode_id": "ino_9",
+            "expected_inode_id": "ino_00000000000000000000000009",
             "expected_access_revision_no": 2
         });
         assert_eq!(serde_json::to_value(&operation).expect("serialize"), json);
@@ -1344,7 +1344,7 @@ mod tests {
                 expected_access_revision_no: AccessRevisionNo(2),
             })
             .expect("serialize precondition"),
-            serde_json::json!({"kind": "access_revision", "inode_id": "ino_9", "expected_access_revision_no": 2})
+            serde_json::json!({"kind": "access_revision", "inode_id": "ino_00000000000000000000000009", "expected_access_revision_no": 2})
         );
     }
 }

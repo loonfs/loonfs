@@ -496,9 +496,8 @@ async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
         .expect("publish the planned unit")
 }
 
-/// What a reader sees right now: every inode the namespace knows, resolved
-/// the way a read resolves it — visible or not, at what path, at what
-/// revision.
+/// What a reader sees right now: every visible inode, resolved the way a
+/// read resolves it, at what path and at what revision.
 ///
 /// This is the answer that must not move while a fold or a compaction runs.
 /// Comparing rows would say the opposite of what is wanted: both drop rows
@@ -508,17 +507,26 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<CurrentFileState> {
-    // Every inode the current manifest has allocated, including one whose
-    // rows a base compaction removed because an expired deletion hides it,
-    // which a read reports as hidden before the removal and after it.
-    let next_inode_id = crate::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
+    // Every inode with a stored row, and the root, which has no row until a
+    // compaction stores one. A base compaction removes the rows of an inode
+    // that an expired deletion hides, so the answer keeps only the visible
+    // inodes: a hidden inode that a read wrongly reported as visible before
+    // the removal would still change the answer.
+    let state = load_current_projection(store, namespace_id)
         .await
-        .expect("read metadata manifest")
-        .payload()
-        .next_inode_id;
-    let inode_ids: Vec<InodeId> = (loonfs_types::ROOT_INODE_ID.0..next_inode_id.0)
-        .map(InodeId)
+        .expect("load the current projection")
+        .metadata_state;
+    let inode_ids: Vec<InodeId> = std::iter::once(loonfs_types::ROOT_INODE_ID)
+        .chain(
+            manifest_rows_for_family(&state, ApiMetadataRowFamily::Inodes)
+                .into_iter()
+                .map(|row| match row {
+                    MetadataRow::Inode(record) => record.inode_id,
+                    other => panic!("the inodes family holds a foreign row: {other:?}"),
+                }),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     let view = namespace
@@ -532,6 +540,25 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("resolve every inode the namespace knows")
+    .into_iter()
+    .filter(|state| matches!(state.file, CurrentFile::Visible { .. }))
+    .collect()
+}
+
+/// Copies every file below `from` to the same relative path below `to`, so
+/// a test can run two operations on identical durable state, including the
+/// same generated inode and content IDs.
+fn copy_directory(from: &std::path::Path, to: &std::path::Path) {
+    for entry in std::fs::read_dir(from).expect("read directory") {
+        let entry = entry.expect("directory entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            std::fs::create_dir_all(&target).expect("create directory");
+            copy_directory(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy file");
+        }
+    }
 }
 
 /// Rebuilds one family group through a compaction unit and publishes the
@@ -934,7 +961,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
 
         head_seq,
         writer_epoch: head.writer_epoch,
-        next_inode_id: head.next_inode_id,
         next_run_no,
         retention_floor_seq: source.retention_floor_seq,
         acknowledged_floor_seq: head.basis_floor_seq,
@@ -1055,7 +1081,6 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         head_seq,
 
         writer_epoch: loonfs_types::WriterEpoch(1),
-        next_inode_id: InodeId(64),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
         acknowledged_floor_seq: ChangeSeq(0),

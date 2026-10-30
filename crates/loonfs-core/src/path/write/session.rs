@@ -6,9 +6,7 @@ use super::planner::OperationPlanningSession;
 use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
 use crate::commit::engine::CommitCandidate;
-use crate::commit::{
-    AppendedContent, CandidateAllocation, CommitFingerprint, CommitPlan, CommitValidationSession,
-};
+use crate::commit::{AppendedContent, CommitFingerprint, CommitPlan, CommitValidationSession};
 use crate::error::{CoreError, Result};
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
@@ -16,7 +14,7 @@ use crate::storage::tail_content::{cut_layout, materialize_content_layout, Conte
 use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{next_public_ordinal, ChangeSeq, ContentRef, InodeId};
+use loonfs_types::{next_public_ordinal, ChangeSeq, ContentRef};
 use std::collections::BTreeSet;
 
 /// Working view of one publish attempt.
@@ -26,8 +24,7 @@ use std::collections::BTreeSet;
 /// pieces so later candidates can resolve earlier candidates and
 /// materialize references to them.
 pub(crate) struct PublishPlanningSession<'a, S: ObjectStore + ?Sized> {
-    /// The head after the batch's accepted candidates. Its next inode ID is
-    /// where the next candidate's allocation starts.
+    /// The head after the batch's accepted candidates.
     head: NamespaceReadState,
     tail: &'a ProjectedWalTail,
     base_view: MetadataView<'a, 'a, S>,
@@ -59,12 +56,6 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             accepted_pieces: PlannedPieces::default(),
             durable_cache: DurableVisibilityCache::default(),
         }
-    }
-
-    /// Returns the namespace's next inode ID after the batch's accepted
-    /// candidates.
-    pub(crate) fn next_inode_id(&self) -> InodeId {
-        self.head.next_inode_id
     }
 
     pub(super) fn content(&self, content_ref: &ContentRef) -> Option<ProjectedContent> {
@@ -106,8 +97,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
     /// Folds an accepted commit into the session so later candidates in the
     /// same batch plan and validate against it.
     pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
-        // A plan belongs to the head it was planned against; accepting it at
-        // another head would rewind or skip inode IDs.
+        // A plan belongs to the head it was planned against, and accepting it
+        // at another head would apply its deltas to a state they weren't
+        // validated against.
         assert_eq!(
             plan.apply_after_seq, self.head.seq,
             "a commit plan should be accepted at the head it was planned against"
@@ -122,7 +114,6 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         }
         self.accepted_rows.apply_committed_wal_record_mut(preview);
         self.head.seq = plan.assigned_seq;
-        self.head.next_inode_id = plan.resulting_next_inode_id;
     }
 
     fn planning_view<'v>(
@@ -173,7 +164,6 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             &request.actor_id,
             self.committed_at_ms,
         );
-        let mut allocation = CandidateAllocation::new(head.next_inode_id);
         let mut deltas = Vec::new();
         let mut appended: Vec<AppendedContent> = Vec::new();
         let mut pieces = CommitPieces::new(self);
@@ -193,7 +183,6 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 view: self.planning_view(authorizer, validation.view()),
                 pieces: &pieces,
                 content_writes: self.content_writes,
-                allocation: &mut allocation,
             }
             .plan(operation)
             .await
@@ -235,7 +224,6 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 .flat_map(|value| value.pieces)
                 .collect(),
             inline_content: candidate.inline_content().to_vec(),
-            resulting_next_inode_id: allocation.resulting_next_inode_id(),
         };
         self.carry_revision_layouts(&validation.view(), pre_state, &pieces, candidate, &mut plan)
             .await?;
@@ -326,7 +314,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::{
         AbsolutePath, CommitId, CommitPrecondition, DeleteDirectoryBehavior, DestinationBehavior,
-        NamespaceId,
+        NamespaceId, ROOT_INODE_ID,
     };
     use std::assert_matches;
     use tempfile::tempdir;
@@ -382,7 +370,7 @@ mod tests {
         ))
     }
 
-    fn candidate_that_allocates_then_fails(commit_id: &str) -> CommitCandidate {
+    fn candidate_that_creates_then_fails(commit_id: &str) -> CommitCandidate {
         CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
@@ -401,25 +389,6 @@ mod tests {
                 },
             ],
         })
-    }
-
-    async fn visible_inode_id(
-        store: &LocalFsStore,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> InodeId {
-        crate::test_support::namespace_store(store, namespace_id)
-            .load_current_metadata_view()
-            .await
-            .expect("load view")
-            .resolve_path(
-                absolute_path,
-                loonfs_types::options::AttributeInclusion::Omit,
-                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
-            )
-            .await
-            .expect("visible path")
-            .inode_id
     }
 
     fn test_fingerprint() -> CommitFingerprint {
@@ -466,6 +435,21 @@ mod tests {
             payloads[1].semantic_commit_fingerprint
         );
         payloads[1].semantic_commit_fingerprint = payloads[0].semantic_commit_fingerprint.clone();
+        // Each plan generates its own ID for the new directory, so the second
+        // plan's ID is replaced with the first's before the comparison.
+        let created = |payload: &WalCommitPayload| match payload.deltas.first().map(|d| &d.delta) {
+            Some(WalDelta::CreateInode { inode_id, .. }) => *inode_id,
+            other => panic!("expected the directory's creation first, got {other:?}"),
+        };
+        let first_id = created(&payloads[0]);
+        assert_ne!(first_id, created(&payloads[1]));
+        for delta in &mut payloads[1].deltas {
+            match &mut delta.delta {
+                WalDelta::CreateInode { inode_id, .. } => *inode_id = first_id,
+                WalDelta::BindDirentry { child_inode_id, .. } => *child_inode_id = first_id,
+                other => panic!("unexpected delta {other:?}"),
+            }
+        }
         assert_eq!(payloads[0], payloads[1]);
     }
 
@@ -574,71 +558,54 @@ mod tests {
         let second = results[1].as_ref().expect("second create succeeds");
         assert!(second.committed_seq > first.committed_seq);
 
-        assert_eq!(
-            visible_inode_id(&store, &namespace_id, "/wide").await,
-            InodeId(2)
-        );
-        assert_eq!(
-            visible_inode_id(&store, &namespace_id, "/wide/a.txt").await,
-            InodeId(3)
-        );
-        assert_eq!(
-            visible_inode_id(&store, &namespace_id, "/wide/b.txt").await,
-            InodeId(4)
-        );
-        let head = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_read_state()
-            .await
-            .expect("load head");
-        assert_eq!(head.next_inode_id, InodeId(5));
+        let mut ids = std::collections::BTreeSet::new();
+        for path in ["/wide", "/wide/a.txt", "/wide/b.txt"] {
+            let inode_id = crate::test_support::visible_inode_id(&store, &namespace_id, path).await;
+            assert_ne!(inode_id, ROOT_INODE_ID, "{path} has a generated ID");
+            assert!(ids.insert(inode_id), "{path} has its own ID");
+        }
     }
 
     #[tokio::test]
-    async fn accepted_candidate_followed_by_rejected_candidate_does_not_consume_rejected_ids() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+    async fn a_rejected_candidate_leaves_no_inode_in_either_order() {
+        for rejected_first in [false, true] {
+            let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+            let accepted = create_directory_candidate("accept", "/kept");
+            let rejected = candidate_that_creates_then_fails("reject");
+            let (candidates, accepted_index) = if rejected_first {
+                (vec![rejected, accepted], 1)
+            } else {
+                (vec![accepted, rejected], 0)
+            };
 
-        let results = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .publish_candidates(vec![
-                create_directory_candidate("accept-first", "/kept"),
-                candidate_that_allocates_then_fails("reject-second"),
-            ])
-            .await;
+            let results =
+                crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                    .publish_candidates(candidates)
+                    .await;
 
-        results[0].as_ref().expect("first candidate accepted");
-        results[1].as_ref().expect_err("second candidate rejected");
-        assert_eq!(
-            visible_inode_id(&store, &namespace_id, "/kept").await,
-            InodeId(2)
-        );
-        let head = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_read_state()
-            .await
-            .expect("load head");
-        assert_eq!(head.next_inode_id, InodeId(3));
-    }
-
-    #[tokio::test]
-    async fn rejected_candidate_followed_by_accepted_candidate_reuses_the_rejected_id() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-
-        let results = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .publish_candidates(vec![
-                candidate_that_allocates_then_fails("reject-first"),
-                create_directory_candidate("accept-second", "/kept"),
-            ])
-            .await;
-
-        results[0].as_ref().expect_err("first candidate rejected");
-        results[1].as_ref().expect("second candidate accepted");
-        assert_eq!(
-            visible_inode_id(&store, &namespace_id, "/kept").await,
-            InodeId(2)
-        );
-        let head = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_read_state()
-            .await
-            .expect("load head");
-        assert_eq!(head.next_inode_id, InodeId(3));
+            results[accepted_index]
+                .as_ref()
+                .expect("the directory candidate is accepted");
+            results[1 - accepted_index]
+                .as_ref()
+                .expect_err("the failing candidate is rejected");
+            assert_ne!(
+                crate::test_support::visible_inode_id(&store, &namespace_id, "/kept").await,
+                ROOT_INODE_ID
+            );
+            let error = crate::test_support::namespace_store(&store, &namespace_id)
+                .load_current_metadata_view()
+                .await
+                .expect("load view")
+                .resolve_path(
+                    "/discarded",
+                    loonfs_types::options::AttributeInclusion::Omit,
+                    &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                )
+                .await
+                .expect_err("the rejected candidate's directory doesn't exist");
+            assert_matches!(error, CoreError::PathNotFound(_));
+        }
     }
 
     #[tokio::test]

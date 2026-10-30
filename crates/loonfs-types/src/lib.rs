@@ -29,6 +29,7 @@ mod error;
 mod hex;
 mod id_macros;
 mod ids;
+mod inode_id;
 mod layout;
 pub mod limits;
 mod manifest;
@@ -145,13 +146,13 @@ pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, generated_id_body_prefixes, next_public_ordinal, BindingVersion,
     BindingVersionValidationError, ChangeSeq, CommitId, CommitIdValidationError, CompactorEpoch,
-    ContentId, GeneratedIdValidationError, IndexSegmentId, InodeId, ManifestNo,
-    MetadataCompactionId, MetadataSegmentId, NameKey, NameKeyValidationError, NamespaceId,
-    NamespaceIdValidationError, PinId, ProbeRunId, PublicOrdinalRangeError, RevisionNo, RunNo,
-    UploadId, WalNo, WriterEpoch, WriterId, WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID,
-    GENERATED_ID_BODY_BYTES, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER,
-    MAX_WRITER_ID_BYTES, ROOT_INODE_ID,
+    ContentId, GeneratedIdValidationError, IndexSegmentId, ManifestNo, MetadataCompactionId,
+    MetadataSegmentId, NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError,
+    PinId, ProbeRunId, PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
+    WriterId, WriterIdValidationError, GENERATED_ID_BODY_BYTES, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
+    MAX_PUBLIC_INTEGER, MAX_WRITER_ID_BYTES,
 };
+pub use inode_id::{InodeId, ROOT_INODE_ID};
 pub use layout::{ContentExtent, ContentLayout, ContentLayoutError, ExtentObject};
 pub use manifest::NamespaceAccess;
 pub use metadata_rows::MetadataFamilyGroup;

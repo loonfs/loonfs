@@ -20,25 +20,25 @@
           "events": [
             {
               "kind": "directory_created",
-              "inode_id": "ino_42",
-              "parent_inode_id": "ino_1",
+              "inode_id": "ino_0000000000000000000000001a",
+              "parent_inode_id": "ino_00000000000000000000000000",
               "display_name": "docs",
               "binding_version": "bv-42"
             },
             {
               "kind": "link_created",
-              "inode_id": "ino_43",
-              "parent_inode_id": "ino_42",
+              "inode_id": "ino_0000000000000000000000001b",
+              "parent_inode_id": "ino_0000000000000000000000001a",
               "display_name": "latest",
               "binding_version": "bv-43",
-              "target_inode_id": "ino_44"
+              "target_inode_id": "ino_0000000000000000000000001c"
             },
             {
               "kind": "moved",
-              "inode_id": "ino_44",
-              "source_parent_inode_id": "ino_1",
+              "inode_id": "ino_0000000000000000000000001c",
+              "source_parent_inode_id": "ino_00000000000000000000000000",
               "source_display_name": "draft.txt",
-              "destination_parent_inode_id": "ino_42",
+              "destination_parent_inode_id": "ino_0000000000000000000000001a",
               "destination_display_name": "report.txt",
               "binding_version": "bv-44"
             }
@@ -53,11 +53,11 @@
           "events": [
             {
               "kind": "link_created",
-              "inode_id": "ino_45",
-              "parent_inode_id": "ino_42",
+              "inode_id": "ino_0000000000000000000000001d",
+              "parent_inode_id": "ino_0000000000000000000000001a",
               "display_name": "previous",
               "binding_version": "bv-45",
-              "target_inode_id": "ino_42"
+              "target_inode_id": "ino_0000000000000000000000001a"
             }
           ]
         }
@@ -71,17 +71,17 @@
       [
         {
           "kind": "directory_created",
-          "inode_id": "ino_42",
-          "parent_inode_id": "ino_1",
+          "inode_id": "ino_0000000000000000000000001a",
+          "parent_inode_id": "ino_00000000000000000000000000",
           "display_name": "docs",
           "binding_version": "bv-42"
         },
         {
           "kind": "moved",
-          "inode_id": "ino_44",
-          "source_parent_inode_id": "ino_1",
+          "inode_id": "ino_0000000000000000000000001c",
+          "source_parent_inode_id": "ino_00000000000000000000000000",
           "source_display_name": "draft.txt",
-          "destination_parent_inode_id": "ino_42",
+          "destination_parent_inode_id": "ino_0000000000000000000000001a",
           "destination_display_name": "report.txt",
           "binding_version": "bv-44"
         }

@@ -534,7 +534,7 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
     let path_grant = grant_from(content_ref, "http://example.invalid/object", held as u64);
     let inode_grant = CreateDownloadByInodeResponse {
         namespace_id: path_grant.namespace_id,
-        inode_id: loonfs_types::InodeId(1),
+        inode_id: loonfs_types::ROOT_INODE_ID,
         revision_no: path_grant.revision_no,
         content_ref: path_grant.content_ref,
         ranges: path_grant.ranges,
@@ -548,7 +548,7 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
     let resumed = client
         .create_revision_download_by_inode_with_options(
             &NamespaceId::parse("demo").expect("namespace id"),
-            loonfs_types::InodeId(1),
+            loonfs_types::ROOT_INODE_ID,
             RevisionNo(1),
             &DownloadOptions {
                 start_offset: held as u64,

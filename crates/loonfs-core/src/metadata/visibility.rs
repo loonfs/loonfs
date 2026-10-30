@@ -142,8 +142,8 @@ fn trace_absent_leg(
 ) {
     tracing::debug!(
         leg = leg.name(),
-        parent_inode_id = parent_inode_id.0,
-        child_inode_id = direntry.map(|direntry| direntry.child_inode_id.0),
+        parent_inode_id = %parent_inode_id,
+        child_inode_id = direntry.map(|direntry| tracing::field::display(direntry.child_inode_id)),
         committed_seq = direntry.map(|direntry| direntry.committed_seq.0),
         "visibility walk found no child"
     );

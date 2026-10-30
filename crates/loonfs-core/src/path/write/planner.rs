@@ -11,7 +11,7 @@ use super::preconditions::{
 use super::publish_path_planning::{
     CompiledFilesystemOperation, Destination, PlanningView, Target,
 };
-use crate::commit::{CandidateAllocation, CommitFingerprint, NewChild};
+use crate::commit::{CommitFingerprint, NewChild};
 use crate::error::{CoreError, Result};
 use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
@@ -43,12 +43,11 @@ pub(crate) fn commit_fingerprint(
 }
 
 /// The planning of one operation: the planning view, the commit's pieces,
-/// where content writes go, and the candidate's inode allocation.
+/// and where content writes go.
 pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
     pub(super) view: PlanningView<'p, S>,
     pub(super) pieces: &'p CommitPieces<'p, S>,
     pub(super) content_writes: ContentWrites<'p, S>,
-    pub(super) allocation: &'p mut CandidateAllocation,
 }
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
@@ -298,8 +297,8 @@ mod tests {
     use loonfs_types::{
         AbsolutePath, AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue,
         CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-        DestinationPrecondition, InodeId, NamespaceAccess, PrincipalId, PrincipalScope,
-        PrincipalSet, RevisionNo, Subject, SubjectId,
+        DestinationPrecondition, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet,
+        RevisionNo, Subject, SubjectId, ROOT_INODE_ID,
     };
     use std::assert_matches;
     use std::collections::BTreeSet;
@@ -561,27 +560,27 @@ mod tests {
             [
                 WalCommitDelta {
                     semantic_operation_index: 0,
-                    delta: WalDelta::CreateInode { delta_index: 0, inode_id: InodeId(2), .. },
+                    delta: WalDelta::CreateInode { delta_index: 0, inode_id: directory, .. },
                 },
                 WalCommitDelta {
                     semantic_operation_index: 0,
                     delta: WalDelta::BindDirentry {
                         delta_index: 1,
-                        parent_inode_id: InodeId(1),
-                        child_inode_id: InodeId(2),
+                        parent_inode_id: ROOT_INODE_ID,
+                        child_inode_id: bound_directory,
                         ..
                     },
                 },
                 WalCommitDelta {
                     semantic_operation_index: 1,
-                    delta: WalDelta::CreateInode { delta_index: 2, inode_id: InodeId(3), .. },
+                    delta: WalDelta::CreateInode { delta_index: 2, inode_id: file, .. },
                 },
                 WalCommitDelta {
                     semantic_operation_index: 1,
                     delta: WalDelta::BindDirentry {
                         delta_index: 3,
-                        parent_inode_id: InodeId(2),
-                        child_inode_id: InodeId(3),
+                        parent_inode_id: file_parent,
+                        child_inode_id: bound_file,
                         display_name,
                         ..
                     },
@@ -590,13 +589,18 @@ mod tests {
                     semantic_operation_index: 1,
                     delta: WalDelta::AppendFileRevision {
                         delta_index: 4,
-                        inode_id: InodeId(3),
+                        inode_id: revised_file,
                         ..
                     },
                 },
             ] if display_name.as_str() == "a.txt"
+                && *directory != ROOT_INODE_ID
+                && directory != file
+                && bound_directory == directory
+                && file_parent == directory
+                && bound_file == file
+                && revised_file == file
         );
-        assert_eq!(planned.resulting_next_inode_id, InodeId(4));
     }
 
     #[tokio::test]

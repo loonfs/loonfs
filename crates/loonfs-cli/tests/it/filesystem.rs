@@ -1536,7 +1536,7 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
             "--namespace",
             "demo",
             "--inode",
-            &format!("ino_{}", u64::MAX),
+            &loonfs_types::InodeId::generate().to_string(),
         ]);
         assert_failure(&missing);
         assert_eq!(json_error(&missing)["code"], "inode_not_found");
@@ -1550,7 +1550,7 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
         "embedded",
         "/after.txt",
         "--inode",
-        "ino_2",
+        "ino_00000000000000000000000002",
     ]);
     assert_failure(&both);
 }
@@ -1575,7 +1575,8 @@ fn inode_arguments_reject_bare_numbers() {
         assert_failure(&output);
         let stderr = stderr_string(&output);
         assert!(
-            stderr.contains("must use `ino_` followed by a nonzero u64 without leading zeroes"),
+            stderr
+                .contains("must use `ino_` followed by 26 lowercase Crockford base 32 characters"),
             "{stderr}"
         );
     }

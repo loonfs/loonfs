@@ -120,7 +120,7 @@ def stream_client(fixture, direct, body, asynchronous=False, range_body=None):
                 "inode_kind": "file",
                 "namespace_id": "demo",
                 "path": "/file",
-                "inode_id": "ino_2",
+                "inode_id": "ino_00000000000000000000000002",
                 "head_seq": 1,
                 "created_at_ms": 0,
                 "created_by": actor,

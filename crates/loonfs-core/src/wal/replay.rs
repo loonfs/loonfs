@@ -3,11 +3,10 @@
 pub(crate) use super::frame::WalObjectError;
 use super::ProjectedWalTail;
 use super::{ReplayedWalTail, ValidatedWalTail};
-use crate::commit::next_inode_after;
 use crate::error::MetadataProjectionLoadError;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_types::format::wal::{WalCommitDelta, WalDelta, WalObjectEnvelope, WalObjectPayload};
-use loonfs_types::{ChangeSeq, InodeId, WalNo};
+use loonfs_types::format::wal::{WalObjectEnvelope, WalObjectPayload};
+use loonfs_types::{ChangeSeq, WalNo};
 
 pub(crate) fn project_validated_wal_tail(
     base_head: &NamespaceReadState,
@@ -21,16 +20,8 @@ pub(crate) fn project_validated_wal_tail(
             object_key: object.object_key().to_owned(),
             error,
         };
-        for record in &payload.records {
-            head.seq = record.committed_seq;
-            head.next_inode_id =
-                replay_next_inode_id_from_commit_deltas(head.next_inode_id, &record.deltas);
-        }
         tail.push_object(&payload.namespace_id, &payload.records)
             .map_err(replay_error)?;
-        if head.next_inode_id != payload.next_inode_id {
-            return Err(replay_error(WalObjectError::SummaryMismatch));
-        }
         head = head.after_wal_object(payload);
     }
     Ok(ReplayedWalTail {
@@ -108,29 +99,4 @@ pub(crate) fn validate_basis_floor(
         });
     }
     Ok(())
-}
-
-fn replay_next_inode_id_from_commit_deltas(
-    current_next_inode_id: InodeId,
-    deltas: &[WalCommitDelta],
-) -> InodeId {
-    deltas
-        .iter()
-        .fold(current_next_inode_id, |next_inode_id, delta| {
-            match &delta.delta {
-                // At the limit, allocation stops at the current ID.
-                WalDelta::CreateInode { inode_id, .. } => {
-                    next_inode_id.max(next_inode_after(*inode_id).unwrap_or(*inode_id))
-                }
-                // Other delta types reference existing inodes and do not
-                // allocate IDs.
-                WalDelta::BindDirentry { .. }
-                | WalDelta::UnbindDirentry { .. }
-                | WalDelta::AppendFileRevision { .. }
-                | WalDelta::TombstoneSubtree { .. }
-                | WalDelta::RevokeSubtreeTombstone { .. }
-                | WalDelta::AppendAttributesRevision { .. }
-                | WalDelta::AppendAccessRevision { .. } => next_inode_id,
-            }
-        })
 }

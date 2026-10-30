@@ -10,7 +10,6 @@
 pub(crate) mod batch;
 pub(crate) mod candidates;
 pub(crate) mod engine;
-mod inode_allocator;
 mod ops;
 mod plan;
 pub(crate) mod publish_view;
@@ -18,7 +17,6 @@ mod validate;
 mod wal_payload;
 pub(crate) mod wal_size;
 
-pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation};
 pub(crate) use self::ops::{CommitOperation, NewChild};
 pub(crate) use self::plan::{AppendedContent, CommitPlan, ResolvedBinding};
 pub(crate) use self::validate::CommitValidationSession;

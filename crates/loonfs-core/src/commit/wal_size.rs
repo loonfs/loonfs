@@ -15,22 +15,24 @@ use loonfs_types::{
 // CBOR u64 values use at most nine bytes; u32 values use five.
 const INTEGER_BYTES: usize = 9;
 const INDEX_BYTES: usize = 5;
+// An inode ID is a 16-byte CBOR byte string behind a one-byte header.
+const INODE_ID_BYTES: usize = 1 + 16;
 const NAMES_BYTES: usize =
     cbor_string_bytes(MAX_NAME_KEY_BYTES) + cbor_string_bytes(MAX_DISPLAY_NAME_BYTES);
 const CREATE_INODE_BYTES: usize = delta_bytes(
     "create_inode",
     &[
-        ("inode_id", INTEGER_BYTES),
+        ("inode_id", INODE_ID_BYTES),
         ("inode_kind", cbor_string_bytes("file".len())),
     ],
 );
 const BIND_BYTES: usize = delta_bytes(
     "bind_direntry",
     &[
-        ("parent_inode_id", INTEGER_BYTES),
+        ("parent_inode_id", INODE_ID_BYTES),
         ("name_key", 0),
         ("display_name", 0),
-        ("child_inode_id", INTEGER_BYTES),
+        ("child_inode_id", INODE_ID_BYTES),
         ("child_kind", cbor_string_bytes("file".len())),
         ("child_created_by", cbor_string_bytes(MAX_ACTOR_ID_BYTES)),
         ("child_created_at_ms", INTEGER_BYTES),
@@ -39,10 +41,10 @@ const BIND_BYTES: usize = delta_bytes(
 const UNBIND_BYTES: usize = delta_bytes(
     "unbind_direntry",
     &[
-        ("parent_inode_id", INTEGER_BYTES),
+        ("parent_inode_id", INODE_ID_BYTES),
         ("name_key", 0),
         ("display_name", 0),
-        ("child_inode_id", INTEGER_BYTES),
+        ("child_inode_id", INODE_ID_BYTES),
         ("child_kind", cbor_string_bytes("file".len())),
         ("child_created_by", cbor_string_bytes(MAX_ACTOR_ID_BYTES)),
         ("child_created_at_ms", INTEGER_BYTES),
@@ -55,11 +57,11 @@ const UNBIND_BYTES: usize = delta_bytes(
 const TOMBSTONE_BYTES: usize = delta_bytes(
     "tombstone_subtree",
     &[
-        ("root_inode_id", INTEGER_BYTES),
+        ("root_inode_id", INODE_ID_BYTES),
         (
             "deleted_binding",
             cbor_map_bytes(&[
-                ("parent_inode_id", INTEGER_BYTES),
+                ("parent_inode_id", INODE_ID_BYTES),
                 ("name_key", 0),
                 ("display_name", 0),
             ]) + NAMES_BYTES,
@@ -83,7 +85,7 @@ const CONTENT_REF_BYTES: usize = cbor_map_bytes(&[
 const REVISION_BYTES: usize = delta_bytes(
     "append_file_revision",
     &[
-        ("inode_id", INTEGER_BYTES),
+        ("inode_id", INODE_ID_BYTES),
         ("revision_no", INTEGER_BYTES),
         ("content_ref", CONTENT_REF_BYTES),
     ],
@@ -127,7 +129,7 @@ fn carried_layout_bytes(deltas: &[WalCommitDelta]) -> usize {
 const ATTRIBUTES_BYTES: usize = delta_bytes(
     "append_attributes_revision",
     &[
-        ("inode_id", INTEGER_BYTES),
+        ("inode_id", INODE_ID_BYTES),
         ("attributes_revision_no", INTEGER_BYTES),
         (
             "attributes",
@@ -149,7 +151,7 @@ const fn rights_list_bytes() -> usize {
 const ACCESS_BYTES: usize = delta_bytes(
     "append_access_revision",
     &[
-        ("inode_id", INTEGER_BYTES),
+        ("inode_id", INODE_ID_BYTES),
         ("access_revision_no", INTEGER_BYTES),
         ("boundary", 1),
         (
@@ -162,7 +164,7 @@ const ACCESS_BYTES: usize = delta_bytes(
 const REVOKE_BYTES: usize = delta_bytes(
     "revoke_subtree_tombstone",
     &[
-        ("root_inode_id", INTEGER_BYTES),
+        ("root_inode_id", INODE_ID_BYTES),
         (
             "target",
             cbor_map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),

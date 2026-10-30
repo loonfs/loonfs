@@ -6,7 +6,7 @@
 use super::super::{CommitOperation, ResolvedBinding};
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
-use crate::commit::{CandidateAllocation, CommitFingerprint, CommitPlan, CommitValidationError};
+use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationError};
 use crate::error::{CoreError, ErrorCode, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
@@ -18,6 +18,7 @@ use loonfs_types::format::{
     wal::{WalCommitDelta, WalDelta},
 };
 use loonfs_types::ChecksumAlgorithm;
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     next_public_ordinal, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq,
     CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
@@ -156,7 +157,7 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
         delta_index,
         root_inode_id,
         deleted_binding: DeletedBinding {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             name_key: NameKey::parse("docs").expect("valid name key"),
             display_name: test_display_name("docs"),
         },
@@ -171,7 +172,7 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
         4_200,
         &[WalDelta::CreateInode {
             delta_index: 0,
-            inode_id: InodeId(1),
+            inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
         }],
     );
@@ -195,11 +196,7 @@ struct TestValidationContext<'a> {
     metadata_state: &'a MetadataState,
 }
 
-fn validation_context(
-    metadata_state: &MetadataState,
-    seq: ChangeSeq,
-    next_inode_id: InodeId,
-) -> TestValidationContext<'_> {
+fn validation_context(metadata_state: &MetadataState, seq: ChangeSeq) -> TestValidationContext<'_> {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let head = NamespaceReadState {
         created_at_ms: 1_000,
@@ -213,7 +210,6 @@ fn validation_context(
             writer_id: loonfs_types::WriterId::parse("writer-a").expect("writer id"),
             acquired_at_ms: 1_000,
         }),
-        next_inode_id,
         wal_no: loonfs_types::WalNo(0),
         folded_wal_no: loonfs_types::WalNo(0),
         basis_floor_seq: ChangeSeq(0),
@@ -263,21 +259,6 @@ async fn build_commit_plan(
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
 ) -> std::result::Result<CommitPlan, CommitValidationError> {
-    let mut allocation = CandidateAllocation::new(context.head.next_inode_id);
-    for op in ops {
-        let assigned = match op {
-            CommitOperation::CreateDirectory { child_inode_id, .. }
-            | CommitOperation::CreateFile { child_inode_id, .. } => Some(*child_inode_id),
-            _ => None,
-        };
-        if let Some(assigned) = assigned {
-            assert_eq!(
-                allocation.allocate().expect("test inode allocation"),
-                assigned,
-                "test create operations must carry their planned inode ids"
-            );
-        }
-    }
     let deltas = validate_planned_ops(ops, committed_at_ms, context)
         .await
         .map_err(|error| match error {
@@ -297,18 +278,17 @@ async fn build_commit_plan(
         deltas,
         appended: Vec::new(),
         inline_content: Vec::new(),
-        resulting_next_inode_id: allocation.resulting_next_inode_id(),
     })
 }
 
 #[tokio::test]
 async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondition() {
     let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_append_attributes(0, InodeId(2), 1, &[("owner", "ada")]),
         wal_append_attributes(0, InodeId(2), 2, &[("owner", "grace")]),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(3));
     let request = planned(vec![CommitOperation::UpdateAttributes {
         inode_id: InodeId(2),
         base_attributes_revision_no: AttributesRevisionNo(1),
@@ -338,10 +318,10 @@ async fn a_first_attribute_write_states_revision_zero() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
         0,
         InodeId(2),
-        InodeId(1),
+        ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(1));
     let request = |base: u64| {
         planned(vec![CommitOperation::UpdateAttributes {
             inode_id: InodeId(2),
@@ -369,7 +349,7 @@ async fn a_first_attribute_write_states_revision_zero() {
 #[tokio::test]
 async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let metadata_state = metadata_state_after(&[]);
-    let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
+    let context = validation_context(&metadata_state, ChangeSeq(0));
     let request = planned(vec![CommitOperation::UpdateAttributes {
         inode_id: InodeId(9),
         base_attributes_revision_no: AttributesRevisionNo(0),
@@ -391,7 +371,7 @@ async fn an_attribute_update_of_a_missing_inode_is_rejected() {
 #[tokio::test]
 async fn stale_revision_precondition_is_rejected() {
     let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -401,7 +381,7 @@ async fn stale_revision_precondition_is_rejected() {
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3));
     let request = planned(vec![CommitOperation::ReplaceFile {
         inode_id: InodeId(3),
         base_revision_no: RevisionNo(1),
@@ -427,13 +407,13 @@ async fn a_create_for_a_bound_name_is_rejected() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
         0,
         InodeId(2),
-        InodeId(1),
+        ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(1));
     let request = planned(vec![CommitOperation::CreateDirectory {
         child_inode_id: InodeId(3),
-        parent_inode_id: InodeId(1),
+        parent_inode_id: ROOT_INODE_ID,
         display_name: test_display_name("docs"),
     }]);
 
@@ -444,7 +424,7 @@ async fn a_create_for_a_bound_name_is_rejected() {
         error,
         CommitValidationError::NameTaken {
             operand: CommitOperand::CreateParent,
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             child_inode_id: InodeId(2),
             ..
         }
@@ -454,7 +434,7 @@ async fn a_create_for_a_bound_name_is_rejected() {
 #[tokio::test]
 async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
     let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -463,9 +443,9 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
             content_ref("content-1"),
         ),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(2));
     let docs_binding = ResolvedBinding {
-        parent_inode_id: InodeId(1),
+        parent_inode_id: ROOT_INODE_ID,
         name_key: NameKey::parse("docs").expect("valid name key"),
         display_name: test_display_name("docs"),
         child_inode_id: InodeId(2),
@@ -476,14 +456,14 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
     };
     let reused_inode = CommitOperation::CreateFile {
         child_inode_id: InodeId(3),
-        parent_inode_id: InodeId(1),
+        parent_inode_id: ROOT_INODE_ID,
         display_name: test_display_name("copy.txt"),
         content_ref: content_ref("content-2"),
     };
     let unbinds_another_child = CommitOperation::Rename {
         inode_id: InodeId(3),
         source_binding: docs_binding,
-        new_parent_inode_id: InodeId(1),
+        new_parent_inode_id: ROOT_INODE_ID,
         new_display_name: test_display_name("moved.txt"),
     };
 
@@ -494,8 +474,12 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
         assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert_eq!(
             error.to_string(),
-            "namespace corrupt: a commit binds inode `3`, which is already bound as \
-             `readme.txt` under parent inode `2`"
+            format!(
+                "namespace corrupt: a commit binds inode `{}`, which is already bound as \
+                 `readme.txt` under parent inode `{}`",
+                InodeId(3),
+                InodeId(2)
+            )
         );
     }
 }
@@ -505,13 +489,13 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
         0,
         InodeId(2),
-        InodeId(1),
+        ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(1));
     let request = vec![CommitOperation::Rename {
         source_binding: ResolvedBinding {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             name_key: NameKey::parse("missing.txt").expect("valid name key"),
             display_name: test_display_name("missing.txt"),
             child_inode_id: InodeId(9),
@@ -521,7 +505,7 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
             },
         },
         inode_id: InodeId(2),
-        new_parent_inode_id: InodeId(1),
+        new_parent_inode_id: ROOT_INODE_ID,
         new_display_name: test_display_name("renamed"),
     }];
 
@@ -531,7 +515,7 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
     assert_matches!(
         error,
         CommitValidationError::BindingPreconditionMissing {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             ..
         }
     );
@@ -540,7 +524,7 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
 #[tokio::test]
 async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -550,7 +534,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
         ),
         wal_tombstone(0, InodeId(2)),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3));
 
     let create_error = build_commit_plan(
         &planned(vec![CommitOperation::CreateFile {
@@ -608,10 +592,10 @@ async fn restore_revision_validation_rejects_missing_inode() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
         0,
         InodeId(2),
-        InodeId(1),
+        ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(1));
     let request = planned(vec![CommitOperation::RestoreRevision {
         inode_id: InodeId(99),
         source_revision_no: RevisionNo(1),
@@ -635,10 +619,10 @@ async fn restore_revision_validation_rejects_non_file_target() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
         0,
         InodeId(2),
-        InodeId(1),
+        ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(1));
     let request = planned(vec![CommitOperation::RestoreRevision {
         inode_id: InodeId(2),
         source_revision_no: RevisionNo(1),
@@ -662,7 +646,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
 #[tokio::test]
 async fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -672,7 +656,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3));
 
     let stale_base = build_commit_plan(
         &planned(vec![CommitOperation::RestoreRevision {
@@ -695,7 +679,10 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     );
     assert_eq!(
         stale_base.to_string(),
-        "base revision mismatch for inode `3`: expected revision 1, found revision 2"
+        format!(
+            "base revision mismatch for inode `{}`: expected revision 1, found revision 2",
+            InodeId(3)
+        )
     );
 
     let missing_source = build_commit_plan(
@@ -721,7 +708,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
 #[tokio::test]
 async fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -730,7 +717,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
             content_ref("content-1"),
         ),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(2));
 
     // The restore must resolve to the very object the replace attached, so
     // the expectation is that reference itself.
@@ -766,7 +753,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     // so the expectations are those references themselves.
     let expected = content_ref("content-1");
     let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -776,7 +763,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3));
 
     let request = planned(vec![
         CommitOperation::RestoreRevision {
@@ -812,7 +799,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
 #[tokio::test]
 async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -822,7 +809,7 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
         ),
         wal_tombstone(0, InodeId(2)),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3));
 
     let error = build_commit_plan(
         &planned(vec![CommitOperation::RestoreRevision {
@@ -851,7 +838,7 @@ async fn restore_revision_overflow_is_rejected() {
     let mut deltas = wal_create_file(
         0,
         InodeId(2),
-        InodeId(1),
+        ROOT_INODE_ID,
         "overflow.txt".to_owned(),
         content_ref("content-max"),
     );
@@ -871,7 +858,7 @@ async fn restore_revision_overflow_is_rejected() {
             4_200,
             &[WalDelta::CreateInode {
                 delta_index: 0,
-                inode_id: InodeId(1),
+                inode_id: ROOT_INODE_ID,
                 inode_kind: InodeKind::Directory,
             }],
         )
@@ -882,7 +869,7 @@ async fn restore_revision_overflow_is_rejected() {
             4_200,
             &deltas,
         );
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(1));
     let request = planned(vec![CommitOperation::RestoreRevision {
         inode_id: InodeId(2),
         source_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
@@ -906,7 +893,7 @@ async fn restore_revision_overflow_is_rejected() {
 fn wal_delete_docs(bound_at: DeltaPosition) -> Vec<WalDelta> {
     let mut deltas = vec![WalDelta::UnbindDirentry {
         delta_index: 0,
-        parent_inode_id: InodeId(1),
+        parent_inode_id: ROOT_INODE_ID,
         name_key: NameKey::parse("docs").expect("valid name key"),
         display_name: test_display_name("docs"),
         child_inode_id: InodeId(2),
@@ -931,7 +918,7 @@ async fn an_undelete_applies_only_while_its_deletion_is_the_roots_latest_event()
     let undelete_at = |seq| CommitOperation::Undelete {
         inode_id: InodeId(2),
         deletion_seq: ChangeSeq(seq),
-        parent_inode_id: InodeId(1),
+        parent_inode_id: ROOT_INODE_ID,
         display_name: test_display_name("docs"),
     };
     // An undelete at sequence 3: the revoke, then the binding at delta 1.
@@ -941,7 +928,7 @@ async fn an_undelete_applies_only_while_its_deletion_is_the_roots_latest_event()
         target: deletion,
     }];
     undeleted.extend(
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned())
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned())
             .into_iter()
             .skip(1),
     );
@@ -974,7 +961,7 @@ async fn an_undelete_applies_only_while_its_deletion_is_the_roots_latest_event()
     ];
     let history = |later: Vec<Vec<WalDelta>>| {
         let mut history = vec![
-            wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+            wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
             wal_delete_docs(position(1, 1)),
         ];
         history.extend(later);
@@ -984,7 +971,7 @@ async fn an_undelete_applies_only_while_its_deletion_is_the_roots_latest_event()
         let history = history(later);
         let metadata_state = metadata_state_after(&history);
         let head_seq = ChangeSeq(u64::try_from(history.len()).expect("seq"));
-        let context = validation_context(&metadata_state, head_seq, InodeId(3));
+        let context = validation_context(&metadata_state, head_seq);
         let error = build_commit_plan(&ops, 4_200, &context)
             .await
             .expect_err(name);
@@ -997,7 +984,7 @@ async fn an_undelete_applies_only_while_its_deletion_is_the_roots_latest_event()
     }
 
     let metadata_state = metadata_state_after(&history(Vec::new()));
-    let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(2));
     let plan = build_commit_plan(&[undelete_at(2)], 4_200, &context)
         .await
         .expect("undelete the latest deletion");

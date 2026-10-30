@@ -18,8 +18,8 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo, NamespaceId, WalNo,
-    WriterEpoch, WriterId,
+    AbsolutePath, ChangeSeq, CommitId, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterEpoch,
+    WriterId,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -30,7 +30,7 @@ fn context(now_ms: u64) -> crate::test_support::WriterAt {
 }
 
 #[tokio::test]
-async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summaries() {
+async fn readers_reject_invalid_numbers_epochs_and_sequences() {
     let directory = tempfile::tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("verification").expect("namespace");
@@ -49,14 +49,13 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
         decode_wal_object_envelope_zstd(&store.get(&key, None).await.expect("get").expect("fence"))
             .expect("decode");
 
-    for changed in 0..5 {
+    for changed in 0..4 {
         let mut payload = original.payload().clone();
         match changed {
             0 => payload.wal_no = WalNo(1),
             1 => payload.writer_epoch = WriterEpoch(0),
             2 => payload.writer_epoch = WriterEpoch(3),
-            3 => payload.head_seq = ChangeSeq(1),
-            _ => payload.next_inode_id = InodeId(3),
+            _ => payload.head_seq = ChangeSeq(1),
         }
         let bytes = encode_wal_object_envelope_zstd(payload)
             .expect("encode")

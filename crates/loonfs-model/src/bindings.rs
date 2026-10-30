@@ -142,7 +142,7 @@ mod tests {
         }
     }
 
-    fn bind(delta_index: u32, child: u64, kind: InodeKind, parent: u64, name: &str) -> WalDelta {
+    fn bind(delta_index: u32, child: u128, kind: InodeKind, parent: u128, name: &str) -> WalDelta {
         WalDelta::BindDirentry {
             delta_index,
             parent_inode_id: InodeId(parent),
@@ -157,9 +157,9 @@ mod tests {
 
     fn unbind(
         delta_index: u32,
-        child: u64,
+        child: u128,
         kind: InodeKind,
-        parent: u64,
+        parent: u128,
         name: &str,
         bound_at: DeltaPosition,
     ) -> WalDelta {
@@ -179,7 +179,7 @@ mod tests {
         }
     }
 
-    fn create(inode_id: u64, kind: InodeKind, parent: u64, name: &str) -> Vec<WalDelta> {
+    fn create(inode_id: u128, kind: InodeKind, parent: u128, name: &str) -> Vec<WalDelta> {
         vec![
             WalDelta::CreateInode {
                 delta_index: 0,
@@ -214,16 +214,16 @@ mod tests {
 
         // The first child's own value still names the slot the second took.
         assert_eq!(
-            first_violation(&[create(2, File, 1, "a"), create(3, File, 1, "a")]),
+            first_violation(&[create(2, File, 0, "a"), create(3, File, 0, "a")]),
             Some(ModelError::SlotHasTwoChildren {
                 seq: ChangeSeq(2),
-                parent_inode_id: InodeId(1),
+                parent_inode_id: loonfs_types::ROOT_INODE_ID,
                 name_key: NameKey::parse("a").expect("valid name key"),
                 bindings: [position(1, 1), position(2, 1)],
             })
         );
         assert_eq!(
-            first_violation(&[create(2, File, 1, "a"), vec![bind(0, 2, File, 1, "b")]]),
+            first_violation(&[create(2, File, 0, "a"), vec![bind(0, 2, File, 0, "b")]]),
             Some(ModelError::ChildHasTwoParents {
                 seq: ChangeSeq(2),
                 child_inode_id: InodeId(2),
@@ -234,8 +234,8 @@ mod tests {
         // bound child's own value still names it.
         assert_eq!(
             first_violation(&[
-                create(2, File, 1, "a"),
-                vec![unbind(0, 3, File, 1, "a", position(1, 1))],
+                create(2, File, 0, "a"),
+                vec![unbind(0, 3, File, 0, "a", position(1, 1))],
             ]),
             Some(ModelError::BindingIndexesDisagree {
                 seq: ChangeSeq(2),
@@ -244,10 +244,10 @@ mod tests {
         );
         assert_eq!(
             first_violation(&[
-                create(2, Directory, 1, "a"),
+                create(2, Directory, 0, "a"),
                 create(3, Directory, 2, "b"),
                 vec![
-                    unbind(0, 2, Directory, 1, "a", position(1, 1)),
+                    unbind(0, 2, Directory, 0, "a", position(1, 1)),
                     bind(1, 2, Directory, 3, "c"),
                 ],
             ]),
@@ -258,11 +258,11 @@ mod tests {
         );
         assert_eq!(
             first_violation(&[
-                create(2, Directory, 1, "a"),
+                create(2, Directory, 0, "a"),
                 create(3, Directory, 2, "b"),
                 vec![
                     unbind(0, 3, Directory, 2, "b", position(2, 1)),
-                    bind(1, 3, Directory, 1, "b"),
+                    bind(1, 3, Directory, 0, "b"),
                 ],
             ]),
             None

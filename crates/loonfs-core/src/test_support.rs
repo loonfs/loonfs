@@ -178,6 +178,29 @@ pub fn namespace_store<S>(store: S, namespace_id: &NamespaceId) -> NamespaceStor
     )
 }
 
+/// Returns the inode ID of the item visible at `absolute_path` in the
+/// namespace's current view, for a test that needs the random ID a commit
+/// generated.
+#[cfg(test)]
+pub(crate) async fn visible_inode_id<S: loonfs_objectstore::ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> loonfs_types::InodeId {
+    namespace_store(store, namespace_id)
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view")
+        .resolve_path(
+            absolute_path,
+            loonfs_types::options::AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("a visible path")
+        .inode_id
+}
+
 /// Returns the components of [`namespace_store`] with `wall_clock` as their
 /// wall clock, for a test that sets the time its operations record.
 pub fn namespace_store_with_wall_clock<S>(

@@ -1,7 +1,7 @@
-//! Converts inode IDs between internal numbers and public API strings.
+//! Converts inode IDs to and from their public API strings.
 //!
-//! Public IDs use the form `ino_<number>`. They are scoped to a namespace and
-//! should be treated as identifiers rather than numbers.
+//! A public ID is `ino_` followed by the 26-character body that every
+//! generated ID uses, such as `ino_1z5ae0x2rx99qswz2v78egz3kc`.
 
 use crate::id_macros::validation_error;
 use crate::InodeId;
@@ -9,43 +9,35 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 /// Prefix used by every public inode ID.
-const PREFIX: &str = "ino_";
+pub(crate) const PREFIX: &str = "ino_";
 
 /// OpenAPI pattern for public inode IDs.
-pub const PATTERN: &str = r"^ino_[1-9][0-9]*$";
+pub const PATTERN: &str = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$";
 
 /// Example public inode ID used in OpenAPI.
-pub const EXAMPLE: &str = "ino_123";
+pub const EXAMPLE: &str = "ino_1z5ae0x2rx99qswz2v78egz3kc";
 
 /// OpenAPI description for public inode IDs.
 pub const DESCRIPTION: &str =
     "The stable ID of one inode within a namespace. An inode's ID doesn't change.";
 
-const INVALID_REASON: &str = "must use `ino_` followed by a nonzero u64 without leading zeroes";
+const INVALID_REASON: &str =
+    "must use `ino_` followed by 26 lowercase Crockford base 32 characters, \
+                              the first from `0` through `7`";
 
 validation_error!(PublicInodeIdError, "invalid inode id {value:?}: {reason}");
 
 /// Converts an inode ID to its public API string.
 pub fn encode(id: InodeId) -> String {
-    format!("{PREFIX}{}", id.0)
+    id.to_string()
 }
 
 /// Parses and validates a public inode ID.
 pub fn decode(value: &str) -> Result<InodeId, PublicInodeIdError> {
-    let Some(suffix) = value.strip_prefix(PREFIX) else {
-        return Err(PublicInodeIdError::new(value, INVALID_REASON));
-    };
-    if suffix.is_empty()
-        || suffix.starts_with('0')
-        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(PublicInodeIdError::new(value, INVALID_REASON));
-    }
-
-    suffix
-        .parse::<u64>()
-        .map(InodeId)
-        .map_err(|_| PublicInodeIdError::new(value, INVALID_REASON))
+    value
+        .strip_prefix(PREFIX)
+        .and_then(InodeId::parse_body)
+        .ok_or_else(|| PublicInodeIdError::new(value, INVALID_REASON))
 }
 
 /// Serializes an inode ID as a public API string.
@@ -106,16 +98,21 @@ mod tests {
         );
     }
 
+    const SAMPLE: &str = "ino_1z5ae0x2rx99qswz2v78egz3kc";
+    const SAMPLE_ID: InodeId = InodeId(0x3f2a_9c0e_8b1d_4a6f_9e7c_5b3a_1d0f_8e6c);
+
     #[test]
     fn decode_accepts_public_inode_id_grammar() {
         for (value, expected) in [
-            ("ino_1", InodeId(1)),
-            ("ino_42", InodeId(42)),
-            ("ino_18446744073709551615", InodeId(u64::MAX)),
+            ("ino_00000000000000000000000000", crate::ROOT_INODE_ID),
+            (SAMPLE, SAMPLE_ID),
+            ("ino_7zzzzzzzzzzzzzzzzzzzzzzzzz", InodeId(u128::MAX)),
         ] {
             assert_eq!(decode(value).expect("valid public inode id"), expected);
             assert_eq!(encode(expected), value);
         }
+        assert_eq!(EXAMPLE, SAMPLE);
+        assert_eq!(decode(EXAMPLE).expect("the example parses"), SAMPLE_ID);
     }
 
     macro_rules! rejection_test {
@@ -127,18 +124,50 @@ mod tests {
         };
     }
 
-    rejection_test!(decode_rejects_zero, "ino_0");
-    rejection_test!(decode_rejects_leading_zero, "ino_01");
-    rejection_test!(decode_rejects_sign, "ino_-1");
-    rejection_test!(decode_rejects_uppercase_prefix, "INO_27");
-    rejection_test!(decode_rejects_mixed_case_prefix, "Ino_27");
-    rejection_test!(decode_rejects_missing_prefix, "27");
+    rejection_test!(decode_rejects_a_decimal_suffix, "ino_42");
+    rejection_test!(
+        decode_rejects_a_short_suffix,
+        "ino_1z5ae0x2rx99qswz2v78egz3k"
+    );
+    rejection_test!(
+        decode_rejects_a_long_suffix,
+        "ino_1z5ae0x2rx99qswz2v78egz3kc0"
+    );
+    rejection_test!(
+        decode_rejects_a_hex_suffix,
+        "ino_3f2a9c0e8b1d4a6f9e7c5b3a1d0f8e6c"
+    );
+    rejection_test!(
+        decode_rejects_an_uppercase_suffix,
+        "ino_1Z5AE0X2RX99QSWZ2V78EGZ3KC"
+    );
+    rejection_test!(
+        decode_rejects_a_first_character_above_7,
+        "ino_8z5ae0x2rx99qswz2v78egz3kc"
+    );
+    rejection_test!(
+        decode_rejects_a_letter_outside_the_alphabet,
+        "ino_1z5ae0x2rx99qswz2v78egz3ki"
+    );
+    rejection_test!(
+        decode_rejects_uppercase_prefix,
+        "INO_1z5ae0x2rx99qswz2v78egz3kc"
+    );
+    rejection_test!(
+        decode_rejects_mixed_case_prefix,
+        "Ino_1z5ae0x2rx99qswz2v78egz3kc"
+    );
+    rejection_test!(decode_rejects_missing_prefix, "1z5ae0x2rx99qswz2v78egz3kc");
     rejection_test!(decode_rejects_empty_suffix, "ino_");
-    rejection_test!(decode_rejects_suffix_trailing_text, "ino_27x");
-    rejection_test!(decode_rejects_leading_whitespace, " ino_27");
-    rejection_test!(decode_rejects_trailing_whitespace, "ino_27 ");
+    rejection_test!(
+        decode_rejects_leading_whitespace,
+        " ino_1z5ae0x2rx99qswz2v78egz3kc"
+    );
+    rejection_test!(
+        decode_rejects_trailing_whitespace,
+        "ino_1z5ae0x2rx99qswz2v78egz3kc "
+    );
     rejection_test!(decode_rejects_empty_string, "");
-    rejection_test!(decode_rejects_u64_overflow, "ino_18446744073709551616");
 
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     struct RequiredField {
@@ -159,39 +188,42 @@ mod tests {
     #[test]
     fn serde_adapter_uses_only_the_string_form() {
         let value = RequiredField {
-            inode_id: InodeId(42),
+            inode_id: SAMPLE_ID,
         };
+        let json = format!(r#"{{"inode_id":"{SAMPLE}"}}"#);
 
         assert_eq!(
             serde_json::to_string(&value).expect("serialize public inode id"),
-            r#"{"inode_id":"ino_42"}"#
+            json
         );
         assert_eq!(
-            serde_json::from_str::<RequiredField>(r#"{"inode_id":"ino_42"}"#)
-                .expect("deserialize public inode id"),
+            serde_json::from_str::<RequiredField>(&json).expect("deserialize public inode id"),
             value
         );
         serde_json::from_str::<RequiredField>(r#"{"inode_id":42}"#)
             .expect_err("a numeric inode ID should be rejected");
+        serde_json::from_str::<RequiredField>(r#"{"inode_id":"1z5ae0x2rx99qswz2v78egz3kc"}"#)
+            .expect_err("an inode ID without the prefix should be rejected");
     }
 
     #[test]
     fn optional_serde_adapter_composes_with_skip_serializing_if() {
         let present = OptionalField {
-            inode_id: Some(InodeId(42)),
+            inode_id: Some(SAMPLE_ID),
         };
         let absent = OptionalField { inode_id: None };
+        let json = format!(r#"{{"inode_id":"{SAMPLE}"}}"#);
 
         assert_eq!(
             serde_json::to_string(&present).expect("serialize present public inode id"),
-            r#"{"inode_id":"ino_42"}"#
+            json
         );
         assert_eq!(
             serde_json::to_string(&absent).expect("serialize absent public inode id"),
             "{}"
         );
         assert_eq!(
-            serde_json::from_str::<OptionalField>(r#"{"inode_id":"ino_42"}"#)
+            serde_json::from_str::<OptionalField>(&json)
                 .expect("deserialize present public inode id"),
             present
         );

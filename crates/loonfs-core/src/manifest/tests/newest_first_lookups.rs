@@ -435,15 +435,15 @@ async fn visibility_over_newest_first_lookups_matches_the_merge() {
     }
 }
 
-/// Whether a delta run's filter admits `probe` for a segment whose key
-/// range meets `prefix`.
-async fn a_delta_run_admits(
+/// How many delta segments whose key range meets `prefix` have a filter
+/// that admits `probe`.
+async fn delta_segments_admitting(
     store: &ConcurrencyWatchStore<LocalFsStore>,
     verified: &scan::VerifiedMetadataSegments<'_, ConcurrencyWatchStore<LocalFsStore>>,
     family: ApiMetadataRowFamily,
     prefix: &str,
     probe: &str,
-) -> bool {
+) -> usize {
     let upper_bound = string_prefix_upper_bound(prefix);
     let descriptors = verified
         .scan_runs
@@ -461,19 +461,22 @@ async fn a_delta_run_admits(
                 upper_bound.as_deref(),
             )
         });
+    let mut admitting = 0;
     for descriptor in descriptors {
         let filter = load_segment_filter(store, None, &SessionBlockMemo::default(), descriptor)
             .await
             .expect("load a filter");
         if filter.may_contain(probe) {
-            return true;
+            admitting += 1;
         }
     }
-    false
+    admitting
 }
 
-/// A filler key that a delta run's filter admits by a false positive, and
-/// one that no delta run's filter admits, for each of two families.
+/// A filler key that exactly one delta segment's filter admits by a false
+/// positive, and one that no delta segment's filter admits, for each of two
+/// families. The keys contain random inode IDs, so a key can also meet more
+/// than one false positive, and the test skips such a key.
 struct FalsePositiveKeys {
     binding: NameKey,
     plain_binding: NameKey,
@@ -487,7 +490,7 @@ async fn false_positive_keys(
 ) -> FalsePositiveKeys {
     let (mut bindings, mut revisions) = ([None, None], [None, None]);
     for (name, inode_id) in &fixture.fillers {
-        let admitted = a_delta_run_admits(
+        let admitting = delta_segments_admitting(
             &fixture.store,
             verified,
             ApiMetadataRowFamily::DirentryBinds,
@@ -495,8 +498,10 @@ async fn false_positive_keys(
             &lookup_keys::direntry_bind_probe(fixture.docs, name),
         )
         .await;
-        bindings[usize::from(!admitted)].get_or_insert_with(|| name.clone());
-        let admitted = a_delta_run_admits(
+        if admitting <= 1 {
+            bindings[1 - admitting].get_or_insert_with(|| name.clone());
+        }
+        let admitting = delta_segments_admitting(
             &fixture.store,
             verified,
             ApiMetadataRowFamily::Revisions,
@@ -504,7 +509,9 @@ async fn false_positive_keys(
             &lookup_keys::revision_probe(*inode_id),
         )
         .await;
-        revisions[usize::from(!admitted)].get_or_insert(*inode_id);
+        if admitting <= 1 {
+            revisions[1 - admitting].get_or_insert(*inode_id);
+        }
     }
     let [Some(binding), Some(plain_binding)] = bindings else {
         panic!("some filler names are admitted by a delta filter and some aren't");

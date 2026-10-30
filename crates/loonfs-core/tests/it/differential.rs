@@ -37,7 +37,7 @@ use loonfs_types::{
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-type NormalizedInode = (u64, &'static str, u64, CommitId, ActorId, u64);
+type NormalizedInode = (u128, &'static str, u64, CommitId, ActorId, u64);
 type NormalizedInodes = Vec<NormalizedInode>;
 type NormalizedDirentryBinds = Vec<NormalizedDirectoryBinding>;
 
@@ -78,7 +78,7 @@ type NormalizedMetadata = (
 /// positional so a divergence prints which one differs.
 #[derive(Debug, PartialEq, Eq)]
 struct NormalizedAttributeRevision {
-    inode_id: u64,
+    inode_id: u128,
     revision: u64,
     committed_seq: u64,
     commit_id: CommitId,
@@ -90,7 +90,7 @@ struct NormalizedAttributeRevision {
 
 #[derive(Debug, PartialEq, Eq)]
 struct NormalizedAccessRevision {
-    inode_id: u64,
+    inode_id: u128,
     revision: u64,
     committed_seq: u64,
     commit_id: CommitId,
@@ -108,7 +108,7 @@ struct NormalizedAccessRevision {
 /// prints which one differs.
 #[derive(Debug, PartialEq, Eq)]
 struct NormalizedTombstone {
-    root_inode_id: u64,
+    root_inode_id: u128,
     tombstone_seq: u64,
     tombstone_delta_index: u32,
     commit_id: CommitId,
@@ -130,7 +130,7 @@ enum NormalizedTombstoneAction {
 
 #[derive(Debug, PartialEq, Eq)]
 struct NormalizedBinding {
-    parent_inode_id: u64,
+    parent_inode_id: u128,
     name_key: String,
     display_name: String,
 }
@@ -457,7 +457,7 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
             "/docs/readme.txt/notes",
         ],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "docs", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "docs", 0),
             create_file(
                 0,
                 InodeId(3),
@@ -476,7 +476,7 @@ fn metadata_apply_matches_model_for_rename() {
     assert_core_matches_model(
         &["/docs", "/docs/readme.txt", "/README.txt", "/readme.txt"],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "docs", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "docs", 0),
             create_file(
                 0,
                 InodeId(3),
@@ -495,7 +495,14 @@ fn metadata_apply_matches_model_for_rename() {
                     position(2, 1),
                     1,
                 ),
-                bind(1, InodeId(3), InodeKind::File, InodeId(1), "README.txt", 1),
+                bind(
+                    1,
+                    InodeId(3),
+                    InodeKind::File,
+                    ROOT_INODE_ID,
+                    "README.txt",
+                    1,
+                ),
             ],
         ],
     );
@@ -508,7 +515,7 @@ fn metadata_apply_matches_model_for_a_case_only_rename() {
     assert_core_matches_model(
         &["/docs", "/DOCS", "/docs/Report.txt", "/docs/report.txt"],
         &[
-            create_directory(0, docs, InodeId(1), "docs", 0),
+            create_directory(0, docs, ROOT_INODE_ID, "docs", 0),
             create_file(
                 0,
                 InodeId(3),
@@ -532,7 +539,7 @@ fn metadata_apply_matches_model_for_restore_revision() {
     assert_core_matches_model(
         &["/docs", "/docs/readme.txt"],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "docs", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "docs", 0),
             create_file(
                 0,
                 InodeId(3),
@@ -552,7 +559,7 @@ fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
     assert_core_matches_model(
         &["/docs", "/docs/readme.txt"],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "docs", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "docs", 0),
             create_file(
                 0,
                 InodeId(3),
@@ -575,7 +582,7 @@ fn metadata_apply_matches_model_for_delete_file() {
     assert_core_matches_model(
         &["/docs", "/docs/Readme.TXT"],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "docs", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "docs", 0),
             create_file(
                 0,
                 InodeId(3),
@@ -602,13 +609,13 @@ fn metadata_apply_matches_model_for_delete_subtree() {
     assert_core_matches_model(
         &["/Docs", "/Docs/nested"],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "Docs", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "Docs", 0),
             create_directory(0, InodeId(3), InodeId(2), "nested", 1),
             delete(
                 0,
                 InodeId(2),
                 InodeKind::Directory,
-                InodeId(1),
+                ROOT_INODE_ID,
                 "Docs",
                 position(1, 1),
                 0,
@@ -622,7 +629,7 @@ fn metadata_apply_matches_model_for_undelete() {
     assert_core_matches_model(
         &["/docs", "/docs/Readme.TXT"],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "docs", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "docs", 0),
             create_file(
                 0,
                 InodeId(3),
@@ -660,7 +667,7 @@ fn metadata_apply_matches_model_for_attribute_writes_and_removals() {
     assert_core_matches_model(
         &["/docs", "/docs/readme.txt"],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "docs", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "docs", 0),
             create_file(
                 0,
                 InodeId(3),
@@ -708,8 +715,8 @@ fn metadata_apply_matches_model_for_access_updates() {
     assert_core_matches_model(
         &["/docs", "/other"],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "docs", 0),
-            create_directory(0, InodeId(3), InodeId(1), "other", 1),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "docs", 0),
+            create_directory(0, InodeId(3), ROOT_INODE_ID, "other", 1),
             update_access(0, InodeId(2), 1, true, first),
             update_access(0, InodeId(2), 2, false, second),
             update_access(0, InodeId(3), 1, false, AccessGrants::default()),
@@ -722,7 +729,7 @@ fn metadata_apply_matches_model_for_a_cleared_attribute_map() {
     assert_core_matches_model(
         &["/docs"],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "docs", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "docs", 0),
             update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
             update_attributes(0, InodeId(2), 2, Attributes::default()),
         ],
@@ -737,7 +744,7 @@ fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
             create_file(
                 0,
                 InodeId(2),
-                InodeId(1),
+                ROOT_INODE_ID,
                 "source.txt",
                 content_ref("content-1"),
                 0,
@@ -747,7 +754,7 @@ fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
                 let mut deltas = create_file(
                     0,
                     InodeId(3),
-                    InodeId(1),
+                    ROOT_INODE_ID,
                     "copy.txt",
                     content_ref("content-1"),
                     2,
@@ -772,7 +779,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
             create_file(
                 0,
                 InodeId(2),
-                InodeId(1),
+                ROOT_INODE_ID,
                 "Readme.TXT",
                 content_ref("content-1"),
                 0,
@@ -782,7 +789,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
                 0,
                 InodeId(2),
                 InodeKind::File,
-                InodeId(1),
+                ROOT_INODE_ID,
                 "Readme.TXT",
                 position(1, 1),
                 0,
@@ -791,7 +798,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
                 0,
                 InodeId(2),
                 InodeKind::File,
-                InodeId(1),
+                ROOT_INODE_ID,
                 "Readme.TXT",
                 position(3, 1),
                 0,
@@ -814,7 +821,7 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
             "/docs/old.txt",
         ],
         &[
-            create_directory(0, docs, InodeId(1), "docs", 0),
+            create_directory(0, docs, ROOT_INODE_ID, "docs", 0),
             create_file(
                 0,
                 InodeId(3),
@@ -887,7 +894,7 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
             "/archive/alpha/notes.txt",
         ],
         &[
-            create_directory(0, InodeId(2), InodeId(1), "projects", 0),
+            create_directory(0, InodeId(2), ROOT_INODE_ID, "projects", 0),
             create_directory(0, InodeId(3), InodeId(2), "alpha", 1),
             create_file(
                 0,
@@ -901,17 +908,17 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
                 0,
                 InodeId(2),
                 directory,
-                InodeId(1),
+                ROOT_INODE_ID,
                 "projects",
                 position(1, 1),
                 0,
             ),
-            create_directory(0, InodeId(5), InodeId(1), "projects", 4),
+            create_directory(0, InodeId(5), ROOT_INODE_ID, "projects", 4),
             undelete(
                 0,
                 InodeId(2),
                 directory,
-                InodeId(1),
+                ROOT_INODE_ID,
                 "archive",
                 position(4, 1),
                 0,
@@ -947,8 +954,8 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
 #[test]
 fn repeated_content_in_one_commit_emits_one_publication() {
     let content = content_ref("shared content");
-    let mut deltas = create_file(0, InodeId(2), InodeId(1), "one", content.clone(), 0);
-    deltas.extend(create_file(3, InodeId(3), InodeId(1), "two", content, 0));
+    let mut deltas = create_file(0, InodeId(2), ROOT_INODE_ID, "one", content.clone(), 0);
+    deltas.extend(create_file(3, InodeId(3), ROOT_INODE_ID, "two", content, 0));
     assert_core_matches_model(&["/one", "/two"], &[deltas]);
 }
 
@@ -972,7 +979,7 @@ fn appends_record_revision_checksums_and_the_chain_head() {
     let mut first = create_file(
         0,
         InodeId(2),
-        InodeId(1),
+        ROOT_INODE_ID,
         "log",
         ContentRef::blob_v1(
             namespace_id.clone(),
@@ -1280,10 +1287,7 @@ async fn reads_at_or_above_the_retention_floor_match_the_model_after_compaction(
     let store = LocalFsStore::new(directory.path()).expect("store");
     let last_seq = u64::try_from(RETENTION_HISTORY.len()).expect("seq");
     for head_seq in RETENTION_FLOOR.0..=last_seq {
-        let namespace_id =
-            loonfs_types::NamespaceId::parse(format!("floor-head-{head_seq}")).expect("namespace");
         let steps = &RETENTION_HISTORY[..usize::try_from(head_seq).expect("index")];
-        commit_and_compact_at_the_floor(&store, &namespace_id, steps).await;
         let created_inodes = steps
             .iter()
             .filter(|step| matches!(step, RetentionStep::Directory(_) | RetentionStep::File(_)))
@@ -1293,14 +1297,22 @@ async fn reads_at_or_above_the_retention_floor_match_the_model_after_compaction(
         } else {
             0
         };
+        let kept_rows = 1 + u64::try_from(created_inodes).expect("count") - expired_inodes;
+        let namespace_id =
+            loonfs_types::NamespaceId::parse(format!("floor-head-{head_seq}")).expect("namespace");
+        commit_and_compact_at_the_floor(&store, &namespace_id, steps).await;
         let statistics = namespace_store(&store, &namespace_id)
             .load_statistics()
             .await
             .expect("statistics");
-        assert_eq!(
+        // A base compaction keeps every row of a visible or recoverable inode,
+        // and a kept inode filter false positive can keep an expired inode's
+        // row too (inode IDs are random), so the count is within that bound.
+        assert!(
+            (kept_rows..=kept_rows + expired_inodes).contains(&statistics.inode_record_count),
+            "inode rows at head {head_seq}: {} outside {kept_rows}..={}",
             statistics.inode_record_count,
-            1 + u64::try_from(created_inodes).expect("count") - expired_inodes,
-            "inode rows at head {head_seq}"
+            kept_rows + expired_inodes
         );
         assert_head_reads_match_model(&store, &namespace_id, ChangeSeq(head_seq)).await;
     }
@@ -1594,7 +1606,7 @@ fn core_bootstrap_state() -> CoreMetadataState {
         4_000,
         &[WalDelta::CreateInode {
             delta_index: 0,
-            inode_id: InodeId(1),
+            inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
         }],
     )
@@ -2088,7 +2100,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
 }
 
 fn normalize_inode(
-    inode_id: u64,
+    inode_id: u128,
     inode_kind: InodeKind,
     committed_seq: u64,
     commit_id: CommitId,

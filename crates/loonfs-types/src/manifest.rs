@@ -7,9 +7,7 @@ use crate::envelope::EnvelopeCodecError;
 use crate::metadata_rows::MetadataRowFamily;
 use crate::segment_blocks::BlockHandle;
 use crate::CompactorEpoch;
-use crate::{
-    AccessGrants, ActorId, ChangeSeq, InodeId, ManifestNo, MetadataSegmentId, NamespaceId, RunNo,
-};
+use crate::{AccessGrants, ActorId, ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
 use crate::{PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -248,8 +246,6 @@ pub struct NamespaceManifestPayload {
     pub activity: ManifestActivity,
     /// Current writer fencing epoch.
     pub writer_epoch: WriterEpoch,
-    /// First inode identity available after replaying the manifest snapshot.
-    pub next_inode_id: InodeId,
     /// Run number the next producer allocates. Every run's `run_no` is below it.
     pub next_run_no: RunNo,
     /// Earliest sequence for which retained history remains readable.
@@ -292,8 +288,7 @@ impl NamespaceManifestPayload {
             .unwrap_or(self.head_seq)
     }
 
-    /// Constructs manifest 1 with the root inode reserved and no retention
-    /// window.
+    /// Constructs manifest 1 with no retention window.
     pub fn initial(
         namespace_id: NamespaceId,
         created_at_ms: u64,
@@ -314,7 +309,6 @@ impl NamespaceManifestPayload {
             head_seq: ChangeSeq(0),
             activity: ManifestActivity::default(),
             writer_epoch: WriterEpoch(0),
-            next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
             next_run_no: RunNo(0),
             folded_wal_no: WalNo(0),
             retention_floor_seq: ChangeSeq(0),
@@ -337,7 +331,6 @@ impl NamespaceManifestPayload {
             retention_window_ms: source.retention_window_ms,
             fork_basis: Some(fork_basis),
             head_seq: source.head_seq,
-            next_inode_id: source.next_inode_id,
             next_run_no: source.next_run_no,
             retention_floor_seq: fork_seq,
             acknowledged_floor_seq: fork_seq,
@@ -372,7 +365,6 @@ impl NamespaceManifestPayload {
             head_seq: self.head_seq,
             activity: self.activity,
             writer_epoch: self.writer_epoch,
-            next_inode_id: self.next_inode_id,
             next_run_no: self.next_run_no,
             retention_floor_seq: self.retention_floor_seq,
             acknowledged_floor_seq: self.acknowledged_floor_seq,
@@ -419,9 +411,6 @@ impl NamespaceManifestPayload {
                 }
                 if self.acknowledged_floor_seq != ChangeSeq(0) {
                     return invalid("acknowledged_floor_seq");
-                }
-                if self.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
-                    return invalid("next_inode_id");
                 }
                 if self.next_run_no != RunNo(0) {
                     return invalid("next_run_no");
@@ -482,9 +471,6 @@ impl NamespaceManifestPayload {
         }
         if successor.acknowledged_floor_seq < self.acknowledged_floor_seq {
             return invalid("acknowledged_floor_seq");
-        }
-        if successor.next_inode_id < self.next_inode_id {
-            return invalid("next_inode_id");
         }
         if successor.next_run_no < self.next_run_no {
             return invalid("next_run_no");
@@ -573,9 +559,7 @@ mod tests {
         MetadataSegmentRef, NamespaceManifestPayload, RunTier,
     };
     use crate::CompactorEpoch;
-    use crate::{
-        ChangeSeq, InodeId, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch,
-    };
+    use crate::{ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch};
     use std::assert_matches;
 
     #[test]
@@ -861,7 +845,6 @@ mod tests {
 
             head_seq: ChangeSeq(10),
             writer_epoch: WriterEpoch(2),
-            next_inode_id: InodeId(42),
             next_run_no: RunNo(1),
             retention_floor_seq: ChangeSeq(0),
             acknowledged_floor_seq: ChangeSeq(0),
@@ -907,7 +890,6 @@ mod tests {
 
             head_seq: ChangeSeq(12),
             writer_epoch: WriterEpoch(2),
-            next_inode_id: InodeId(42),
             next_run_no: RunNo(2),
             retention_floor_seq: ChangeSeq(0),
             acknowledged_floor_seq: ChangeSeq(0),

@@ -674,7 +674,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
 
         head_seq: materialization.head.seq,
         writer_epoch: materialization.head.writer_epoch,
-        next_inode_id: materialization.head.next_inode_id,
         next_run_no: RunNo(2),
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
         acknowledged_floor_seq: ChangeSeq(0),

@@ -300,7 +300,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     };
     let first = harness
         .client
-        .list_by_inode_with_options(&namespace, loonfs_types::InodeId(1), &options)
+        .list_by_inode_with_options(&namespace, loonfs_types::ROOT_INODE_ID, &options)
         .page_limit(page_limit(1))
         .page()
         .await
@@ -310,7 +310,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     let cursor = first.next_cursor.as_deref().expect("children cursor");
     let error = harness
         .client
-        .list_by_inode(&namespace, loonfs_types::InodeId(1))
+        .list_by_inode(&namespace, loonfs_types::ROOT_INODE_ID)
         .page_limit(page_limit(1))
         .cursor(Some(cursor.to_owned()))
         .page()
@@ -319,7 +319,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     assert_eq!(error.code(), Some(loonfs_types::ErrorCode::InvalidRequest));
     let second = harness
         .client
-        .list_by_inode_with_options(&namespace, loonfs_types::InodeId(1), &options)
+        .list_by_inode_with_options(&namespace, loonfs_types::ROOT_INODE_ID, &options)
         .page_limit(page_limit(1))
         .cursor(Some(cursor.to_owned()))
         .page()

@@ -449,16 +449,25 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
         ("POST", "/v0/maintenance/namespaces/demo/grep/index/enable"),
         ("POST", "/v0/maintenance/namespaces/demo/grep/index/disable"),
         ("GET", "/v0/namespaces/demo/filesystem/revisions"),
-        ("GET", "/v0/namespaces/demo/inodes/ino_1"),
-        ("GET", "/v0/namespaces/demo/inodes/ino_1/children"),
-        ("GET", "/v0/namespaces/demo/inodes/ino_1/revisions"),
         (
             "GET",
-            "/v0/namespaces/demo/inodes/ino_1/revisions/1/content",
+            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000",
+        ),
+        (
+            "GET",
+            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/children",
+        ),
+        (
+            "GET",
+            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/revisions",
+        ),
+        (
+            "GET",
+            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/revisions/1/content",
         ),
         (
             "POST",
-            "/v0/namespaces/demo/inodes/ino_1/revisions/1/downloads",
+            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/revisions/1/downloads",
         ),
         ("GET", "/v0/namespaces/demo/filesystem/trash"),
         ("POST", "/v0/namespaces/demo/commits"),

@@ -2,14 +2,13 @@
 
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
-use loonfs::{
-    ChangeSeq, EntryInodeKind, ErrorCode, InodeId, MetadataCache, NamespaceId, SharedObjectStore,
-};
+use loonfs::{ChangeSeq, EntryInodeKind, ErrorCode, MetadataCache, NamespaceId, SharedObjectStore};
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
+use loonfs_types::ROOT_INODE_ID;
 use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -809,7 +808,7 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
         .stat_path_blocking(&namespace_id, "/")
         .expect("stat root after create");
     assert_eq!(root.path, "/");
-    assert_eq!(root.inode_id, InodeId(1));
+    assert_eq!(root.inode_id, ROOT_INODE_ID);
     assert_eq!(root.inode_kind(), EntryInodeKind::Directory);
     assert_eq!(root.head_seq, ChangeSeq(0));
 

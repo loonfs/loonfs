@@ -160,8 +160,17 @@ async fn fold_wal_and_advance_retention(
         .retention_floor_seq
 }
 
-fn normalize_namespace(mut response: GrepResponse, namespace_id: &NamespaceId) -> GrepResponse {
-    response.namespace_id = namespace_id.clone();
+/// Clears what differs between the responses of two namespaces that contain
+/// the same files: the namespace ID, and the random inode IDs, which also set
+/// the order of the matches.
+fn normalize_namespace(mut response: GrepResponse) -> GrepResponse {
+    response.namespace_id = NamespaceId::parse("normalized").expect("namespace id");
+    for found in &mut response.matches {
+        found.inode_id = loonfs_types::ROOT_INODE_ID;
+    }
+    response.matches.sort_by(|left, right| {
+        (&left.path, left.byte_offset).cmp(&(&right.path, right.byte_offset))
+    });
     response
 }
 
@@ -1114,12 +1123,17 @@ async fn grep_built_through_seq(
         .built_through_seq()
 }
 
+/// Returns the paths of a response's matches in path order. A response lists
+/// its matches in inode ID order, and inode IDs are random, so a test compares
+/// the paths in an order it can predict.
 fn matched_paths(response: &GrepResponse) -> Vec<String> {
-    response
+    let mut paths: Vec<String> = response
         .matches
         .iter()
         .map(|found| found.path.as_str().to_owned())
-        .collect()
+        .collect();
+    paths.sort();
+    paths
 }
 
 #[tokio::test]
@@ -2143,7 +2157,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
             .expect("path scope query")
             .matches
     );
-    inode_scope.scope = GrepScope::Inode(loonfs_types::InodeId(MAX_PUBLIC_INTEGER));
+    inode_scope.scope = GrepScope::Inode(loonfs_types::InodeId::generate());
     let error = new_query(&store, &namespace_id, &inode_scope)
         .await
         .expect_err("a missing inode scope must remain a missing inode");
@@ -2342,8 +2356,8 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
         .await
         .expect("incremental query");
     assert_eq!(
-        normalize_namespace(incremental, &backfill_namespace),
-        backfill
+        normalize_namespace(incremental),
+        normalize_namespace(backfill)
     );
     writer.shutdown().await.expect("shutdown");
 }
@@ -2972,14 +2986,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
             .query(&request("needle"), first_page(), &reads, &store)
             .await
             .expect("grep");
-        assert_eq!(
-            response
-                .matches
-                .iter()
-                .map(|found| found.path.as_str())
-                .collect::<Vec<_>>(),
-            expected
-        );
+        assert_eq!(matched_paths(&response), expected);
     }
     let mut scan = request("ee");
     scan.allow_scan = true;

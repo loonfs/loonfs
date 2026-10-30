@@ -980,7 +980,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
         .await
         .expect("bootstrap");
     // Below the floor: three revisions of a file that stays and of one that is
-    // deleted. The first write of each creates inodes 2 and 3.
+    // deleted.
     for body in ["one", "two", "three"] {
         for path in ["/live.txt", "/deleted.txt"] {
             crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
@@ -992,6 +992,9 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
             .await
             .expect("checkpoint the revisions");
     }
+    let live = crate::test_support::visible_inode_id(&store, &namespace_id, "/live.txt").await;
+    let deleted =
+        crate::test_support::visible_inode_id(&store, &namespace_id, "/deleted.txt").await;
     let deletion_seq = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .delete_path("/deleted.txt", None)
         .await
@@ -1064,18 +1067,20 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
             assert!(result.rows_written <= result.rows_read);
             continue;
         }
-        let kept: Vec<(u64, u64)> = after[&ApiMetadataRowFamily::Revisions]
+        let kept: Vec<(InodeId, u64)> = after[&ApiMetadataRowFamily::Revisions]
             .iter()
             .map(|row| match row {
-                MetadataRow::FileRevision(revision) => {
-                    (revision.inode_id.0, revision.revision_no.0)
-                }
+                MetadataRow::FileRevision(revision) => (revision.inode_id, revision.revision_no.0),
                 other => panic!("the revisions family holds a foreign row: {other:?}"),
             })
             .collect();
+        // Row keys order an inode's revisions newest first, and the inodes by
+        // ID.
+        let mut expected = vec![(live, 5), (live, 4), (live, 3), (deleted, 3)];
+        expected
+            .sort_by_key(|(inode_id, revision_no)| (*inode_id, std::cmp::Reverse(*revision_no)));
         assert_eq!(
-            kept,
-            [(2, 5), (2, 4), (2, 3), (3, 3)],
+            kept, expected,
             "each file keeps the revisions above the floor and its newest at or below it, \
              and the recoverably deleted file keeps its newest"
         );
@@ -1375,7 +1380,7 @@ async fn install_synthetic_bindings_base(
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                 },
-                child_inode_id: InodeId(100_000 + index),
+                child_inode_id: InodeId(u128::from(100_000 + index)),
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
@@ -1387,7 +1392,7 @@ async fn install_synthetic_bindings_base(
             crate::metadata::DirentryBindingRecord {
                 parent_inode_id: parent,
                 name_key: NameKey::parse(&name).expect("name key"),
-                child_inode_id: InodeId(100_000 + index),
+                child_inode_id: InodeId(u128::from(100_000 + index)),
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
@@ -1742,7 +1747,7 @@ async fn large_compaction_inputs(
                 })
                 .collect();
             rows.push(MetadataRow::AttributesRevision(AttributesRevisionRecord {
-                inode_id: InodeId(index * 3 + run + 1),
+                inode_id: InodeId(u128::from(index * 3 + run + 1)),
                 attributes_revision_no: AttributesRevisionNo(1),
                 committed_seq: ChangeSeq(run + 1),
                 commit_id: CommitId::parse(format!("c_{run}")).expect("commit id"),
@@ -2517,21 +2522,23 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
     );
     // Nothing the job rebuilt moved, and the file the fold published is
     // there: the swap replaced its own input and preserved the rest.
-    let visible_after = visible_namespace(&store, &namespace_id).await;
+    let (raced, visible_after): (Vec<_>, Vec<_>) = visible_namespace(&store, &namespace_id)
+        .await
+        .into_iter()
+        .partition(|state| {
+            matches!(
+                &state.file,
+                CurrentFile::Visible { path, .. } if path.as_str() == "/raced-the-finalizer.txt"
+            )
+        });
     assert_eq!(
-        visible_after.len(),
-        visible_before.len() + 1,
-        "the swap must leave the fold's file and nothing else new"
-    );
-    assert_eq!(
-        &visible_after[..visible_before.len()],
-        visible_before.as_slice(),
-        "the swap must not move anything a read already answered"
-    );
-    assert_matches!(
-        visible_after.last().expect("the fold's file").file,
-        CurrentFile::Visible { .. },
+        raced.len(),
+        1,
         "the file the fold published must be visible after the swap"
+    );
+    assert_eq!(
+        visible_after, visible_before,
+        "the swap must not move anything a read already answered"
     );
 }
 
@@ -3706,7 +3713,6 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_even_past_the_filter
     let mut head =
         NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_types::ActorId::loonfs());
     head.seq = ChangeSeq(2);
-    head.next_inode_id = InodeId(3);
     let policy = MetadataRunPolicy::default();
     let manifest = build_namespace_manifest_from_metadata_state(
         &store,

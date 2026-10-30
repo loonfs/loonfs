@@ -892,7 +892,7 @@ mod tests {
             pin_id: None,
             frames: vec![
                 DirectoryTreeFrame {
-                    directory_inode_id: InodeId(1),
+                    directory_inode_id: crate::ROOT_INODE_ID,
                     last_name_key: Some(NameKey::parse("src").expect("name key")),
                 },
                 DirectoryTreeFrame {

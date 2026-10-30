@@ -57,7 +57,7 @@ fn attribute_rows(state: &MetadataState) -> BTreeMap<ApiMetadataRowFamily, Vec<M
 
 fn kept_revisions(
     rows_by_family: &BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
-) -> Vec<(u64, u64)> {
+) -> Vec<(u128, u64)> {
     rows_by_family
         .get(&ApiMetadataRowFamily::Attributes)
         .expect("family rows")

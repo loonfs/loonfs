@@ -3,6 +3,7 @@
 use super::*;
 use loonfs_test_support::stores::replace_object;
 use loonfs_types::Checksum;
+use loonfs_types::ROOT_INODE_ID;
 use std::assert_matches;
 
 #[derive(serde::Serialize)]
@@ -348,7 +349,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     use std::collections::BTreeMap;
     let bind = |seq: u64, delta: u32| {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             name_key: NameKey::parse("docs").expect("valid name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
@@ -363,7 +364,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     };
     let unbind = |unbind_seq: u64| {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             name_key: NameKey::parse("docs").expect("valid name key"),
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -403,7 +404,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     use std::collections::BTreeMap;
     let bind = |delta: u32| {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             name_key: NameKey::parse("docs").expect("valid name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
@@ -417,7 +418,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         })
     };
     let unbind = MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-        parent_inode_id: InodeId(1),
+        parent_inode_id: ROOT_INODE_ID,
         name_key: NameKey::parse("docs").expect("valid name key"),
         child_inode_id: InodeId(2),
         child_kind: loonfs_types::InodeKind::Directory,
@@ -746,9 +747,12 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         })
         .expect("child bind segments");
     let child_segment = child_binds.segments.first().expect("child bind segment");
-    assert!(child_segment
-        .min_row_key
-        .starts_with("direntry-child-bind-000000000000000000"));
+    let first_child = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs")
+        .await
+        .min(crate::test_support::visible_inode_id(&store, &namespace_id, "/docs/hello.txt").await);
+    assert!(child_segment.min_row_key.starts_with(
+        &loonfs_types::format::manifest::lookup_keys::direntry_child_prefix(first_child)
+    ));
 
     let deleted_key = metadata_segment_object_key(child_segment);
     store
