@@ -48,12 +48,11 @@ pub(crate) struct MetadataMergeReport {
     pub(crate) rows_written: u64,
     pub(super) input_bytes: u64,
     pub(super) output_bytes: u64,
-    /// The most decoded input blocks the merge's iterators kept at once, and
-    /// the most rows one retention operator kept. These are what bound the
-    /// merge's memory, so tests assert they do not follow the size of the
-    /// group, of one inode's history, or of one slot's versions.
+    /// The most decoded input blocks the merge's iterators kept at once,
+    /// which bounds the merge's memory, so tests assert it doesn't follow the
+    /// size of the group. A retention operator decides each row as it
+    /// arrives and keeps none.
     pub(crate) peak_resident_blocks: usize,
-    pub(crate) peak_operator_rows: usize,
 }
 
 /// Rebuilds the family group and runs selected by `spec`. `segments` must come
@@ -383,9 +382,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 (locality.as_deref() != Some(row_locality)).then(|| row_locality.to_owned())
             };
             if opened.is_some() {
-                if let Some(kept) = operator.close_group(floor_seq)? {
-                    self.write_row(kept, &mut writers, puts).await?;
-                }
+                operator.close_group();
                 locality = opened;
             }
             let family = *iterators[next].sort_key();
@@ -402,18 +399,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             if !self.kept_inodes.keeps(&row) {
                 continue;
             }
-            if let Some(kept) = operator.take_floor_value_before(&row, floor_seq)? {
+            if let Some(kept) = operator.push(family, row, floor_seq)? {
                 self.write_row(kept, &mut writers, puts).await?;
             }
-            let kept = operator.push(family, row, floor_seq)?;
-            self.result.peak_operator_rows =
-                self.result.peak_operator_rows.max(operator.held_rows());
-            if let Some(kept) = kept {
-                self.write_row(kept, &mut writers, puts).await?;
-            }
-        }
-        if let Some(kept) = operator.close_group(floor_seq)? {
-            self.write_row(kept, &mut writers, puts).await?;
         }
 
         for (_, writer) in writers {
@@ -476,8 +464,14 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let writer = writers
             .get_mut(&family)
             .expect("a cluster should write only the families it merges");
+        // The slot index's summary rows have no copy in the child index, so
+        // the parity digest covers binding events alone.
+        let summary_row = matches!(
+            &row,
+            MetadataRow::DirentryBinding(binding) if !binding.is_binding_event()
+        );
         match index_pair(self.group) {
-            Some((canonical, _)) if family == canonical => {
+            Some((canonical, _)) if family == canonical && !summary_row => {
                 writer.push(row, &mut |encoded| self.canonical_digest.fold(encoded));
             }
             Some((_, index)) if family == index => {
@@ -489,7 +483,8 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     }
 
     /// Refuses to hand back a run whose secondary index does not contain the same
-    /// rows as its canonical family.
+    /// rows as its canonical family, apart from the canonical family's rows
+    /// that the index doesn't store (the slot index's summary rows).
     ///
     /// This is the only index-parity check a merge makes, whichever path is
     /// driving it. Comparing the two families outright is not available to a
@@ -605,6 +600,7 @@ mod tests {
             name_key: NameKey::parse(name).expect("name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
+                revision: Some(crate::test_support::revision_summary()),
             },
             child_inode_id: InodeId(42),
             child_kind: loonfs_types::InodeKind::File,
@@ -612,6 +608,13 @@ mod tests {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(bind_seq),
             delta_index: 0,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(bind_seq),
+                delta_index: 0,
+            },
         })
     }
 
@@ -625,6 +628,13 @@ mod tests {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(bind_seq + 1),
             delta_index: 0,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(bind_seq + 1),
+                delta_index: 0,
+            },
             state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         })
     }

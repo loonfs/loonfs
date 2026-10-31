@@ -460,7 +460,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
                 .expect("visible binding should be bound")
                 .clone(),
             child_inode_id: binding.child_inode_id,
-            position: binding.position(),
+            bind_position: binding.bind_position,
         })
     }
 

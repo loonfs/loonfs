@@ -66,13 +66,6 @@
           "binding_version": "bv-44",
           "revision_no": 7,
           "size_bytes": 5,
-          "content_ref": {
-            "kind": "blob_v1",
-            "owner_namespace_id": "conf-unknown-inode-kinds",
-            "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
-            "size_bytes": 5,
-            "checksum": { "algorithm": "crc64nvme", "value": "3377857006524257" }
-          },
           "revision_committed_by": "conformance-unknown-inode-kinds",
           "revision_committed_at_ms": 1752624000000
         }
@@ -132,13 +125,6 @@
         "binding_version": "bv-44",
         "revision_no": 7,
         "size_bytes": 5,
-        "content_ref": {
-          "kind": "blob_v1",
-          "owner_namespace_id": "conf-unknown-inode-kinds",
-          "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
-          "size_bytes": 5,
-          "checksum": { "algorithm": "crc64nvme", "value": "3377857006524257" }
-        },
         "revision_committed_by": "conformance-unknown-inode-kinds",
         "revision_committed_at_ms": 1752624000000
       }

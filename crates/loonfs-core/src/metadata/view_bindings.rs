@@ -139,27 +139,24 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 self.visible_seq(),
             )),
             MetadataState::direntry_binds,
-            |direntry| direntry.child_inode_id == child_inode_id,
+            |direntry| direntry.child_inode_id == child_inode_id && direntry.is_binding_event(),
             |state| state.indexes.latest_binding_for_child(child_inode_id),
         )
         .await
     }
 
-    /// Returns the bind rows of `parent_inode_id` that the row states contain
-    /// after `start_after_name_key`, with their row keys, in row-key order.
-    pub(super) fn tail_direntry_bind_page_candidates(
+    /// Returns the slot-index rows of `parent_inode_id` that the row states
+    /// contain at or after `lower_bound`, with their row keys, in row-key
+    /// order.
+    pub(super) fn tail_direntry_binds(
         &self,
         parent_inode_id: InodeId,
-        start_after_name_key: Option<&NameKey>,
+        lower_bound: &str,
     ) -> Vec<(String, DirentryBindingRecord)> {
-        let mut candidates = self
+        let mut rows = self
             .row_states()
             .flat_map(|state| state.direntry_binds())
-            .filter(|direntry| {
-                direntry.parent_inode_id == parent_inode_id
-                    && start_after_name_key
-                        .is_none_or(|last_name_key| &direntry.name_key > last_name_key)
-            })
+            .filter(|direntry| direntry.parent_inode_id == parent_inode_id)
             .map(|record| {
                 let row_key = lookup_keys::direntry_bind_row_key(
                     record.parent_inode_id,
@@ -170,9 +167,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 );
                 (row_key, record.clone())
             })
+            .filter(|(row_key, _)| row_key.as_str() >= lower_bound)
             .collect::<Vec<_>>();
-        candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
-        candidates
+        rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+        rows
     }
 
     /// One page of the namespace's deletions in `range` that no undelete has
@@ -220,11 +218,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         let segments = self.manifest_segments();
         let raw_limit = limit.max(ACTIVE_DELETION_RAW_SCAN_LIMIT);
         // A short page is the end of the range.
-        let refill = |after: Option<String>| async move {
-            let lower_bound = after.map_or_else(
-                || range.lower_bound.clone(),
-                |row_key| lookup_keys::after_row_key(&row_key),
-            );
+        let refill = |lower_bound: String| async move {
             let rows = manifest_index::active_deletions_page(
                 segments,
                 &lower_bound,
@@ -237,7 +231,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 rows,
             })
         };
-        let mut merge = ManifestTailMerge::new(tail, TieOrder::TailFirst);
+        let mut merge =
+            ManifestTailMerge::new(range.lower_bound.clone(), tail, TieOrder::TailFirst);
         let mut entries = Vec::with_capacity(limit);
         let mut removed_position: Option<(ChangeSeq, InodeId)> = None;
         let mut last_row_key: Option<String> = None;
@@ -261,17 +256,26 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         Ok(entries)
     }
 
+    /// Returns the root's tombstone events that its newest event at the
+    /// view's sequence is among: the manifest's newest event at or below the
+    /// sequence, and the row states' events.
     pub(super) async fn tombstones_for_root(
         &self,
         root_inode_id: InodeId,
     ) -> Result<SharedRows<SubtreeTombstoneRecord>> {
+        let segments = self.manifest_segments();
+        let visible_seq = self.visible_seq();
         self.shared_rows(
             |inner| &mut inner.tombstones_for_root,
             root_inode_id,
-            Box::pin(manifest_index::tombstones_for_root(
-                self.manifest_segments(),
-                root_inode_id,
-            )),
+            Box::pin(async move {
+                Ok(
+                    manifest_index::newest_tombstone_for_root(segments, root_inode_id, visible_seq)
+                        .await?
+                        .into_iter()
+                        .collect(),
+                )
+            }),
             MetadataState::subtree_tombstones,
             |tombstone| tombstone.root_inode_id == root_inode_id,
             |state| state.indexes.latest_tombstone(root_inode_id),

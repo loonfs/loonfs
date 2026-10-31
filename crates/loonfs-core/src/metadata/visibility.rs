@@ -500,7 +500,7 @@ where
         .display_name()
         .expect("visible binding should be bound")
         .to_string();
-    let binding_version = Some(last.position());
+    let binding_version = Some(last.bind_position);
     Ok(ResolvedVisiblePath {
         absolute_path: current_absolute_path,
         inode_id: last.child_inode_id,

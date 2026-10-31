@@ -26,9 +26,18 @@ pub(crate) fn manifest_rows_for_family(
             .cloned()
             .map(MetadataRow::Inode)
             .collect::<Vec<_>>(),
-        MetadataRowFamily::DirentryBinds | MetadataRowFamily::DirentryChildBinds => metadata_state
+        MetadataRowFamily::DirentryBinds => metadata_state
             .direntry_binds()
             .iter()
+            .cloned()
+            .map(MetadataRow::DirentryBinding)
+            .collect::<Vec<_>>(),
+        // The child index stores the binding events, without the slot
+        // index's summary rows.
+        MetadataRowFamily::DirentryChildBinds => metadata_state
+            .direntry_binds()
+            .iter()
+            .filter(|binding| binding.is_binding_event())
             .cloned()
             .map(MetadataRow::DirentryBinding)
             .collect::<Vec<_>>(),

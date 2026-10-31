@@ -325,7 +325,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     );
     assert!(!binds.iter().any(|row| matches!(
         row,
-        MetadataRow::DirentryBinding (crate::metadata::DirentryBindingRecord { state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name }, .. }) if display_name.as_str() == "tmp.txt"
+        MetadataRow::DirentryBinding (crate::metadata::DirentryBindingRecord { state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name, .. }, .. }) if display_name.as_str() == "tmp.txt"
     )));
     assert!(materialized
         .metadata_state
@@ -353,6 +353,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
             name_key: NameKey::parse("docs").expect("valid name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
+                revision: None,
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -360,6 +361,13 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(seq),
             delta_index: delta,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(seq),
+                delta_index: delta,
+            },
         })
     };
     let unbind = |unbind_seq: u64| {
@@ -372,6 +380,13 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(unbind_seq),
             delta_index: 0,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(unbind_seq),
+                delta_index: 0,
+            },
             state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         })
     };
@@ -408,6 +423,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
             name_key: NameKey::parse("docs").expect("valid name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
+                revision: None,
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -415,6 +431,13 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(1),
             delta_index: delta,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(1),
+                delta_index: delta,
+            },
         })
     };
     let unbind = MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
@@ -426,6 +449,13 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         child_created_at_ms: 4_200,
         committed_seq: ChangeSeq(1),
         delta_index: 1,
+        commit_id: crate::test_support::binding_commit_id(),
+        committed_by: loonfs_types::ActorId::loonfs(),
+        committed_at_ms: 0,
+        bind_position: loonfs_types::format::manifest::DeltaPosition {
+            seq: ChangeSeq(1),
+            delta_index: 1,
+        },
         state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
     });
     let mut rows = BTreeMap::new();
@@ -464,8 +494,11 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     }
 }
 
+/// Checks that a manifest whose slot index has more rows than its child
+/// index, as the summary rows make it, loads, and that one whose child index
+/// has more rows than its slot index doesn't.
 #[tokio::test]
-async fn manifest_load_rejects_unequal_index_descriptor_counts() {
+async fn manifest_load_rejects_a_child_index_with_more_rows_than_the_slot_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -481,21 +514,37 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
         .await
         .expect("create checkpoint");
 
-    // Tamper only the descriptor's row_count for the child-bind index family;
-    // the per-run count-equality check must reject the manifest at load.
+    // The file's revision wrote a summary row to the slot index alone.
     let manifest =
         load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
-            .expect("load manifest")
+            .expect("a slot index with summary rows loads")
             .manifest;
     let mut payload = manifest.payload().clone();
+    let rows_of = |payload: &NamespaceManifestPayload, family| {
+        payload
+            .runs
+            .iter()
+            .flat_map(|run| &run.segments)
+            .filter(|descriptor| descriptor.family == family)
+            .map(|descriptor| descriptor.row_count)
+            .sum::<u64>()
+    };
+    let slot_rows = rows_of(&payload, ApiMetadataRowFamily::DirentryBinds);
+    assert_eq!(
+        slot_rows,
+        rows_of(&payload, ApiMetadataRowFamily::DirentryChildBinds) + 1
+    );
+
+    // Tamper only the descriptor's row_count for the child-bind index
+    // family, so the child index has more rows than the slot index.
     let descriptor = payload
         .runs
         .iter_mut()
         .flat_map(|run| &mut run.segments)
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryChildBinds)
         .expect("child-bind index descriptor");
-    descriptor.row_count += 1;
+    descriptor.row_count += 2;
     let manifest_number = payload.manifest_no;
     overwrite_manifest(
         &store,

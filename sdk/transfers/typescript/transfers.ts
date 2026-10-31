@@ -333,6 +333,9 @@ async function downloadProxied(
         if (entry.inode_kind !== "file") {
             throw new Error(`path is a ${entry.inode_kind}, not a file`);
         }
+        if (entry.content_ref === undefined) {
+            throw new Error(`entry read for ${input.path} has no content_ref`);
+        }
         claim = entry.content_ref;
         revisionNo = entry.revision_no;
     } else {

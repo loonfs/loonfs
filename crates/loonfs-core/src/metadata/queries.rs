@@ -208,7 +208,9 @@ impl MetadataState {
         self.direntry_binds
             .iter()
             .filter(|direntry| {
-                direntry.child_inode_id == child_inode_id && direntry.committed_seq <= base_seq
+                direntry.child_inode_id == child_inode_id
+                    && direntry.is_binding_event()
+                    && direntry.committed_seq <= base_seq
             })
             .max_by_key(|direntry| direntry.position())
             .cloned()

@@ -2,6 +2,7 @@
 
 use super::merge_iterator::LocalityGrouping;
 use crate::error::{CoreError, Result};
+use crate::metadata::DirentryBindingRecord;
 use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
 use loonfs_types::MetadataFamilyGroup;
 use loonfs_types::{ChangeSeq, InodeId, NameKey};
@@ -25,8 +26,9 @@ pub(crate) enum RetentionRule {
     /// Remove cancelled deletion pairs and the listed rows of expired
     /// deletions.
     ActiveDeletions,
-    /// Per edge, retains the values above the floor and the bound value at
-    /// the floor.
+    /// Per edge and per kind of row, retains the values above the floor and
+    /// the newest value at or below it, unless the edge is unbound at the
+    /// floor.
     Bindings,
 }
 
@@ -43,7 +45,7 @@ impl RetentionRule {
                 acknowledged_floor_seq,
                 revoked: false,
             }),
-            Self::Bindings => RetentionOperator::Bindings(Box::default()),
+            Self::Bindings => RetentionOperator::Bindings(BindingRetention::default()),
         }
     }
 }
@@ -56,12 +58,11 @@ pub(crate) enum RetentionOperator {
     CommitHistory,
     WholeState(WholeStateRetention),
     ActiveDeletions(ActiveDeletionRetention),
-    Bindings(Box<BindingRetention>),
+    Bindings(BindingRetention),
 }
 
 impl RetentionOperator {
-    /// Returns the retained row, or `None` when the row is dropped or kept
-    /// until [`Self::close_group`].
+    /// Returns the retained row, or `None` when the row is dropped.
     pub(crate) fn push(
         &mut self,
         family: MetadataRowFamily,
@@ -79,50 +80,15 @@ impl RetentionOperator {
         Ok(kept.map(|row| (family, row)))
     }
 
-    pub(crate) fn take_floor_value_before(
-        &mut self,
-        row: &MetadataRow,
-        floor_seq: ChangeSeq,
-    ) -> Result<Option<KeptRow>> {
-        match (self, row) {
-            (Self::Bindings(state), MetadataRow::DirentryBinding(binding))
-                if binding.committed_seq > floor_seq =>
-            {
-                state.close_group()
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// Finishes the current key group and returns any retained row.
-    pub(crate) fn close_group(&mut self, _floor_seq: ChangeSeq) -> Result<Option<KeptRow>> {
+    /// Finishes the current key group. Every rule decides each row as it
+    /// arrives, so no row waits for the end of its group.
+    pub(crate) fn close_group(&mut self) {
         match self {
-            Self::KeepEveryRow | Self::CommitHistory => Ok(None),
-            Self::FirstPerGroup(kept) => {
-                *kept = false;
-                Ok(None)
-            }
-            Self::WholeState(state) => {
-                state.close_group();
-                Ok(None)
-            }
-            Self::ActiveDeletions(state) => {
-                state.close_group();
-                Ok(None)
-            }
+            Self::KeepEveryRow | Self::CommitHistory => {}
+            Self::FirstPerGroup(kept) => *kept = false,
+            Self::WholeState(state) => state.close_group(),
+            Self::ActiveDeletions(state) => state.close_group(),
             Self::Bindings(state) => state.close_group(),
-        }
-    }
-
-    /// Number of rows this operator currently keeps.
-    pub(super) fn held_rows(&self) -> usize {
-        match self {
-            Self::KeepEveryRow
-            | Self::FirstPerGroup(_)
-            | Self::CommitHistory
-            | Self::WholeState(_)
-            | Self::ActiveDeletions(_) => 0,
-            Self::Bindings(state) => usize::from(state.at_floor.is_some()),
         }
     }
 }
@@ -260,14 +226,45 @@ impl ActiveDeletionRetention {
     }
 }
 
+/// Applies the binding rule to one binding index, whose keys sort each
+/// edge's rows newest first.
+///
+/// An edge's rows in the slot index are of two kinds: binding events, which
+/// both indexes store, and summary rows, which the slot index alone stores.
+/// For each edge and each kind, the operator keeps every row above the floor
+/// and the kind's first row at or below it, which is the newest at or below
+/// the floor, and drops the kind's later rows. When the edge's first binding
+/// event at or below the floor is unbound, the edge was unbound at the
+/// floor, so the operator drops the edge's rows of both kinds at or below
+/// it. The child index stores binding events alone, so the rule reads the
+/// same there with one kind. Both indexes keep or drop each binding event
+/// the same way
+/// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
+///
+/// A summary row exists only while its edge is bound, so a summary row that
+/// arrives before the edge's first binding event at or below the floor
+/// belongs to a binding that is still in place at the floor.
 #[derive(Debug, Default)]
 pub(crate) struct BindingRetention {
-    at_floor: Option<KeptRow>,
-    /// The parent, name, and child of the last bound floor value this index
-    /// kept. The slot index keeps one slot's edges adjacent and the child
-    /// index keeps one child's edges adjacent, so a second edge bound in the
-    /// same slot, or for the same child, is always compared with this one.
+    /// The state of the edge at the floor, once the edge's first binding
+    /// event at or below the floor has arrived.
+    floor_event: Option<FloorEvent>,
+    /// Whether the edge's first summary row at or below the floor has
+    /// arrived.
+    floor_summary_seen: bool,
+    /// The parent, name, and child of the last edge bound at the floor in
+    /// this index. The slot index keeps one slot's edges adjacent and the
+    /// child index keeps one child's edges adjacent, so a second edge bound
+    /// in the same slot, or for the same child, is always compared with this
+    /// one.
     last_bound_edge: Option<(InodeId, NameKey, InodeId)>,
+}
+
+/// An edge's binding event at the floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloorEvent {
+    Bound,
+    Unbound,
 }
 
 impl BindingRetention {
@@ -283,30 +280,36 @@ impl BindingRetention {
         if binding.committed_seq > floor_seq {
             return Ok(Some(row));
         }
-        if binding.is_bound() {
-            if let Some((_, MetadataRow::DirentryBinding(previous))) = &self.at_floor {
-                return Err(CoreError::NamespaceCorrupt(format!(
-                    "binding at seq `{}` delta `{}` is superseded at or below the retention floor without an unbound version",
-                    previous.committed_seq, previous.delta_index
-                )));
-            }
+        if !binding.is_binding_event() {
+            let keep = self.floor_event != Some(FloorEvent::Unbound) && !self.floor_summary_seen;
+            self.floor_summary_seen = true;
+            return Ok(keep.then_some(row));
         }
-        self.at_floor = binding.is_bound().then_some((family, row));
-        Ok(None)
+        if self.floor_event.is_some() {
+            return Ok(None);
+        }
+        if !binding.is_bound() {
+            self.floor_event = Some(FloorEvent::Unbound);
+            return Ok(None);
+        }
+        self.floor_event = Some(FloorEvent::Bound);
+        self.refuse_a_second_bound_edge(family, binding)?;
+        Ok(Some(row))
     }
 
-    fn close_group(&mut self) -> Result<Option<KeptRow>> {
-        let Some(kept) = self.at_floor.take() else {
-            return Ok(None);
-        };
-        let (family, MetadataRow::DirentryBinding(binding)) = &kept else {
-            return Ok(Some(kept));
-        };
+    /// Refuses a second edge bound at the floor in the slot of the last
+    /// bound edge, in the slot index, or for its child, in the child index.
+    /// Commit validation allows one child per slot and one parent per child.
+    fn refuse_a_second_bound_edge(
+        &mut self,
+        family: MetadataRowFamily,
+        binding: &DirentryBindingRecord,
+    ) -> Result<()> {
         if let Some((parent_inode_id, name_key, child_inode_id)) = &self.last_bound_edge {
             let same_slot =
                 *parent_inode_id == binding.parent_inode_id && *name_key == binding.name_key;
             let same_child = *child_inode_id == binding.child_inode_id;
-            if *family == MetadataRowFamily::DirentryBinds && same_slot {
+            if family == MetadataRowFamily::DirentryBinds && same_slot {
                 return Err(CoreError::NamespaceCorrupt(format!(
                     "parent `{parent_inode_id}` binds name `{name_key}` to children \
                      `{child_inode_id}` and `{}` at or below the retention floor; refusing to \
@@ -314,7 +317,7 @@ impl BindingRetention {
                     binding.child_inode_id
                 )));
             }
-            if *family == MetadataRowFamily::DirentryChildBinds && same_child {
+            if family == MetadataRowFamily::DirentryChildBinds && same_child {
                 return Err(CoreError::NamespaceCorrupt(format!(
                     "child `{child_inode_id}` is bound as `{name_key}` under parent \
                      `{parent_inode_id}` and as `{}` under parent `{}` at or below the retention \
@@ -328,7 +331,12 @@ impl BindingRetention {
             binding.name_key.clone(),
             binding.child_inode_id,
         ));
-        Ok(Some(kept))
+        Ok(())
+    }
+
+    fn close_group(&mut self) {
+        self.floor_event = None;
+        self.floor_summary_seen = false;
     }
 }
 
@@ -341,7 +349,7 @@ pub(crate) struct RetentionCluster {
 }
 
 // Both indexes put an edge's parent, name, and child ahead of its position, so
-// positions run oldest first only within one edge.
+// positions run newest first within one edge.
 const BINDINGS_CLUSTERS: [RetentionCluster; 2] = [
     RetentionCluster {
         families: &[MetadataRowFamily::DirentryBinds],
@@ -468,7 +476,7 @@ mod tests {
             let key = row.row_key();
             let group = locality_of(family, &key, cluster.locality);
             if previous != group {
-                operator.close_group(ChangeSeq(0)).expect("close");
+                operator.close_group();
                 previous = group.to_owned();
             }
             if let Some((_, row)) = operator.push(family, row, ChangeSeq(0)).expect("push") {
@@ -543,38 +551,73 @@ mod tests {
         }
     }
 
-    fn bind_row(parent: u64, name: &str, child: u64, bind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(u128::from(parent)),
-            name_key: NameKey::parse(name).expect("name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                display_name: DisplayName::parse(name).expect("display name"),
-            },
-            child_inode_id: InodeId(u128::from(child)),
-            child_kind: loonfs_types::InodeKind::File,
-            child_created_by: loonfs_types::ActorId::loonfs(),
-            child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(bind_seq),
-            delta_index: 0,
-        })
+    /// A binding row of the file `child` named `name` under `parent`, at
+    /// `seq`, of the binding that the bind at `bind_seq` established.
+    fn binding_row(
+        parent: u64,
+        name: &str,
+        child: u64,
+        seq: u64,
+        bind_seq: u64,
+        bound: bool,
+    ) -> MetadataRow {
+        let mut record = crate::test_support::binding_row(parent, name, child, seq);
+        record.bind_position.seq = ChangeSeq(bind_seq);
+        if !bound {
+            record.state = loonfs_types::format::manifest::DirentryBindingState::Unbound;
+        }
+        MetadataRow::DirentryBinding(record)
     }
 
-    fn unbind_row(parent: u64, name: &str, unbind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(u128::from(parent)),
-            name_key: NameKey::parse(name).expect("name key"),
-            child_inode_id: InodeId(42),
-            child_kind: loonfs_types::InodeKind::File,
-            child_created_by: loonfs_types::ActorId::loonfs(),
-            child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(unbind_seq),
-            delta_index: 0,
-            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
-        })
+    fn bind_row(parent: u64, name: &str, child: u64, bind_seq: u64) -> MetadataRow {
+        binding_row(parent, name, child, bind_seq, bind_seq, true)
+    }
+
+    fn summary_row(child: u64, seq: u64, bind_seq: u64) -> MetadataRow {
+        binding_row(7, "a.txt", child, seq, bind_seq, true)
+    }
+
+    fn unbind_row(child: u64, seq: u64, bind_seq: u64) -> MetadataRow {
+        binding_row(7, "a.txt", child, seq, bind_seq, false)
+    }
+
+    /// Runs `rows` through the retention rule of `family`'s cluster in key
+    /// order, as a base merge does, and returns the rows it keeps.
+    fn retained(
+        group: MetadataFamilyGroup,
+        family: MetadataRowFamily,
+        mut rows: Vec<MetadataRow>,
+    ) -> Vec<MetadataRow> {
+        use super::super::merge_iterator::locality_of;
+        if family == MetadataRowFamily::DirentryChildBinds {
+            rows.retain(|row| {
+                matches!(row, MetadataRow::DirentryBinding(binding) if binding.is_binding_event())
+            });
+        }
+        rows.sort_by_key(|row| row.row_key_for_family(family));
+        let cluster = retention_clusters(group)
+            .iter()
+            .find(|cluster| cluster.families.contains(&family))
+            .expect("a cluster merges the family");
+        let mut operator = cluster.rule.operator(ChangeSeq(0));
+        let mut locality: Option<String> = None;
+        let mut kept = Vec::new();
+        for row in rows {
+            let key = row.row_key_for_family(family);
+            let row_locality = locality_of(family, &key, cluster.locality);
+            if locality.as_deref() != Some(row_locality) {
+                operator.close_group();
+                locality = Some(row_locality.to_owned());
+            }
+            if let Some((_, row)) = operator.push(family, row, floor()).expect("push") {
+                kept.push(row);
+            }
+        }
+        kept
     }
 
     #[test]
-    fn one_inode_keeps_the_newest_row_at_the_floor_and_holds_nothing() {
+    fn one_inode_keeps_the_newest_row_at_the_floor() {
         for family in WHOLE_STATE_FAMILIES {
             let mut operator = RetentionRule::WholeState.operator(ChangeSeq(0));
             let mut kept = Vec::new();
@@ -598,7 +641,6 @@ mod tests {
                 if let Some((_, row)) = pushed {
                     kept.push(row);
                 }
-                assert_eq!(operator.held_rows(), 0);
             }
             assert_eq!(kept.len(), 3, "two above the floor and the newest below it");
             assert_eq!(kept[2], whole_state_row(family, 7, 100_000, 50));
@@ -663,9 +705,8 @@ mod tests {
             .push(MetadataRowFamily::ActiveDeletions, listed(3), floor())
             .expect("push")
             .is_none());
-        assert_eq!(operator.held_rows(), 0);
 
-        operator.close_group(floor()).expect("close");
+        operator.close_group();
         assert!(
             operator
                 .push(MetadataRowFamily::ActiveDeletions, listed(3), floor())
@@ -682,7 +723,7 @@ mod tests {
         let mut operator = RetentionRule::ActiveDeletions.operator(ChangeSeq(40));
         let mut kept = Vec::new();
         for deletion_seq in [39, 40, 41, 99] {
-            operator.close_group(floor()).expect("close");
+            operator.close_group();
             if let Some((_, row)) = operator
                 .push(
                     MetadataRowFamily::ActiveDeletions,
@@ -697,97 +738,159 @@ mod tests {
         assert_eq!(kept, vec![listed(41), listed(99)]);
     }
 
+    /// Checks that both binding indexes keep an edge's rows above the floor
+    /// and its newest bound row at or below it, reading the edge newest
+    /// first, and that the tombstone family keeps every event.
     #[test]
-    fn one_slot_of_many_versions_holds_at_most_one_row() {
-        let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
-        let mut kept = Vec::new();
-        let mut peak = 0usize;
-        for position in 1..=100_000u64 {
-            operator
-                .push(
-                    MetadataRowFamily::DirentryBinds,
-                    bind_row(7, "hot.txt", 42, position * 2 - 1),
-                    ChangeSeq(200_000),
-                )
-                .expect("push");
-            peak = peak.max(operator.held_rows());
-            operator
-                .push(
-                    MetadataRowFamily::DirentryBinds,
-                    unbind_row(7, "hot.txt", position * 2),
-                    ChangeSeq(200_000),
-                )
-                .expect("push");
-            peak = peak.max(operator.held_rows());
-            if let Some((_, row)) = operator.close_group(ChangeSeq(200_000)).expect("close") {
-                kept.push(row);
-            }
+    fn binding_and_tombstone_histories_keep_their_floor_rows_newest_first() {
+        // An edge bound at 50, unbound at 60, bound again at 70 and 120.
+        let edge = vec![
+            bind_row(7, "a.txt", 42, 50),
+            unbind_row(42, 60, 50),
+            bind_row(7, "a.txt", 42, 70),
+            unbind_row(42, 110, 70),
+            bind_row(7, "a.txt", 42, 120),
+        ];
+        for family in [
+            MetadataRowFamily::DirentryBinds,
+            MetadataRowFamily::DirentryChildBinds,
+        ] {
+            assert_eq!(
+                retained(MetadataFamilyGroup::Bindings, family, edge.clone()),
+                vec![
+                    bind_row(7, "a.txt", 42, 120),
+                    unbind_row(42, 110, 70),
+                    bind_row(7, "a.txt", 42, 70),
+                ],
+                "{family:?}"
+            );
         }
-        assert_eq!(peak, 1, "the operator holds one bind row and no more");
-        assert!(kept.is_empty(), "every floor value is unbound");
+        let tombstone = |seq: u64, set: bool| {
+            MetadataRow::Tombstone(crate::metadata::SubtreeTombstoneRecord {
+                root_inode_id: InodeId(42),
+                committed_seq: ChangeSeq(seq),
+                delta_index: 0,
+                commit_id: crate::test_support::binding_commit_id(),
+                action: if set {
+                    crate::metadata::TombstoneRowAction::Set {
+                        deleted_binding: loonfs_types::format::manifest::DeletedBinding {
+                            parent_inode_id: InodeId(7),
+                            name_key: NameKey::parse("a.txt").expect("name key"),
+                            display_name: DisplayName::parse("a.txt").expect("display name"),
+                        },
+                    }
+                } else {
+                    crate::metadata::TombstoneRowAction::Revoke {
+                        target: loonfs_types::format::manifest::DeltaPosition {
+                            seq: ChangeSeq(seq - 1),
+                            delta_index: 0,
+                        },
+                    }
+                },
+                committed_by: loonfs_types::ActorId::loonfs(),
+                committed_at_ms: 0,
+            })
+        };
+        let events = vec![
+            tombstone(40, true),
+            tombstone(41, false),
+            tombstone(90, true),
+            tombstone(91, false),
+            tombstone(130, true),
+        ];
+        let mut newest_first = events.clone();
+        newest_first.reverse();
+        assert_eq!(
+            retained(
+                MetadataFamilyGroup::Tombstones,
+                MetadataRowFamily::Tombstones,
+                events
+            ),
+            newest_first
+        );
     }
 
+    /// Checks that an edge with summary rows above, at, and below the floor
+    /// keeps its rows above the floor and the floor row of each kind, so the
+    /// child index and the slot index keep the same binding events.
     #[test]
-    fn a_second_unretired_bind_in_one_slot_is_refused() {
-        let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
-        operator
-            .push(
+    fn an_edge_keeps_the_floor_row_of_each_kind() {
+        // Bound at 20, written at 30, 40, 90, and 130, with the floor at 100.
+        let edge = vec![
+            bind_row(7, "a.txt", 42, 20),
+            summary_row(42, 30, 20),
+            summary_row(42, 40, 20),
+            summary_row(42, 90, 20),
+            summary_row(42, 130, 20),
+        ];
+        assert_eq!(
+            retained(
+                MetadataFamilyGroup::Bindings,
                 MetadataRowFamily::DirentryBinds,
-                bind_row(7, "a.txt", 42, 10),
-                floor(),
-            )
-            .expect("push");
-        assert!(operator
-            .close_group(floor())
-            .expect("close")
-            .is_some_and(|(family, _)| family == MetadataRowFamily::DirentryBinds));
-
-        // The next slot is unaffected by the one before it: the bind left
-        // standing in `a.txt` is that slot's latest, which is what the
-        // invariant allows.
-        operator
-            .push(
-                MetadataRowFamily::DirentryBinds,
-                bind_row(7, "b.txt", 42, 11),
-                floor(),
-            )
-            .expect("push");
-
-        let error = operator
-            .push(
-                MetadataRowFamily::DirentryBinds,
-                bind_row(7, "b.txt", 42, 12),
-                floor(),
-            )
-            .expect_err("a superseded bind with no unbind is refused");
-        assert!(
-            error.to_string().contains("seq `11`"),
-            "the error must name the bind that was superseded, got: {error}"
+                edge.clone()
+            ),
+            vec![
+                summary_row(42, 130, 20),
+                summary_row(42, 90, 20),
+                bind_row(7, "a.txt", 42, 20),
+            ]
         );
-        assert!(error.to_string().contains("superseded at or below"));
+        assert_eq!(
+            retained(
+                MetadataFamilyGroup::Bindings,
+                MetadataRowFamily::DirentryChildBinds,
+                edge
+            ),
+            vec![bind_row(7, "a.txt", 42, 20)]
+        );
+    }
+
+    /// Checks that an edge whose binding event at the floor is unbound loses
+    /// its rows of both kinds at or below the floor, and keeps the rows above
+    /// it.
+    #[test]
+    fn an_unbound_floor_row_drops_the_edges_history() {
+        let edge = vec![
+            bind_row(7, "a.txt", 42, 20),
+            summary_row(42, 30, 20),
+            unbind_row(42, 50, 20),
+            bind_row(7, "a.txt", 42, 110),
+            summary_row(42, 120, 110),
+        ];
+        for family in [
+            MetadataRowFamily::DirentryBinds,
+            MetadataRowFamily::DirentryChildBinds,
+        ] {
+            let mut expected = vec![summary_row(42, 120, 110), bind_row(7, "a.txt", 42, 110)];
+            if family == MetadataRowFamily::DirentryChildBinds {
+                expected.remove(0);
+            }
+            assert_eq!(
+                retained(MetadataFamilyGroup::Bindings, family, edge.clone()),
+                expected,
+                "{family:?}"
+            );
+        }
     }
 
     #[test]
     fn two_children_bound_in_one_slot_at_the_floor_are_refused() {
         let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
-        operator
+        assert!(operator
             .push(
                 MetadataRowFamily::DirentryBinds,
                 bind_row(7, "a.txt", 2, 20),
                 floor(),
             )
-            .expect("push");
-        assert!(operator.close_group(floor()).expect("close").is_some());
-        operator
+            .expect("push")
+            .is_some());
+        operator.close_group();
+        let error = operator
             .push(
                 MetadataRowFamily::DirentryBinds,
                 bind_row(7, "a.txt", 3, 10),
                 floor(),
             )
-            .expect("push");
-
-        let error = operator
-            .close_group(floor())
             .expect_err("a second child bound in the slot at the floor is refused");
         assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert!(
@@ -802,28 +905,25 @@ mod tests {
     fn two_edges_bound_for_one_child_at_the_floor_are_refused() {
         let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
         for (parent, name, child) in [(9, "z.txt", 41), (7, "a.txt", 42)] {
-            operator
-                .push(
-                    MetadataRowFamily::DirentryChildBinds,
-                    bind_row(parent, name, child, 20),
-                    floor(),
-                )
-                .expect("push");
             assert!(
-                operator.close_group(floor()).expect("close").is_some(),
+                operator
+                    .push(
+                        MetadataRowFamily::DirentryChildBinds,
+                        bind_row(parent, name, child, 20),
+                        floor(),
+                    )
+                    .expect("push")
+                    .is_some(),
                 "one bound edge per child is kept"
             );
+            operator.close_group();
         }
-        operator
+        let error = operator
             .push(
                 MetadataRowFamily::DirentryChildBinds,
                 bind_row(8, "b.txt", 42, 10),
                 floor(),
             )
-            .expect("push");
-
-        let error = operator
-            .close_group(floor())
             .expect_err("a second edge bound for the child at the floor is refused");
         assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert!(

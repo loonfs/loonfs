@@ -370,11 +370,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     }
 
     /// Returns the latest revision for an inode already proven visible at
-    /// this session's seq. Unlike [`MetadataView::latest_revision_head`],
-    /// this skips re-deriving the inode's visibility: the re-check costs a
-    /// full child-binds scan and tombstone probe per entry on a wide listing,
-    /// and it cannot disagree with the enumeration that admitted the entry
-    /// at the same seq.
+    /// this session's seq, for a stat. Unlike
+    /// [`MetadataView::latest_revision_head`], this skips re-deriving the
+    /// inode's visibility, because it can't disagree with the resolution
+    /// that admitted the inode at the same seq. A listing reads no revision:
+    /// it reports the revision summary in each file's binding row.
     pub(crate) async fn latest_revision_head_of_visible(
         &mut self,
         inode_id: InodeId,
@@ -387,25 +387,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.latest_revision_head_cache
             .insert(inode_id, revision.clone());
         Ok(revision)
-    }
-
-    pub(crate) async fn preload_revision_heads(
-        &mut self,
-        file_inode_ids: &[InodeId],
-    ) -> Result<()> {
-        let mut pending: Vec<_> = file_inode_ids
-            .iter()
-            .copied()
-            .filter(|inode_id| !self.latest_revision_head_cache.contains_key(inode_id))
-            .collect();
-        pending.sort_unstable();
-        pending.dedup();
-        let base = &self.base;
-        let loaded =
-            preload_inode_groups(&pending, |inode_id| base.latest_revision_record(inode_id))
-                .await?;
-        self.latest_revision_head_cache.extend(loaded);
-        Ok(())
     }
 
     pub(crate) async fn preload_access_rows(

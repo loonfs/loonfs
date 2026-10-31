@@ -7,9 +7,7 @@ use super::loaded_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CURRENT_FILES_PER_STAT;
-use crate::metadata::{
-    AncestorWalk, DirentryBindingRecord, MetadataViewSession, ResolvedVisiblePath,
-};
+use crate::metadata::{AncestorWalk, MetadataViewSession, ResolvedVisiblePath};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use std::collections::HashMap;
@@ -141,7 +139,7 @@ pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
             .unwrap_or_default(),
         binding_version: current_binding
             .as_ref()
-            .map(DirentryBindingRecord::position),
+            .map(|binding| binding.bind_position),
     }))
 }
 

@@ -321,8 +321,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     }
 
     // Each stat reads three segments: the first run's bindings for the parent
-    // directories, the run with the file's binding, and the run with its
-    // newest revision. The file's keys contain its inode ID, whose low bits
+    // directories, the newest run with a row of the file's binding, and the
+    // run with its newest revision. Each revision writes a summary row under
+    // the file's binding, so the hot file's newest binding row is in the run
+    // with its newest revision. The file's keys contain its inode ID, whose low bits
     // are random, so a newer run's inline filter can admit a key by a false
     // positive, and the newest-first lookup then reads that run's segment too.
     // The batch runs are the newest `RUNS` delta runs, oldest first.
@@ -367,7 +369,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             ),
             (
                 "hot.txt",
-                3 + false_positive_gets("hot.txt", inode_ids[1], 0, RUNS - 1)
+                3 + false_positive_gets("hot.txt", inode_ids[1], RUNS - 1, RUNS - 1)
             ),
         ],
         "segment GETs of each cold stat, of {gets_per_stat:?} GETs in all"

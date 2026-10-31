@@ -257,11 +257,13 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .await
         .expect("layout statistics");
     assert_eq!(layout.manifest_bytes, stored_length);
+    // The second write's run has the revision's summary row in the slot
+    // index, and no binding event for the child index.
     assert_eq!(
         layout.segments_by_family,
         BTreeMap::from([
             (MetadataRowFamily::Inodes, 1),
-            (MetadataRowFamily::DirentryBinds, 1),
+            (MetadataRowFamily::DirentryBinds, 2),
             (MetadataRowFamily::DirentryChildBinds, 1),
             (MetadataRowFamily::Revisions, 2),
             (MetadataRowFamily::Tombstones, 0),

@@ -16,13 +16,18 @@ use serde::{Deserialize, Serialize};
 pub enum MetadataRowFamily {
     /// Stores inode identity, kind, and creation position.
     Inodes,
-    /// Orders directory bindings for parent-and-name visibility lookups.
+    /// Orders directory bindings by parent, name, and child, newest first
+    /// within each edge, for path resolution and directory listings. Besides
+    /// the binding events, each bound file edge has a summary row for every
+    /// revision of the file.
     DirentryBinds,
-    /// Re-indexes directory bindings by child for parent discovery.
+    /// Re-indexes the binding events by child, newest first within each
+    /// edge, for parent discovery.
     DirentryChildBinds,
     /// Stores file revisions newest-first within each inode.
     Revisions,
-    /// Stores set and revoke events used to determine active subtree tombstones.
+    /// Stores set and revoke events used to determine active subtree
+    /// tombstones, newest first within each root.
     Tombstones,
     /// Lists the deletions that no undelete has cancelled, derived from the
     /// tombstone family and ordered by deletion sequence. The trash listing
@@ -163,7 +168,7 @@ impl MetadataFamilyGroup {
 pub enum MetadataRow {
     /// Establishes one inode's immutable identity and kind.
     Inode(InodeRecord),
-    /// Stores the value of a directory slot at one delta position.
+    /// Stores the value of a directory edge at one delta position.
     DirentryBinding(DirentryBindingRecord),
     /// Publishes one immutable content revision for a file inode.
     FileRevision(RevisionRecord),
@@ -215,7 +220,10 @@ pub struct InodeRecord {
     pub committed_at_ms: u64,
 }
 
-/// Stores one slot change in both binding indexes.
+/// Stores one value of a directory edge: a binding event in both binding
+/// indexes, or a revision summary in the slot index.
+///
+/// See [directory bindings](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirentryBindingRecord {
@@ -231,16 +239,27 @@ pub struct DirentryBindingRecord {
     pub child_created_by: crate::ActorId,
     /// Unix milliseconds of the child's creating commit.
     pub child_created_at_ms: u64,
-    /// Commit that published this change.
+    /// Commit that wrote this row.
     pub committed_seq: ChangeSeq,
     /// Order within the commit.
     pub delta_index: u32,
+    /// Commit ID of the commit that wrote this row.
+    pub commit_id: CommitId,
+    /// Actor of the commit that wrote this row, as supplied by the
+    /// application.
+    pub committed_by: crate::ActorId,
+    /// Wall-clock stamp of the commit that wrote this row, in Unix
+    /// milliseconds.
+    pub committed_at_ms: u64,
+    /// Position of the bind event that established the edge's binding. An
+    /// unbound row stores the position of the bind that it removes.
+    pub bind_position: DeltaPosition,
     /// Value after this change.
     pub state: DirentryBindingState,
 }
 
 impl DirentryBindingRecord {
-    /// Returns the position used to order slot changes.
+    /// Returns the position used to order an edge's values.
     pub fn position(&self) -> DeltaPosition {
         DeltaPosition {
             seq: self.committed_seq,
@@ -251,7 +270,16 @@ impl DirentryBindingRecord {
     /// Returns the spelling while the slot is bound.
     pub fn display_name(&self) -> Option<&DisplayName> {
         match &self.state {
-            DirentryBindingState::Bound { display_name } => Some(display_name),
+            DirentryBindingState::Bound { display_name, .. } => Some(display_name),
+            DirentryBindingState::Unbound => None,
+        }
+    }
+
+    /// Returns the bound file's revision summary, which a directory, an
+    /// unbound row, and a corrupt file row don't have.
+    pub fn revision(&self) -> Option<&RevisionSummary> {
+        match &self.state {
+            DirentryBindingState::Bound { revision, .. } => revision.as_ref(),
             DirentryBindingState::Unbound => None,
         }
     }
@@ -260,9 +288,17 @@ impl DirentryBindingRecord {
     pub fn is_bound(&self) -> bool {
         matches!(self.state, DirentryBindingState::Bound { .. })
     }
+
+    /// Returns whether a bind or unbind delta wrote this row, which both
+    /// binding indexes store, rather than a revision delta, which writes a
+    /// summary row to the slot index alone. A summary row is bound, and its
+    /// position isn't its bind position.
+    pub fn is_binding_event(&self) -> bool {
+        !self.is_bound() || self.position() == self.bind_position
+    }
 }
 
-/// An unbound value hides older values of the slot or child.
+/// An unbound value hides older values of the edge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DirentryBindingState {
@@ -270,9 +306,29 @@ pub enum DirentryBindingState {
     Bound {
         /// Caller spelling preserved for reads.
         display_name: DisplayName,
+        /// The file's current revision as of this row. A directory has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<RevisionSummary>,
     },
     /// The slot is available.
     Unbound,
+}
+
+/// The fields of a file's current revision that a directory listing reports,
+/// copied into the bound rows of the file's edge.
+///
+/// See [directory bindings](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionSummary {
+    /// The file's current revision number.
+    pub revision_no: RevisionNo,
+    /// The current revision's length in bytes.
+    pub size_bytes: u64,
+    /// Actor of the commit that published the current revision.
+    pub revision_committed_by: crate::ActorId,
+    /// Unix milliseconds of the commit that published the current revision.
+    pub revision_committed_at_ms: u64,
 }
 
 /// One immutable content revision for a file inode.

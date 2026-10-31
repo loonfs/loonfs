@@ -38,7 +38,7 @@ The merge reads the selected runs through sorted iterators, and it produces rows
 
 The output writer closes a data block at about 64 KiB decoded, and a segment at about 8 MiB decoded or 65,536 rows. A final row can exceed a byte target, and an oversized row is never split. Filters and indexes also use memory, so these targets don't guarantee a memory limit that's independent of row size.
 
-A merge limits decoded input buffering, concurrent fetches, cached blocks, and output buffers, whatever the size of its window. Each family's retention operator keeps a constant number of fields and at most one complete row in memory. As a result, one inode's long attribute history, or one name's many binding versions, doesn't have to be kept in memory as a complete group.
+A merge limits decoded input buffering, concurrent fetches, cached blocks, and output buffers, whatever the size of its window. Each family's retention operator keeps a constant number of fields and decides each row as it arrives, without keeping a row back. As a result, one inode's long attribute history, or one name's many binding versions, doesn't have to be kept in memory as a complete group.
 
 ```text
 selected immutable runs
@@ -59,11 +59,11 @@ Output segments are written with new IDs under `namespaces/{namespace_id}/segmen
 
 This section describes which binding rows a compaction keeps.
 
-The slot index and the child index contain the same edge events (both bound and unbound) in two different orders. An edge is a parent, a name, and a child. A compaction that includes the oldest run groups the rows of both indexes by edge. For each edge, it keeps every version above the floor, and it keeps the newest version at or below the floor if that version is bound.
+The slot index and the child index contain the same binding events (both bound and unbound) in two different orders, and the slot index also contains a summary row for each revision of a bound file. An edge is a parent, a name, and a child. A compaction that includes the oldest run groups the rows of both indexes by edge. For each edge and each kind of row, it keeps every version above the floor and the newest version at or below the floor, unless the edge's newest binding event at or below the floor is unbound, and then it keeps no row of the edge at or below the floor.
 
 An unbound version is a tombstone. A compaction that includes the oldest run is the only kind that can remove it, and it removes the older versions that the tombstone hides at the same time. A compaction above the oldest run keeps every row.
 
-Within an edge, binding keys sort by position, oldest first. The retention operator keeps at most one floor version (the newest version at or below the floor) until its edge ends or a row above the floor arrives. It also tracks the last edge it kept bound at the floor. In the slot index, it refuses a second child bound in one slot at the floor, and in the child index, it refuses a second parent bound for one child at the floor. A merge reads each index as a separate sorted stream, and it applies the same rule to each one.
+Within an edge, binding keys sort by position, newest first, so the first row of each kind at or below the floor is that kind's floor version, and the operator decides it when it arrives. It also tracks the last edge it kept bound at the floor. In the slot index, it refuses a second child bound in one slot at the floor, and in the child index, it refuses a second parent bound for one child at the floor. A merge reads each index as a separate sorted stream, and it applies the same rule to each one.
 
 ## Validating a merge
 
@@ -71,7 +71,7 @@ This section describes the checks a merge runs before it publishes.
 
 Every metadata row key identifies one logical row. Input keys must be strictly increasing within the merged stream of each family. A merge rejects a duplicate even if retention would otherwise remove it, and even if the duplicate is split across segments or runs.
 
-The binding output keyed by parent and name, and the binding output keyed by child, must contain the same binding rows. Before publication, the merge compares order-independent digests of the two outputs. This check is separate from duplicate detection, because the same duplicate in both families could leave their digests equal.
+The binding output keyed by parent and name, and the binding output keyed by child, must contain the same binding events. The digest of the slot index leaves out its summary rows. Before publication, the merge compares order-independent digests of the two outputs. This check is separate from duplicate detection, because the same duplicate in both families could leave their digests equal.
 
 The published manifest must also pass the manifest validation in [Manifests, runs, and segments](../specs/format.md#71-manifests-runs-and-segments).
 

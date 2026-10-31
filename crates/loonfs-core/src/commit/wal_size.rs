@@ -48,10 +48,7 @@ const UNBIND_BYTES: usize = delta_bytes(
         ("child_kind", cbor_string_bytes("file".len())),
         ("child_created_by", cbor_string_bytes(MAX_ACTOR_ID_BYTES)),
         ("child_created_at_ms", INTEGER_BYTES),
-        (
-            "target",
-            cbor_map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),
-        ),
+        ("target", POSITION_BYTES),
     ],
 ) + NAMES_BYTES;
 const TOMBSTONE_BYTES: usize = delta_bytes(
@@ -82,14 +79,36 @@ const CONTENT_REF_BYTES: usize = cbor_map_bytes(&[
         ]),
     ),
 ]);
+const POSITION_BYTES: usize =
+    cbor_map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]);
+/// A revision delta, with the file's current edge, whose summary row replay
+/// writes under that edge.
 const REVISION_BYTES: usize = delta_bytes(
     "append_file_revision",
     &[
         ("inode_id", INODE_ID_BYTES),
+        ("parent_inode_id", INODE_ID_BYTES),
+        ("name_key", 0),
+        ("display_name", 0),
+        ("bind_position", POSITION_BYTES),
+        ("child_created_by", cbor_string_bytes(MAX_ACTOR_ID_BYTES)),
+        ("child_created_at_ms", INTEGER_BYTES),
         ("revision_no", INTEGER_BYTES),
         ("content_ref", CONTENT_REF_BYTES),
     ],
-);
+) + NAMES_BYTES;
+/// The revision summary that a bind of a file includes.
+const BIND_REVISION_BYTES: usize = cbor_string_bytes("revision".len())
+    + cbor_map_bytes(&[
+        ("revision_no", INTEGER_BYTES),
+        ("size_bytes", INTEGER_BYTES),
+        (
+            "revision_committed_by",
+            cbor_string_bytes(MAX_ACTOR_ID_BYTES),
+        ),
+        ("revision_committed_at_ms", INTEGER_BYTES),
+    ]);
+const FILE_BIND_BYTES: usize = BIND_BYTES + BIND_REVISION_BYTES;
 const APPEND_OFFSET_BYTES: usize = cbor_string_bytes("append_offset".len()) + INTEGER_BYTES;
 const APPEND_PIECE_BYTES: usize = cbor_map_bytes(&[
     ("content_id", cbor_string_bytes(MAX_ID_BYTES)),
@@ -165,10 +184,7 @@ const REVOKE_BYTES: usize = delta_bytes(
     "revoke_subtree_tombstone",
     &[
         ("root_inode_id", INODE_ID_BYTES),
-        (
-            "target",
-            cbor_map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),
-        ),
+        ("target", POSITION_BYTES),
     ],
 );
 
@@ -273,9 +289,11 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
         FilesystemOperation::CreateDirectoryByInode { .. } => {
             CREATE_INODE_BYTES + BIND_BYTES + NAMES_BYTES
         }
-        FilesystemOperation::PutFile { path, .. } => create_path_bytes(path) + REVISION_BYTES,
+        FilesystemOperation::PutFile { path, .. } => {
+            create_path_bytes(path) + BIND_REVISION_BYTES + REVISION_BYTES
+        }
         FilesystemOperation::CreateFileByInode { .. } => {
-            CREATE_INODE_BYTES + BIND_BYTES + NAMES_BYTES + REVISION_BYTES
+            CREATE_INODE_BYTES + FILE_BIND_BYTES + NAMES_BYTES + REVISION_BYTES
         }
         FilesystemOperation::PutFileRevisionByInode { .. }
         | FilesystemOperation::RestoreRevision { .. }
@@ -288,12 +306,12 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
             DELETE_BYTES
         }
         FilesystemOperation::MovePath { .. } | FilesystemOperation::MoveByInode { .. } => {
-            DELETE_BYTES + UNBIND_BYTES + BIND_BYTES + NAMES_BYTES
+            DELETE_BYTES + UNBIND_BYTES + FILE_BIND_BYTES + NAMES_BYTES
         }
         FilesystemOperation::CopyPath { .. } | FilesystemOperation::CopyByInode { .. } => {
-            CREATE_INODE_BYTES + BIND_BYTES + NAMES_BYTES + REVISION_BYTES + ATTRIBUTES_BYTES
+            CREATE_INODE_BYTES + FILE_BIND_BYTES + NAMES_BYTES + REVISION_BYTES + ATTRIBUTES_BYTES
         }
-        FilesystemOperation::Undelete { .. } => REVOKE_BYTES + BIND_BYTES + NAMES_BYTES,
+        FilesystemOperation::Undelete { .. } => REVOKE_BYTES + FILE_BIND_BYTES + NAMES_BYTES,
         FilesystemOperation::UpdateAttributes { .. }
         | FilesystemOperation::UpdateAttributesByInode { .. } => ATTRIBUTES_BYTES,
         FilesystemOperation::UpdateAccess { .. }

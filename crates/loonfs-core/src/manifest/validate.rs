@@ -233,6 +233,18 @@ fn validate_segment_key_ranges(
     Ok(())
 }
 
+/// Compares the row counts of each run's paired families, as the segment
+/// descriptors state them.
+///
+/// The child index stores the slot index's binding events, and the slot
+/// index also stores a summary row for each revision of a bound file, so a
+/// run's slot index has at least as many rows as its child index. A
+/// descriptor doesn't say how many of its rows are summary rows, so the
+/// check is an inequality. A merge compares the binding events themselves
+/// with digests
+/// (`crate::compaction::group_merge::GroupMerge::refuse_a_run_whose_index_disagrees`).
+/// Each commit has one commit row and one receipt, so those counts are
+/// equal.
 fn validate_run_index_parity(
     object_key: &str,
     runs: &[MetadataRunManifest],
@@ -263,11 +275,11 @@ fn validate_run_index_parity(
                 | MetadataRowFamily::Access => {}
             }
         }
-        if direntry_bind_rows != direntry_child_bind_rows {
+        if direntry_bind_rows < direntry_child_bind_rows {
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
                 message: format!(
-                    "metadata run `{}` has {direntry_bind_rows} direntry bind rows but {direntry_child_bind_rows} child-bind index rows",
+                    "metadata run `{}` has {direntry_bind_rows} direntry bind rows but more child-bind index rows, {direntry_child_bind_rows}",
                     run.run_no
                 ),
             });
@@ -358,8 +370,9 @@ pub(crate) fn validate_manifest_row_seq_range<'a>(
     Ok(())
 }
 
-/// Compares a bind family against its reverse index outright, over rows a
-/// caller has all of.
+/// Compares the binding events of a bind family against its reverse index
+/// outright, over rows a caller has all of. The bind family's summary rows
+/// have no copy in the reverse index.
 ///
 /// Only the test-only inspection materialization keeps a whole family, so only
 /// it can afford this. A merge never keeps a whole family and checks parity by digesting
@@ -371,7 +384,12 @@ pub(super) fn validate_direntry_child_bind_index(
     direntry_bind_rows: &[MetadataRow],
     direntry_child_bind_rows: &[MetadataRow],
 ) -> Result<(), ManifestLoadError> {
-    let mut direntry_bind_rows = direntry_bind_rows.iter().collect::<Vec<_>>();
+    let mut direntry_bind_rows = direntry_bind_rows
+        .iter()
+        .filter(|row| {
+            !matches!(row, MetadataRow::DirentryBinding(binding) if !binding.is_binding_event())
+        })
+        .collect::<Vec<_>>();
     let mut direntry_child_bind_rows = direntry_child_bind_rows.iter().collect::<Vec<_>>();
     direntry_bind_rows
         .sort_by_cached_key(|row| row.row_key_for_family(MetadataRowFamily::DirentryChildBinds));

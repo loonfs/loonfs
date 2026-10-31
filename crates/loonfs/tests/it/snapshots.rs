@@ -432,10 +432,18 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .await
         .expect("namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
-    namespace_writer
-        .put_file("/file", b"before", &loonfs_test_support::test_actor())
-        .await
-        .expect("file");
+    let replace = loonfs::PutFileOptions {
+        behavior: loonfs::DestinationBehavior::Replace,
+        ..Default::default()
+    };
+    // Two revisions before the snapshot, so the snapshot lists the second
+    // revision's summary row.
+    for bytes in [&b"first"[..], b"before"] {
+        namespace_writer
+            .put_file_with_options("/file", bytes, &loonfs_test_support::test_actor(), &replace)
+            .await
+            .expect("file");
+    }
     let reader = writer.read_only();
     let namespace_reader = reader.namespace(&namespace);
     let root = namespace_reader.stat("/").await.expect("root");
@@ -444,6 +452,16 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .create_snapshot("options")
         .await
         .expect("snapshot");
+    // A later revision and a deletion don't change what the snapshot lists.
+    namespace_writer
+        .put_file_with_options(
+            "/file",
+            b"after the snapshot",
+            &loonfs_test_support::test_actor(),
+            &replace,
+        )
+        .await
+        .expect("replace");
     namespace_writer
         .delete_path("/file", &loonfs_test_support::test_actor())
         .await
@@ -489,6 +507,12 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .await
         .expect("snapshot children");
     assert_eq!(paths.entries.len(), 1);
+    let mut listed_kind = before.kind.clone();
+    if let loonfs::PathEntryKind::File { content_ref, .. } = &mut listed_kind {
+        *content_ref = None;
+    }
+    assert_eq!(paths.entries[0].kind, listed_kind);
+    assert_eq!(paths.entries[0].revision_no(), Some(loonfs::RevisionNo(2)));
     assert_eq!(paths.entries, inodes.entries);
     assert_eq!(paths.head_seq, snapshot.captured_seq);
 }

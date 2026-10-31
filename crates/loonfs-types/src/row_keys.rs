@@ -86,7 +86,7 @@ impl MetadataRow {
                     Some(lookup_keys::direntry_child_bind_row_key(
                         record.child_inode_id,
                         record.parent_inode_id,
-                        record.name_key.as_str(),
+                        &record.name_key,
                         record.committed_seq,
                         record.delta_index,
                     ))
@@ -177,6 +177,21 @@ impl MetadataRow {
             Self::AccessRevision(record) => lookup_keys::access_probe(record.inode_id),
         }
     }
+
+    /// Returns the second Bloom filter key that a `direntry_binds` row adds,
+    /// which a directory listing probes for the parent's rows, or `None` for
+    /// every other family.
+    ///
+    /// Consecutive rows of one parent share the key, so a writer adds it
+    /// once per run of those rows.
+    pub fn parent_filter_key_for_family(&self, family: MetadataRowFamily) -> Option<String> {
+        match (self, family) {
+            (Self::DirentryBinding(record), MetadataRowFamily::DirentryBinds) => {
+                Some(lookup_keys::direntry_parent_probe(record.parent_inode_id))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Encodes an arbitrary string so it can occupy one component of a durable row key.
@@ -233,9 +248,14 @@ pub mod lookup_keys {
         after_row_key(&inode_key(inode_id))
     }
 
+    /// Builds the Bloom filter probe for every binding under one parent.
+    pub fn direntry_parent_probe(parent_inode_id: InodeId) -> String {
+        format!("{DIRENTRY_BIND_ROW_PREFIX}{}", parent_inode_id.body())
+    }
+
     /// Builds the prefix for directory bindings under one parent.
     pub fn direntry_parent_prefix(parent_inode_id: InodeId) -> String {
-        format!("{DIRENTRY_BIND_ROW_PREFIX}{}-", parent_inode_id.body())
+        format!("{}-", direntry_parent_probe(parent_inode_id))
     }
 
     /// Builds the Bloom filter probe for a parent/name binding.
@@ -252,7 +272,22 @@ pub mod lookup_keys {
         format!("{}-", direntry_bind_probe(parent_inode_id, name_key))
     }
 
-    /// Builds a row key for one version of a child's binding in a parent/name slot.
+    /// Builds the prefix for every value of one edge in the slot index,
+    /// newest first.
+    pub fn direntry_bind_edge_prefix(
+        parent_inode_id: InodeId,
+        name_key: &NameKey,
+        child_inode_id: InodeId,
+    ) -> String {
+        format!(
+            "{}{}-",
+            direntry_bind_prefix(parent_inode_id, name_key),
+            child_inode_id.body()
+        )
+    }
+
+    /// Builds a newest-first row key for one value of an edge in the slot
+    /// index.
     pub fn direntry_bind_row_key(
         parent_inode_id: InodeId,
         name_key: &NameKey,
@@ -261,10 +296,10 @@ pub mod lookup_keys {
         delta_index: u32,
     ) -> String {
         format!(
-            "{}{}-{:020}-{delta_index:010}",
-            direntry_bind_prefix(parent_inode_id, name_key),
-            child_inode_id.body(),
-            committed_seq.0
+            "{}{:020}-{:010}",
+            direntry_bind_edge_prefix(parent_inode_id, name_key, child_inode_id),
+            u64::MAX - committed_seq.0,
+            u32::MAX - delta_index
         )
     }
 
@@ -278,20 +313,35 @@ pub mod lookup_keys {
         format!("{}-", direntry_child_probe(child_inode_id))
     }
 
-    /// Builds a reverse-index row key for one version of a child's binding in a parent/name slot.
+    /// Builds the prefix for every binding event of one edge in the child
+    /// index, newest first.
+    pub fn direntry_child_bind_edge_prefix(
+        child_inode_id: InodeId,
+        parent_inode_id: InodeId,
+        name_key: &NameKey,
+    ) -> String {
+        format!(
+            "{}{}-{}-",
+            direntry_child_prefix(child_inode_id),
+            parent_inode_id.body(),
+            hex_encode_row_key_component(name_key.as_str())
+        )
+    }
+
+    /// Builds a newest-first child-index row key for one binding event of an
+    /// edge.
     pub(super) fn direntry_child_bind_row_key(
         child_inode_id: InodeId,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
         committed_seq: ChangeSeq,
         delta_index: u32,
     ) -> String {
         format!(
-            "{}{}-{}-{:020}-{delta_index:010}",
-            direntry_child_prefix(child_inode_id),
-            parent_inode_id.body(),
-            hex_encode_row_key_component(name_key),
-            committed_seq.0
+            "{}{:020}-{:010}",
+            direntry_child_bind_edge_prefix(child_inode_id, parent_inode_id, name_key),
+            u64::MAX - committed_seq.0,
+            u32::MAX - delta_index
         )
     }
 
@@ -305,7 +355,7 @@ pub mod lookup_keys {
         format!("{}-", tombstone_probe(root_inode_id))
     }
 
-    /// Builds a row key for one tombstone event.
+    /// Builds a newest-first row key for one tombstone event.
     ///
     /// The action is stored in the value, so delete and revoke rows for one
     /// position share a key.
@@ -317,8 +367,8 @@ pub mod lookup_keys {
         format!(
             "{}{:020}-{:010}",
             tombstone_prefix(root_inode_id),
-            committed_seq.0,
-            delta_index
+            u64::MAX - committed_seq.0,
+            u32::MAX - delta_index
         )
     }
 
@@ -554,13 +604,18 @@ mod tests {
         assert!(resume < lookup_keys::inode_key(InodeId(8)));
     }
 
-    #[test]
-    fn direntry_bind_row_key_supports_parent_and_child_indexes() {
-        let row = MetadataRow::DirentryBinding(DirentryBindingRecord {
+    fn binding_record(name: &str, display_name: &str) -> DirentryBindingRecord {
+        DirentryBindingRecord {
             parent_inode_id: InodeId(9),
-            name_key: NameKey::parse("report.txt").expect("valid name key"),
+            name_key: NameKey::parse(name).expect("valid name key"),
             state: DirentryBindingState::Bound {
-                display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
+                display_name: crate::DisplayName::parse(display_name).expect("valid display name"),
+                revision: Some(crate::metadata_rows::RevisionSummary {
+                    revision_no: crate::RevisionNo(1),
+                    size_bytes: 5,
+                    revision_committed_by: crate::ActorId::loonfs(),
+                    revision_committed_at_ms: 4_200,
+                }),
             },
             child_inode_id: InodeId(42),
             child_kind: crate::InodeKind::File,
@@ -568,37 +623,100 @@ mod tests {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(17),
             delta_index: 3,
-        });
+            commit_id: row_commit_id(),
+            committed_by: crate::ActorId::loonfs(),
+            committed_at_ms: 4_200,
+            bind_position: crate::metadata_rows::DeltaPosition {
+                seq: ChangeSeq(17),
+                delta_index: 3,
+            },
+        }
+    }
+
+    #[test]
+    fn direntry_bind_row_key_supports_parent_and_child_indexes() {
+        let row = MetadataRow::DirentryBinding(binding_record("report.txt", "Report.txt"));
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
-            "direntry-bind-00000000000000000000000009-7265706f72742e747874-0000000000000000000000001a-00000000000000000017-0000000003"
+            "direntry-bind-00000000000000000000000009-7265706f72742e747874-0000000000000000000000001a-18446744073709551598-4294967292"
         );
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryChildBinds),
-            "direntry-child-bind-0000000000000000000000001a-00000000000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
+            "direntry-child-bind-0000000000000000000000001a-00000000000000000000000009-7265706f72742e747874-18446744073709551598-4294967292"
         );
+        assert_eq!(
+            row.parent_filter_key_for_family(MetadataRowFamily::DirentryBinds),
+            Some("direntry-bind-00000000000000000000000009".to_owned())
+        );
+        assert_eq!(
+            row.parent_filter_key_for_family(MetadataRowFamily::DirentryChildBinds),
+            None
+        );
+    }
+
+    /// Checks that the binding and tombstone histories sort newest first, so
+    /// the first row at or below a sequence is the value at that sequence.
+    #[test]
+    fn binding_and_tombstone_histories_sort_newest_first() {
+        let at = |seq: u64, delta_index: u32| {
+            let mut record = binding_record("report.txt", "report.txt");
+            record.committed_seq = ChangeSeq(seq);
+            record.delta_index = delta_index;
+            MetadataRow::DirentryBinding(record)
+        };
+        let tombstone_at = |seq: u64, delta_index: u32| {
+            MetadataRow::Tombstone(SubtreeTombstoneRecord {
+                root_inode_id: InodeId(42),
+                committed_seq: ChangeSeq(seq),
+                delta_index,
+                commit_id: row_commit_id(),
+                action: TombstoneRowAction::Set {
+                    deleted_binding: deleted_binding(),
+                },
+                committed_at_ms: 12_000,
+                committed_by: crate::ActorId::loonfs(),
+            })
+        };
+        for family in [
+            MetadataRowFamily::DirentryBinds,
+            MetadataRowFamily::DirentryChildBinds,
+        ] {
+            let keys = [at(12, 1), at(12, 0), at(11, 4)].map(|row| row.row_key_for_family(family));
+            assert!(
+                keys.windows(2).all(|pair| pair[0] < pair[1]),
+                "{family:?}: {keys:?}"
+            );
+        }
+        let keys = [
+            tombstone_at(12, 1),
+            tombstone_at(12, 0),
+            tombstone_at(11, 4),
+        ]
+        .map(|row| row.row_key_for_family(MetadataRowFamily::Tombstones));
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]), "{keys:?}");
+        assert_eq!(
+            keys[0],
+            "tombstone-0000000000000000000000001a-18446744073709551603-4294967294"
+        );
+        // Every value of an edge sorts under the edge's prefix.
+        let edge = lookup_keys::direntry_bind_edge_prefix(
+            InodeId(9),
+            &NameKey::parse("report.txt").expect("valid name key"),
+            InodeId(42),
+        );
+        assert!(at(12, 1)
+            .row_key_for_family(MetadataRowFamily::DirentryBinds)
+            .starts_with(&edge));
     }
 
     #[test]
     fn row_keys_hex_encode_dash_containing_variable_components() {
-        let row = MetadataRow::DirentryBinding(DirentryBindingRecord {
-            parent_inode_id: InodeId(9),
-            name_key: NameKey::parse("report-2024").expect("valid name key"),
-            state: DirentryBindingState::Bound {
-                display_name: crate::DisplayName::parse("report-2024").expect("valid display name"),
-            },
-            child_inode_id: InodeId(42),
-            child_kind: crate::InodeKind::File,
-            child_created_by: crate::ActorId::loonfs(),
-            child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(17),
-            delta_index: 3,
-        });
+        let row = MetadataRow::DirentryBinding(binding_record("report-2024", "report-2024"));
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
-            "direntry-bind-00000000000000000000000009-7265706f72742d32303234-0000000000000000000000001a-00000000000000000017-0000000003"
+            "direntry-bind-00000000000000000000000009-7265706f72742d32303234-0000000000000000000000001a-18446744073709551598-4294967292"
         );
     }
 
@@ -698,21 +816,7 @@ mod tests {
 
     #[test]
     fn row_key_prefixes_match_the_row_keys_they_front() {
-        let name_key = NameKey::parse("report.txt").expect("valid name key");
-        let display_name = crate::DisplayName::parse("report.txt").expect("valid display name");
-        let bind = MetadataRow::DirentryBinding(DirentryBindingRecord {
-            parent_inode_id: InodeId(9),
-            name_key: name_key.clone(),
-            state: DirentryBindingState::Bound {
-                display_name: display_name.clone(),
-            },
-            child_inode_id: InodeId(42),
-            child_kind: crate::InodeKind::File,
-            child_created_by: crate::ActorId::loonfs(),
-            child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(17),
-            delta_index: 3,
-        });
+        let bind = MetadataRow::DirentryBinding(binding_record("report.txt", "report.txt"));
         let revision = MetadataRow::FileRevision(RevisionRecord {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
@@ -828,7 +932,25 @@ mod tests {
     #[test]
     fn attribution_values_never_change_row_or_index_keys() {
         fn rows(actor: crate::ActorId) -> Vec<(MetadataRowFamily, MetadataRow)> {
+            let mut binding = binding_record("report.txt", "report.txt");
+            binding.committed_by = actor.clone();
+            binding.child_created_by = actor.clone();
+            if let DirentryBindingState::Bound {
+                revision: Some(revision),
+                ..
+            } = &mut binding.state
+            {
+                revision.revision_committed_by = actor.clone();
+            }
             vec![
+                (
+                    MetadataRowFamily::DirentryBinds,
+                    MetadataRow::DirentryBinding(binding.clone()),
+                ),
+                (
+                    MetadataRowFamily::DirentryChildBinds,
+                    MetadataRow::DirentryBinding(binding),
+                ),
                 (
                     MetadataRowFamily::Inodes,
                     MetadataRow::Inode(InodeRecord {

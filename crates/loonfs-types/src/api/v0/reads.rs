@@ -79,11 +79,13 @@ impl PathEntry {
         }
     }
 
-    /// Returns the current content reference for a file entry.
+    /// Returns the current content reference of a file entry that a stat
+    /// returned. A directory listing doesn't report it, so a listed entry
+    /// returns `None`.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match &self.kind {
             PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
-            PathEntryKind::File { content_ref, .. } => Some(content_ref),
+            PathEntryKind::File { content_ref, .. } => content_ref.as_ref(),
         }
     }
 
@@ -115,8 +117,11 @@ pub enum PathEntryKind {
         revision_no: RevisionNo,
         /// The file's current size in bytes.
         size_bytes: u64,
-        /// The file's current content.
-        content_ref: ContentRef,
+        /// The file's current content. It's present on entry reads (a stat by
+        /// path or by inode) and absent from directory listings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        content_ref: Option<ContentRef>,
         /// The actor responsible for the current revision.
         revision_committed_by: ActorId,
         /// The time the current revision was committed, in Unix milliseconds.
@@ -443,10 +448,23 @@ mod tests {
         file.kind = PathEntryKind::File {
             revision_no: RevisionNo(7),
             size_bytes: 5,
-            content_ref: content_ref.clone(),
+            content_ref: Some(content_ref.clone()),
             revision_committed_by: ActorId::loonfs(),
             revision_committed_at_ms: 1_752_624_000_000,
         };
+
+        // A listed entry has no content reference, and its JSON leaves the
+        // field out.
+        let mut listed = file.clone();
+        if let PathEntryKind::File { content_ref, .. } = &mut listed.kind {
+            *content_ref = None;
+        }
+        let listed_json = serde_json::to_value(&listed).expect("serialize listed entry");
+        assert!(listed_json.get("content_ref").is_none());
+        assert_eq!(
+            serde_json::from_value::<PathEntry>(listed_json).expect("decode listed entry"),
+            listed
+        );
 
         assert_eq!(
             serde_json::to_value(file).expect("serialize file entry"),
@@ -511,7 +529,7 @@ mod tests {
         let file = PathEntryKind::File {
             revision_no: RevisionNo(1),
             size_bytes: 5,
-            content_ref,
+            content_ref: Some(content_ref),
             revision_committed_by: ActorId::loonfs(),
             revision_committed_at_ms: 1,
         };

@@ -181,13 +181,17 @@ impl MetadataIndexes {
             record.clone(),
             DirentryBindingRecord::position,
         );
-        replace_if_newer(
-            &mut self.latest_binding_by_child,
-            &mut self.owned_heap_bytes,
-            record.child_inode_id,
-            record.clone(),
-            DirentryBindingRecord::position,
-        );
+        // The child index stores binding events alone, like the durable
+        // `direntry_child_binds` family.
+        if record.is_binding_event() {
+            replace_if_newer(
+                &mut self.latest_binding_by_child,
+                &mut self.owned_heap_bytes,
+                record.child_inode_id,
+                record.clone(),
+                DirentryBindingRecord::position,
+            );
+        }
     }
 
     /// Revisions contribute only the seq watermark: no read consults an
@@ -284,22 +288,10 @@ fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (ChangeSeq, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_types::{DisplayName, NameKey};
+    use loonfs_types::NameKey;
 
     fn bind(parent: u64, name: &str, child: u64, seq: u64) -> DirentryBindingRecord {
-        DirentryBindingRecord {
-            parent_inode_id: InodeId(u128::from(parent)),
-            name_key: NameKey::parse(name).expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                display_name: DisplayName::parse(name).expect("valid display name"),
-            },
-            child_inode_id: InodeId(u128::from(child)),
-            child_kind: loonfs_types::InodeKind::File,
-            child_created_by: loonfs_types::ActorId::loonfs(),
-            child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(seq),
-            delta_index: 0,
-        }
+        crate::test_support::binding_row(parent, name, child, seq)
     }
 
     #[test]

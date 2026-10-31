@@ -1130,9 +1130,11 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let mut manifest = decode_namespace_manifest_json(&manifest_bytes)
         .expect("decode source manifest")
         .into_payload();
+    // Without its slot index, a run has fewer slot-index rows than
+    // child-index rows.
     manifest.runs.iter_mut().for_each(|run| {
         run.segments
-            .retain(|descriptor| descriptor.family != MetadataRowFamily::DirentryChildBinds);
+            .retain(|descriptor| descriptor.family != MetadataRowFamily::DirentryBinds);
     });
     let manifest = loonfs_types::format::manifest::encode_namespace_manifest_json(manifest)
         .expect("rebuild manifest checksum")

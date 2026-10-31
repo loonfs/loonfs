@@ -17,9 +17,8 @@ use super::step::{CompactionUnitOutcome, MetadataCompactionCancellation};
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
 use crate::limits::{DIRECTORY_PAGE_RAW_SCAN_LIMIT, MAX_KEPT_INODE_WALK_DEPTH};
-use crate::metadata::row_decode::{
-    active_deletion_from_manifest_row, direntry_binding_from_manifest_row,
-};
+use crate::metadata::manifest_index::{direntry_binds_page, slot_edge_end};
+use crate::metadata::row_decode::active_deletion_from_manifest_row;
 use crate::metadata::{ActiveDeletionRecord, DirentryBindingRecord};
 use crate::segment::runs::MetadataFamilyGroup;
 use crate::segment::scan::VerifiedMetadataSegments;
@@ -331,9 +330,11 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
     /// the way a recursive listing walks a tree.
     ///
     /// The walk reads a directory's slot index in key order, one edge (a name
-    /// and a child) at a time. An edge's rows run oldest first, so its last
-    /// row is its state at the basis's head, and the walk reaches the child of
-    /// an edge whose last row is bound. Before the walk descends into a child
+    /// and a child) at a time. An edge's rows run newest first, so its first
+    /// row is its value at the basis's head, and the walk reaches the child
+    /// of an edge whose first row is bound. The walk then skips the edge's
+    /// older rows, and starts the directory's next scan past the edge when
+    /// the scanned page ends inside it. Before the walk descends into a child
     /// directory, it drops the rows it scanned past that child's edge and
     /// scans them again when it returns, so only the directory it's reading
     /// keeps a page of rows. A directory whose last edge leads to the child
@@ -343,8 +344,6 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
         // The scanned rows of the directory on top of the stack that the walk
         // hasn't read yet.
         let mut unread: VecDeque<(String, DirentryBindingRecord)> = VecDeque::new();
-        // The last row read of the edge the walk is reading, with its row key.
-        let mut edge: Option<(String, DirentryBindingRecord)> = None;
         loop {
             if self.cancellation.is_cancelled() {
                 return Ok(ControlFlow::Break(WalkStop::Cancelled));
@@ -352,49 +351,53 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
             let Some(frame) = stack.last_mut() else {
                 return Ok(ControlFlow::Continue(()));
             };
-            if unread.is_empty() {
-                if let Some(lower_bound) = frame.resume_at.take() {
-                    let (rows, resume_at) =
-                        self.scan_slot_index(frame.directory, &lower_bound).await?;
-                    frame.resume_at = resume_at;
-                    unread = rows;
-                    continue;
+            let Some((_, value)) = unread.pop_front() else {
+                match frame.resume_at.take() {
+                    Some(lower_bound) => {
+                        let (rows, resume_at) =
+                            self.scan_slot_index(frame.directory, &lower_bound).await?;
+                        frame.resume_at = resume_at;
+                        unread = rows;
+                    }
+                    None => {
+                        stack.pop();
+                    }
                 }
-            }
-            let next = unread.pop_front();
-            if let (Some((_, last)), Some((_, row))) = (&edge, &next) {
-                if last.name_key == row.name_key && last.child_inode_id == row.child_inode_id {
-                    edge = next;
-                    continue;
-                }
-            }
-            let ended = std::mem::replace(&mut edge, next);
-            let directory_read = edge.is_none();
-            if directory_read {
-                stack.pop();
-            }
-            let Some((row_key, last)) = ended else {
                 continue;
             };
-            if !last.is_bound() {
+            let edge_end = slot_edge_end(&value);
+            while unread
+                .front()
+                .is_some_and(|(row_key, _)| row_key.as_str() < edge_end.as_str())
+            {
+                unread.pop_front();
+            }
+            if unread.is_empty() {
+                if let Some(resume_at) = &mut frame.resume_at {
+                    if resume_at.as_str() < edge_end.as_str() {
+                        resume_at.clone_from(&edge_end);
+                    }
+                }
+            }
+            if !value.is_bound() {
                 continue;
             }
-            self.insert(last.child_inode_id)?;
-            if last.child_kind != InodeKind::Directory {
+            self.insert(value.child_inode_id)?;
+            if value.child_kind != InodeKind::Directory {
                 continue;
             }
-            if !directory_read {
-                let parent = stack
-                    .last_mut()
-                    .expect("a directory with rows left should be on the stack");
-                parent.resume_at = Some(lookup_keys::after_row_key(&row_key));
+            if !unread.is_empty() {
+                frame.resume_at = Some(edge_end);
                 unread.clear();
-                edge = None;
+            } else if frame.resume_at.is_none() {
+                // A directory whose last edge leads to the child leaves the
+                // stack before the child joins it.
+                stack.pop();
             }
             if stack.len() == MAX_KEPT_INODE_WALK_DEPTH {
                 return Ok(ControlFlow::Break(WalkStop::TooDeep));
             }
-            stack.push(WalkFrame::new(last.child_inode_id));
+            stack.push(WalkFrame::new(value.child_inode_id));
         }
     }
 
@@ -407,25 +410,13 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
         directory: InodeId,
         lower_bound: &str,
     ) -> Result<(VecDeque<(String, DirentryBindingRecord)>, Option<String>)> {
-        let upper_bound =
-            string_prefix_upper_bound(&lookup_keys::direntry_parent_prefix(directory));
-        let rows = self
-            .segments
-            .scan_range_page_with_keys(
-                MetadataRowFamily::DirentryBinds,
-                lower_bound,
-                upper_bound.as_deref(),
-                KEPT_INODE_SCAN_ROWS,
-            )
-            .await?;
+        let rows =
+            direntry_binds_page(&self.segments, directory, lower_bound, KEPT_INODE_SCAN_ROWS)
+                .await?;
         let resume_at = rows
             .last()
             .filter(|_| rows.len() == KEPT_INODE_SCAN_ROWS)
             .map(|(row_key, _)| lookup_keys::after_row_key(row_key));
-        let rows = rows
-            .into_iter()
-            .map(|(row_key, row)| Ok((row_key, direntry_binding_from_manifest_row(row)?)))
-            .collect::<Result<_>>()?;
-        Ok((rows, resume_at))
+        Ok((rows.into(), resume_at))
     }
 }

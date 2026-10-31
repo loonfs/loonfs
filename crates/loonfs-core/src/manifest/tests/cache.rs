@@ -435,27 +435,31 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
     let lower_bound =
         loonfs_types::format::manifest::lookup_keys::direntry_parent_prefix(docs_inode_id);
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
+    // Each put writes its file's bind and its first revision's summary row.
     let page = segments
         .scan_range_page(
             ApiMetadataRowFamily::DirentryBinds,
             &lower_bound,
             upper_bound.as_deref(),
-            2,
+            4,
         )
         .await
         .expect("scan range page");
-    let display_names = page
-        .into_iter()
-        .filter_map(|row| match row {
-            MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
-                ..
-            }) => Some(display_name.as_str().to_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let display_names =
+        page.into_iter()
+            .filter_map(|row| match row {
+                MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
+                    state:
+                        loonfs_types::format::manifest::DirentryBindingState::Bound {
+                            display_name, ..
+                        },
+                    ..
+                }) => Some(display_name.as_str().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
 
-    assert_eq!(display_names, vec!["a.txt", "b.txt"]);
+    assert_eq!(display_names, vec!["a.txt", "a.txt", "b.txt", "b.txt"]);
 }
 
 #[tokio::test]
@@ -539,7 +543,11 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .await
         .expect("filtered lookup");
 
-    assert_eq!(rows.len(), 1, "beta's bind should still be found");
+    assert_eq!(
+        rows.len(),
+        2,
+        "beta's bind and its revision's summary row should still be found"
+    );
     let stats = cache.stats();
     // The probe contains `/docs`'s inode ID, whose low bits are random, so the
     // delta segment's filter rejects it in most runs of the test and admits it
@@ -571,6 +579,105 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
             "the delta bind segment should be skipped by its filter, stats: {stats:?}"
         );
     }
+}
+
+/// Checks that a listing's scan of a directory skips a young run that has no
+/// row under the directory by the run's parent probe, although the run's key
+/// range covers the directory, and doesn't skip a run that has rows under the
+/// directory.
+#[tokio::test]
+async fn a_listing_skips_a_run_without_the_directorys_rows_by_its_parent_probe() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+    // `/docs` is created before `/later`, so its inode ID, and its rows,
+    // sort between the root's and `/later`'s.
+    for path in ["/docs/a.txt", "/later/a.txt"] {
+        fixture
+            .write_file_bytes(path, b"first\n", None)
+            .await
+            .expect("write a file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("first checkpoint");
+    for path in ["/root.txt", "/later/b.txt"] {
+        fixture
+            .write_file_bytes(path, b"second\n", None)
+            .await
+            .expect("write a file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("second checkpoint");
+
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
+    let segments = super::load_manifest_segments_for_inspection(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_number,
+    )
+    .await
+    .expect("load segments");
+    let young_binds = segments
+        .manifest()
+        .payload()
+        .runs
+        .iter()
+        .max_by_key(|run| run.run_seq)
+        .expect("the second checkpoint's run")
+        .segments
+        .iter()
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
+        .expect("the second checkpoint's bind segment")
+        .clone();
+    let young_filter =
+        load_segment_filter(&store, None, &SessionBlockMemo::default(), &young_binds)
+            .await
+            .expect("load the young filter");
+    let docs = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+    let later = crate::test_support::visible_inode_id(&store, &namespace_id, "/later").await;
+    let docs_prefix = lookup_keys::direntry_parent_prefix(docs);
+    assert!(
+        young_binds.min_row_key < docs_prefix && docs_prefix < young_binds.max_row_key,
+        "the young run's key range covers `/docs`"
+    );
+
+    let before = cache.stats();
+    let rows =
+        crate::metadata::manifest_index::direntry_binds_page(&segments, docs, &docs_prefix, 64)
+            .await
+            .expect("list `/docs`");
+    assert_eq!(rows.len(), 2, "the file's bind and its summary row");
+    let after = cache.stats();
+    // The probe contains `/docs`'s inode ID, whose low bits are random, so
+    // the young filter rejects it in most runs of the test and admits it by
+    // a false positive in the others.
+    if young_filter.may_contain(&lookup_keys::direntry_parent_probe(docs)) {
+        assert!(after.filter_false_positives > before.filter_false_positives);
+    } else {
+        assert_eq!(after.filter_skips, before.filter_skips + 1, "{after:?}");
+    }
+
+    assert!(young_filter.may_contain(&lookup_keys::direntry_parent_probe(later)));
+    let before = cache.stats();
+    let rows = crate::metadata::manifest_index::direntry_binds_page(
+        &segments,
+        later,
+        &lookup_keys::direntry_parent_prefix(later),
+        64,
+    )
+    .await
+    .expect("list `/later`");
+    assert_eq!(rows.len(), 4, "two files' binds and summary rows");
+    assert_eq!(cache.stats().filter_skips, before.filter_skips);
 }
 
 #[tokio::test]
@@ -777,7 +884,11 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         )
         .await
         .expect("point lookup");
-    assert_eq!(rows.len(), 1, "exactly one bind row for the probed name");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the probed name's bind and its revision's summary row"
+    );
     assert_eq!(
         store.count(OperationSelector::Read),
         1,

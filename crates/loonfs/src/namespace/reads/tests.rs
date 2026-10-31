@@ -204,14 +204,43 @@ async fn create_compacted_directory(
     }
 }
 
+/// Checks that a page of a compacted directory reports each file's revision
+/// from the directory's binding rows, and reads no segment of the
+/// `revisions` family.
 #[tokio::test]
-async fn compacted_directory_page_overlaps_revision_segment_reads() {
-    compacted_directory_page_overlaps_segment_reads(
-        MetadataRowFamily::Revisions,
-        None,
-        Duration::from_millis(500),
-    )
-    .await;
+async fn a_compacted_directory_page_reads_no_revision_segment() {
+    let temporary = tempdir().expect("temporary directory");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(temporary.path()).expect("store"));
+    let namespace_id = namespace_id("compacted-directory-page");
+    create_compacted_directory(&store, &namespace_id, None).await;
+    let (_, revision_keys) = family_keys(&store, &namespace_id, MetadataRowFamily::Revisions).await;
+    let (_, binding_keys) =
+        family_keys(&store, &namespace_id, MetadataRowFamily::DirentryBinds).await;
+    assert!(revision_keys.len() >= 8, "{} segments", revision_keys.len());
+    let recording = Arc::new(RecordingStore::metadata_segments(store));
+    let reader = LoonFs::builder_with_store(recording.clone())
+        .read_only()
+        .build()
+        .await
+        .expect("reader");
+    let page = reader
+        .namespace(&namespace_id)
+        .list("/directory")
+        .page_limit(page_limit(PAGE))
+        .page()
+        .await
+        .expect("page");
+    assert_eq!(page.entries.len(), PAGE);
+    assert!(page
+        .entries
+        .iter()
+        .all(|entry| entry.revision_no() == Some(crate::RevisionNo(1))));
+    let reads = recording.take_get_keys();
+    assert!(
+        reads.iter().all(|key| !revision_keys.contains(key)),
+        "the page read a revision segment: {reads:?}"
+    );
+    assert!(reads.iter().any(|key| binding_keys.contains(key)));
 }
 
 #[tokio::test]
@@ -224,7 +253,7 @@ async fn compacted_directory_page_overlaps_access_segment_reads() {
         ]))
         .expect("principals"),
     };
-    // Authorization and revision reads must fit below the serialized access-read budget.
+    // Authorization reads must fit below the serialized access-read budget.
     compacted_directory_page_overlaps_segment_reads(
         MetadataRowFamily::Access,
         Some(subject),

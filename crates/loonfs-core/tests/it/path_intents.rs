@@ -298,7 +298,10 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     for entry in entries {
         assert_eq!(entry.inode_kind(), EntryInodeKind::File);
         assert_eq!(entry.size_bytes(), Some("file-0-bytes".len() as u64));
-        assert!(entry.content_ref().is_some());
+        assert!(
+            entry.content_ref().is_none(),
+            "a listing reports no reference"
+        );
     }
     assert_eq!(store.count(OperationSelector::Read), 0);
 
@@ -777,7 +780,10 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         assert_eq!(entry.inode_kind(), EntryInodeKind::File);
         assert_eq!(entry.revision_no(), Some(RevisionNo(1)));
         assert_eq!(entry.size_bytes(), Some(size));
-        assert!(entry.content_ref().is_some());
+        assert!(
+            entry.content_ref().is_none(),
+            "a listing reports no reference"
+        );
     }
 }
 
@@ -1752,8 +1758,8 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         "listed entry carries its revision number"
     );
     assert!(
-        kept.content_ref().is_some(),
-        "listed entry carries its content ref"
+        kept.content_ref().is_none(),
+        "a listed entry reports no content reference"
     );
 
     resolve_path(&store, &namespace_id("demo"), "/dead/gone.txt")
@@ -2497,4 +2503,145 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     )
     .await
     .expect("matching inode and revision preconditions allow an inode move");
+}
+
+/// Requires every file entry of a listing of `directory` to report what a
+/// stat of the entry's path reports, apart from the content reference, which
+/// only the stat reports, and returns the listing.
+async fn listing_matching_stats<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    directory: &str,
+) -> Vec<PathEntry> {
+    let entries = list_path(store, namespace_id, directory)
+        .await
+        .expect("list directory");
+    for entry in &entries {
+        let mut stat = resolve_path(store, namespace_id, entry.path.as_str())
+            .await
+            .expect("stat listed entry");
+        if let loonfs_types::PathEntryKind::File { content_ref, .. } = &mut stat.kind {
+            assert!(content_ref.take().is_some(), "a stat reports the reference");
+        }
+        assert_eq!(entry.kind, stat.kind, "{}", entry.path);
+        assert_eq!(
+            entry.binding_version, stat.binding_version,
+            "{}",
+            entry.path
+        );
+    }
+    entries
+}
+
+/// Checks that a listing reports each file's current revision after a write,
+/// a move, a write after the move, a delete, and an undelete, that a fold
+/// leaves every listing unchanged, and that a listing of the folded tree
+/// reads no segment of the `revisions` family.
+#[tokio::test]
+async fn listed_revisions_follow_moves_writes_and_undeletes_across_a_fold() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = loonfs_test_support::stores::RecordingStore::metadata_segments(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+    );
+    let context = default_writer();
+    let namespace_id = namespace_id("listed-revisions");
+    let fixture = NamespaceFixture::new(&store, &namespace_id, &context);
+    fixture.create().await.expect("bootstrap");
+    for directory in ["/a", "/b"] {
+        create_directory_path(&store, &namespace_id, directory, &context, None)
+            .await
+            .expect("create directory");
+    }
+    for bytes in [&b"one"[..], b"two"] {
+        fixture
+            .write_file_bytes("/a/report.txt", bytes, None)
+            .await
+            .expect("write file");
+    }
+    fixture
+        .move_path("/a/report.txt", "/b/final.txt", None)
+        .await
+        .expect("move file");
+    assert!(listing_matching_stats(&store, &namespace_id, "/a")
+        .await
+        .is_empty());
+    let moved = listing_matching_stats(&store, &namespace_id, "/b").await;
+    assert_eq!(
+        moved
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.revision_no(), entry.size_bytes()))
+            .collect::<Vec<_>>(),
+        [("/b/final.txt", Some(RevisionNo(2)), Some(3))]
+    );
+
+    fixture
+        .write_file_bytes("/b/final.txt", b"three!", None)
+        .await
+        .expect("write moved file");
+    let deletion = fixture
+        .delete_path("/b/final.txt", None)
+        .await
+        .expect("delete file");
+    assert!(listing_matching_stats(&store, &namespace_id, "/b")
+        .await
+        .is_empty());
+    submit_operation(
+        &store,
+        &namespace_id,
+        CommitId::generate(),
+        FilesystemOperation::Undelete {
+            inode_id: moved[0].inode_id,
+            deletion_seq: deletion.committed_seq,
+            destination_path: None,
+            destination_parent_inode_id: None,
+            destination_display_name: None,
+        },
+        &context,
+    )
+    .await
+    .expect("undelete file");
+    let unfolded = listing_matching_stats(&store, &namespace_id, "/b").await;
+    assert_eq!(
+        unfolded
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.revision_no(), entry.size_bytes()))
+            .collect::<Vec<_>>(),
+        [("/b/final.txt", Some(RevisionNo(3)), Some(6))]
+    );
+    assert!(unfolded[0].content_ref().is_none());
+
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the tail");
+    let revision_keys: std::collections::BTreeSet<String> = namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest")
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|segment| {
+            segment.family == loonfs_types::format::manifest::MetadataRowFamily::Revisions
+        })
+        .map(loonfs_objectstore::keys::metadata_segment_object_key)
+        .collect();
+    assert!(!revision_keys.is_empty());
+    store.reset();
+    let folded = list_path(&store, &namespace_id, "/b")
+        .await
+        .expect("list folded directory");
+    let reads = store.take_get_keys();
+    assert!(
+        reads.iter().all(|key| !revision_keys.contains(key)),
+        "a folded listing read a revision segment: {reads:?}"
+    );
+    assert_eq!(folded, unfolded);
+    assert!(listing_matching_stats(&store, &namespace_id, "/a")
+        .await
+        .is_empty());
+    assert_eq!(
+        listing_matching_stats(&store, &namespace_id, "/b").await,
+        folded
+    );
 }

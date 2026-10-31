@@ -234,6 +234,43 @@ fn sample_grants() -> AccessGrants {
     .expect("grants")
 }
 
+fn sample_revision_summary() -> loonfs_types::format::manifest::RevisionSummary {
+    loonfs_types::format::manifest::RevisionSummary {
+        revision_no: RevisionNo(2),
+        size_bytes: sample_content_ref().size_bytes,
+        revision_committed_by: actor(),
+        revision_committed_at_ms: 4_000,
+    }
+}
+
+/// A binding row of `/report.txt` at one position, written by the commit
+/// with the golden commit ID.
+fn sample_binding_row(
+    state: loonfs_types::format::manifest::DirentryBindingState,
+    committed_seq: u64,
+    delta_index: u32,
+    bind_position: (u64, u32),
+) -> MetadataRow {
+    MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
+        parent_inode_id: ROOT_INODE_ID,
+        name_key: name_key("report.txt"),
+        child_inode_id: InodeId(2),
+        child_kind: loonfs_types::InodeKind::File,
+        child_created_by: actor(),
+        child_created_at_ms: 3_000,
+        committed_seq: ChangeSeq(committed_seq),
+        delta_index,
+        commit_id: commit_id(),
+        committed_by: actor(),
+        committed_at_ms: 1_000 * committed_seq,
+        bind_position: loonfs_types::format::manifest::DeltaPosition {
+            seq: ChangeSeq(bind_position.0),
+            delta_index: bind_position.1,
+        },
+        state,
+    })
+}
+
 fn sample_wal_payload() -> WalObjectPayload {
     let deltas = vec![
         WalCommitDelta {
@@ -255,6 +292,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_000,
+                revision: None,
             },
         },
         WalCommitDelta {
@@ -280,6 +318,15 @@ fn sample_wal_payload() -> WalObjectPayload {
             delta: WalDelta::AppendFileRevision {
                 delta_index: 3,
                 inode_id: InodeId(5),
+                parent_inode_id: loonfs_types::ROOT_INODE_ID,
+                name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+                display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: loonfs_types::ChangeSeq(1),
+                    delta_index: 0,
+                },
+                child_created_by: loonfs_types::ActorId::loonfs(),
+                child_created_at_ms: 0,
                 revision_no: RevisionNo(2),
                 content_ref: sample_content_ref(),
                 layout: Some(loonfs_types::ContentLayout {
@@ -331,6 +378,15 @@ fn sample_wal_payload() -> WalObjectPayload {
             delta: WalDelta::AppendFileRevision {
                 delta_index: 7,
                 inode_id: InodeId(6),
+                parent_inode_id: loonfs_types::ROOT_INODE_ID,
+                name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+                display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: loonfs_types::ChangeSeq(1),
+                    delta_index: 0,
+                },
+                child_created_by: loonfs_types::ActorId::loonfs(),
+                child_created_at_ms: 0,
                 revision_no: RevisionNo(1),
                 content_ref: sample_content_ref(),
                 layout: Some(loonfs_types::ContentLayout {
@@ -343,6 +399,21 @@ fn sample_wal_payload() -> WalObjectPayload {
                     }],
                 }),
                 append_offset: None,
+            },
+        },
+        WalCommitDelta {
+            semantic_operation_index: 7,
+            delta: WalDelta::BindDirentry {
+                delta_index: 8,
+                parent_inode_id: ROOT_INODE_ID,
+                name_key: NameKey::parse("report.txt").expect("valid name key"),
+                display_name: loonfs_types::DisplayName::parse("Report.txt")
+                    .expect("valid display name"),
+                child_inode_id: InodeId(6),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: actor(),
+                child_created_at_ms: 4_000,
+                revision: Some(sample_revision_summary()),
             },
         },
     ];
@@ -408,6 +479,15 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
         delta: WalDelta::AppendFileRevision {
             delta_index: 6,
             inode_id: InodeId(6),
+            parent_inode_id: loonfs_types::ROOT_INODE_ID,
+            name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+            display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: loonfs_types::ChangeSeq(1),
+                delta_index: 0,
+            },
+            child_created_by: loonfs_types::ActorId::loonfs(),
+            child_created_at_ms: 0,
             revision_no: RevisionNo(1),
             content_ref: empty_content_ref,
             layout: None,
@@ -419,6 +499,15 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
         delta: WalDelta::AppendFileRevision {
             delta_index: 7,
             inode_id: InodeId(7),
+            parent_inode_id: loonfs_types::ROOT_INODE_ID,
+            name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+            display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: loonfs_types::ChangeSeq(1),
+                delta_index: 0,
+            },
+            child_created_by: loonfs_types::ActorId::loonfs(),
+            child_created_at_ms: 0,
             revision_no: RevisionNo(2),
             content_ref: ContentRef::blob_v1(
                 namespace_id(),
@@ -1372,6 +1461,7 @@ fn wal_delta_decode_rejects_invalid_name_key() {
         child_kind: loonfs_types::InodeKind::Directory,
         child_created_by: actor(),
         child_created_at_ms: 4_000,
+        revision: None,
     };
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(&valid, &mut encoded).expect("encode delta");
@@ -1713,6 +1803,7 @@ fn wal_delta_wire_tags_match_spec_names() {
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_000,
+                revision: Some(sample_revision_summary()),
             }),
             "bind_direntry",
         ),
@@ -1737,6 +1828,15 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::AppendFileRevision {
                 delta_index: 0,
                 inode_id: InodeId(2),
+                parent_inode_id: loonfs_types::ROOT_INODE_ID,
+                name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+                display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: loonfs_types::ChangeSeq(1),
+                    delta_index: 0,
+                },
+                child_created_by: loonfs_types::ActorId::loonfs(),
+                child_created_at_ms: 0,
                 revision_no: RevisionNo(1),
                 content_ref: sample_content_ref(),
                 layout: None,
@@ -1856,11 +1956,12 @@ fn sample_tombstone_reset_row() -> MetadataRow {
     })
 }
 
+/// One root's tombstone events in key order, which is newest first.
 fn sample_tombstone_rows() -> [MetadataRow; 3] {
     [
-        sample_tombstone_set_row(),
-        sample_tombstone_revoke_row(),
         sample_tombstone_reset_row(),
+        sample_tombstone_revoke_row(),
+        sample_tombstone_set_row(),
     ]
 }
 
@@ -1995,6 +2096,7 @@ fn sample_commit_row() -> MetadataRow {
                     child_kind: loonfs_types::InodeKind::Directory,
                     child_created_by: actor(),
                     child_created_at_ms: 9_000,
+                    revision: None,
                 },
             },
         ],
@@ -2076,6 +2178,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             name_key: name_key("docs"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
+                revision: Some(sample_revision_summary()),
             },
             child_inode_id: InodeId(2),
             child_kind: InodeKind::File,
@@ -2083,6 +2186,13 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             child_created_at_ms: 3_000,
             committed_seq: ChangeSeq(3),
             delta_index: 0,
+            commit_id: commit_id(),
+            committed_by: actor(),
+            committed_at_ms: 3_000,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(3),
+                delta_index: 0,
+            },
         }),
         MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
             parent_inode_id: ROOT_INODE_ID,
@@ -2090,6 +2200,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs-archive")
                     .expect("valid display name"),
+                revision: None,
             },
             child_inode_id: InodeId(5),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -2097,6 +2208,13 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             child_created_at_ms: 6_000,
             committed_seq: ChangeSeq(6),
             delta_index: 0,
+            commit_id: commit_id(),
+            committed_by: actor(),
+            committed_at_ms: 6_000,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(6),
+                delta_index: 0,
+            },
         }),
         MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
             parent_inode_id: ROOT_INODE_ID,
@@ -2105,16 +2223,22 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: actor(),
             child_created_at_ms: 6_000,
-
             committed_seq: ChangeSeq(8),
             delta_index: 0,
-
+            commit_id: commit_id(),
+            committed_by: actor(),
+            committed_at_ms: 8_000,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(6),
+                delta_index: 0,
+            },
             state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         }),
     ];
     rows.extend(sample_inode_rows());
     rows.extend(sample_revision_rows());
     rows.extend([sample_tombstone_set_row(), sample_tombstone_revoke_row()]);
+    rows.sort_by_key(MetadataRow::row_key);
     for row in &rows {
         let key = row.row_key();
         builder.push(&key, &key, row).expect("push sample row");
@@ -2525,6 +2649,15 @@ fn provenance_rows_reject_every_missing_required_field() {
         (
             sample_tombstone_set_row(),
             &["commit_id", "committed_by"][..],
+        ),
+        (
+            sample_binding_rows().remove(1),
+            &[
+                "commit_id",
+                "committed_by",
+                "committed_at_ms",
+                "bind_position",
+            ][..],
         ),
         (sample_active_deletion_listed_row(), &["deleted_by"][..]),
         (
@@ -2965,32 +3098,27 @@ fn namespace_manifest_rejects_a_naming_field() {
     );
 }
 
+/// The rows of one edge: the file's bind at sequence 3, the summary row that
+/// its second revision wrote at sequence 4, and the unbind at sequence 5.
 fn sample_binding_rows() -> Vec<MetadataRow> {
-    use loonfs_types::format::manifest::{DirentryBindingRecord, DirentryBindingState};
-    [
-        DirentryBindingState::Bound {
-            display_name: loonfs_types::DisplayName::parse("Report.txt").expect("display name"),
-        },
-        DirentryBindingState::Unbound,
+    use loonfs_types::format::manifest::DirentryBindingState;
+    let bound = |revision_no: u64| DirentryBindingState::Bound {
+        display_name: loonfs_types::DisplayName::parse("Report.txt").expect("display name"),
+        revision: Some(loonfs_types::format::manifest::RevisionSummary {
+            revision_no: RevisionNo(revision_no),
+            ..sample_revision_summary()
+        }),
+    };
+    vec![
+        sample_binding_row(bound(1), 3, 1, (3, 1)),
+        sample_binding_row(bound(2), 4, 0, (3, 1)),
+        sample_binding_row(DirentryBindingState::Unbound, 5, 0, (3, 1)),
     ]
-    .into_iter()
-    .enumerate()
-    .map(|(delta_index, state)| {
-        MetadataRow::DirentryBinding(DirentryBindingRecord {
-            parent_inode_id: ROOT_INODE_ID,
-            name_key: name_key("report.txt"),
-            child_inode_id: InodeId(2),
-            child_kind: loonfs_types::InodeKind::File,
-            child_created_by: actor(),
-            child_created_at_ms: 4_000,
-            committed_seq: ChangeSeq(3),
-            delta_index: u32::try_from(delta_index).expect("two states fit in u32"),
-            state,
-        })
-    })
-    .collect()
 }
 
+/// Checks the encoding of both binding indexes: the slot index stores the
+/// edge's binding events and its summary row, the child index stores the
+/// binding events alone, and both sort the edge newest first.
 #[test]
 fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
     use loonfs_types::format::segment_blocks::SegmentBlocksBuilder;
@@ -3004,7 +3132,14 @@ fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
             "sst_block_data_direntry_child_binds.v1.bin",
         ),
     ] {
-        let rows = sample_binding_rows();
+        let mut rows: Vec<MetadataRow> = sample_binding_rows()
+            .into_iter()
+            .filter(|row| {
+                family == MetadataRowFamily::DirentryBinds
+                    || matches!(row, MetadataRow::DirentryBinding(binding) if binding.is_binding_event())
+            })
+            .collect();
+        rows.reverse();
         let mut builder =
             SegmentBlocksBuilder::new(std::num::NonZeroUsize::new(4096).expect("nonzero target"));
         for row in &rows {
@@ -3014,7 +3149,7 @@ fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
                     &row.filter_key_for_family(family),
                     row,
                 )
-                .expect("push row");
+                .expect("push row newest first");
         }
         let built = builder.build().expect("finish block");
         let index = sample_segment_index(&built);

@@ -182,14 +182,30 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
         match resolved.inode_kind {
             InodeKind::File => {
+                // A listing of a file lists the file, from its binding row
+                // like every other listed entry.
+                let parent_inode_id = resolved
+                    .parent_inode_id
+                    .expect("a file should have a parent directory");
+                let name_key = absolute_path
+                    .components()
+                    .last()
+                    .map(|component| NameKey::for_display_name(&component.to_display_name()))
+                    .expect("a file's path should have a component");
+                let binding = session
+                    .bound_child(parent_inode_id, &name_key)
+                    .await?
+                    .filter(DirentryBindingRecord::is_bound)
+                    .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.to_string()))?;
+                let child = ListedChild {
+                    resolved,
+                    binding,
+                    readable: true,
+                };
                 return Ok(Page {
                     items: vec![
-                        self.build_authoritative_path_entry_with_session(
-                            &mut session,
-                            &resolved,
-                            options.include_attributes,
-                        )
-                        .await?,
+                        self.build_listed_entry(&mut session, &child, options.include_attributes)
+                            .await?,
                     ],
                     next_cursor: None,
                 });
@@ -386,8 +402,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .collect())
     }
 
-    /// Builds the entries of listed children, and includes the attributes of
-    /// the readable ones when `attributes` asks for them.
+    /// Builds the entries of listed children from their binding rows, and
+    /// includes the attributes of the readable ones when `attributes` asks
+    /// for them.
     pub(super) async fn build_listed_entries(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
@@ -410,12 +427,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             { METADATA_VIEW_SESSION_COUNTER_FIELDS[10].0 } = tracing::field::Empty,
         );
         let entries = async {
-            let file_inode_ids: Vec<InodeId> = children
-                .iter()
-                .filter(|child| child.resolved.inode_kind == InodeKind::File)
-                .map(|child| child.resolved.inode_id)
-                .collect();
-            session.preload_revision_heads(&file_inode_ids).await?;
             if attributes == AttributeInclusion::Include {
                 let readable_inode_ids: Vec<InodeId> = children
                     .iter()
@@ -424,20 +435,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 session.preload_attributes(&readable_inode_ids).await?;
             }
             let mut entries = Vec::with_capacity(children.len());
-            for child in children {
-                let attributes = if child.readable {
-                    attributes
-                } else {
-                    AttributeInclusion::Omit
-                };
-                entries.push(
-                    self.build_authoritative_path_entry_with_session(
-                        session,
-                        &child.resolved,
-                        attributes,
-                    )
-                    .await?,
-                );
+            for child in &children {
+                entries.push(self.build_listed_entry(session, child, attributes).await?);
             }
             Ok::<_, CoreError>(entries)
         }
@@ -447,12 +446,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(entries)
     }
 
-    /// `resolved` must come from visible resolution or enumeration at this
-    /// session's seq (both callers do), so the revision and attribute lookups
-    /// do not re-derive the inode's visibility.
+    /// Builds the entry of a stat, which reads a file's current revision for
+    /// its content reference.
     ///
-    /// An included attribute projection includes the map and its revision even
-    /// when the map is empty; an omitted projection includes neither.
+    /// `resolved` must come from visible resolution at this session's seq, so
+    /// the revision and attribute lookups do not re-derive the inode's
+    /// visibility.
     pub(crate) async fn build_authoritative_path_entry_with_session(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
@@ -469,12 +468,65 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 PathEntryKind::File {
                     revision_no: revision.revision_no,
                     size_bytes: revision.content_ref.size_bytes,
-                    content_ref: revision.content_ref,
+                    content_ref: Some(revision.content_ref),
                     revision_committed_by: revision.committed_by,
                     revision_committed_at_ms: revision.committed_at_ms,
                 }
             }
         };
+        self.path_entry(session, resolved, kind, attributes).await
+    }
+
+    /// Builds the entry of a listed child from its binding row, which
+    /// includes a file's revision summary, so the entry reads no revision
+    /// and reports no content reference
+    /// ([format section 4.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#44-paths-listings-and-revision-reads)).
+    ///
+    /// The attributes of a child the subject can't read are left out.
+    async fn build_listed_entry(
+        &self,
+        session: &mut MetadataViewSession<'_, '_, S>,
+        child: &ListedChild,
+        attributes: AttributeInclusion,
+    ) -> Result<PathEntry> {
+        let resolved = &child.resolved;
+        let kind = match resolved.inode_kind {
+            InodeKind::Directory => PathEntryKind::Directory {},
+            InodeKind::File => {
+                let revision = child.binding.revision().ok_or_else(|| {
+                    CoreError::NamespaceCorrupt(format!(
+                        "the binding of file `{}` under directory `{}` has no revision summary",
+                        child.binding.child_inode_id, child.binding.parent_inode_id
+                    ))
+                })?;
+                PathEntryKind::File {
+                    revision_no: revision.revision_no,
+                    size_bytes: revision.size_bytes,
+                    content_ref: None,
+                    revision_committed_by: revision.revision_committed_by.clone(),
+                    revision_committed_at_ms: revision.revision_committed_at_ms,
+                }
+            }
+        };
+        let attributes = if child.readable {
+            attributes
+        } else {
+            AttributeInclusion::Omit
+        };
+        self.path_entry(session, resolved, kind, attributes).await
+    }
+
+    /// Assembles an entry of `resolved` with `kind`.
+    ///
+    /// An included attribute projection includes the map and its revision even
+    /// when the map is empty; an omitted projection includes neither.
+    async fn path_entry(
+        &self,
+        session: &mut MetadataViewSession<'_, '_, S>,
+        resolved: &ResolvedVisiblePath,
+        kind: PathEntryKind,
+        attributes: AttributeInclusion,
+    ) -> Result<PathEntry> {
         // Attributes belong to the inode, so a directory returns attributes as readily
         // as a file; only the projection determines whether the read happens.
         let attributes = match attributes {
@@ -519,10 +571,11 @@ pub(super) struct ScannedChild {
     pub(super) readable: bool,
 }
 
-/// A child that a listing page returns, resolved to its path, and whether
-/// the subject can read the child.
+/// A child that a listing page returns, resolved to its path, with its
+/// binding row and whether the subject can read the child.
 pub(super) struct ListedChild {
     pub(super) resolved: ResolvedVisiblePath,
+    pub(super) binding: DirentryBindingRecord,
     pub(super) readable: bool,
 }
 
@@ -531,6 +584,7 @@ impl ListedChild {
     pub(super) fn new(directory: &ResolvedVisiblePath, scanned: ScannedChild) -> Self {
         Self {
             resolved: resolve_visible_child(directory, &scanned.child.binding),
+            binding: scanned.child.binding,
             readable: scanned.readable,
         }
     }
@@ -552,6 +606,6 @@ pub(super) fn resolve_visible_child(
         created_at_ms: binding.child_created_at_ms,
         parent_inode_id: Some(binding.parent_inode_id),
         display_name: display_name.to_string(),
-        binding_version: Some(binding.position()),
+        binding_version: Some(binding.bind_position),
     }
 }

@@ -252,6 +252,14 @@ impl SegmentBlocksBuilder {
             .map(drop)
     }
 
+    /// Adds a filter key that no row of its own carries, such as the key that
+    /// a run of rows sharing a prefix adds for a scan of that prefix.
+    ///
+    /// The key counts as one more insertion when the filter is sized.
+    pub fn push_filter_key(&mut self, filter_key: &str) {
+        self.filter_hashes.push(filter_key_hashes(filter_key));
+    }
+
     /// Appends one row and returns its CBOR encoding.
     pub fn push_with_encoded_row<R: Serialize>(
         &mut self,
@@ -1246,6 +1254,27 @@ mod tests {
         }
         let rate = false_positives as f64 / probes as f64;
         assert!(rate < 0.02, "false positive rate {rate} exceeds 2%");
+    }
+
+    /// Checks that a filter key without a row of its own is admitted and is
+    /// counted when the filter is sized.
+    #[test]
+    fn an_extra_filter_key_is_admitted_and_sizes_the_filter() {
+        let rows = 100_usize;
+        let mut builder = SegmentBlocksBuilder::default();
+        for index in 0..rows {
+            let (key, filter_key, row) = inode_row(index as u64);
+            builder.push(&key, &filter_key, &row).expect("push row");
+        }
+        builder.push_filter_key("group-probe");
+        let built = builder.build().expect("segment");
+        let filter = decode_filter_block(section(&built.bytes, &built.filter), &built.filter)
+            .expect("filter");
+        assert!(filter.may_contain("group-probe"));
+        assert_eq!(
+            built.filter.decoded_bytes as usize,
+            12 + ((rows + 1) * FILTER_BITS_PER_KEY).div_ceil(8)
+        );
     }
 
     #[test]

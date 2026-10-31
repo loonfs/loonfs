@@ -286,7 +286,12 @@ impl HeapBytes for DirentryBindingRecord {
     fn heap_bytes(&self) -> usize {
         self.name_key.heap_bytes()
             + self.child_created_by.heap_bytes()
+            + self.commit_id.heap_bytes()
+            + self.committed_by.heap_bytes()
             + self.display_name().map_or(0, HeapBytes::heap_bytes)
+            + self
+                .revision()
+                .map_or(0, |revision| revision.revision_committed_by.heap_bytes())
     }
 }
 
@@ -364,19 +369,36 @@ impl HeapBytes for WalCommitDelta {
                 name_key,
                 display_name,
                 child_created_by,
+                revision,
                 ..
+            } => {
+                name_key.heap_bytes()
+                    + display_name.heap_bytes()
+                    + child_created_by.heap_bytes()
+                    + revision
+                        .as_ref()
+                        .map_or(0, |revision| revision.revision_committed_by.heap_bytes())
             }
-            | WalDelta::UnbindDirentry {
+            WalDelta::UnbindDirentry {
                 name_key,
                 display_name,
                 child_created_by,
                 ..
             } => name_key.heap_bytes() + display_name.heap_bytes() + child_created_by.heap_bytes(),
             WalDelta::AppendFileRevision {
+                name_key,
+                display_name,
+                child_created_by,
                 content_ref,
                 layout,
                 ..
-            } => content_ref.heap_bytes() + layout.heap_bytes(),
+            } => {
+                name_key.heap_bytes()
+                    + display_name.heap_bytes()
+                    + child_created_by.heap_bytes()
+                    + content_ref.heap_bytes()
+                    + layout.heap_bytes()
+            }
             WalDelta::TombstoneSubtree {
                 deleted_binding, ..
             } => deleted_binding.heap_bytes(),

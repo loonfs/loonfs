@@ -38,7 +38,8 @@ struct ListedFile {
 }
 
 /// Every visible file in the namespace right now, by inode, found by walking
-/// directories through the ordinary listing surface.
+/// directories through the ordinary listing surface. A listing doesn't report
+/// a file's content reference, so a stat of each file supplies it.
 async fn listed_files(
     reader: &LoonFs<ReadOnly>,
     namespace_id: &NamespaceId,
@@ -61,9 +62,16 @@ async fn listed_files(
                 loonfs::PathEntryKind::File {
                     revision_no,
                     size_bytes,
-                    content_ref,
                     ..
                 } => {
+                    let content_ref = reader
+                        .namespace(namespace_id)
+                        .stat(entry.path.as_str())
+                        .await
+                        .expect("stat listed file")
+                        .content_ref()
+                        .cloned()
+                        .expect("a stat of a file includes its content reference");
                     found.insert(
                         entry.inode_id,
                         ListedFile {

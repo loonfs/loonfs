@@ -393,6 +393,7 @@ mod tests {
             name_key: NameKey::parse(name).expect("name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
+                revision: Some(crate::test_support::revision_summary()),
             },
             child_inode_id: InodeId(42),
             child_kind: loonfs_types::InodeKind::File,
@@ -400,6 +401,13 @@ mod tests {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(bind_seq),
             delta_index: 0,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(bind_seq),
+                delta_index: 0,
+            },
         })
     }
 
@@ -413,6 +421,13 @@ mod tests {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(bind_seq + 1),
             delta_index: 0,
+            commit_id: crate::test_support::binding_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
+            committed_at_ms: 0,
+            bind_position: loonfs_types::format::manifest::DeltaPosition {
+                seq: ChangeSeq(bind_seq + 1),
+                delta_index: 0,
+            },
             state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         })
     }
