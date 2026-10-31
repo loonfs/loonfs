@@ -332,7 +332,7 @@ pub(crate) fn file_content_ref(entry: &PathEntry) -> Result<ContentRef> {
             .clone()
             .expect("a stat entry should include its content reference")),
         // Core builds entries from stored kinds, so an unknown kind never reaches here.
-        PathEntryKind::Directory {} | PathEntryKind::Unknown => Err(CoreError::ExpectedFile {
+        PathEntryKind::Directory { .. } | PathEntryKind::Unknown => Err(CoreError::ExpectedFile {
             target: entry.path.to_string(),
             kind: InodeKind::Directory,
         }),

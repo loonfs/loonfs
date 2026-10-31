@@ -320,13 +320,17 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         inode_ids.push(entry.inode_id);
     }
 
-    // Each stat reads three segments: the first run's bindings for the parent
-    // directories, the newest run with a row of the file's binding, and the
-    // run with its newest revision. Each revision writes a summary row under
-    // the file's binding, so the hot file's newest binding row is in the run
-    // with its newest revision. The file's keys contain its inode ID, whose low bits
-    // are random, so a newer run's inline filter can admit a key by a false
-    // positive, and the newest-first lookup then reads that run's segment too.
+    // A stat reads the newest run's bindings for the parent directories,
+    // because every batch writes below them, and each write advances their
+    // subtree sequences with subtree rows. It also reads the newest run with a
+    // row of the file's binding, and the run with its newest revision. Each
+    // revision writes a summary row under the file's binding, so the hot
+    // file's newest binding row and newest revision are in the newest run, and
+    // its stat reads two segments where the other file's reads three. The
+    // file's keys contain its inode ID, whose low bits are random, so a newer
+    // run's inline filter can admit a key by a false positive, and the
+    // newest-first lookup then reads that run's segment too, unless it's the
+    // newest run's bindings, which the stat reads for the parents anyway.
     // The batch runs are the newest `RUNS` delta runs, oldest first.
     let directory = LoonFs::builder_with_store(store.clone())
         .read_only()
@@ -348,8 +352,9 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let batches = &batches[batches.len() - RUNS..];
     let false_positive_gets = |name: &str, inode_id, binding_run: usize, revision_run: usize| {
         let name_key = NameKey::for_display_name(&DisplayName::parse(name).expect("name"));
+        let older_batches = &batches[..RUNS - 1];
         segments_admitting(
-            &batches[binding_run + 1..],
+            &older_batches[(binding_run + 1).min(older_batches.len())..],
             MetadataRowFamily::DirentryBinds,
             &lookup_keys::direntry_bind_prefix(directory, &name_key),
             &lookup_keys::direntry_bind_probe(directory, &name_key),
@@ -369,7 +374,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             ),
             (
                 "hot.txt",
-                3 + false_positive_gets("hot.txt", inode_ids[1], RUNS - 1, RUNS - 1)
+                2 + false_positive_gets("hot.txt", inode_ids[1], RUNS - 1, RUNS - 1)
             ),
         ],
         "segment GETs of each cold stat, of {gets_per_stat:?} GETs in all"

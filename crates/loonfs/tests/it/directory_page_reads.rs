@@ -8,7 +8,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::RecordingStore;
 use loonfs_types::format::manifest::MetadataRowFamily;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -31,9 +31,10 @@ async fn family_keys(
 }
 
 /// Checks that a directory page over folded batches reads its children's
-/// kinds and revision summaries from the directory's binding rows, so it
-/// reads no child inode row and no revision row, and that each listed file
-/// reports what a stat of it reports, apart from the content reference.
+/// kinds, revision summaries, and subtree sequences from the directory's
+/// binding rows, so it reads no child inode row, no revision row, and no
+/// child-index row, and that each listed entry reports what a stat of it
+/// reports, apart from a file's content reference.
 #[tokio::test]
 async fn directory_pages_read_no_child_inode_or_revision_rows() {
     let temporary = tempdir().expect("temporary directory");
@@ -72,6 +73,7 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
     // The writer's own maintenance folds before the session's fold
     // threshold, so the session never folds, and so never compacts these
     // runs into fewer segments.
+    let mut subtree_seqs = BTreeMap::new();
     for batch in 0..12 {
         for index in batch * 25..(batch + 1) * 25 {
             namespace_writer
@@ -83,6 +85,14 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
                 .await
                 .expect("create file");
         }
+        // Each batch also writes below one of three child directories, so
+        // their subtree rows are spread across the folded runs.
+        let directory = format!("/files/dir-{}", batch % 3);
+        let written = namespace_writer
+            .put_file(&format!("{directory}/{batch:02}.txt"), b"d", &actor)
+            .await
+            .expect("write below a child directory");
+        subtree_seqs.insert(directory, written.committed_seq);
         maintenance
             .fold_wal(&namespace_id)
             .await
@@ -121,6 +131,8 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
     assert!(child_inode_keys.len() >= 6);
     let revision_keys = family_keys(&store, &namespace_id, MetadataRowFamily::Revisions).await;
     assert!(revision_keys.len() >= 6);
+    let child_index_keys =
+        family_keys(&store, &namespace_id, MetadataRowFamily::DirentryChildBinds).await;
     // A child inode segment's key range can include the directory's own ID,
     // and a Bloom filter false positive can make the directory's own lookup
     // read that segment. A one-entry page of the directory reads the same
@@ -147,11 +159,11 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
     let namespace = reader.namespace(&namespace_id);
     let page = namespace
         .list("/files")
-        .page_limit(page_limit(300))
+        .page_limit(page_limit(400))
         .page()
         .await
         .expect("directory page");
-    assert_eq!(page.entries.len(), 300);
+    assert_eq!(page.entries.len(), 303);
     assert!(page.next_cursor.is_none());
     for key in recording.take_get_keys() {
         assert!(
@@ -159,16 +171,30 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
             "read child inode object {key}"
         );
         assert!(!revision_keys.contains(&key), "read revision object {key}");
+        assert!(
+            !child_index_keys.contains(&key) || directory_reads.contains(&key),
+            "read child index object {key}"
+        );
     }
     for entry in page.entries {
         let stat = namespace
             .stat_with_options(entry.path.as_str(), &StatOptions::default())
             .await
-            .expect("stat listed file");
+            .expect("stat listed entry");
         assert_eq!(entry.created_by, actor);
         assert_eq!(entry.created_by, stat.created_by);
         assert_eq!(entry.created_at_ms, stat.created_at_ms);
         assert_eq!(entry.binding_version, stat.binding_version);
+        if let Some(subtree_seq) = entry.subtree_seq() {
+            assert_eq!(
+                subtree_seqs.get(entry.path.as_str()),
+                Some(&subtree_seq),
+                "{}",
+                entry.path
+            );
+            assert_eq!(entry.kind, stat.kind, "{}", entry.path);
+            continue;
+        }
         let mut stat_kind = stat.kind.clone();
         let PathEntryKind::File { content_ref, .. } = &mut stat_kind else {
             panic!("expected a file, got {:?}", stat.kind);

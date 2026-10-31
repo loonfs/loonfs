@@ -305,3 +305,120 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         );
     }
 }
+
+/// Checks that the planned estimate covers the `advance_subtree` deltas of
+/// an update below a deep chain of directories with the longest names, which
+/// the request estimate leaves out.
+#[tokio::test]
+async fn advance_subtree_deltas_encode_within_the_planned_estimate() {
+    const DEPTH: u128 = 200;
+    let directory = tempfile::tempdir().expect("store directory");
+    let store =
+        loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("n".repeat(MAX_ID_BYTES)).expect("namespace");
+    let actor = ActorId::parse("a".repeat(256)).expect("actor");
+    let mut head =
+        NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_test_support::test_actor());
+    head.seq = ChangeSeq(MAX_PUBLIC_INTEGER - 1);
+    head.wal_no = WalNo(MAX_PUBLIC_INTEGER - 1);
+    head.writer_epoch = WriterEpoch(MAX_PUBLIC_INTEGER);
+    // A chain of directories, each named with the longest display name, and
+    // an empty directory at its bottom whose attributes the request updates.
+    let mut deltas = vec![WalDelta::CreateInode {
+        delta_index: 0,
+        inode_id: ROOT_INODE_ID,
+        inode_kind: InodeKind::Directory,
+    }];
+    for depth in 0..=DEPTH {
+        let parent_inode_id = if depth == 0 {
+            ROOT_INODE_ID
+        } else {
+            InodeId(depth + 1)
+        };
+        let name = format!("{depth:0255}");
+        let delta_index = u32::try_from(deltas.len()).expect("delta index");
+        deltas.extend([
+            WalDelta::CreateInode {
+                delta_index,
+                inode_id: InodeId(depth + 2),
+                inode_kind: InodeKind::Directory,
+            },
+            WalDelta::BindDirentry {
+                delta_index: delta_index + 1,
+                parent_inode_id,
+                name_key: NameKey::parse(&name).expect("key"),
+                display_name: DisplayName::parse(&name).expect("name"),
+                child_inode_id: InodeId(depth + 2),
+                child_kind: InodeKind::Directory,
+                child_created_by: actor.clone(),
+                child_created_at_ms: u64::MAX,
+                revision: None,
+            },
+        ]);
+    }
+    let mut state = MetadataState::default();
+    state.apply_committed_wal_deltas_mut(
+        head.seq,
+        &CommitId::parse("seed").expect("commit"),
+        &actor,
+        0,
+        &deltas,
+    );
+    let candidate = CommitCandidate::new(CommitIntent {
+        commit_id: CommitId::parse("c".repeat(MAX_ID_BYTES)).expect("commit"),
+        actor_id: actor.clone(),
+        subject: None,
+        message: None,
+        preconditions: Vec::new(),
+        operations: vec![FilesystemOperation::UpdateAttributesByInode {
+            inode_id: InodeId(DEPTH + 2),
+            set: BTreeMap::from([(attribute_key("x"), attribute_text("a"))]),
+            remove: Vec::new(),
+            expected_attributes_revision_no: None,
+        }],
+    });
+    let tail = crate::wal::ProjectedWalTail::default();
+    let base = crate::wal::ProjectedWalTail::from_rows(state);
+    let content_writes = crate::test_support::content_writes();
+    let manifest = VerifiedMetadataSegments::initial(&store);
+    let plan = PublishPlanningSession::new(
+        &head,
+        &tail,
+        MetadataView::in_memory(&manifest, &base, None, head.seq),
+        ContentWrites::new(&store, &content_writes),
+        u64::MAX,
+    )
+    .prepare_commit(
+        &candidate,
+        crate::authorize::Authorizer::Unrestricted,
+        candidate.semantic_identity(&namespace_id),
+    )
+    .await
+    .expect("plan");
+    let advances = plan
+        .deltas
+        .iter()
+        .filter(|delta| matches!(delta.delta, WalDelta::AdvanceSubtree { .. }))
+        .count();
+    assert_eq!(advances, usize::try_from(DEPTH).expect("depth"));
+    let estimate = candidate.planned_wal_record_bytes(&plan.deltas, &plan.appended)
+        + WAL_OBJECT_OVERHEAD_BYTES;
+    let encoded = prepare_wal_object(
+        namespace_id.clone(),
+        head.writer_epoch,
+        &head,
+        head.basis_floor_seq,
+        &[plan],
+    )
+    .expect("encode");
+    assert!(
+        encoded.document_bytes() <= estimate,
+        "{} > {estimate}",
+        encoded.document_bytes()
+    );
+    assert!(
+        candidate.wal_record_bytes_upper_bound() + WAL_OBJECT_OVERHEAD_BYTES
+            < encoded.document_bytes(),
+        "the request estimate leaves the advances out"
+    );
+}

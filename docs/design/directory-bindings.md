@@ -1,6 +1,6 @@
 # Directory bindings
 
-A "directory slot" is a name within a parent directory, identified by `(parent_inode_id, name_key)`. Each change to a slot writes a bound or unbound value to two indexes, and each revision of a bound file writes the file's new revision summary to one of them. A read takes each edge's newest value at its sequence, which is the edge's first row. Compaction processes each index separately, under one retention rule.
+A "directory slot" is a name within a parent directory, identified by `(parent_inode_id, name_key)`. Each change to a slot writes a bound or unbound value to two indexes, each revision of a bound file writes the file's new revision summary to one of them, and each commit that changes something below a bound directory writes the directory's new subtree sequence to the same one. A read takes each edge's newest value at its sequence, which is the edge's first row. Compaction processes each index separately, under one retention rule.
 
 [Directory bindings](../specs/format.md#13-directory-bindings) in the storage format defines the records, keys, and visibility rules, and [Commit identity and preconditions](../specs/api.md#51-commit-identity-and-preconditions) in the API specification defines binding tokens and preconditions.
 
@@ -15,11 +15,15 @@ A directory binding row (`direntry_binding`) contains the parent's inode ID (`pa
 
 An "edge" is a parent, a name, and a child. A bind writes a bound row to both indexes, and an unbind writes an unbound row to both. These rows are the binding events, and both indexes store the same ones. A revision of a file writes one more bound row, a "summary row", to the slot index alone, under the file's current edge. The summary row copies the edge's name and attribution, keeps its `bind_position`, and stores the new revision's summary, so the slot index has the file's current revision next to its name. The unbind delta in the WAL identifies the exact bind it removes, and an unbound row's `bind_position` is that bind's position.
 
+A directory's "subtree sequence" (`subtree_seq`) is the sequence of the newest commit that changed anything below the directory, or that bound the directory itself. It's the `committed_seq` of the newest row of the directory's edge in the slot index, so no field stores it. A commit that changes an inode ends with an `advance_subtree` delta for each ancestor directory of the inode below the root, except a directory whose edge the same commit binds or unbinds. Each `advance_subtree` delta writes a "subtree row" to the slot index alone, under the directory's current edge, the way a revision writes a summary row. A subtree row keeps the edge's `bind_position`, and its own `committed_seq` is the directory's new subtree sequence. A fold writes only the newest subtree row of each directory edge among the commits that it folds.
+
 ## Reads
 
 This section describes how a read finds the value of a slot, the parent of a child, or the entries of a directory.
 
 At sequence `N`, an edge's value is its first row in key order whose `committed_seq` is at or below `N`, because each edge's rows sort newest first. A slot's value is the newest of its edges' values, and a parent lookup applies the same rule to a child's edges in the child index. A bound value identifies its child, and an unbound value, or no value, means the name is available. A read takes an edge's first row at or below its sequence and then moves past the edge, so a file with thousands of summary rows costs one row.
+
+The subtree sequence in a directory's entry is the `committed_seq` of the value of the directory's edge. A listing takes the subtree sequence from each directory child's edge row, and a stat by path takes it from the directory's own edge row, which the stat already read to resolve the path, so neither one reads anything more. A stat by inode makes one more lookup in the slot index to read the directory's edge row. The root has no edge, so its subtree sequence is the read's head sequence. A fold keeps only the newest subtree row of each edge, so the value is exact at the head and at each manifest's head sequence. A read at a sequence between two manifests' heads can report an older value, but never one older than the value at the earlier manifest's head.
 
 LoonFS checks two rules when it validates a commit: a slot has at most one child, and a child has at most one parent. A commit fails validation if it binds into a slot that already has another child, or binds a child that already has a binding, unless the same operation unbinds that binding first. A move unbinds the old slot before it binds the new one, and an undelete binds a deletion root, which has no binding. So the two indexes agree at every readable sequence.
 
@@ -31,7 +35,7 @@ This section describes which binding rows compaction keeps and removes.
 
 An unbound value is a tombstone for the older values of its edge. It must stay while an excluded run might still contain those older values. A compaction that excludes the group's oldest run keeps every row.
 
-A "bottom-anchored" compaction includes the oldest run. It groups the rows of both indexes by edge. For each edge and each kind of row (binding events and summary rows), it keeps every row above the floor and the newest row at or below the floor. If the edge's newest binding event at or below the floor is unbound, it removes the edge's rows of both kinds at or below the floor. The rows arrive newest first, so the operator decides each row when it arrives. It also tracks the last edge that's bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index, and it refuses a second child bound in one slot at the floor, or a second parent bound for one child at the floor, as corruption.
+A "bottom-anchored" compaction includes the oldest run. It groups the rows of both indexes by edge. For each edge and each kind of row (binding events, and summary or subtree rows), it keeps every row above the floor and the newest row at or below the floor. If the edge's newest binding event at or below the floor is unbound, it removes the edge's rows of both kinds at or below the floor. The rows arrive newest first, so the operator decides each row when it arrives. It also tracks the last edge that's bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index, and it refuses a second child bound in one slot at the floor, or a second parent bound for one child at the floor, as corruption.
 
 For example, suppose inode 7 is bound at `/a` at sequence 10, written at sequence 15, and moved to `/b` at sequence 20, and the floor is at 20. A bottom-anchored compaction produces:
 
@@ -42,7 +46,7 @@ For example, suppose inode 7 is bound at `/a` at sequence 10, written at sequenc
 
 If the file is instead written at sequence 15 and not moved, the slot index keeps the summary row at 15 and the bind at 10, and the child index keeps the bind at 10.
 
-Every row above the floor stays. The child index stores binding events alone, and the rule judges binding events apart from summary rows, so both indexes keep the same binding events. The merge's digests of the two indexes' binding events, and the manifest's check that each run's slot index has at least as many rows as its child index, verify that the indexes agree.
+Every row above the floor stays. The child index stores binding events alone, and the rule judges binding events apart from summary and subtree rows, so both indexes keep the same binding events. The merge's digests of the two indexes' binding events, and the manifest's check that each run's slot index has at least as many rows as its child index, verify that the indexes agree.
 
 Why can compaction remove an unbound floor value, when attribute and access revisions keep a cleared floor value? The next attribute or access update needs the cleared value's revision number. A binding position comes from the event that published it, so a later bind doesn't depend on a kept unbound value.
 

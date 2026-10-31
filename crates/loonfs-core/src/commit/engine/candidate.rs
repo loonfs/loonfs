@@ -447,13 +447,15 @@ impl CommitCandidate {
         Ok(bytes.0)
     }
 
-    /// Bounds the request's WAL bytes before planning adds carried layouts.
-    /// Publication adds their extent bounds before accepting the plan.
+    /// Bounds the request's WAL bytes before planning adds carried layouts
+    /// and `advance_subtree` deltas. Publication adds their bounds before
+    /// accepting the plan.
     pub fn wal_record_bytes_upper_bound(&self) -> usize {
         self.wal_record_bytes_upper_bound_with_inline_content(&self.inline_content)
     }
 
-    /// Bounds the request after inline selection, before carried layouts.
+    /// Bounds the request after inline selection, before carried layouts and
+    /// `advance_subtree` deltas.
     pub fn wal_record_bytes_upper_bound_with_inline_content(
         &self,
         inline_content: &[InlineContent],
@@ -461,8 +463,8 @@ impl CommitCandidate {
         super::super::wal_size::estimated_wal_record_bytes(self.intent(), inline_content)
     }
 
-    /// Bounds the planned WAL record, which can include layouts that the
-    /// request bound leaves out.
+    /// Bounds the planned WAL record, which can include layouts and
+    /// `advance_subtree` deltas that the request bound leaves out.
     pub(crate) fn planned_wal_record_bytes(
         &self,
         deltas: &[loonfs_types::format::wal::WalCommitDelta],

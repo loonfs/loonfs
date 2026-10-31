@@ -6,7 +6,8 @@
 //! not copy the child's kind or attribution; the model reads both from the
 //! child's inode row. The model stores no revision summary under a binding,
 //! and no summary row for a revision, so it reads a file's current revision
-//! from the file's revision rows. The initial root inode uses
+//! from the file's revision rows. It stores no subtree row either, and it
+//! doesn't model a directory's subtree sequence. The initial root inode uses
 //! `ActorId::loonfs()`, and the initial empty attribute state has no
 //! actor or timestamp because it is not stored as a revision.
 
@@ -357,6 +358,7 @@ impl MetadataState {
                             .collect(),
                     });
                 }
+                WalDelta::AdvanceSubtree { .. } => {}
             }
         }
 

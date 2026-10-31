@@ -198,6 +198,38 @@ impl MetadataState {
                     },
                 });
             }
+            WalDelta::AdvanceSubtree {
+                delta_index,
+                parent_inode_id,
+                name_key,
+                display_name,
+                child_inode_id,
+                child_created_by,
+                child_created_at_ms,
+                bind_position,
+            } => {
+                // The subtree row of the directory's edge, which the slot
+                // index stores and the child index doesn't. The row's
+                // `committed_seq` is the directory's new subtree sequence.
+                self.push_direntry_binding_record(DirentryBindingRecord {
+                    parent_inode_id: *parent_inode_id,
+                    name_key: name_key.clone(),
+                    child_inode_id: *child_inode_id,
+                    child_kind: InodeKind::Directory,
+                    child_created_by: child_created_by.clone(),
+                    child_created_at_ms: *child_created_at_ms,
+                    committed_seq,
+                    delta_index: *delta_index,
+                    commit_id: commit_id.clone(),
+                    committed_by: actor.clone(),
+                    committed_at_ms,
+                    bind_position: *bind_position,
+                    state: DirentryBindingState::Bound {
+                        display_name: display_name.clone(),
+                        revision: None,
+                    },
+                });
+            }
             WalDelta::TombstoneSubtree {
                 delta_index,
                 root_inode_id,

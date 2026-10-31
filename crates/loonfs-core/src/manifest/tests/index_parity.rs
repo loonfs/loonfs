@@ -762,6 +762,9 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     }
 }
 
+/// Checks that a compaction writes a child index that agrees with the slot
+/// index, apart from the subtree row that the slot index alone stores, and
+/// that the manifest doesn't load without its child index segment.
 #[tokio::test]
 async fn manifest_writes_and_validates_direntry_child_bind_index() {
     let temp_dir = tempdir().expect("tempdir");
@@ -771,10 +774,13 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
-        .await
-        .expect("write hello");
+    // The second write advances `/docs`, which writes a subtree row.
+    for path in ["/docs/hello.txt", "/docs/again.txt"] {
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, b"hello\n", None)
+            .await
+            .expect("write");
+    }
 
     let manifest_no = checkpoint_then_compact(
         &store,
@@ -786,7 +792,15 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     let materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
-            .expect("load manifest");
+            .expect("the parity checks accept the slot index's subtree row");
+    assert!(
+        materialized
+            .metadata_state
+            .direntry_binds()
+            .iter()
+            .any(|row| row.child_kind == loonfs_types::InodeKind::Directory
+                && !row.is_binding_event())
+    );
     let base = base_tier(&materialized.manifest);
     let child_binds = base
         .iter()

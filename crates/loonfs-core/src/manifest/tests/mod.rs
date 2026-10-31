@@ -19,6 +19,7 @@ mod newest_first_lookups;
 mod read_ahead_windows;
 mod retention;
 mod streaming_compaction;
+mod subtree_rows;
 
 use super::error::ManifestLoadError;
 use super::load::{

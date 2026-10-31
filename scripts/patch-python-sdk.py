@@ -163,16 +163,14 @@ commit_path.write_text(source)
 # A client must keep a path entry whose inode kind it doesn't know, and read the fields
 # that every entry includes. The generated union rejects an unknown kind, which fails the
 # whole stat or listing, so the patch wraps that union in one with a fallback member for
-# the other kinds. A directory entry has exactly the fields that every entry includes, so
-# the fallback member copies the directory member's fields.
+# the other kinds. The fallback member copies the directory member's fields, apart from
+# the fields that only a directory entry includes.
 schemas = openapi["components"]["schemas"]
 entry_fields = {
     kind: set(schemas[reference.rsplit("/", 1)[1]]["properties"])
     for kind, reference in schemas["PathEntry"]["discriminator"]["mapping"].items()
 }
-assert entry_fields["dir"] == set.intersection(*entry_fields.values()), (
-    "a directory entry no longer has exactly the fields that every entry includes"
-)
+directory_fields = entry_fields["dir"] - set.intersection(*entry_fields.values())
 inode_kinds = "".join(f'    "{kind}",\n' for kind in sorted(entry_fields))
 path_entry_path = pathlib.Path("generated/python/types/path_entry.py")
 source = path_entry_path.read_text()
@@ -202,6 +200,9 @@ unknown_member, count = re.subn(
     flags=re.DOTALL,
 )
 assert count == 1, "expected a docstring on the directory member"
+for field in sorted(directory_fields):
+    unknown_member, count = re.subn(rf"    {field}: [^\n]*\n", "", unknown_member)
+    assert count == 1, f"expected one `{field}` field on the directory member"
 unknown_member = replace_once(unknown_member, "class PathEntry_Dir(", "class PathEntry_Unknown(")
 unknown_member = replace_once(unknown_member, '    inode_kind: typing.Literal["dir"] = "dir"\n', "    inode_kind: str\n")
 unknown_member = replace_once(

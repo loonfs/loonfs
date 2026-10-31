@@ -296,7 +296,7 @@ impl<Destination: TreePath> RemoteTree<'_, Destination> {
             }
             let entry = listing.entries.next().expect("the entry was peeked");
             match entry.kind {
-                PathEntryKind::Directory {} => {
+                PathEntryKind::Directory { .. } => {
                     self.last_directory = Some(ListedDirectory {
                         inode_id: entry.inode_id,
                         source,

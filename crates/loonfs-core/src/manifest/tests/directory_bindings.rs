@@ -550,8 +550,9 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         manifest_rows_for_family(&rebuilt.metadata_state, ApiMetadataRowFamily::DirentryBinds);
     assert_eq!(
         forward.len(),
-        4,
-        "three parents and one edge of the child: {forward:?}"
+        7,
+        "the bind and newest subtree row of each of three parents, and one edge of the \
+         child: {forward:?}"
     );
     let child_rows = forward
         .iter()

@@ -447,7 +447,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     /// Builds the entry of a stat, which reads a file's current revision for
-    /// its content reference.
+    /// its content reference, and a directory's slot-index row for its
+    /// subtree sequence.
     ///
     /// `resolved` must come from visible resolution at this session's seq, so
     /// the revision and attribute lookups do not re-derive the inode's
@@ -459,7 +460,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         attributes: AttributeInclusion,
     ) -> Result<PathEntry> {
         let kind = match resolved.inode_kind {
-            InodeKind::Directory => PathEntryKind::Directory {},
+            InodeKind::Directory => PathEntryKind::Directory {
+                subtree_seq: self.subtree_seq(session, resolved).await?,
+            },
             InodeKind::File => {
                 let revision = session
                     .latest_revision_head_of_visible(resolved.inode_id)
@@ -491,7 +494,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<PathEntry> {
         let resolved = &child.resolved;
         let kind = match resolved.inode_kind {
-            InodeKind::Directory => PathEntryKind::Directory {},
+            // The child's binding is its edge's newest row at the read's
+            // sequence, so the row's `committed_seq` is the directory's
+            // subtree sequence.
+            InodeKind::Directory => PathEntryKind::Directory {
+                subtree_seq: child.binding.committed_seq,
+            },
             InodeKind::File => {
                 let revision = child.binding.revision().ok_or_else(|| {
                     CoreError::NamespaceCorrupt(format!(
@@ -514,6 +522,43 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             AttributeInclusion::Omit
         };
         self.path_entry(session, resolved, kind, attributes).await
+    }
+
+    /// Returns the subtree sequence of the directory `resolved` at this
+    /// view's sequence: the head sequence for the root, which has no edge
+    /// row, and otherwise the sequence of the commit that wrote the newest
+    /// row of the directory's edge in the slot index
+    /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
+    ///
+    /// A path's resolution read that row, so a stat by path finds it in the
+    /// session. A stat by inode resolved the directory through the child
+    /// index, which stores binding events alone, so it reads the row here.
+    async fn subtree_seq(
+        &self,
+        session: &mut MetadataViewSession<'_, '_, S>,
+        resolved: &ResolvedVisiblePath,
+    ) -> Result<ChangeSeq> {
+        let Some(parent_inode_id) = resolved.parent_inode_id else {
+            return Ok(self.head.seq);
+        };
+        let display_name = DisplayName::parse(&resolved.display_name).map_err(|error| {
+            CoreError::NamespaceCorrupt(format!(
+                "stored display name for inode `{}` is invalid: {error}",
+                resolved.inode_id
+            ))
+        })?;
+        let binding = session
+            .bound_child(parent_inode_id, &NameKey::for_display_name(&display_name))
+            .await?
+            .filter(|binding| binding.is_bound() && binding.child_inode_id == resolved.inode_id)
+            .ok_or_else(|| {
+                CoreError::NamespaceCorrupt(format!(
+                    "the slot index doesn't bind directory `{}` under directory \
+                     `{parent_inode_id}`, which the child index binds it under",
+                    resolved.inode_id
+                ))
+            })?;
+        Ok(binding.committed_seq)
     }
 
     /// Assembles an entry of `resolved` with `kind`.

@@ -19,7 +19,8 @@ pub enum MetadataRowFamily {
     /// Orders directory bindings by parent, name, and child, newest first
     /// within each edge, for path resolution and directory listings. Besides
     /// the binding events, each bound file edge has a summary row for every
-    /// revision of the file.
+    /// revision of the file, and each bound directory edge has a subtree row
+    /// for each advance of the directory's subtree sequence.
     DirentryBinds,
     /// Re-indexes the binding events by child, newest first within each
     /// edge, for parent discovery.
@@ -221,7 +222,8 @@ pub struct InodeRecord {
 }
 
 /// Stores one value of a directory edge: a binding event in both binding
-/// indexes, or a revision summary in the slot index.
+/// indexes, or a file's summary row or a directory's subtree row in the slot
+/// index.
 ///
 /// See [directory bindings](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,7 +241,10 @@ pub struct DirentryBindingRecord {
     pub child_created_by: crate::ActorId,
     /// Unix milliseconds of the child's creating commit.
     pub child_created_at_ms: u64,
-    /// Commit that wrote this row.
+    /// Commit that wrote this row. In the slot index, a bound directory's
+    /// newest row at a read's sequence was written by the commit that last
+    /// changed the directory's binding or anything below it, so that row's
+    /// `committed_seq` is the directory's subtree sequence.
     pub committed_seq: ChangeSeq,
     /// Order within the commit.
     pub delta_index: u32,
@@ -290,9 +295,10 @@ impl DirentryBindingRecord {
     }
 
     /// Returns whether a bind or unbind delta wrote this row, which both
-    /// binding indexes store, rather than a revision delta, which writes a
-    /// summary row to the slot index alone. A summary row is bound, and its
-    /// position isn't its bind position.
+    /// binding indexes store, rather than a revision delta or an
+    /// `advance_subtree` delta, which writes a summary row or a subtree row
+    /// to the slot index alone. Those rows are bound, and their position
+    /// isn't their bind position.
     pub fn is_binding_event(&self) -> bool {
         !self.is_bound() || self.position() == self.bind_position
     }

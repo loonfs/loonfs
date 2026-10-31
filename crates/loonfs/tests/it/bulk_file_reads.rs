@@ -53,7 +53,7 @@ async fn listed_files(
             .entries;
         for entry in entries {
             match entry.kind {
-                loonfs::PathEntryKind::Directory {} => {
+                loonfs::PathEntryKind::Directory { .. } => {
                     directories.push(entry.path.as_str().to_owned());
                 }
                 loonfs::PathEntryKind::Unknown => {

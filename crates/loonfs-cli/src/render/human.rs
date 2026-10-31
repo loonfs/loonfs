@@ -333,6 +333,9 @@ fn human_path_entry_details(entry: &PathEntry) -> String {
         format!("created_by: {}", render_actor(&entry.created_by)),
         format!("created: {}", format_utc_ms(entry.created_at_ms)),
     ]);
+    if let Some(subtree_seq) = entry.subtree_seq() {
+        lines.push(format!("subtree_seq: {}", subtree_seq.0));
+    }
     if let loonfs_types::PathEntryKind::File {
         revision_no,
         size_bytes,
@@ -583,15 +586,23 @@ fn single_line(message: &str) -> String {
     message.lines().collect::<Vec<_>>().join(" | ")
 }
 
+/// Renders one listed entry as tab-separated columns: its kind, a file's
+/// size, a directory's subtree sequence, its creation time and actor, and
+/// its path.
 pub(crate) fn human_path_entry(entry: &loonfs_types::PathEntry) -> String {
     let size = entry
         .size_bytes()
         .map(|value: u64| value.to_string())
         .unwrap_or_else(|| "-".to_owned());
+    let subtree_seq = entry
+        .subtree_seq()
+        .map(|value| value.0.to_string())
+        .unwrap_or_else(|| "-".to_owned());
     format!(
-        "{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}",
         entry.inode_kind(),
         size,
+        subtree_seq,
         format_utc_ms(entry.created_at_ms),
         render_actor(&entry.created_by),
         entry.path
