@@ -52,7 +52,7 @@ This section describes how bindings work with subtree deletion, forks, and the A
 
 Deleting a subtree unbinds its root and records a subtree tombstone. The descendants stay bound beneath that root, and the covering-tombstone rule hides them. An undelete binds the root again, either at the name saved in the tombstone or at the caller's destination. Reusing a name writes a newer bound value.
 
-In a fork, compaction applies the same retention rule to inherited runs and local runs. Inherited segments and content references keep their owner namespace, and pins still protect their captured manifests and runs.
+In a fork, compaction applies the same retention rule to inherited runs and local runs. Inherited segments keep their owner namespace, and pins still protect their captured manifests and runs.
 
 WAL deltas, semantic fingerprints, and change-feed events don't depend on how binding rows are encoded. The API's `binding_version` token represents a binding's `bind_position`, which a summary row keeps. Creating, moving, or undeleting an entry changes the token, but writing its content or attributes doesn't. Binding preconditions compare the same positions that reads return.
 
