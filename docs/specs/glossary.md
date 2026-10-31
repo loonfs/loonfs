@@ -118,7 +118,7 @@ An immutable object that stores file bytes, under the family root's prefix (`nam
 
 ### Content reference
 
-The record in a file revision that identifies its bytes: a content ID, a size, and a checksum. The reader's manifest supplies the family root, so a reference identifies the same object in every member of a fork family. A content reference identifies content, but it doesn't prove that a content object contains those bytes yet (they may still be stored in the WAL).
+The record in a file revision that identifies its bytes: a content ID, a size, and a checksum. The reader's manifest supplies the [family root](#family-root), so a reference identifies the same object in every member of a [fork family](#fork-family). A content reference identifies content, but it doesn't prove that a content object contains those bytes yet (they may still be stored in the WAL).
 
 ### Chain
 
@@ -126,7 +126,7 @@ The bytes stored under one content ID. A chain grows when a file is appended to,
 
 ### Chain creator
 
-The namespace whose commit started a chain, recorded in the chain's layout row. Only the creator's commits extend the chain in place. When another member of the fork family appends to the chain, LoonFS starts a new chain that lists the first chain's extents as shared base extents. See [Operations and WAL deltas](format.md#66-operations-and-wal-deltas).
+The namespace whose commit started a chain, recorded in the chain's [layout](#layout). Only the creator's commits extend the chain in place. When another member of the [fork family](#fork-family) appends to the chain, LoonFS starts a new chain that lists the first chain's extents as [shared base extents](#extent). See [Operations and WAL deltas](format.md#66-operations-and-wal-deltas).
 
 ### Extent
 
@@ -136,7 +136,7 @@ Most extents are "own extents", which store bytes written for the chain itself. 
 
 ### Layout
 
-The ordered list of extents that together make up a chain's bytes. LoonFS stores each chain's layout as a metadata row, and a reader uses it to find which content objects to read for a range of bytes.
+The ordered list of extents that together make up a chain's bytes, along with the chain's [creator](#chain-creator). LoonFS stores each chain's layout as a metadata row, and a reader uses it to find which content objects to read for a range of bytes.
 
 ### Span object
 
@@ -168,7 +168,7 @@ Proof that a content reference's bytes were verified in a completed upload. A co
 
 ### Content root
 
-A reference that keeps a fork family's content objects from being deleted. A root in any member of the family counts. There are three kinds: the layouts in a manifest that garbage collection protects, the WAL tail, and upload session records. See [Content roots](format.md#119-content-roots).
+A reference that keeps a [fork family's](#fork-family) content objects from being deleted. A root in any member of the fork family counts. There are three kinds: the layouts in a manifest that garbage collection protects, the WAL tail, and upload session records. See [Content roots](format.md#119-content-roots).
 
 ## Metadata storage
 
@@ -245,15 +245,15 @@ The maintenance API's "checkpoint" inventory lists every pin of a namespace, so 
 
 ### Fork
 
-A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's fork family, so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace never appear in the other. See [Forking a namespace](format.md#92-forking-a-namespace).
+A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace never appear in the other. See [Forking a namespace](format.md#92-forking-a-namespace).
 
 ### Fork family
 
-A namespace that was created without a source, and every namespace forked from it, directly or through other forks. The members of a family store their content objects and upload records under one prefix, the family root's, so a content reference identifies the same object in every member, and one garbage collection pass collects the family's content. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+A set of namespaces: one namespace that was created without a source (the [family root](#family-root)), and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family, and a member leaves the fork family when it's retired. The members store their content objects and upload records under the family root's prefix, so a content reference identifies the same object in every member. The family root's garbage collection pass collects the family's content, with roots from every member. The pass finds the members through fork pins, because each fork pins the namespace it was forked from. For example, if `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of `main`'s family, and their content objects are stored under `namespaces/main/content/`. See [Namespaces and identity](format.md#11-namespaces-and-identity).
 
 ### Family root
 
-The member of a fork family that was created without a source. Every manifest in the family records it (`family_root_id`), and its prefix stores the family's content objects and upload records. A family root can't be retired while any fork of it exists. See [File contents and ownership](format.md#15-file-contents-and-ownership).
+The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family root (`family_root_id`), and the family root's prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its garbage collection pass keeps collecting the family's content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
 
 ### Writer position
 
@@ -325,7 +325,7 @@ How old an unreferenced manifest, WAL object, content object, or temporary objec
 
 ### Namespace retirement
 
-The point at which a deleted fork's pin on its source is deleted, and a deleted family root's content prefix is swept. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
+The point at which garbage collection deletes a deleted fork's pin on its source, or sweeps a deleted family root's content prefix. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
 
 ## API
 

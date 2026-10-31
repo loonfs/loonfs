@@ -87,7 +87,7 @@ later numbered WAL -> committed changes ---+            |
 
 A new namespace's first manifest describes only the root directory. A fork's first manifest lists the metadata runs it inherited from its source.
 
-LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records a content ID, a size, and a checksum. The content ID and the namespace's family root, which its manifest records, determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
+LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records a content ID, a size, and a checksum. The content ID and the namespace's [family root](glossary.md#family-root), which its manifest records, determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
 
 Directory listings use committed metadata for names and file sizes, so listing a directory doesn't download any files. Reading a file verifies its complete size and checksum. If an object needed to recover the namespace is missing or corrupt, the read fails.
 
@@ -99,7 +99,7 @@ Why fail instead of reading an older version of the files? A fallback would retu
 
 A "fork" is a new namespace that starts as a copy of another namespace at one point in its history. To create one, LoonFS writes and verifies a [pin](glossary.md#pin) on the source's manifest, and then writes the fork's manifest 1, which lists the source's metadata runs. The fork shares the source's content and metadata objects, so nothing is copied (and the cost of a fork doesn't depend on how much data the source stores). Forking the source's current head may first fold the source's WAL tail, which writes its inline content to content objects. After the fork, commits to one namespace never appear in the other.
 
-A fork and its source belong to one fork family, and every member of the family stores its content objects under the family root's prefix, so the fork reads inherited content and content of its own with the same kind of key. When the fork publishes its own manifests, the inherited objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
+A fork and its source belong to one [fork family](glossary.md#fork-family), and every member of the family stores its content objects under the family root's prefix. So the fork reads inherited content and its own content with the same kind of key. When the fork publishes its own manifests, the inherited objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
 
 A snapshot is a pin too. A caller creates a snapshot to keep one version of a namespace readable, and the read endpoints and forks accept its `snapshot_id`. A snapshot can have an expiry time, or none. Each create call writes a new pin with a new ID, so a snapshot's name is a label, not a key (two snapshots can have the same name). The maintenance API's checkpoint inventory lists every pin, snapshots and fork pins, so an operator can see what keeps old manifests.
 
