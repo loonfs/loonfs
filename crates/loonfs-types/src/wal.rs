@@ -295,6 +295,35 @@ pub enum WalDelta {
         /// The inode's complete direct grants after this update.
         grants: AccessGrants,
     },
+    /// Advances one directory's subtree sequence to this delta's commit.
+    ///
+    /// Replay writes a subtree row under the directory's current edge in the
+    /// slot index, so the delta records that edge, the way a revision delta
+    /// records the file's edge. A commit writes one for each ancestor
+    /// directory of every inode it changes, after its other deltas
+    /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
+    AdvanceSubtree {
+        /// Stable position of this delta within its commit.
+        delta_index: u32,
+        /// Directory of the advanced directory's current edge.
+        parent_inode_id: InodeId,
+        /// Canonical component of the directory's current edge.
+        name_key: NameKey,
+        /// Spelling of the directory's current edge, copied into the subtree
+        /// row.
+        display_name: DisplayName,
+        /// The directory whose subtree sequence advances.
+        child_inode_id: InodeId,
+        /// Actor of the directory's creating commit, copied into the subtree
+        /// row.
+        child_created_by: crate::ActorId,
+        /// Unix milliseconds of the directory's creating commit, copied into
+        /// the subtree row.
+        child_created_at_ms: u64,
+        /// Position of the bind event that established the directory's
+        /// current edge.
+        bind_position: DeltaPosition,
+    },
 }
 
 /// Associates a materialized WAL delta with the semantic operation that produced it.
@@ -305,6 +334,8 @@ pub enum WalDelta {
 pub struct WalCommitDelta {
     /// Internal operation position within this commit. Convenience requests can
     /// expand into several operations; each operation's deltas are contiguous.
+    /// The commit's `advance_subtree` deltas take the index after its last
+    /// operation's.
     pub semantic_operation_index: u32,
     /// Replay mutation produced for that semantic operation.
     pub delta: WalDelta,
@@ -312,11 +343,19 @@ pub struct WalCommitDelta {
 
 /// Groups a commit's ordered deltas by their durable semantic operation.
 ///
-/// Indices are local to the commit and need not be consecutive.
+/// Indices are local to the commit and need not be consecutive. The commit's
+/// `advance_subtree` deltas follow its operations' deltas under an index of
+/// their own, and no operation produced them, so their group is left out.
 pub fn semantic_operation_groups(
     deltas: &[WalCommitDelta],
 ) -> impl Iterator<Item = &[WalCommitDelta]> {
-    deltas.chunk_by(|left, right| left.semantic_operation_index == right.semantic_operation_index)
+    deltas
+        .chunk_by(|left, right| left.semantic_operation_index == right.semantic_operation_index)
+        .filter(|group| {
+            !group
+                .iter()
+                .all(|delta| matches!(delta.delta, WalDelta::AdvanceSubtree { .. }))
+        })
 }
 
 /// Counts activity represented by one committed record.
@@ -706,6 +745,26 @@ mod tests {
         record.deltas[1].semantic_operation_index = 2;
         record.deltas[2].semantic_operation_index = 9;
         assert_eq!(committed_activity(&record), activity(10, 3, 2));
+        // The `advance_subtree` deltas that end a commit aren't an operation.
+        let mut advanced = record.clone();
+        advanced.deltas.push(WalCommitDelta {
+            semantic_operation_index: 10,
+            delta: WalDelta::AdvanceSubtree {
+                delta_index: 3,
+                parent_inode_id: crate::ROOT_INODE_ID,
+                name_key: NameKey::parse("docs").expect("name key"),
+                display_name: DisplayName::parse("docs").expect("display name"),
+                child_inode_id: InodeId(7),
+                child_created_by: crate::ActorId::loonfs(),
+                child_created_at_ms: 0,
+                bind_position: DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 1,
+                },
+            },
+        });
+        assert_eq!(semantic_operation_groups(&advanced.deltas).count(), 2);
+        assert_eq!(committed_activity(&advanced), activity(10, 3, 2));
         let mut empty = record.clone();
         empty.deltas.clear();
         assert_eq!(committed_activity(&empty), Some(Default::default()));

@@ -3,8 +3,10 @@
 
 use crate::metadata::{active_deletion_from_tombstone, MetadataState};
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_types::{ChangeSeq, ContentId};
+use loonfs_types::format::manifest::{
+    ActiveDeletionRowAction, DirentryBindingRecord, MetadataRow, MetadataRowFamily,
+};
+use loonfs_types::{ChangeSeq, ContentId, InodeId, InodeKind, NameKey};
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -33,7 +35,7 @@ pub(crate) fn manifest_rows_for_family(
             .map(MetadataRow::DirentryBinding)
             .collect::<Vec<_>>(),
         // The child index stores the binding events, without the slot
-        // index's summary rows.
+        // index's summary and subtree rows.
         MetadataRowFamily::DirentryChildBinds => metadata_state
             .direntry_binds()
             .iter()
@@ -94,7 +96,48 @@ pub(crate) fn manifest_rows_for_family(
     if family == MetadataRowFamily::ContentLayouts {
         rows.dedup_by_key(|row| row.row_key_for_family(family));
     }
+    if family == MetadataRowFamily::DirentryBinds {
+        keep_newest_subtree_rows(&mut rows);
+    }
     rows
+}
+
+/// Keeps the newest subtree row of each directory edge among `rows`, which
+/// are in row-key order, and drops the edge's older subtree rows.
+///
+/// A fold writes the rows of the commits it folds, so a directory edge keeps
+/// its subtree sequence as of the fold's last commit, and a read at a
+/// sequence inside the fold's range can find an older subtree sequence
+/// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
+/// The binding events and the summary rows stay.
+fn keep_newest_subtree_rows(rows: &mut Vec<MetadataRow>) {
+    let mut kept_edge: Option<(InodeId, NameKey, InodeId)> = None;
+    rows.retain(|row| {
+        let MetadataRow::DirentryBinding(binding) = row else {
+            return true;
+        };
+        if !is_subtree_row(binding) {
+            return true;
+        }
+        let edge = (
+            binding.parent_inode_id,
+            binding.name_key.clone(),
+            binding.child_inode_id,
+        );
+        // One edge's rows are adjacent and newest first, so the first
+        // subtree row of an edge is its newest.
+        if kept_edge.as_ref() == Some(&edge) {
+            return false;
+        }
+        kept_edge = Some(edge);
+        true
+    });
+}
+
+/// Returns whether an `advance_subtree` delta wrote `binding`: a directory
+/// row that isn't a binding event.
+fn is_subtree_row(binding: &DirentryBindingRecord) -> bool {
+    binding.child_kind == InodeKind::Directory && !binding.is_binding_event()
 }
 
 pub(crate) fn manifest_rows_for_family_after_seq(

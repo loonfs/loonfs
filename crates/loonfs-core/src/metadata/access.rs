@@ -186,6 +186,7 @@ mod tests {
                     display_name,
                     revision: matches!(child, 4 | 7 | 8)
                         .then(crate::test_support::revision_summary),
+                    subtree_seq: (!matches!(child, 4 | 7 | 8)).then_some(ChangeSeq(1)),
                 },
                 child_inode_id: InodeId(child),
                 child_kind: if matches!(child, 4 | 7 | 8) {
@@ -326,6 +327,7 @@ mod tests {
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name,
                     revision: None,
+                    subtree_seq: Some(ChangeSeq(1)),
                 },
                 child_inode_id,
                 child_kind: InodeKind::Directory,

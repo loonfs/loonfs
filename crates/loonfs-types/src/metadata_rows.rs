@@ -19,7 +19,8 @@ pub enum MetadataRowFamily {
     /// Orders directory bindings by parent, name, and child, newest first
     /// within each edge, for path resolution and directory listings. Besides
     /// the binding events, each bound file edge has a summary row for every
-    /// revision of the file.
+    /// revision of the file, and each bound directory edge has a subtree row
+    /// for each advance of the directory's subtree sequence.
     DirentryBinds,
     /// Re-indexes the binding events by child, newest first within each
     /// edge, for parent discovery.
@@ -221,7 +222,8 @@ pub struct InodeRecord {
 }
 
 /// Stores one value of a directory edge: a binding event in both binding
-/// indexes, or a revision summary in the slot index.
+/// indexes, or a file's revision summary or a directory's subtree sequence in
+/// the slot index.
 ///
 /// See [directory bindings](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,15 +286,25 @@ impl DirentryBindingRecord {
         }
     }
 
+    /// Returns the bound directory's subtree sequence, which a file, an
+    /// unbound row, and a corrupt directory row don't have.
+    pub fn subtree_seq(&self) -> Option<ChangeSeq> {
+        match &self.state {
+            DirentryBindingState::Bound { subtree_seq, .. } => *subtree_seq,
+            DirentryBindingState::Unbound => None,
+        }
+    }
+
     /// Returns whether the slot has a child at this position.
     pub fn is_bound(&self) -> bool {
         matches!(self.state, DirentryBindingState::Bound { .. })
     }
 
     /// Returns whether a bind or unbind delta wrote this row, which both
-    /// binding indexes store, rather than a revision delta, which writes a
-    /// summary row to the slot index alone. A summary row is bound, and its
-    /// position isn't its bind position.
+    /// binding indexes store, rather than a revision delta or an
+    /// `advance_subtree` delta, which writes a summary row or a subtree row
+    /// to the slot index alone. Those rows are bound, and their position
+    /// isn't their bind position.
     pub fn is_binding_event(&self) -> bool {
         !self.is_bound() || self.position() == self.bind_position
     }
@@ -309,6 +321,11 @@ pub enum DirentryBindingState {
         /// The file's current revision as of this row. A directory has none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revision: Option<RevisionSummary>,
+        /// The directory's subtree sequence as of this row: the sequence of
+        /// the commit that wrote the row, which bound the directory or
+        /// advanced its subtree sequence. A file has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtree_seq: Option<ChangeSeq>,
     },
     /// The slot is available.
     Unbound,

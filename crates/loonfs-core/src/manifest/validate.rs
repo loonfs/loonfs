@@ -237,11 +237,12 @@ fn validate_segment_key_ranges(
 /// descriptors state them.
 ///
 /// The child index stores the slot index's binding events, and the slot
-/// index also stores a summary row for each revision of a bound file, so a
-/// run's slot index has at least as many rows as its child index. A
-/// descriptor doesn't say how many of its rows are summary rows, so the
-/// check is an inequality. A merge compares the binding events themselves
-/// with digests
+/// index also stores a summary row for each revision of a bound file and a
+/// subtree row for each advance of a bound directory's subtree sequence, so
+/// a run's slot index has at least as many rows as its child index. A
+/// descriptor doesn't say how many of its rows are summary or subtree rows,
+/// so the check is an inequality. A merge compares the binding events
+/// themselves with digests
 /// (`crate::compaction::group_merge::GroupMerge::refuse_a_run_whose_index_disagrees`).
 /// Each commit has one commit row and one receipt, so those counts are
 /// equal.
@@ -371,8 +372,8 @@ pub(crate) fn validate_manifest_row_seq_range<'a>(
 }
 
 /// Compares the binding events of a bind family against its reverse index
-/// outright, over rows a caller has all of. The bind family's summary rows
-/// have no copy in the reverse index.
+/// outright, over rows a caller has all of. The bind family's summary and
+/// subtree rows have no copy in the reverse index.
 ///
 /// Only the test-only inspection materialization keeps a whole family, so only
 /// it can afford this. A merge never keeps a whole family and checks parity by digesting

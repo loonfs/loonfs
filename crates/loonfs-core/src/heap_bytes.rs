@@ -406,6 +406,12 @@ impl HeapBytes for WalCommitDelta {
             } => deleted_binding.heap_bytes(),
             WalDelta::AppendAttributesRevision { attributes, .. } => attributes.heap_bytes(),
             WalDelta::AppendAccessRevision { grants, .. } => grants.heap_bytes(),
+            WalDelta::AdvanceSubtree {
+                name_key,
+                display_name,
+                child_created_by,
+                ..
+            } => name_key.heap_bytes() + display_name.heap_bytes() + child_created_by.heap_bytes(),
         }
     }
 }

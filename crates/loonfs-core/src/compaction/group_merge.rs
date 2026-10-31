@@ -464,8 +464,8 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let writer = writers
             .get_mut(&family)
             .expect("a cluster should write only the families it merges");
-        // The slot index's summary rows have no copy in the child index, so
-        // the parity digest covers binding events alone.
+        // The slot index's summary and subtree rows have no copy in the child
+        // index, so the parity digest covers binding events alone.
         let summary_row = matches!(
             &row,
             MetadataRow::DirentryBinding(binding) if !binding.is_binding_event()
@@ -484,7 +484,8 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
 
     /// Refuses to hand back a run whose secondary index does not contain the same
     /// rows as its canonical family, apart from the canonical family's rows
-    /// that the index doesn't store (the slot index's summary rows).
+    /// that the index doesn't store (the slot index's summary and subtree
+    /// rows).
     ///
     /// This is the only index-parity check a merge makes, whichever path is
     /// driving it. Comparing the two families outright is not available to a
@@ -601,6 +602,7 @@ mod tests {
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
                 revision: Some(crate::test_support::revision_summary()),
+                subtree_seq: None,
             },
             child_inode_id: InodeId(42),
             child_kind: loonfs_types::InodeKind::File,

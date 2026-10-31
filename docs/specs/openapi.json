@@ -3487,7 +3487,7 @@
         ]
       },
       "PathEntryDirectory": {
-        "description": "A directory, which has no revision fields.",
+        "description": "A directory, with its subtree sequence.",
         "properties": {
           "attributes": {
             "$ref": "#/components/schemas/Attributes",
@@ -3551,9 +3551,14 @@
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
             "description": "The absolute path, built from the stored display names."
+          },
+          "subtree_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The sequence of the newest commit that changed anything below the\ndirectory, or that created, moved, or undeleted the directory\nitself. For the root, it's the head sequence that the entry was\nread at."
           }
         },
         "required": [
+          "subtree_seq",
           "inode_kind",
           "namespace_id",
           "path",

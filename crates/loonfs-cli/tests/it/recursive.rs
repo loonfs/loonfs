@@ -652,6 +652,7 @@ fn recursive_get_reports_drift_across_listing_pages() {
             "created_by": "loonfs",
             "created_at_ms": 1_752_624_000_000_u64,
             "inode_kind": "dir",
+            "subtree_seq": head_seq,
             "head_seq": head_seq,
             "parent_inode_id": parent_inode_id,
             "display_name": path.rsplit('/').next().expect("a name"),

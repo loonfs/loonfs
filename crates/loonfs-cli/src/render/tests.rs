@@ -197,7 +197,9 @@ fn path_entry(path: &str, display_name: Option<&str>) -> PathEntry {
         },
         created_by: loonfs_types::ActorId::loonfs(),
         created_at_ms: 1_752_624_000_000,
-        kind: PathEntryKind::Directory {},
+        kind: PathEntryKind::Directory {
+            subtree_seq: ChangeSeq(2),
+        },
         head_seq: ChangeSeq(3),
         parent_inode_id: display_name.map(|_| ROOT_INODE_ID),
         display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
@@ -225,6 +227,7 @@ fn human_stat_omits_the_absent_root_name() {
         "seq: 3",
         "created_by: loonfs",
         "created: 2025-07-16 00:00:00Z",
+        "subtree_seq: 2",
     ] {
         assert!(root.contains(line), "{root}");
     }
@@ -236,6 +239,14 @@ fn human_stat_omits_the_absent_root_name() {
     let named = human_success(&stat_output(path_entry("/docs", Some("docs"))));
     assert!(named.contains("path: /docs"), "{named}");
     assert!(named.contains("\nname: docs"), "{named}");
+}
+
+#[test]
+fn human_listing_reports_a_directory_subtree_sequence() {
+    assert_eq!(
+        super::human::human_path_entry(&path_entry("/docs", Some("docs"))),
+        "dir\t-\t2\t2025-07-16 00:00:00Z\tloonfs\t/docs"
+    );
 }
 
 /// Builds a stat answer carrying one attribute, so the value's rendering
@@ -275,8 +286,9 @@ fn human_stat_escapes_control_characters_in_attribute_values() {
     );
     assert_eq!(
         rendered.lines().count(),
-        10,
-        "the base entry, attribution, attribute update, and one attribute line: {rendered}"
+        11,
+        "the base entry, attribution, subtree sequence, attribute update, and one attribute \
+         line: {rendered}"
     );
 
     let escape =

@@ -66,7 +66,7 @@ impl PathEntry {
     /// Returns the current revision number for a file entry.
     pub const fn revision_no(&self) -> Option<RevisionNo> {
         match &self.kind {
-            PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
+            PathEntryKind::Directory { .. } | PathEntryKind::Unknown => None,
             PathEntryKind::File { revision_no, .. } => Some(*revision_no),
         }
     }
@@ -74,7 +74,7 @@ impl PathEntry {
     /// Returns the current byte length for a file entry.
     pub const fn size_bytes(&self) -> Option<u64> {
         match &self.kind {
-            PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
+            PathEntryKind::Directory { .. } | PathEntryKind::Unknown => None,
             PathEntryKind::File { size_bytes, .. } => Some(*size_bytes),
         }
     }
@@ -84,15 +84,23 @@ impl PathEntry {
     /// returns `None`.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match &self.kind {
-            PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
+            PathEntryKind::Directory { .. } | PathEntryKind::Unknown => None,
             PathEntryKind::File { content_ref, .. } => content_ref.as_ref(),
+        }
+    }
+
+    /// Returns the subtree sequence of a directory entry.
+    pub const fn subtree_seq(&self) -> Option<ChangeSeq> {
+        match &self.kind {
+            PathEntryKind::Directory { subtree_seq } => Some(*subtree_seq),
+            PathEntryKind::File { .. } | PathEntryKind::Unknown => None,
         }
     }
 
     /// Returns the current revision's commit stamp for a file entry.
     pub const fn revision_committed_at_ms(&self) -> Option<u64> {
         match &self.kind {
-            PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
+            PathEntryKind::Directory { .. } | PathEntryKind::Unknown => None,
             PathEntryKind::File {
                 revision_committed_at_ms,
                 ..
@@ -106,10 +114,16 @@ impl PathEntry {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "inode_kind", rename_all = "snake_case")]
 pub enum PathEntryKind {
-    /// A directory, which has no revision fields.
+    /// A directory, with its subtree sequence.
     #[serde(rename = "dir")]
     #[cfg_attr(feature = "openapi", schema(title = "PathEntryDirectory"))]
-    Directory {},
+    Directory {
+        /// The sequence of the newest commit that changed anything below the
+        /// directory, or that created, moved, or undeleted the directory
+        /// itself. For the root, it's the head sequence that the entry was
+        /// read at.
+        subtree_seq: ChangeSeq,
+    },
     /// A file, with a summary of its current revision.
     #[cfg_attr(feature = "openapi", schema(title = "PathEntryFile"))]
     File {
@@ -138,7 +152,7 @@ impl PathEntryKind {
     /// Returns the inode kind this payload represents.
     pub const fn inode_kind(&self) -> EntryInodeKind {
         match self {
-            Self::Directory {} => EntryInodeKind::Directory,
+            Self::Directory { .. } => EntryInodeKind::Directory,
             Self::File { .. } => EntryInodeKind::File,
             Self::Unknown => EntryInodeKind::Unknown,
         }
@@ -149,7 +163,7 @@ impl PathEntryKind {
     /// Other kinds return `None`.
     pub const fn revision_committed_by(&self) -> Option<&ActorId> {
         match self {
-            Self::Directory {} | Self::Unknown => None,
+            Self::Directory { .. } | Self::Unknown => None,
             Self::File {
                 revision_committed_by,
                 ..
@@ -358,7 +372,9 @@ mod tests {
             },
             created_by: ActorId::loonfs(),
             created_at_ms: 1_752_624_000_000,
-            kind: PathEntryKind::Directory {},
+            kind: PathEntryKind::Directory {
+                subtree_seq: ChangeSeq(2),
+            },
             head_seq: ChangeSeq(3),
             parent_inode_id,
             display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
@@ -379,6 +395,7 @@ mod tests {
                 "created_by": "loonfs",
                 "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "dir",
+                "subtree_seq": 2,
                 "head_seq": 3,
                 "parent_inode_id": "ino_00000000000000000000000000",
                 "display_name": "docs",
@@ -406,6 +423,7 @@ mod tests {
                     "created_by": "loonfs",
                     "created_at_ms": 1_752_624_000_000_u64,
                     "inode_kind": "dir",
+                    "subtree_seq": 2,
                     "head_seq": 3,
                     "parent_inode_id": "ino_00000000000000000000000000",
                     "display_name": "docs",
@@ -514,7 +532,9 @@ mod tests {
 
     #[test]
     fn entry_kinds_share_inode_kind_wire_values() {
-        let directory = PathEntryKind::Directory {};
+        let directory = PathEntryKind::Directory {
+            subtree_seq: ChangeSeq(2),
+        };
         assert_eq!(
             serde_json::to_value(directory).expect("serialize directory entry kind")["inode_kind"],
             serde_json::to_value(InodeKind::Directory).expect("serialize directory inode kind")

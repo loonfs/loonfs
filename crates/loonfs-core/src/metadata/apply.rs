@@ -109,6 +109,9 @@ impl MetadataState {
                     state: DirentryBindingState::Bound {
                         display_name: display_name.clone(),
                         revision: revision.clone(),
+                        // A directory's new edge starts at the bind's own
+                        // sequence.
+                        subtree_seq: (*child_kind == InodeKind::Directory).then_some(committed_seq),
                     },
                 });
             }
@@ -195,6 +198,39 @@ impl MetadataState {
                             revision_committed_by: actor.clone(),
                             revision_committed_at_ms: committed_at_ms,
                         }),
+                        subtree_seq: None,
+                    },
+                });
+            }
+            WalDelta::AdvanceSubtree {
+                delta_index,
+                parent_inode_id,
+                name_key,
+                display_name,
+                child_inode_id,
+                child_created_by,
+                child_created_at_ms,
+                bind_position,
+            } => {
+                // The subtree row of the directory's edge, which the slot
+                // index stores and the child index doesn't.
+                self.push_direntry_binding_record(DirentryBindingRecord {
+                    parent_inode_id: *parent_inode_id,
+                    name_key: name_key.clone(),
+                    child_inode_id: *child_inode_id,
+                    child_kind: InodeKind::Directory,
+                    child_created_by: child_created_by.clone(),
+                    child_created_at_ms: *child_created_at_ms,
+                    committed_seq,
+                    delta_index: *delta_index,
+                    commit_id: commit_id.clone(),
+                    committed_by: actor.clone(),
+                    committed_at_ms,
+                    bind_position: *bind_position,
+                    state: DirentryBindingState::Bound {
+                        display_name: display_name.clone(),
+                        revision: None,
+                        subtree_seq: Some(committed_seq),
                     },
                 });
             }

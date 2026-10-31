@@ -354,6 +354,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
                 revision: None,
+                subtree_seq: Some(ChangeSeq(seq)),
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -424,6 +425,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
                 revision: None,
+                subtree_seq: Some(ChangeSeq(1)),
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -762,6 +764,9 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     }
 }
 
+/// Checks that a compaction writes a child index that agrees with the slot
+/// index, apart from the subtree row that the slot index alone stores, and
+/// that the manifest doesn't load without its child index segment.
 #[tokio::test]
 async fn manifest_writes_and_validates_direntry_child_bind_index() {
     let temp_dir = tempdir().expect("tempdir");
@@ -771,10 +776,13 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
-        .await
-        .expect("write hello");
+    // The second write advances `/docs`, which writes a subtree row.
+    for path in ["/docs/hello.txt", "/docs/again.txt"] {
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .write_file_bytes(path, b"hello\n", None)
+            .await
+            .expect("write");
+    }
 
     let manifest_no = checkpoint_then_compact(
         &store,
@@ -786,7 +794,12 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     let materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
-            .expect("load manifest");
+            .expect("the parity checks accept the slot index's subtree row");
+    assert!(materialized
+        .metadata_state
+        .direntry_binds()
+        .iter()
+        .any(|row| row.subtree_seq().is_some() && !row.is_binding_event()));
     let base = base_tier(&materialized.manifest);
     let child_binds = base
         .iter()

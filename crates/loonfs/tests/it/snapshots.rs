@@ -517,6 +517,80 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
     assert_eq!(paths.head_seq, snapshot.captured_seq);
 }
 
+/// Checks that a snapshot reports each directory's subtree sequence, and the
+/// root's, as of its capture after a later write below them.
+#[tokio::test]
+async fn a_snapshot_reports_subtree_sequences_as_of_its_capture() {
+    let directory = tempdir().expect("directory");
+    let writer = LoonFs::builder_with_store(Arc::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+    ))
+    .writer_id(loonfs_test_support::ids::writer_id("snapshot-subtrees"))
+    .build()
+    .await
+    .expect("writer");
+    let namespace = namespace_id("subtrees");
+    let actor = loonfs_test_support::test_actor();
+    writer
+        .create_namespace(&namespace, &actor)
+        .await
+        .expect("namespace");
+    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    namespace_writer
+        .put_file("/docs/a/one.txt", b"one", &actor)
+        .await
+        .expect("write one");
+    let written = namespace_writer
+        .put_file("/docs/a/two.txt", b"two", &actor)
+        .await
+        .expect("write two");
+    let snapshot = namespace_writer
+        .create_snapshot("subtrees")
+        .await
+        .expect("snapshot");
+    let later = namespace_writer
+        .put_file("/docs/a/three.txt", b"three", &actor)
+        .await
+        .expect("write after the snapshot");
+    let reader = writer.read_only();
+    let namespace_reader = reader.namespace(&namespace);
+    let at_snapshot = loonfs::StatOptions {
+        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
+        ..Default::default()
+    };
+    for path in ["/docs", "/docs/a"] {
+        let current = namespace_reader.stat(path).await.expect("stat");
+        assert_eq!(current.subtree_seq(), Some(later.committed_seq), "{path}");
+        let captured = namespace_reader
+            .stat_with_options(path, &at_snapshot)
+            .await
+            .expect("stat at the snapshot");
+        assert_eq!(
+            captured.subtree_seq(),
+            Some(written.committed_seq),
+            "{path}"
+        );
+    }
+    let root = namespace_reader
+        .stat_with_options("/", &at_snapshot)
+        .await
+        .expect("stat the root at the snapshot");
+    assert_eq!(root.subtree_seq(), Some(snapshot.captured_seq));
+    let listed = namespace_reader
+        .list_with_options(
+            "/",
+            &loonfs::ListOptions {
+                at: ReadAt::Snapshot(snapshot.snapshot_id),
+                ..Default::default()
+            },
+        )
+        .page()
+        .await
+        .expect("list the root at the snapshot");
+    assert_eq!(listed.entries[0].subtree_seq(), Some(written.committed_seq));
+    writer.shutdown().await.expect("shutdown");
+}
+
 /// Checks that the shared file read, change feed, and download options read
 /// the state that a snapshot captured through the namespace handle, and that
 /// a download of a numbered revision refuses a snapshot.

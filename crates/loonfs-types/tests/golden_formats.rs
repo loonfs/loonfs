@@ -243,19 +243,25 @@ fn sample_revision_summary() -> loonfs_types::format::manifest::RevisionSummary 
     }
 }
 
-/// A binding row of `/report.txt` at one position, written by the commit
-/// with the golden commit ID.
+/// A binding row at one position, written by the commit with the golden
+/// commit ID, of `/report.txt` for a file child and of `/reports` for a
+/// directory child.
 fn sample_binding_row(
+    child_kind: InodeKind,
     state: loonfs_types::format::manifest::DirentryBindingState,
     committed_seq: u64,
     delta_index: u32,
     bind_position: (u64, u32),
 ) -> MetadataRow {
+    let (name, child_inode_id) = match child_kind {
+        InodeKind::File => ("report.txt", InodeId(2)),
+        InodeKind::Directory => ("reports", InodeId(3)),
+    };
     MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
         parent_inode_id: ROOT_INODE_ID,
-        name_key: name_key("report.txt"),
-        child_inode_id: InodeId(2),
-        child_kind: loonfs_types::InodeKind::File,
+        name_key: name_key(name),
+        child_inode_id,
+        child_kind,
         child_created_by: actor(),
         child_created_at_ms: 3_000,
         committed_seq: ChangeSeq(committed_seq),
@@ -415,6 +421,23 @@ fn sample_wal_payload() -> WalObjectPayload {
                 child_created_by: actor(),
                 child_created_at_ms: 4_000,
                 revision: Some(sample_revision_summary()),
+            },
+        },
+        WalCommitDelta {
+            semantic_operation_index: 8,
+            delta: WalDelta::AdvanceSubtree {
+                delta_index: 9,
+                parent_inode_id: ROOT_INODE_ID,
+                name_key: NameKey::parse("reports").expect("valid name key"),
+                display_name: loonfs_types::DisplayName::parse("Reports")
+                    .expect("valid display name"),
+                child_inode_id: InodeId(8),
+                child_created_by: actor(),
+                child_created_at_ms: 3_000,
+                bind_position: loonfs_types::format::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 1,
+                },
             },
         },
     ];
@@ -2214,6 +2237,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
                 revision: Some(sample_revision_summary()),
+                subtree_seq: None,
             },
             child_inode_id: InodeId(2),
             child_kind: InodeKind::File,
@@ -2236,6 +2260,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
                 display_name: loonfs_types::DisplayName::parse("docs-archive")
                     .expect("valid display name"),
                 revision: None,
+                subtree_seq: Some(ChangeSeq(6)),
             },
             child_inode_id: InodeId(5),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -3143,27 +3168,38 @@ fn namespace_manifest_rejects_a_naming_field() {
     );
 }
 
-/// The rows of one edge: the file's bind at sequence 3, the summary row that
-/// its second revision wrote at sequence 4, and the unbind at sequence 5.
+/// The rows of two edges, oldest first: a file's bind at sequence 3, the
+/// summary row that its second revision wrote at sequence 4, and its unbind
+/// at sequence 5, and a directory's bind at sequence 3 and the subtree row
+/// that a change below it wrote at sequence 6.
 fn sample_binding_rows() -> Vec<MetadataRow> {
     use loonfs_types::format::manifest::DirentryBindingState;
-    let bound = |revision_no: u64| DirentryBindingState::Bound {
+    let file = |revision_no: u64| DirentryBindingState::Bound {
         display_name: loonfs_types::DisplayName::parse("Report.txt").expect("display name"),
         revision: Some(loonfs_types::format::manifest::RevisionSummary {
             revision_no: RevisionNo(revision_no),
             ..sample_revision_summary()
         }),
+        subtree_seq: None,
+    };
+    let directory = |subtree_seq: u64| DirentryBindingState::Bound {
+        display_name: loonfs_types::DisplayName::parse("Reports").expect("display name"),
+        revision: None,
+        subtree_seq: Some(ChangeSeq(subtree_seq)),
     };
     vec![
-        sample_binding_row(bound(1), 3, 1, (3, 1)),
-        sample_binding_row(bound(2), 4, 0, (3, 1)),
-        sample_binding_row(DirentryBindingState::Unbound, 5, 0, (3, 1)),
+        sample_binding_row(InodeKind::File, file(1), 3, 1, (3, 1)),
+        sample_binding_row(InodeKind::Directory, directory(3), 3, 2, (3, 2)),
+        sample_binding_row(InodeKind::File, file(2), 4, 0, (3, 1)),
+        sample_binding_row(InodeKind::File, DirentryBindingState::Unbound, 5, 0, (3, 1)),
+        sample_binding_row(InodeKind::Directory, directory(6), 6, 0, (3, 2)),
     ]
 }
 
-/// Checks the encoding of both binding indexes: the slot index stores the
-/// edge's binding events and its summary row, the child index stores the
-/// binding events alone, and both sort the edge newest first.
+/// Checks the encoding of both binding indexes: the slot index stores each
+/// edge's binding events, the file's summary row, and the directory's
+/// subtree row, the child index stores the binding events alone, and both
+/// sort each edge newest first.
 #[test]
 fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
     use loonfs_types::format::segment_blocks::SegmentBlocksBuilder;
@@ -3184,7 +3220,7 @@ fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
                     || matches!(row, MetadataRow::DirentryBinding(binding) if binding.is_binding_event())
             })
             .collect();
-        rows.reverse();
+        rows.sort_by_key(|row| row.row_key_for_family(family));
         let mut builder =
             SegmentBlocksBuilder::new(std::num::NonZeroUsize::new(4096).expect("nonzero target"));
         for row in &rows {

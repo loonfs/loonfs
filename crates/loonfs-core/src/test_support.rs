@@ -69,6 +69,7 @@ pub(crate) fn binding_row(
         state: loonfs_types::format::manifest::DirentryBindingState::Bound {
             display_name: loonfs_types::DisplayName::parse(name).expect("valid display name"),
             revision: Some(revision_summary()),
+            subtree_seq: None,
         },
     }
 }

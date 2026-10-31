@@ -1718,9 +1718,8 @@ fn durable_entry(entry: loonfs_types::PathEntry) -> EntryAnswer {
                 committed_by: revision_committed_by,
                 committed_at_ms: revision_committed_at_ms,
             }),
-            loonfs_types::PathEntryKind::Directory {} | loonfs_types::PathEntryKind::Unknown => {
-                None
-            }
+            loonfs_types::PathEntryKind::Directory { .. }
+            | loonfs_types::PathEntryKind::Unknown => None,
         },
     }
 }

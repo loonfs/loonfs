@@ -132,8 +132,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
 
     /// Plans each operation against the view, validates its compiled
     /// operations at once, and applies the accepted effects, so later
-    /// operations observe earlier ones. The first failure aborts the request
-    /// and attaches the failing operation's index.
+    /// operations observe earlier ones, and then adds the commit's
+    /// `advance_subtree` deltas. The first failure aborts the request and
+    /// attaches the failing operation's index.
     ///
     /// The head is the validated source of the namespace and writer epoch:
     /// `load_publish_metadata_view` fences on epoch equality, and the batch
@@ -211,6 +212,8 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 .map_err(|error| error.at_operation(index))?;
             deltas.extend(operation_deltas);
         }
+        let advances = validation.advance_subtrees(&deltas).await?;
+        deltas.extend(advances);
 
         let mut plan = CommitPlan {
             namespace_id: head.namespace_id.clone(),

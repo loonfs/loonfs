@@ -230,7 +230,8 @@ impl ActiveDeletionRetention {
 /// edge's rows newest first.
 ///
 /// An edge's rows in the slot index are of two kinds: binding events, which
-/// both indexes store, and summary rows, which the slot index alone stores.
+/// both indexes store, and the summary rows of a file's edge or the subtree
+/// rows of a directory's edge, which the slot index alone stores.
 /// For each edge and each kind, the operator keeps every row above the floor
 /// and the kind's first row at or below it, which is the newest at or below
 /// the floor, and drops the kind's later rows. When the edge's first binding
@@ -241,16 +242,16 @@ impl ActiveDeletionRetention {
 /// the same way
 /// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 ///
-/// A summary row exists only while its edge is bound, so a summary row that
-/// arrives before the edge's first binding event at or below the floor
-/// belongs to a binding that is still in place at the floor.
+/// A summary or subtree row exists only while its edge is bound, so such a
+/// row that arrives before the edge's first binding event at or below the
+/// floor belongs to a binding that is still in place at the floor.
 #[derive(Debug, Default)]
 pub(crate) struct BindingRetention {
     /// The state of the edge at the floor, once the edge's first binding
     /// event at or below the floor has arrived.
     floor_event: Option<FloorEvent>,
-    /// Whether the edge's first summary row at or below the floor has
-    /// arrived.
+    /// Whether the edge's first summary or subtree row at or below the floor
+    /// has arrived.
     floor_summary_seen: bool,
     /// The parent, name, and child of the last edge bound at the floor in
     /// this index. The slot index keeps one slot's edges adjacent and the
@@ -581,6 +582,21 @@ mod tests {
         binding_row(7, "a.txt", child, seq, bind_seq, false)
     }
 
+    /// A bound row of the directory `child` named `docs` under 7, at `seq`,
+    /// of the binding that the bind at `bind_seq` established: the bind
+    /// itself when `seq` is `bind_seq`, and a subtree row otherwise.
+    fn directory_row(child: u64, seq: u64, bind_seq: u64) -> MetadataRow {
+        let mut record = crate::test_support::binding_row(7, "docs", child, seq);
+        record.bind_position.seq = ChangeSeq(bind_seq);
+        record.child_kind = loonfs_types::InodeKind::Directory;
+        record.state = loonfs_types::format::manifest::DirentryBindingState::Bound {
+            display_name: DisplayName::parse("docs").expect("display name"),
+            revision: None,
+            subtree_seq: Some(ChangeSeq(seq)),
+        };
+        MetadataRow::DirentryBinding(record)
+    }
+
     /// Runs `rows` through the retention rule of `family`'s cluster in key
     /// order, as a base merge does, and returns the rows it keeps.
     fn retained(
@@ -843,6 +859,42 @@ mod tests {
                 edge
             ),
             vec![bind_row(7, "a.txt", 42, 20)]
+        );
+    }
+
+    /// Checks that a directory's edge keeps every subtree row above the floor
+    /// and exactly one at or below it, the newest, next to its bind, and that
+    /// the child index keeps the bind alone.
+    #[test]
+    fn a_directory_edge_keeps_one_subtree_row_at_the_floor() {
+        // Bound at 20 and advanced at 30, 40, 90, and 130, with the floor at
+        // 100.
+        let edge = vec![
+            directory_row(42, 20, 20),
+            directory_row(42, 30, 20),
+            directory_row(42, 40, 20),
+            directory_row(42, 90, 20),
+            directory_row(42, 130, 20),
+        ];
+        assert_eq!(
+            retained(
+                MetadataFamilyGroup::Bindings,
+                MetadataRowFamily::DirentryBinds,
+                edge.clone()
+            ),
+            vec![
+                directory_row(42, 130, 20),
+                directory_row(42, 90, 20),
+                directory_row(42, 20, 20),
+            ]
+        );
+        assert_eq!(
+            retained(
+                MetadataFamilyGroup::Bindings,
+                MetadataRowFamily::DirentryChildBinds,
+                edge
+            ),
+            vec![directory_row(42, 20, 20)]
         );
     }
 

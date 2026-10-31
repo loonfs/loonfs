@@ -188,6 +188,36 @@ const REVOKE_BYTES: usize = delta_bytes(
         ("target", POSITION_BYTES),
     ],
 );
+/// An `advance_subtree` delta, with the directory's current edge, under
+/// which replay writes the directory's subtree row.
+const ADVANCE_SUBTREE_BYTES: usize = delta_bytes(
+    "advance_subtree",
+    &[
+        ("parent_inode_id", INODE_ID_BYTES),
+        ("name_key", 0),
+        ("display_name", 0),
+        ("child_inode_id", INODE_ID_BYTES),
+        ("child_created_by", cbor_string_bytes(MAX_ACTOR_ID_BYTES)),
+        ("child_created_at_ms", INTEGER_BYTES),
+        ("bind_position", POSITION_BYTES),
+    ],
+) + NAMES_BYTES;
+
+/// Bounds the plan's `advance_subtree` deltas, which a request bound leaves
+/// out because their count depends on the depth of each inode that the
+/// request changes.
+fn advance_subtree_bytes(deltas: &[WalCommitDelta]) -> usize {
+    deltas
+        .iter()
+        .filter(|delta| {
+            matches!(
+                delta.delta,
+                loonfs_types::format::wal::WalDelta::AdvanceSubtree { .. }
+            )
+        })
+        .count()
+        .saturating_mul(ADVANCE_SUBTREE_BYTES)
+}
 
 const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
     cbor_map_bytes(&[
@@ -276,6 +306,7 @@ pub(crate) fn planned_wal_record_bytes(
         .saturating_sub(requested)
         .saturating_add(planned)
         .saturating_add(carried_layout_bytes(deltas))
+        .saturating_add(advance_subtree_bytes(deltas))
 }
 
 fn operation_bytes(operation: &FilesystemOperation) -> usize {

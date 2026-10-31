@@ -80,13 +80,7 @@ impl<'a, S: ObjectStore + ?Sized> CommitValidationSession<'a, S> {
                 }
             }
             for delta in &operation_deltas {
-                self.overlay.apply_committed_wal_delta_mut(
-                    self.committed_seq,
-                    self.commit_id,
-                    self.actor_id,
-                    self.committed_at_ms,
-                    delta,
-                );
+                self.apply(delta);
             }
             deltas.extend(operation_deltas.into_iter().map(|delta| WalCommitDelta {
                 semantic_operation_index: op_index,
@@ -94,5 +88,17 @@ impl<'a, S: ObjectStore + ?Sized> CommitValidationSession<'a, S> {
             }));
         }
         Ok(deltas)
+    }
+
+    /// Adds the rows of one accepted delta to the rows this commit would
+    /// persist.
+    pub(super) fn apply(&mut self, delta: &WalDelta) {
+        self.overlay.apply_committed_wal_delta_mut(
+            self.committed_seq,
+            self.commit_id,
+            self.actor_id,
+            self.committed_at_ms,
+            delta,
+        );
     }
 }

@@ -107,7 +107,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let entry = self
             .resolve_path(absolute_path, AttributeInclusion::Omit, access)
             .await?;
-        if matches!(entry.kind, PathEntryKind::Directory {}) {
+        if matches!(entry.kind, PathEntryKind::Directory { .. }) {
             return Err(CoreError::ExpectedFile {
                 target: entry.path.to_string(),
                 kind: InodeKind::Directory,
