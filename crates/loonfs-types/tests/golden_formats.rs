@@ -33,6 +33,7 @@ use loonfs_types::format::wal::{
     decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, WalCodecError,
     WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
 };
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
@@ -247,7 +248,7 @@ fn sample_wal_payload() -> WalObjectPayload {
             semantic_operation_index: 0,
             delta: WalDelta::BindDirentry {
                 delta_index: 1,
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: NameKey::parse("docs").expect("valid name key"),
                 display_name: loonfs_types::DisplayName::parse("Docs").expect("valid display name"),
                 child_inode_id: InodeId(7),
@@ -260,7 +261,7 @@ fn sample_wal_payload() -> WalObjectPayload {
             semantic_operation_index: 1,
             delta: WalDelta::UnbindDirentry {
                 delta_index: 2,
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: NameKey::parse("old.txt").expect("valid name key"),
                 display_name: loonfs_types::DisplayName::parse("Old.txt")
                     .expect("valid display name"),
@@ -299,7 +300,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                 delta_index: 4,
                 root_inode_id: InodeId(9),
                 deleted_binding: DeletedBinding {
-                    parent_inode_id: InodeId(1),
+                    parent_inode_id: ROOT_INODE_ID,
                     name_key: NameKey::parse("old.txt").expect("valid name key"),
                     display_name: loonfs_types::DisplayName::parse("Old.txt")
                         .expect("valid display name"),
@@ -350,7 +351,6 @@ fn sample_wal_payload() -> WalObjectPayload {
         wal_no: WalNo(2),
         writer_epoch: WriterEpoch(3),
         head_seq: ChangeSeq(2),
-        next_inode_id: InodeId(10),
         basis_floor_seq: ChangeSeq(0),
         records: vec![WalCommitPayload {
             committed_seq: ChangeSeq(2),
@@ -470,7 +470,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
 
         head_seq: ChangeSeq(2),
         writer_epoch: WriterEpoch(3),
-        next_inode_id: InodeId(10),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
         acknowledged_floor_seq: ChangeSeq(0),
@@ -1366,7 +1365,7 @@ fn wal_delta_decode_rejects_invalid_name_key() {
     // in the CBOR map, and require the decode to fail.
     let valid = WalDelta::BindDirentry {
         delta_index: 0,
-        parent_inode_id: InodeId(1),
+        parent_inode_id: ROOT_INODE_ID,
         name_key: name_key("docs"),
         display_name: loonfs_types::DisplayName::parse("Docs").expect("valid display name"),
         child_inode_id: InodeId(2),
@@ -1481,7 +1480,7 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
                 delta_index: 0,
                 root_inode_id: InodeId(9),
                 deleted_binding: DeletedBinding {
-                    parent_inode_id: InodeId(1),
+                    parent_inode_id: ROOT_INODE_ID,
                     name_key: name_key("old.txt"),
                     display_name: loonfs_types::DisplayName::parse("Old.txt")
                         .expect("valid display name"),
@@ -1699,7 +1698,7 @@ fn wal_delta_wire_tags_match_spec_names() {
         (
             serde_json::to_value(WalDelta::CreateInode {
                 delta_index: 0,
-                inode_id: InodeId(1),
+                inode_id: ROOT_INODE_ID,
                 inode_kind: InodeKind::Directory,
             }),
             "create_inode",
@@ -1707,7 +1706,7 @@ fn wal_delta_wire_tags_match_spec_names() {
         (
             serde_json::to_value(WalDelta::BindDirentry {
                 delta_index: 0,
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: NameKey::parse("a").expect("valid name key"),
                 display_name: loonfs_types::DisplayName::parse("a").expect("valid display name"),
                 child_inode_id: InodeId(2),
@@ -1720,7 +1719,7 @@ fn wal_delta_wire_tags_match_spec_names() {
         (
             serde_json::to_value(WalDelta::UnbindDirentry {
                 delta_index: 0,
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: NameKey::parse("a").expect("valid name key"),
                 display_name: loonfs_types::DisplayName::parse("a").expect("valid display name"),
                 child_inode_id: InodeId(2),
@@ -1750,7 +1749,7 @@ fn wal_delta_wire_tags_match_spec_names() {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
                 deleted_binding: DeletedBinding {
-                    parent_inode_id: InodeId(1),
+                    parent_inode_id: ROOT_INODE_ID,
                     name_key: name_key("a"),
                     display_name: loonfs_types::DisplayName::parse("a")
                         .expect("valid display name"),
@@ -1808,7 +1807,7 @@ fn sample_tombstone_set_row() -> MetadataRow {
         commit_id: commit_id(),
         action: TombstoneRowAction::Set {
             deleted_binding: DeletedBinding {
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: name_key("docs-archive"),
                 display_name: loonfs_types::DisplayName::parse("Docs-Archive")
                     .expect("valid display name"),
@@ -1846,7 +1845,7 @@ fn sample_tombstone_reset_row() -> MetadataRow {
         commit_id: commit_id(),
         action: TombstoneRowAction::Set {
             deleted_binding: DeletedBinding {
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: name_key("docs-archive"),
                 display_name: loonfs_types::DisplayName::parse("Docs-Archive")
                     .expect("valid display name"),
@@ -1877,7 +1876,7 @@ fn sample_active_deletion_listed_row() -> MetadataRow {
             deleted_at_ms: 4_000,
             deleted_by: actor(),
             deleted_binding: DeletedBinding {
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: name_key("docs-archive"),
                 display_name: loonfs_types::DisplayName::parse("Docs-Archive")
                     .expect("valid display name"),
@@ -1988,7 +1987,7 @@ fn sample_commit_row() -> MetadataRow {
                 semantic_operation_index: 0,
                 delta: WalDelta::BindDirentry {
                     delta_index: 1,
-                    parent_inode_id: InodeId(1),
+                    parent_inode_id: ROOT_INODE_ID,
                     name_key: name_key("reports"),
                     display_name: loonfs_types::DisplayName::parse("Reports")
                         .expect("valid display name"),
@@ -2006,7 +2005,7 @@ fn sample_commit_row() -> MetadataRow {
 fn sample_inode_rows() -> [MetadataRow; 2] {
     [
         MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
-            inode_id: InodeId(1),
+            inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
             committed_seq: ChangeSeq(1),
             commit_id: commit_id(),
@@ -2073,7 +2072,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
         sample_populated_attributes_row(),
         sample_commit_receipt_row(),
         MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             name_key: name_key("docs"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
@@ -2086,7 +2085,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             delta_index: 0,
         }),
         MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             name_key: name_key("docs-archive"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs-archive")
@@ -2100,7 +2099,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             delta_index: 0,
         }),
         MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             name_key: name_key("docs-archive"),
             child_inode_id: InodeId(5),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -2607,7 +2606,7 @@ fn sst_block_filter_matches_golden_bytes_and_answers() {
     let filter = decode_filter_block(stored, &built.filter).expect("decode filter");
     assert!(filter.may_contain(
         &MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
-            inode_id: InodeId(1),
+            inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
             committed_seq: ChangeSeq(1),
             commit_id: commit_id(),
@@ -2727,7 +2726,7 @@ fn inline_commit_wire_bytes_match_golden() {
                 expected_revision_no: None,
             },
             FilesystemOperation::CreateFileByInode {
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 display_name: loonfs_types::DisplayName::parse("empty").expect("name"),
                 content: loonfs_types::FileContent::Inline(Vec::new()),
             },
@@ -2978,7 +2977,7 @@ fn sample_binding_rows() -> Vec<MetadataRow> {
     .enumerate()
     .map(|(delta_index, state)| {
         MetadataRow::DirentryBinding(DirentryBindingRecord {
-            parent_inode_id: InodeId(1),
+            parent_inode_id: ROOT_INODE_ID,
             name_key: name_key("report.txt"),
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::File,

@@ -1534,6 +1534,10 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
         .await
         .expect("seed file");
 
+    let docs = resolve_path(&store, &namespace_id("demo"), "/docs")
+        .await
+        .expect("resolve the directory")
+        .inode_id;
     let error = delete_path_non_recursive(
         &store,
         &namespace_id("demo"),
@@ -1547,8 +1551,8 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
         &error,
         CoreError::FailedOperation { operation_index: 0, error: source }
             if matches!(source.as_ref(), CoreError::CommitValidation(
-                CommitValidationError::DirectoryNotEmpty { inode_id: InodeId(2) }
-            ))
+                CommitValidationError::DirectoryNotEmpty { inode_id }
+            ) if *inode_id == docs)
     );
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }

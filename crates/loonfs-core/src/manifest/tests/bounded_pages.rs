@@ -8,6 +8,7 @@ use crate::segment::segment_block_cache::{
     MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad,
 };
 use loonfs_test_support::stores::{replace_object, ConcurrencyWatchStore};
+use loonfs_types::ROOT_INODE_ID;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -29,12 +30,12 @@ pub(super) fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow
                 .collect();
             let name = format!("file-{index:06}-{suffix}");
             MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: NameKey::parse(&name).expect("name"),
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                 },
-                child_inode_id: InodeId(index as u64 + 2),
+                child_inode_id: InodeId(u128::from(index as u64 + 2)),
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,

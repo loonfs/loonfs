@@ -389,7 +389,7 @@ mod tests {
 
     fn bind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(parent),
+            parent_inode_id: InodeId(u128::from(parent)),
             name_key: NameKey::parse(name).expect("name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
@@ -405,7 +405,7 @@ mod tests {
 
     fn unbind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(parent),
+            parent_inode_id: InodeId(u128::from(parent)),
             name_key: NameKey::parse(name).expect("name key"),
             child_inode_id: InodeId(42),
             child_kind: loonfs_types::InodeKind::File,

@@ -823,7 +823,7 @@ mod tests {
 
     fn inode_row(inode_id: u64) -> (String, String, MetadataRow) {
         let row = MetadataRow::Inode(crate::metadata_rows::InodeRecord {
-            inode_id: InodeId(inode_id),
+            inode_id: InodeId(u128::from(inode_id)),
             inode_kind: InodeKind::File,
             committed_seq: ChangeSeq(inode_id),
             commit_id: crate::CommitId::parse(format!("c_row_{inode_id}"))

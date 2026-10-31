@@ -295,7 +295,7 @@ impl Client {
         inode_id: InodeId,
         options: &DownloadOptions,
     ) -> Result<CreateDownloadByInodeResponse> {
-        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let inode_id = inode_id.to_string();
         self.request_download_by_inode(
             operations::CREATE_DOWNLOAD_BY_INODE,
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/downloads")),
@@ -332,7 +332,7 @@ impl Client {
         revision_no: RevisionNo,
         options: &DownloadOptions,
     ) -> Result<CreateDownloadByInodeResponse> {
-        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let inode_id = inode_id.to_string();
         self.request_download_by_inode(
             operations::CREATE_REVISION_DOWNLOAD_BY_INODE,
             self.namespace_url(
@@ -391,8 +391,7 @@ impl Client {
             &download.content_ref,
             format!(
                 "inode {} revision {}",
-                loonfs_types::public_inode_id::encode(download.inode_id),
-                download.revision_no
+                download.inode_id, download.revision_no
             ),
         )
         .await

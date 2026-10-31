@@ -86,10 +86,7 @@ pub(super) fn validate_manifest_materialization_ranges(
     }
 
     if payload.runs.is_empty() {
-        if payload.head_seq == ChangeSeq(0)
-            && payload.next_inode_id == loonfs_types::FIRST_ALLOCATABLE_INODE_ID
-            && payload.next_run_no == RunNo(0)
-        {
+        if payload.head_seq == ChangeSeq(0) && payload.next_run_no == RunNo(0) {
             return Ok(());
         }
         return Err(ManifestLoadError::RunManifestMismatch {

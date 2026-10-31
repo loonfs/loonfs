@@ -89,8 +89,9 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     );
     assert!(after_repeat.hits > after_first.hits);
 
-    let docs_inode_id = InodeId(2);
-    let lower_bound = format!("direntry-bind-{:020}-", docs_inode_id.0);
+    let docs_inode_id = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+    let lower_bound =
+        loonfs_types::format::manifest::lookup_keys::direntry_parent_prefix(docs_inode_id);
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
     let before_range = cache.stats();
     let page = segments
@@ -142,9 +143,14 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     )
     .await
     .expect("load segments against a degenerate budget");
-    let root_inode_key = "inode-00000000000000000001";
+    let root_inode_key =
+        loonfs_types::format::manifest::lookup_keys::inode_key(loonfs_types::ROOT_INODE_ID);
     assert!(degenerate_segments
-        .find_row(ApiMetadataRowFamily::Inodes, root_inode_key, root_inode_key)
+        .find_row(
+            ApiMetadataRowFamily::Inodes,
+            &root_inode_key,
+            &root_inode_key
+        )
         .await
         .expect("get inode")
         .is_some());
@@ -425,8 +431,9 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
             .await
             .expect("load segments");
 
-    let docs_inode_id = InodeId(2);
-    let lower_bound = format!("direntry-bind-{:020}-", docs_inode_id.0);
+    let docs_inode_id = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+    let lower_bound =
+        loonfs_types::format::manifest::lookup_keys::direntry_parent_prefix(docs_inode_id);
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
     let page = segments
         .scan_range_page(
@@ -500,7 +507,9 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     let docs_binds = segments
         .scan_prefix(
             ApiMetadataRowFamily::DirentryBinds,
-            "direntry-bind-00000000000000000001-",
+            &loonfs_types::format::manifest::lookup_keys::direntry_parent_prefix(
+                loonfs_types::ROOT_INODE_ID,
+            ),
         )
         .await
         .expect("scan root binds");
@@ -515,7 +524,10 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         })
         .expect("docs directory bind");
     let encoded_name = loonfs_types::format::manifest::hex_encode_row_key_component("beta.txt");
-    let filter_probe = format!("direntry-bind-{:020}-{encoded_name}", docs_inode.0);
+    let filter_probe = format!(
+        "{}{encoded_name}",
+        loonfs_types::format::manifest::lookup_keys::direntry_parent_prefix(docs_inode)
+    );
     let prefix = format!("{filter_probe}-");
     let rows = segments
         .scan_prefix_for_lookup(
@@ -529,10 +541,36 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
 
     assert_eq!(rows.len(), 1, "beta's bind should still be found");
     let stats = cache.stats();
-    assert!(
-        stats.filter_skips >= 1,
-        "the delta bind segment should be skipped by its filter, stats: {stats:?}"
-    );
+    // The probe contains `/docs`'s inode ID, whose low bits are random, so the
+    // delta segment's filter rejects it in most runs of the test and admits it
+    // by a false positive in the others. The lookup records a skip in the
+    // first case and a false positive in the second.
+    let delta_bind = segments
+        .manifest()
+        .payload()
+        .runs
+        .iter()
+        .filter(|run| run.tier == RunTier::Delta)
+        .max_by_key(|run| run.run_seq)
+        .expect("the second checkpoint's run")
+        .segments
+        .iter()
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
+        .expect("the second checkpoint's bind segment");
+    let filter = load_segment_filter(&store, None, &SessionBlockMemo::default(), delta_bind)
+        .await
+        .expect("load the delta filter");
+    if filter.may_contain(&filter_probe) {
+        assert!(
+            stats.filter_false_positives >= 1,
+            "the delta filter admits the probe, stats: {stats:?}"
+        );
+    } else {
+        assert!(
+            stats.filter_skips >= 1,
+            "the delta bind segment should be skipped by its filter, stats: {stats:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -568,10 +606,13 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
         super::load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
             .await
             .expect("load segments");
+    let other = loonfs_types::format::manifest::lookup_keys::inode_key(
+        crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await,
+    );
     store.reset();
-    let key = "inode-00000000000000000001";
+    let key = loonfs_types::format::manifest::lookup_keys::inode_key(loonfs_types::ROOT_INODE_ID);
     assert!(segments
-        .find_row(ApiMetadataRowFamily::Inodes, key, key)
+        .find_row(ApiMetadataRowFamily::Inodes, &key, &key)
         .await
         .expect("first lookup")
         .is_some());
@@ -579,13 +620,12 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     assert!(first_lookup_gets > 0, "a cold lookup fetches blocks");
 
     assert!(segments
-        .find_row(ApiMetadataRowFamily::Inodes, key, key)
+        .find_row(ApiMetadataRowFamily::Inodes, &key, &key)
         .await
         .expect("repeated lookup")
         .is_some());
-    let other = "inode-00000000000000000002";
     assert!(segments
-        .find_row(ApiMetadataRowFamily::Inodes, other, other)
+        .find_row(ApiMetadataRowFamily::Inodes, &other, &other)
         .await
         .expect("second-key lookup")
         .is_some());
@@ -642,17 +682,17 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
         .await
         .expect("fold view")
         .manifest_segments;
-    let key = "inode-00000000000000000001";
+    let key = loonfs_types::format::manifest::lookup_keys::inode_key(loonfs_types::ROOT_INODE_ID);
     for segments in [&read_view, &fold_view] {
         store.reset();
         assert!(segments
-            .find_row(ApiMetadataRowFamily::Inodes, key, key)
+            .find_row(ApiMetadataRowFamily::Inodes, &key, &key)
             .await
             .expect("first lookup")
             .is_some());
         let first_lookup_reads = store.count(OperationSelector::Read);
         assert!(segments
-            .find_row(ApiMetadataRowFamily::Inodes, key, key)
+            .find_row(ApiMetadataRowFamily::Inodes, &key, &key)
             .await
             .expect("repeated lookup")
             .is_some());

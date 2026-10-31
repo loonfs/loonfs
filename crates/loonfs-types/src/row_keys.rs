@@ -225,7 +225,7 @@ pub mod lookup_keys {
 
     /// Builds an inode row key.
     pub fn inode_key(inode_id: InodeId) -> String {
-        format!("{INODE_ROW_PREFIX}{:020}", inode_id.0)
+        format!("{INODE_ROW_PREFIX}{}", inode_id.body())
     }
 
     /// Builds a scan bound immediately after an inode row.
@@ -235,7 +235,7 @@ pub mod lookup_keys {
 
     /// Builds the prefix for directory bindings under one parent.
     pub fn direntry_parent_prefix(parent_inode_id: InodeId) -> String {
-        format!("{DIRENTRY_BIND_ROW_PREFIX}{:020}-", parent_inode_id.0)
+        format!("{DIRENTRY_BIND_ROW_PREFIX}{}-", parent_inode_id.body())
     }
 
     /// Builds the Bloom filter probe for a parent/name binding.
@@ -261,16 +261,16 @@ pub mod lookup_keys {
         delta_index: u32,
     ) -> String {
         format!(
-            "{}{:020}-{:020}-{delta_index:010}",
+            "{}{}-{:020}-{delta_index:010}",
             direntry_bind_prefix(parent_inode_id, name_key),
-            child_inode_id.0,
+            child_inode_id.body(),
             committed_seq.0
         )
     }
 
     /// Builds the Bloom filter probe for bindings to one child inode.
     pub fn direntry_child_probe(child_inode_id: InodeId) -> String {
-        format!("{DIRENTRY_CHILD_BIND_ROW_PREFIX}{:020}", child_inode_id.0)
+        format!("{DIRENTRY_CHILD_BIND_ROW_PREFIX}{}", child_inode_id.body())
     }
 
     /// Builds the reverse-index prefix for bindings to one child inode.
@@ -287,9 +287,9 @@ pub mod lookup_keys {
         delta_index: u32,
     ) -> String {
         format!(
-            "{}{:020}-{}-{:020}-{delta_index:010}",
+            "{}{}-{}-{:020}-{delta_index:010}",
             direntry_child_prefix(child_inode_id),
-            parent_inode_id.0,
+            parent_inode_id.body(),
             hex_encode_row_key_component(name_key),
             committed_seq.0
         )
@@ -297,7 +297,7 @@ pub mod lookup_keys {
 
     /// Builds the Bloom filter probe for one tombstone root.
     pub fn tombstone_probe(root_inode_id: InodeId) -> String {
-        format!("{TOMBSTONE_ROW_PREFIX}{:020}", root_inode_id.0)
+        format!("{TOMBSTONE_ROW_PREFIX}{}", root_inode_id.body())
     }
 
     /// Builds the prefix for a root inode's tombstone history.
@@ -342,8 +342,9 @@ pub mod lookup_keys {
         sort_rank: u32,
     ) -> String {
         format!(
-            "{ACTIVE_DELETION_ROW_PREFIX}{:020}-{:020}-{sort_rank:010}",
-            deletion_seq.0, root_inode_id.0
+            "{ACTIVE_DELETION_ROW_PREFIX}{:020}-{}-{sort_rank:010}",
+            deletion_seq.0,
+            root_inode_id.body()
         )
     }
 
@@ -413,7 +414,7 @@ pub mod lookup_keys {
 
     /// Builds the Bloom filter probe for an inode's revisions.
     pub fn revision_probe(inode_id: InodeId) -> String {
-        format!("{REVISION_ROW_PREFIX}{:020}", inode_id.0)
+        format!("{REVISION_ROW_PREFIX}{}", inode_id.body())
     }
 
     /// Builds the prefix for an inode's newest-first revisions.
@@ -447,7 +448,7 @@ pub mod lookup_keys {
 
     /// Builds the Bloom filter probe for an inode's attribute revisions.
     pub fn attributes_probe(inode_id: InodeId) -> String {
-        format!("{ATTRIBUTE_ROW_PREFIX}{:020}", inode_id.0)
+        format!("{ATTRIBUTE_ROW_PREFIX}{}", inode_id.body())
     }
 
     /// Builds the prefix for an inode's newest-first attribute revisions.
@@ -473,7 +474,7 @@ pub mod lookup_keys {
 
     /// Builds the Bloom filter probe for an inode's access revisions.
     pub fn access_probe(inode_id: InodeId) -> String {
-        format!("{ACCESS_ROW_PREFIX}{:020}", inode_id.0)
+        format!("{ACCESS_ROW_PREFIX}{}", inode_id.body())
     }
 
     /// Builds the prefix for an inode's newest-first access revisions.
@@ -525,8 +526,8 @@ mod tests {
     fn inode_row_keys_sort_by_ascending_inode_id() {
         // The inode family's durable order IS ascending inode id, which is
         // what lets a whole-namespace file walk resume from one bound.
-        let ids = [9_u64, 1, 100, 10, 2];
-        let key_of = |id: u64| lookup_keys::inode_key(InodeId(id));
+        let ids = [9_u128, 0, 1 << 100, 10, u128::MAX];
+        let key_of = |id: u128| lookup_keys::inode_key(InodeId(id));
         let mut keys: Vec<String> = ids.iter().copied().map(key_of).collect();
         keys.sort();
 
@@ -571,11 +572,11 @@ mod tests {
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
-            "direntry-bind-00000000000000000009-7265706f72742e747874-00000000000000000042-00000000000000000017-0000000003"
+            "direntry-bind-00000000000000000000000009-7265706f72742e747874-0000000000000000000000001a-00000000000000000017-0000000003"
         );
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryChildBinds),
-            "direntry-child-bind-00000000000000000042-00000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
+            "direntry-child-bind-0000000000000000000000001a-00000000000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
         );
     }
 
@@ -597,7 +598,7 @@ mod tests {
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
-            "direntry-bind-00000000000000000009-7265706f72742d32303234-00000000000000000042-00000000000000000017-0000000003"
+            "direntry-bind-00000000000000000000000009-7265706f72742d32303234-0000000000000000000000001a-00000000000000000017-0000000003"
         );
     }
 
@@ -622,7 +623,7 @@ mod tests {
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::Revisions),
-            "revision-00000000000000000042-18446744073709551608-18446744073709551603-4294967292"
+            "revision-0000000000000000000000001a-18446744073709551608-18446744073709551603-4294967292"
         );
     }
 
@@ -645,7 +646,7 @@ mod tests {
 
         assert_eq!(
             newest.row_key_for_family(MetadataRowFamily::Attributes),
-            "attribute-00000000000000000042-18446744073709551612-18446744073709551603-4294967294"
+            "attribute-0000000000000000000000001a-18446744073709551612-18446744073709551603-4294967294"
         );
         assert_eq!(
             newest.row_key(),
@@ -686,7 +687,7 @@ mod tests {
         let older = access_row(2, 11, 0);
         assert_eq!(
             newest.row_key(),
-            "access-00000000000000000042-18446744073709551612-18446744073709551603-4294967294"
+            "access-0000000000000000000000001a-18446744073709551612-18446744073709551603-4294967294"
         );
         assert!(newest.row_key() < older.row_key());
         assert_eq!(

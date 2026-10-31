@@ -241,7 +241,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 if expected_destination.is_some() {
                     return Err(CoreError::PathNotFound(path));
                 }
-                let child_inode_id = self.allocation.allocate()?;
+                let child_inode_id = self.next_inode_id();
                 ops.push(CommitOperation::CreateFile {
                     child_inode_id,
                     parent_inode_id,
@@ -263,9 +263,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                     .await?
                     .attributes;
                 if !source_attributes.is_empty() {
-                    // Both operations include the one identity assigned above,
-                    // so validation cannot allocate a different inode for
-                    // either.
+                    // Both operations include the one ID generated above, so
+                    // they refer to the same new inode.
                     ops.push(CommitOperation::UpdateAttributes {
                         inode_id: child_inode_id,
                         base_attributes_revision_no: AttributesRevisionNo(0),

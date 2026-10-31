@@ -13,7 +13,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
-use loonfs_types::{public_inode_id, ErrorCode, ErrorResponse, NamespaceId};
+use loonfs_types::{ErrorCode, ErrorResponse, NamespaceId};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -114,7 +114,7 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
         router,
         namespace_id,
         bytes,
-        inode: public_inode_id::encode(entry.inode_id),
+        inode: entry.inode_id.to_string(),
         snapshot_id: snapshot.snapshot_id.to_string(),
     }
 }

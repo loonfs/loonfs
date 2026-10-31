@@ -153,7 +153,8 @@ mod tests {
 
         let mut builder = MetadataStateBuilder::default();
         let commit_id = CommitId::parse("c_access_fixture").expect("commit id");
-        for inode in 1..=8 {
+        // Inode 0 is the root directory.
+        for inode in [0, 2, 3, 4, 5, 6, 7, 8] {
             builder.push_inode(InodeRecord {
                 inode_id: InodeId(inode),
                 inode_kind: if matches!(inode, 4 | 7 | 8) {
@@ -168,10 +169,10 @@ mod tests {
             });
         }
         for (parent, child, name) in [
-            (1, 2, "docs"),
+            (0, 2, "docs"),
             (2, 3, "secret"),
             (3, 4, "file"),
-            (1, 5, "pub"),
+            (0, 5, "pub"),
             (6, 7, "x"),
             (2, 8, "tool"),
         ] {
@@ -210,7 +211,7 @@ mod tests {
         });
         for (inode, boundary, grants) in [
             (
-                1,
+                0,
                 false,
                 grants(&[("team", &[Read, Write, Create, Remove]), ("ops", &[Admin])]),
             ),

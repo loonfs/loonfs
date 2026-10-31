@@ -6,6 +6,7 @@
 use crate::common::read_context;
 use loonfs_core::content::prepare_stored_content;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs_core::test_support::kept_inodes::compact_groups_without_false_positives;
 use loonfs_core::test_support::namespace_store;
 use loonfs_core::{
     CompactionUnitOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
@@ -15,9 +16,10 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_types::options::StatOptions;
 use loonfs_types::Commit;
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
-    NamespaceId, PageRequest, RevisionNo,
+    MetadataFamilyGroup, NamespaceId, PageRequest, RevisionNo,
 };
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -407,7 +409,7 @@ async fn ordinary_mutations_preserve_visibility_equivalence() {
             &before_delete,
             "before non-recursive delete",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(docs, "/docs"),
                 ExpectedInode::visible(empty, "/empty"),
                 ExpectedInode::visible(original, "/docs/original.txt"),
@@ -426,7 +428,7 @@ async fn ordinary_mutations_preserve_visibility_equivalence() {
             &after_delete,
             "after non-recursive delete",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(docs, "/docs"),
                 ExpectedInode::hidden(empty),
                 ExpectedInode::visible(original, "/docs/original.txt"),
@@ -469,7 +471,7 @@ async fn recursive_delete_covers_descendants_without_enumerating_them() {
         .expect("recursive delete");
     let after_delete = harness.read_context().await;
     let before_expected = [
-        ExpectedInode::visible(InodeId(1), "/"),
+        ExpectedInode::visible(ROOT_INODE_ID, "/"),
         ExpectedInode::visible(tree, "/tree"),
         ExpectedInode::visible(a, "/tree/a"),
         ExpectedInode::visible(b, "/tree/a/b"),
@@ -488,7 +490,7 @@ async fn recursive_delete_covers_descendants_without_enumerating_them() {
             &after_delete,
             "snapshot after recursive delete",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::hidden(tree),
                 ExpectedInode::hidden(a),
                 ExpectedInode::hidden(b),
@@ -528,7 +530,7 @@ async fn reused_path_keeps_the_old_subtree_hidden() {
             &deleted_snapshot,
             "after delete and before path reuse",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::hidden(old_slot),
                 ExpectedInode::hidden(old_deep),
                 ExpectedInode::hidden(old_file),
@@ -541,7 +543,7 @@ async fn reused_path_keeps_the_old_subtree_hidden() {
             &reused_snapshot,
             "after path reuse",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::hidden(old_slot),
                 ExpectedInode::hidden(old_deep),
                 ExpectedInode::hidden(old_file),
@@ -644,7 +646,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
             &deleted_snapshot,
             "after ordered rename and delete",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::hidden(source),
                 ExpectedInode::visible(safe, "/safe"),
                 ExpectedInode::visible(branch, "/safe/branch"),
@@ -670,7 +672,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
             &restored_snapshot,
             "after crossing the revived boundary",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(source, "/restored-source"),
                 ExpectedInode::visible(safe, "/safe"),
                 ExpectedInode::visible(branch, "/restored-source/branch"),
@@ -746,7 +748,7 @@ async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
             &first_deleted_snapshot,
             "after deleting a mutated subtree",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::hidden(tree),
                 ExpectedInode::hidden(branch),
                 ExpectedInode::hidden(kept),
@@ -766,7 +768,7 @@ async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
             &restored_snapshot,
             "after first undelete",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(tree, "/restored"),
                 ExpectedInode::visible(branch, "/restored/branch"),
                 ExpectedInode::visible(kept, "/restored/branch/moved.txt"),
@@ -798,7 +800,7 @@ async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
             &second_restored_snapshot,
             "after mutation and second undelete",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(tree, "/again"),
                 ExpectedInode::visible(branch, "/again/branch"),
                 ExpectedInode::visible(kept, "/again/branch/moved.txt"),
@@ -900,7 +902,7 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
     }
 
     let expected = [
-        ExpectedInode::visible(InodeId(1), "/"),
+        ExpectedInode::visible(ROOT_INODE_ID, "/"),
         ExpectedInode::hidden(old),
         ExpectedInode::visible(branch, "/moved"),
         ExpectedInode::visible(live, "/moved/live.txt"),
@@ -950,6 +952,17 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
                 .expect("a commit after the advance");
             harness.engine.fold_wal().await.expect("fold the commit");
             let inode_rows = harness.inode_rows().await;
+            // The low bits of an inode ID are random, so the kept inode
+            // filter could keep one of the four rows by a false positive. The
+            // inodes group merges with a seed whose filter keeps none of
+            // them, and the engine then compacts the other groups.
+            compact_groups_without_false_positives(
+                harness.store.as_ref(),
+                harness.namespace_id(),
+                &[MetadataFamilyGroup::Inodes],
+                &[old, grave, deep, dead],
+            )
+            .await;
             drain_compaction(&harness, &expected, "after retention").await;
             assert_eq!(harness.inode_rows().await, inode_rows - 4);
         }
@@ -1037,7 +1050,7 @@ async fn directory_move_sequences_cannot_create_parent_cycles() {
             &context,
             "after legal moves and rejected cycle",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(b, "/b"),
                 ExpectedInode::visible(a, "/b/a"),
                 ExpectedInode::visible(c, "/b/c"),
@@ -1078,7 +1091,7 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
             &context,
             "after file deletion",
             &[
-                ExpectedInode::visible(InodeId(1), "/"),
+                ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::hidden(inode_id),
             ],
         )
@@ -1180,7 +1193,7 @@ async fn revision_history_pages_survive_wal_folds_and_compaction() {
     drain_compaction(
         &harness,
         &[
-            ExpectedInode::visible(InodeId(1), "/"),
+            ExpectedInode::visible(ROOT_INODE_ID, "/"),
             ExpectedInode::visible(inode_id, "/history.txt"),
         ],
         "after revision compaction",

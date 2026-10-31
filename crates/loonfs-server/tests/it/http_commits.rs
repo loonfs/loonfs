@@ -36,6 +36,10 @@ fn commit_id(value: &str) -> CommitId {
 /// and normalizes namespace-specific identifiers while preserving content checksums and sizes.
 fn change_identity(change: &Commit) -> (ChangeSeq, String, Option<String>, String) {
     let mut events = serde_json::to_value(&change.events).expect("serialize events");
+    // Each transport generates its own inode IDs, so every generated ID is
+    // replaced by its order of first appearance.
+    let root = loonfs_types::ROOT_INODE_ID.to_string();
+    let mut generated: Vec<String> = Vec::new();
     for event in events.as_array_mut().expect("events array") {
         if let Some(content_ref) = event.get_mut("content_ref") {
             content_ref["content_id"] = serde_json::Value::from("<normalized>");
@@ -43,6 +47,22 @@ fn change_identity(change: &Commit) -> (ChangeSeq, String, Option<String>, Strin
         }
         if let Some(binding_version) = event.get_mut("binding_version") {
             *binding_version = serde_json::Value::from("<normalized>");
+        }
+        for (field, value) in event.as_object_mut().expect("event object") {
+            let Some(inode_id) = value.as_str().filter(|_| field.ends_with("inode_id")) else {
+                continue;
+            };
+            if inode_id == root {
+                continue;
+            }
+            let index = generated
+                .iter()
+                .position(|seen| seen == inode_id)
+                .unwrap_or_else(|| {
+                    generated.push(inode_id.to_owned());
+                    generated.len() - 1
+                });
+            *value = serde_json::Value::from(format!("<inode {index}>"));
         }
     }
     (
@@ -1099,7 +1119,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
             "path": FIRST_FILE,
             "content_ref": second.content_ref.clone(),
             "behavior": "replace",
-            "expected_inode_id": loonfs_types::public_inode_id::encode(observed.inode_id)
+            "expected_inode_id": observed.inode_id.to_string()
         });
         put[precondition] = serde_json::json!(1);
         serde_json::json!({

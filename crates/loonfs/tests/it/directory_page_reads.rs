@@ -116,6 +116,23 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     assert!(child_inode_keys.len() >= 6);
     let revision_keys = family_keys(&store, &namespace_id, MetadataRowFamily::Revisions).await;
     assert!(revision_keys.len() >= 6);
+    // A child inode segment's key range can include the directory's own ID,
+    // and a Bloom filter false positive can make the directory's own lookup
+    // read that segment. A one-entry page of the directory reads the same
+    // segments for the directory's lookup.
+    let one_entry = Arc::new(RecordingStore::metadata_segments(store.clone()));
+    LoonFs::builder_with_store(one_entry.clone())
+        .read_only()
+        .build()
+        .await
+        .expect("one-entry reader")
+        .namespace(&namespace_id)
+        .list("/files")
+        .page_limit(page_limit(1))
+        .page()
+        .await
+        .expect("one-entry page");
+    let directory_reads: BTreeSet<String> = one_entry.take_get_keys().into_iter().collect();
     let revisions = Arc::new(ConcurrencyWatchStore::new(
         store,
         KeyPredicate::new(move |key| revision_keys.contains(key)),
@@ -137,7 +154,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     assert!(page.next_cursor.is_none());
     for key in recording.take_get_keys() {
         assert!(
-            !child_inode_keys.contains(&key),
+            !child_inode_keys.contains(&key) || directory_reads.contains(&key),
             "read child inode object {key}"
         );
     }

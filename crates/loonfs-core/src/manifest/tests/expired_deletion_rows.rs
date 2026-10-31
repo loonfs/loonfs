@@ -4,8 +4,11 @@
 use super::active_deletions::inode_id_of;
 use super::*;
 use crate::compaction::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
-use crate::namespace::control::LoadedManifest;
 use crate::storage::content_admission::PreparedContent;
+use crate::test_support::kept_inodes::{
+    compact_groups_without_false_positives, compact_with_seed, seeded_kept_inode_filter,
+    seeded_manifest,
+};
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, DeleteDirectoryBehavior,
     InodeKind, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -417,13 +420,6 @@ async fn visible_metadata_at_retained_sequences<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-fn every_group_compacts() -> MetadataRunPolicy {
-    MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataRunPolicy::default()
-    }
-}
-
 /// Checks that once a deletion expires, a base compaction of each group
 /// removes every row of the inodes it hides, with every binding under them
 /// and the trash entry, keeps the tombstone events, and leaves the visible
@@ -442,8 +438,13 @@ async fn a_base_compaction_of_each_group_removes_every_row_an_expired_deletion_h
     let views_before =
         visible_metadata_at_retained_sequences(&store, &namespace_id, &docs.every_inode()).await;
 
-    let (_, published) = drain_compaction(&store, &namespace_id, every_group_compacts()).await;
-    assert!(published >= MetadataFamilyGroup::ALL.len());
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &MetadataFamilyGroup::ALL,
+        &docs.hidden,
+    )
+    .await;
 
     let after = rows_of(&store, &namespace_id, &docs.hidden).await;
     for family in INODE_FAMILIES {
@@ -505,7 +506,13 @@ async fn a_recoverable_deletion_keeps_every_row_while_an_expired_one_loses_its_r
     let kept = [docs.recoverable.as_slice(), docs.visible.as_slice()].concat();
     let before = rows_of(&store, &namespace_id, &kept).await;
 
-    drain_compaction(&store, &namespace_id, every_group_compacts()).await;
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &MetadataFamilyGroup::ALL,
+        &docs.hidden,
+    )
+    .await;
 
     let after = rows_of(&store, &namespace_id, &kept).await;
     for family in [
@@ -695,7 +702,13 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
         ErrorCode::InodeNotFound
     );
     let before = owned_rows(&store, &namespace_id, &both).await;
-    drain_compaction(&store, &namespace_id, every_group_compacts()).await;
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &MetadataFamilyGroup::ALL,
+        &inner,
+    )
+    .await;
     assert_eq!(
         owned_rows(&store, &namespace_id, &outer).await,
         owned_rows_of(&before, &outer),
@@ -736,7 +749,8 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
         .fold_wal()
         .await
         .expect("fold the later write");
-    drain_compaction(&store, &namespace_id, every_group_compacts()).await;
+    compact_groups_without_false_positives(&store, &namespace_id, &MetadataFamilyGroup::ALL, &both)
+        .await;
     for (family, rows) in owned_rows(&store, &namespace_id, &both).await {
         assert_eq!(
             rows,
@@ -860,7 +874,13 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
         "a delta-only compaction removes no row"
     );
 
-    drain_compaction(&store, &namespace_id, every_group_compacts()).await;
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &MetadataFamilyGroup::ALL,
+        &hidden,
+    )
+    .await;
     let after = rows_of(&store, &namespace_id, &hidden).await;
     for family in [
         ApiMetadataRowFamily::Inodes,
@@ -933,6 +953,11 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
         .load_current_manifest()
         .await
         .expect("load the current manifest");
+    let hidden_revision = family_rows(&store, &namespace_id, ApiMetadataRowFamily::Revisions)
+        .await
+        .into_iter()
+        .find(|row| matches!(row, MetadataRow::FileRevision(record) if record.inode_id == a))
+        .expect("the hidden revision");
     let policy = MetadataRunPolicy::default();
     let group = MetadataFamilyGroup::Revisions;
     // 200 million rows take the whole 64 MiB at about 2.7 bits per row.
@@ -959,6 +984,29 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
         )
         .expect("plan the group");
         assert_matches!(spec.placement(), MergePlacement::Base { .. });
+        // The low bits of an inode ID are random, so the test seeds this
+        // variant's filter with a run number whose filter has no false
+        // positive for the hidden revision, and the merge then removes the
+        // revision in every run.
+        let mut seeded = false;
+        for offset in 0..64 {
+            basis.manifest =
+                seeded_manifest(&current, RunNo(current.payload().next_run_no.0 + offset));
+            let filter = load_kept_inode_filter(
+                &basis,
+                &namespace_id,
+                &spec,
+                &MetadataCompactionCancellation::default(),
+            )
+            .await
+            .expect("build the filter")
+            .expect("not cancelled");
+            if !filter.keeps(&hidden_revision) {
+                seeded = true;
+                break;
+            }
+        }
+        assert!(seeded, "{inode_rows:?}: a seed with no false positive");
         store.reset();
         let merged = run_metadata_compaction(
             &basis,
@@ -991,61 +1039,6 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
     }
 }
 
-/// The current manifest with `next_run_no` set to `seed`, which seeds the
-/// kept inode filter of a compaction over it.
-fn seeded_manifest(current: &LoadedManifest, seed: RunNo) -> Arc<NamespaceManifestEnvelope> {
-    let mut payload = current.payload().clone();
-    payload.next_run_no = seed;
-    Arc::new(encode_manifest(payload).into_envelope())
-}
-
-/// Merges `spec` over the current manifest with its kept inode filter seeded
-/// by `seed`, and publishes the output.
-async fn compact_with_seed<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    spec: &MetadataCompactionSpec,
-    seed: RunNo,
-) {
-    let current = crate::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the current manifest");
-    let mut basis = super::super::metadata_basis_from_manifest(store, None, &current).segments;
-    basis.manifest = seeded_manifest(&current, seed);
-    let input_keys = input_segment_keys(&basis.scan_runs, spec).expect("the spec's runs");
-    let cancellation = MetadataCompactionCancellation::default();
-    let merged = run_metadata_compaction(
-        &basis,
-        &crate::cache::MetadataSegmentCache::unshared(0),
-        namespace_id,
-        spec,
-        MetadataRunPolicy::default(),
-        &cancellation,
-    )
-    .await
-    .expect("merge")
-    .expect("not cancelled");
-    drop(basis);
-    let timer = crate::test_support::std_timer();
-    let outcome = crate::test_support::namespace_store(store, namespace_id)
-        .finalize_metadata_compaction(
-            None,
-            spec,
-            &input_keys,
-            merged,
-            &cancellation,
-            &CompactionPublication {
-                compactor_epoch: loonfs_types::CompactorEpoch(0),
-                compaction: OperationClock::start(0, Arc::clone(&timer)),
-                publication: OperationClock::start(0, timer),
-            },
-        )
-        .await
-        .expect("publish the merge");
-    assert_matches!(outcome, CompactionUnitOutcome::Published { .. });
-}
-
 /// Whether the kept inode filter that `seed` seeds over the current manifest
 /// keeps `row`.
 async fn seed_keeps<S: ObjectStore + ?Sized>(
@@ -1057,38 +1050,6 @@ async fn seed_keeps<S: ObjectStore + ?Sized>(
     seeded_kept_inode_filter(store, namespace_id, seed)
         .await
         .keeps(row)
-}
-
-/// The kept inode filter of a base compaction of the inodes group over the
-/// current manifest, seeded by `seed`.
-async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    seed: RunNo,
-) -> KeptInodeFilter {
-    let current = crate::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the current manifest");
-    let mut basis = super::super::metadata_basis_from_manifest(store, None, &current).segments;
-    basis.manifest = seeded_manifest(&current, seed);
-    load_kept_inode_filter(
-        &basis,
-        namespace_id,
-        &MetadataCompactionSpec::new(
-            MetadataFamilyGroup::Inodes,
-            vec![RunNo(0)],
-            0,
-            MergePlacement::Base {
-                output_seq: current.payload().head_seq,
-            },
-            ChangeSeq(0),
-        ),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("build the filter")
-    .expect("not cancelled")
 }
 
 /// Checks that a false positive in the kept inode filter keeps a hidden
@@ -1148,7 +1109,18 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         })
         .expect("the inodes base run");
     assert_eq!(base.tier, RunTier::Base);
-    assert!(!seed_keeps(&store, &namespace_id, payload.next_run_no, &hidden_row).await);
+    // The low bits of an inode ID are random, so the filter that the next run
+    // number seeds can also keep the row. The test takes the first later seed
+    // whose filter doesn't.
+    let mut later_seed = None;
+    for offset in 0..64 {
+        let candidate = RunNo(payload.next_run_no.0 + offset);
+        if !seed_keeps(&store, &namespace_id, candidate, &hidden_row).await {
+            later_seed = Some(candidate);
+            break;
+        }
+    }
+    let later_seed = later_seed.expect("a later seed whose filter removes the row");
     let later = MetadataCompactionSpec::new(
         MetadataFamilyGroup::Inodes,
         vec![base.run_no],
@@ -1158,7 +1130,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         },
         payload.retention_floor_seq,
     );
-    compact_with_seed(&store, &namespace_id, &later, payload.next_run_no).await;
+    compact_with_seed(&store, &namespace_id, &later, later_seed).await;
     assert!(
         !family_rows(&store, &namespace_id, ApiMetadataRowFamily::Inodes)
             .await
@@ -1325,11 +1297,24 @@ async fn a_base_compaction_walks_the_tree_once_the_acknowledged_floor_is_above_z
         })
     };
     assert!(matches!(filter, KeptInodeFilter::Reached(_)));
+    // A Bloom filter keeps every inode that the walk inserted, whatever its
+    // seed, so the recoverable file is kept by every filter. The hidden file
+    // isn't inserted, so some seed's filter rejects it. (The low bits of an
+    // inode ID are random, so one filter can keep it by a false positive.)
     assert!(
         filter.keeps(&revision(recoverable)),
         "a recoverably deleted file keeps its rows"
     );
-    assert!(!filter.keeps(&revision(a)), "a hidden file loses its rows");
+    let mut rejected = false;
+    for seed in 0..64 {
+        let filter = seeded_kept_inode_filter(&store, &namespace_id, RunNo(seed)).await;
+        assert!(filter.keeps(&revision(recoverable)), "seed {seed}");
+        if !filter.keeps(&revision(a)) {
+            rejected = true;
+            break;
+        }
+    }
+    assert!(rejected, "a hidden file loses its rows");
 }
 
 /// Checks that a base compaction of a group that stores rows by inode still
@@ -1358,13 +1343,17 @@ async fn a_group_compacted_after_the_trash_still_removes_an_expired_deletions_ro
         "the base compaction of active_deletions removes the listed row"
     );
 
-    for group in [
-        MetadataFamilyGroup::Revisions,
-        MetadataFamilyGroup::Inodes,
-        MetadataFamilyGroup::Bindings,
-    ] {
-        compact_group(&store, &namespace_id, &context, group).await;
-    }
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &[
+            MetadataFamilyGroup::Revisions,
+            MetadataFamilyGroup::Inodes,
+            MetadataFamilyGroup::Bindings,
+        ],
+        &hidden,
+    )
+    .await;
     let after = rows_of(&store, &namespace_id, &hidden).await;
     for family in [
         ApiMetadataRowFamily::Inodes,

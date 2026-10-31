@@ -95,7 +95,7 @@ pub(crate) fn sample_active_manifest(
     let reorganize = GrepReorganizeState {
         input_segment_ids: vec![segment_id(1), segment_id(2)],
         output_segment_ids: vec![segment_id(3)],
-        row_key_cursor: "gram-6d6e6f-00000000000000000042".to_owned(),
+        row_key_cursor: "gram-6d6e6f-0000000000000000000000001a".to_owned(),
         output_level: 1,
         run_no: RunNo(3),
     };
@@ -172,8 +172,8 @@ pub(crate) fn segment_ref(number: u8, run_no: u64, level: u32) -> GrepSegmentRef
         level,
 
         row_count: 99,
-        min_row_key: "gram-616263-00000000000000000001".to_owned(),
-        max_row_key: "gram-7a7a7a-00000000000000000099".to_owned(),
+        min_row_key: "gram-616263-00000000000000000000000001".to_owned(),
+        max_row_key: "gram-7a7a7a-00000000000000000000000033".to_owned(),
         index_block: BlockHandle {
             offset: 128,
             stored_bytes: 48,
@@ -196,7 +196,7 @@ pub(crate) fn segment_id(number: u8) -> IndexSegmentId {
 
 fn posting(inode_id: u64, revision_no: u64) -> GramPosting {
     GramPosting {
-        inode_id: InodeId(inode_id),
+        inode_id: InodeId(u128::from(inode_id)),
         revision_no: RevisionNo(revision_no),
     }
 }

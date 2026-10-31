@@ -61,12 +61,24 @@ fn stat_help_and_parser_show_both_exclusive_target_forms() {
         clap::error::ErrorKind::MissingRequiredArgument
     );
 
-    let both = Cli::try_parse_from(["loonfs", "stat", "/doc", "--inode", "ino_2"])
-        .expect_err("targets conflict");
+    let both = Cli::try_parse_from([
+        "loonfs",
+        "stat",
+        "/doc",
+        "--inode",
+        "ino_00000000000000000000000002",
+    ])
+    .expect_err("targets conflict");
     assert_eq!(both.kind(), clap::error::ErrorKind::ArgumentConflict);
 
     Cli::try_parse_from(["loonfs", "stat", "/doc"]).expect("path target");
-    Cli::try_parse_from(["loonfs", "stat", "--inode", "ino_2"]).expect("inode target");
+    Cli::try_parse_from([
+        "loonfs",
+        "stat",
+        "--inode",
+        "ino_00000000000000000000000002",
+    ])
+    .expect("inode target");
 }
 
 #[test]

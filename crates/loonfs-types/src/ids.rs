@@ -49,9 +49,11 @@ validation_error!(
 /// Crockford base 32 spelling of a random version 4 UUID, such as
 /// `upl_3s0drmj8em84yb4mnetqkz2j0x`.
 ///
-/// Ids in the id inventory generate through their newtype `generate()`
-/// constructors; this helper stays public for free-form generated labels
-/// (for example a server's per-request id) that have no validated id type.
+/// Every generated ID type has a `generate()` constructor that calls this
+/// function, except `InodeId`, whose `generate()` builds an ID from the
+/// creating commit's sequence, the inode's create number, and `random_u64`.
+/// This function stays public for free-form generated labels that have no
+/// validated ID type, such as a server's per-request ID.
 pub fn generated_id(prefix: &'static str) -> String {
     format!(
         "{prefix}_{}",
@@ -79,11 +81,16 @@ pub fn generated_id_body_prefixes(width: usize) -> impl ExactSizeIterator<Item =
 }
 
 /// Draws a random version 4 UUID.
-fn random_uuid_v4() -> u128 {
+pub(crate) fn random_uuid_v4() -> u128 {
     let mut bytes = random_bytes::<16>();
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     u128::from_be_bytes(bytes)
+}
+
+/// Draws a random 64-bit value.
+pub(crate) fn random_u64() -> u64 {
+    u64::from_be_bytes(random_bytes::<8>())
 }
 
 /// Draws `N` fresh random bytes.
@@ -106,6 +113,25 @@ fn encode_base_32(value: u128, chars: usize) -> String {
         .collect()
 }
 
+/// Spells a 128-bit value as a generated ID body.
+pub(crate) fn encode_generated_id_body(value: u128) -> String {
+    encode_base_32(value, GENERATED_ID_BODY_BYTES)
+}
+
+/// Returns the 128-bit value that a generated ID body spells, or `None` when
+/// `body` isn't a valid body.
+pub(crate) fn decode_generated_id_body(body: &str) -> Option<u128> {
+    if generated_id_body_error(body).is_some() {
+        return None;
+    }
+    body.bytes().try_fold(0_u128, |value, byte| {
+        let digit = GENERATED_ID_ALPHABET
+            .iter()
+            .position(|character| *character == byte)?;
+        Some((value << 5) | u128::try_from(digit).ok()?)
+    })
+}
+
 fn validate_generated_id(
     prefix: &'static str,
     value: &str,
@@ -117,29 +143,31 @@ fn validate_generated_id(
             format!("must start with `{expected_prefix}`"),
         ));
     };
+    match generated_id_body_error(body) {
+        Some(reason) => Err(GeneratedIdValidationError::new(value, reason)),
+        None => Ok(()),
+    }
+}
+
+/// Returns why `body` isn't a generated ID body, or `None` when it is one.
+fn generated_id_body_error(body: &str) -> Option<String> {
     if body.len() != GENERATED_ID_BODY_BYTES
         || !body
             .bytes()
             .all(|byte| GENERATED_ID_ALPHABET.contains(&byte))
     {
-        return Err(GeneratedIdValidationError::new(
-            value,
-            format!(
-                "body must be {GENERATED_ID_BODY_BYTES} characters of the lowercase Crockford \
-                 base 32 alphabet `0123456789abcdefghjkmnpqrstvwxyz`"
-            ),
+        return Some(format!(
+            "body must be {GENERATED_ID_BODY_BYTES} characters of the lowercase Crockford base 32 \
+             alphabet `0123456789abcdefghjkmnpqrstvwxyz`"
         ));
     }
     // The first character spells the two zero bits and the top three bits of
     // the UUID, so a character above `7` would spell a value wider than 128
     // bits.
     if !body.starts_with(|first: char| first <= '7') {
-        return Err(GeneratedIdValidationError::new(
-            value,
-            "body must start with a character from `0` through `7`".to_owned(),
-        ));
+        return Some("body must start with a character from `0` through `7`".to_owned());
     }
-    Ok(())
+    None
 }
 
 fn validate_namespace_id(value: &str) -> Result<(), NamespaceIdValidationError> {
@@ -464,38 +492,6 @@ pub fn next_public_ordinal(current: u64) -> Option<u64> {
 }
 
 numeric_id! {
-    /// The numeric identity of a file or directory within a namespace.
-    ///
-    /// An inode keeps its ID when it's renamed.
-    InodeId
-}
-
-#[cfg(feature = "openapi")]
-#[allow(
-    deprecated,
-    reason = "the published schema uses the requested singular example field"
-)]
-impl utoipa::PartialSchema for InodeId {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::Object::builder()
-            .schema_type(utoipa::openapi::schema::Type::String)
-            .pattern(Some(crate::public_inode_id::PATTERN))
-            .example(Some(serde_json::json!(crate::public_inode_id::EXAMPLE)))
-            .description(Some(crate::public_inode_id::DESCRIPTION))
-            .into()
-    }
-}
-
-#[cfg(feature = "openapi")]
-impl utoipa::ToSchema for InodeId {}
-
-/// Inode 1 is always the root directory of a namespace.
-pub const ROOT_INODE_ID: InodeId = InodeId(1);
-
-/// First inode id available after the root inode.
-pub const FIRST_ALLOCATABLE_INODE_ID: InodeId = InodeId(ROOT_INODE_ID.0 + 1);
-
-numeric_id! {
     /// The number of one revision of a file's content.
     RevisionNo,
     public_ordinal,
@@ -554,7 +550,7 @@ numeric_id! {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_public_ordinal, BindingVersion, ChangeSeq, CommitId, ContentId, InodeId, ManifestNo,
+        next_public_ordinal, BindingVersion, ChangeSeq, CommitId, ContentId, ManifestNo,
         MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo, UploadId, WalNo,
         WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
@@ -612,11 +608,6 @@ mod tests {
             serde_json::from_str::<crate::CompactorEpoch>(&u64::MAX.to_string())
                 .expect("compactor epochs retain the full u64 range"),
             crate::CompactorEpoch(u64::MAX)
-        );
-        assert_eq!(
-            serde_json::from_str::<InodeId>(&(MAX_PUBLIC_INTEGER + 1).to_string())
-                .expect("inode ids retain the full u64 range"),
-            InodeId(MAX_PUBLIC_INTEGER + 1)
         );
     }
 

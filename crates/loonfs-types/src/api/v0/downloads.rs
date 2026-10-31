@@ -121,7 +121,7 @@ pub struct CreateDownloadByInodeResponse {
     /// The namespace that was read.
     pub namespace_id: NamespaceId,
     /// The file inode being read.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The revision being read.
     pub revision_no: RevisionNo,
@@ -316,7 +316,7 @@ mod tests {
             serde_json::to_value(&response).expect("serialize response"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "inode_id": "ino_42",
+                "inode_id": "ino_0000000000000000000000001a",
                 "revision_no": 7,
                 "content_ref": content_ref_json(),
                 "ranges": [{

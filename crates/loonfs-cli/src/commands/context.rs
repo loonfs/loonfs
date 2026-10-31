@@ -427,7 +427,7 @@ impl UndeleteHint {
 
     /// The complete `loonfs undelete` invocation that recovers one deletion.
     pub(crate) fn command(&self, inode_id: InodeId, deletion_seq: ChangeSeq) -> String {
-        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let inode_id = inode_id.to_string();
         format!(
             "loonfs undelete --inode {inode_id} --deletion-seq {}{}",
             deletion_seq.0, self.context_flags

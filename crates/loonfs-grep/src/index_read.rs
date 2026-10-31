@@ -395,7 +395,7 @@ mod tests {
                     state ^= state << 13;
                     state ^= state >> 7;
                     state ^= state << 17;
-                    inode_id = InodeId(inode_id.0 + (state & 0xffff) + 1);
+                    inode_id = InodeId(inode_id.0 + u128::from(state & 0xffff) + 1);
                     GramPosting {
                         inode_id,
                         revision_no: RevisionNo((state >> 32).max(1)),

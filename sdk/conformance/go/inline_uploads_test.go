@@ -116,7 +116,7 @@ func TestInlinePreparationAndRetry(t *testing.T) {
 					}
 					commits = append(commits, body)
 					op := body["operations"].([]any)[0].(map[string]any)
-					if body["commit_id"] != "stable" || body["message"] != "original" || r.Header.Get("Loonfs-Actor") != "writer" || op["path"] != "/file" || op["behavior"] != "replace" || op["expected_inode_id"] != "ino_1" || op["expected_revision_no"] != float64(1) {
+					if body["commit_id"] != "stable" || body["message"] != "original" || r.Header.Get("Loonfs-Actor") != "writer" || op["path"] != "/file" || op["behavior"] != "replace" || op["expected_inode_id"] != "ino_00000000000000000000000000" || op["expected_revision_no"] != float64(1) {
 						t.Error("publication options changed")
 					}
 					if fixture.Inline {
@@ -167,7 +167,7 @@ func TestInlinePreparationAndRetry(t *testing.T) {
 			if inline != fixture.Inline {
 				t.Fatalf("unexpected prepared kind %T", prepared)
 			}
-			message, inode, revision := "original", "ino_1", int64(1)
+			message, inode, revision := "original", "ino_00000000000000000000000000", int64(1)
 			input := files.PreparedUploadInput{NamespaceID: "demo", Path: "/file", Prepared: prepared, CommitID: "stable", Message: &message, Behavior: loonfs.DestinationBehaviorReplace, ExpectedInodeID: &inode, ExpectedRevisionNo: &revision}
 			_, err = client.Files.UploadPrepared(context.Background(), input, option.WithMaxAttempts(1), option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{"writer"}}))
 			if err == nil {

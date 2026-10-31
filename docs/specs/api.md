@@ -298,7 +298,7 @@ Generated SDKs use schema names as public type names:
 
 Namespace-owned resources include `namespace_id`.
 
-Revision numbers, change sequences, attribute revisions, manifest numbers, writer epochs, and grep run numbers are JSON integers from 0 through 9007199254740991 (`2^53 - 1`). Implementations MUST reject larger input values and MUST NOT store a larger value. `inode_id` isn't an ordinal, and it can use the full `u64` range.
+Revision numbers, change sequences, attribute revisions, manifest numbers, writer epochs, and grep run numbers are JSON integers from 0 through 9007199254740991 (`2^53 - 1`). Implementations MUST reject larger input values and MUST NOT store a larger value.
 
 Each field-name suffix has one meaning:
 
@@ -346,9 +346,9 @@ Reads take and release slots as follows:
 
 ### 4.1 Public inode identity
 
-Public APIs represent an inode ID as a string, such as `ino_27`. The value MUST start with the lowercase prefix `ino_`, followed by a nonzero `u64` with no leading zeroes. Numbers, numeric strings such as `"27"`, zero, and uppercase prefixes are invalid. `ino_1` identifies the namespace root.
+Public APIs represent an inode ID as a string, such as `ino_000000r0000013kje0d47gc8kw`. The value MUST start with the lowercase prefix `ino_`, followed by 26 lowercase Crockford base 32 characters, the same spelling that every generated ID uses, so the first character is `0` through `7`. JSON numbers, uppercase letters, characters outside the alphabet, and suffixes of any other length are invalid. In every namespace, `ino_00000000000000000000000000` identifies the namespace root.
 
-An inode ID is unique only within its namespace, so an inode is identified by `namespace_id` and `inode_id` together. Clients MUST treat the ID as an opaque value, and they MUST NOT create IDs or infer ordering from the numeric suffix.
+An inode ID is unique only within its namespace, so an inode is identified by `namespace_id` and `inode_id` together. (A fork's inherited inodes keep the IDs they have in the source namespace.) Clients MUST treat the ID as an opaque value, and they MUST NOT create IDs or infer anything from an ID's characters, such as which commit created an inode, which of two inodes is older, or how many inodes a commit created. The storage format describes how LoonFS builds an inode ID (see [Namespaces and identity](format.md#11-namespaces-and-identity)), but the API doesn't guarantee that layout.
 
 ### 4.2 Checksums
 
@@ -471,11 +471,11 @@ Request-level preconditions are checked against the candidate's "pre-state". The
 
 `file_revision` requires a visible `inode_id` whose current content revision equals `expected_revision_no`. Any new revision of that inode (including a restore) invalidates it, and so does deletion. A failure returns `stale_revision`, and its `actual_revision_no` is absent when the inode isn't visible or has no current revision.
 
-`path_binding` requires an absolute `path` and `expected_inode_id`. A missing or null `expected_inode_id` is a decode error. The precondition passes only when the path resolves to that inode. A different inode, or an unbound path, returns `path_conflict` with `expected_inode_id` and `actual_inode_id`, and `actual_inode_id` is absent when the path is unbound. Without a binding version, the precondition passes again when the path returns to the same inode. The optional `expected_binding_version` also detects moves away and back, and a binding version mismatch returns `binding_version_mismatch`. Checking that the root is bound to `ino_1` passes without a binding version. The root has no binding version, so supplying one returns `invalid_request`.
+`path_binding` requires an absolute `path` and `expected_inode_id`. A missing or null `expected_inode_id` is a decode error. The precondition passes only when the path resolves to that inode. A different inode, or an unbound path, returns `path_conflict` with `expected_inode_id` and `actual_inode_id`, and `actual_inode_id` is absent when the path is unbound. Without a binding version, the precondition passes again when the path returns to the same inode. The optional `expected_binding_version` also detects moves away and back, and a binding version mismatch returns `binding_version_mismatch`. Checking that the root is bound to `ino_00000000000000000000000000` passes without a binding version. The root has no binding version, so supplying one returns `invalid_request`.
 
 `inode_binding` requires `inode_id` and `expected_binding_version`. It passes when the inode is visible and still bound at that version, wherever its path now leads. A mismatch returns `binding_version_mismatch`, and its `actual_binding_version` is absent when the inode isn't visible. A malformed token, a token from another namespace, or the root inode (which has no binding version) returns `invalid_request`.
 
-`path_absence` requires only an absolute `path`, and it rejects inode or binding version fields. It passes when no visible entry resolves at the full path, including when an ancestor is missing or an intermediate component isn't a directory. A bound path returns `path_conflict` with `actual_inode_id` set and `expected_inode_id` absent. A `path_absence` for `/` fails with an actual inode of `ino_1`.
+`path_absence` requires only an absolute `path`, and it rejects inode or binding version fields. It passes when no visible entry resolves at the full path, including when an ancestor is missing or an intermediate component isn't a directory. A bound path returns `path_conflict` with `actual_inode_id` set and `expected_inode_id` absent. A `path_absence` for `/` fails with an actual inode of `ino_00000000000000000000000000`.
 
 `name_absence` requires `parent_inode_id` and `display_name`. It passes when the parent has no visible child whose name key matches the name, including when the parent isn't visible or isn't a directory. A bound name returns `path_conflict` with `actual_inode_id` set and `expected_inode_id` absent.
 
@@ -765,7 +765,7 @@ For example:
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"pin_00000000000000000009-0000000000000009","next_run_no":1,"reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","checkpoint_id":"pin_00000000000000000009-0000000000000009","next_run_no":1,"reorganize_pending":false}
 ```
 
 So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `next_run_no` is the run number that the index allocates next, and `reorganize_pending` reports whether a partitioned segment reorganization is in progress. A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.
@@ -1376,12 +1376,12 @@ Returns one authoritative path entry, addressed by path or by inode ID. Enum val
 {
   "namespace_id": "demo",
   "path": "/docs/report.txt",
-  "inode_id": "ino_42",
+  "inode_id": "ino_000000r0000013kje0d47gc8kw",
   "created_by": "usr_8f3c",
   "created_at_ms": 1752623000000,
   "inode_kind": "file",
   "head_seq": 418,
-  "parent_inode_id": "ino_7",
+  "parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
   "display_name": "report.txt",
   "binding_version": "opaque-token",
   "revision_no": 7,
@@ -1461,12 +1461,12 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
     {
       "namespace_id": "demo",
       "path": "/docs/report.txt",
-      "inode_id": "ino_42",
+      "inode_id": "ino_000000r0000013kje0d47gc8kw",
       "created_by": "usr_8f3c",
       "created_at_ms": 1752623000000,
       "inode_kind": "file",
       "head_seq": 418,
-      "parent_inode_id": "ino_7",
+      "parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
       "display_name": "report.txt",
       "revision_no": 7,
       "revision_committed_by": "render-worker",
@@ -1483,12 +1483,12 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
     {
       "namespace_id": "demo",
       "path": "/docs/slides",
-      "inode_id": "ino_43",
+      "inode_id": "ino_000000w000000kewn0stth7erh",
       "created_by": "usr_8f3c",
       "created_at_ms": 1752623000000,
       "inode_kind": "dir",
       "head_seq": 418,
-      "parent_inode_id": "ino_7",
+      "parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
       "display_name": "slides"
     }
   ],
@@ -1518,13 +1518,13 @@ Each entry includes the inode ID and the deletion sequence that `undelete` requi
   "head_seq": 418,
   "entries": [
     {
-      "inode_id": "ino_42",
+      "inode_id": "ino_000000r0000013kje0d47gc8kw",
       "inode_kind": "file",
       "deletion_seq": 417,
       "deleted_at_ms": 1752625000000,
       "deleted_by": "usr_8f3c",
       "deleted_binding": {
-        "parent_inode_id": "ino_7",
+        "parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
         "name_key": "report.txt",
         "display_name": "report.txt"
       }
@@ -1552,11 +1552,11 @@ For example, a revision listing returns:
 ```json
 {
   "namespace_id": "demo",
-  "inode_id": "ino_42",
+  "inode_id": "ino_000000r0000013kje0d47gc8kw",
   "head_seq": 418,
   "revisions": [
     {
-      "inode_id": "ino_42",
+      "inode_id": "ino_000000r0000013kje0d47gc8kw",
       "revision_no": 7,
       "committed_seq": 418,
       "committed_at_ms": 1752624000000,
@@ -1622,7 +1622,7 @@ A representative request:
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "preconditions": [
     { "kind": "namespace_head", "expected_head_seq": 42 },
-    { "kind": "file_revision", "inode_id": "ino_7", "expected_revision_no": 3 }
+    { "kind": "file_revision", "inode_id": "ino_000000r0000013kje0d47gc8kw", "expected_revision_no": 3 }
   ],
   "operations": [
     {
@@ -1794,14 +1794,14 @@ For example:
   "operations": [
     {
       "kind": "create_directory_by_inode",
-      "parent_inode_id": "ino_1",
-      "display_name": "reports"
+      "parent_inode_id": "ino_00000000000000000000000000",
+      "display_name": "archive"
     },
     {
       "kind": "move_by_inode",
-      "inode_id": "ino_42",
+      "inode_id": "ino_000000r0000013kje0d47gc8kw",
       "expected_binding_version": "opaque-token",
-      "destination_parent_inode_id": "ino_12",
+      "destination_parent_inode_id": "ino_00000s4000000qnxsdtx1c5z9t",
       "destination_display_name": "january.pdf",
       "behavior": "replace"
     }
@@ -1816,19 +1816,26 @@ A representative response:
 ```json
 {
   "namespace_id": "demo",
-  "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+  "commit_id": "c_1b2c3d4e5f60718293a4b5c6d7e8f901",
   "committed_seq": 419,
   "committed_by": "usr_8f3c",
   "committed_at_ms": 1752624000000,
-  "message": "import the January report",
   "events": [
     {
-      "kind": "file_created",
-      "inode_id": "ino_43",
-      "parent_inode_id": "ino_12",
-      "display_name": "january.pdf",
-      "revision_no": 1,
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } }
+      "kind": "directory_created",
+      "inode_id": "ino_00000t6000000tw2yg4n7xytth",
+      "parent_inode_id": "ino_00000000000000000000000000",
+      "display_name": "archive",
+      "binding_version": "opaque-token"
+    },
+    {
+      "kind": "moved",
+      "inode_id": "ino_000000r0000013kje0d47gc8kw",
+      "source_parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
+      "source_display_name": "report.txt",
+      "destination_parent_inode_id": "ino_00000s4000000qnxsdtx1c5z9t",
+      "destination_display_name": "january.pdf",
+      "binding_version": "opaque-token"
     }
   ]
 }
@@ -1872,7 +1879,7 @@ It also accepts `undelete`, which recovers a deleted file or subtree by binding 
   "operations": [
     {
       "kind": "undelete",
-      "inode_id": "ino_42",
+      "inode_id": "ino_000000r0000013kje0d47gc8kw",
       "deletion_seq": 17,
       "destination_path": "/docs/report.txt"
     }
@@ -1904,7 +1911,7 @@ The endpoint also accepts `update_attributes`, which writes and removes attribut
         "tags": "draft,review"
       },
       "remove": ["stage"],
-      "expected_inode_id": "ino_7",
+      "expected_inode_id": "ino_000000r0000013kje0d47gc8kw",
       "expected_attributes_revision_no": 3
     }
   ]
@@ -1960,7 +1967,7 @@ A wrong `expected_inode_id` returns `path_conflict`, like the delete preconditio
         "prn_finance": ["read", "history"],
         "prn_ada": ["read", "history", "write", "create", "remove", "share", "manage"]
       },
-      "expected_inode_id": "ino_9",
+      "expected_inode_id": "ino_000000y000000vk0224rf3qytb",
       "expected_access_revision_no": 2
     }
   ]
@@ -2249,7 +2256,7 @@ The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions
 ```json
 {
   "namespace_id": "demo",
-  "inode_id": "ino_42",
+  "inode_id": "ino_000000r0000013kje0d47gc8kw",
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
@@ -2316,7 +2323,7 @@ One request operation can apply several semantic operations. For example, a put 
       "events": [
         {
           "kind": "content_changed",
-          "inode_id": "ino_42",
+          "inode_id": "ino_000000r0000013kje0d47gc8kw",
           "revision_no": 8,
           "content_ref": {
             "kind": "blob_v1",
@@ -2352,16 +2359,16 @@ Directory and file creation use separate event shapes. A file creation always in
 ```json
 {
   "kind": "directory_created",
-  "inode_id": "ino_42",
-  "parent_inode_id": "ino_1",
+  "inode_id": "ino_000000r000000tn10r0b9wf3yy",
+  "parent_inode_id": "ino_00000000000000000000000000",
   "display_name": "docs",
   "binding_version": "opaque-token"
 }
 
 {
   "kind": "file_created",
-  "inode_id": "ino_43",
-  "parent_inode_id": "ino_1",
+  "inode_id": "ino_000000r0000013kje0d47gc8kw",
+  "parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
   "display_name": "report.txt",
   "binding_version": "opaque-token",
   "revision_no": 1,
@@ -2380,7 +2387,7 @@ A `content_changed` event for an append includes `append_offset`, the offset whe
 ```json
 {
   "kind": "content_changed",
-  "inode_id": "ino_44",
+  "inode_id": "ino_00000ct000000sne6s8ae5c5ka",
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
@@ -2492,7 +2499,7 @@ Representative response:
   "matches": [
     {
       "path": "/src/search.rs",
-      "inode_id": "ino_42",
+      "inode_id": "ino_00000ej000000snh6a5re18dhf",
       "revision_no": 3,
       "line_number": 17,
       "byte_offset": 512,

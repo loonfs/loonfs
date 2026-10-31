@@ -1698,7 +1698,7 @@
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "The newly allocated inode, unique within the namespace."
+            "description": "The new inode, unique within the namespace."
           },
           "kind": {
             "enum": [
@@ -1737,7 +1737,7 @@
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "The newly allocated inode, unique within the namespace."
+            "description": "The new inode, unique within the namespace."
           },
           "kind": {
             "enum": [
@@ -2912,8 +2912,8 @@
       },
       "InodeId": {
         "description": "The stable ID of one inode within a namespace. An inode's ID doesn't change.",
-        "example": "ino_123",
-        "pattern": "^ino_[1-9][0-9]*$",
+        "example": "ino_000000r0000013kje0d47gc8kw",
+        "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
       },
       "InodeKind": {
@@ -7095,12 +7095,12 @@
           },
           {
             "description": "An inode that limits matches to its descendants. It can't be combined with `path_prefix`.",
-            "example": "ino_123",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "query",
             "name": "inode_id",
             "required": false,
             "schema": {
-              "pattern": "^ino_[1-9][0-9]*$",
+              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
               "type": "string"
             }
           },
@@ -7255,12 +7255,12 @@
           },
           {
             "description": "The inode ID.",
-            "example": "ino_123",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[1-9][0-9]*$",
+              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
               "type": "string"
             }
           },
@@ -7388,12 +7388,12 @@
           },
           {
             "description": "The directory's inode ID.",
-            "example": "ino_123",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[1-9][0-9]*$",
+              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
               "type": "string"
             }
           },
@@ -7568,12 +7568,12 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_123",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[1-9][0-9]*$",
+              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
               "type": "string"
             }
           },
@@ -7772,12 +7772,12 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_123",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[1-9][0-9]*$",
+              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
               "type": "string"
             }
           }
@@ -7904,12 +7904,12 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_123",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[1-9][0-9]*$",
+              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
               "type": "string"
             }
           },
@@ -8055,12 +8055,12 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_123",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[1-9][0-9]*$",
+              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
               "type": "string"
             }
           },
@@ -8259,12 +8259,12 @@
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_123",
+            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[1-9][0-9]*$",
+              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
               "type": "string"
             }
           },

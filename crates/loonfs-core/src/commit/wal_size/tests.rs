@@ -15,6 +15,7 @@ use loonfs_types::format::wal::{
     WalDelta, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_BYTES,
     MAX_WAL_OBJECT_INLINE_CONTENT_BYTES, WAL_OBJECT_OVERHEAD_BYTES,
 };
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     ActorId, AttributeKey, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId,
     ContentId, ContentRef, ContentRefKind, DestinationBehavior, DestinationPrecondition,
@@ -52,7 +53,6 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_test_support::test_actor());
     head.seq = ChangeSeq(MAX_PUBLIC_INTEGER - 1);
     head.wal_no = WalNo(MAX_PUBLIC_INTEGER - 1);
-    head.next_inode_id = InodeId(MAX_PUBLIC_INTEGER - 1_000_000);
     head.writer_epoch = WriterEpoch(MAX_PUBLIC_INTEGER);
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
@@ -76,7 +76,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         &[
             WalDelta::CreateInode {
                 delta_index: 0,
-                inode_id: InodeId(1),
+                inode_id: ROOT_INODE_ID,
                 inode_kind: InodeKind::Directory,
             },
             WalDelta::CreateInode {
@@ -86,7 +86,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             },
             WalDelta::BindDirentry {
                 delta_index: 2,
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: NameKey::parse("source").expect("key"),
                 display_name: DisplayName::parse("source").expect("name"),
                 child_inode_id: InodeId(2),
@@ -127,7 +127,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             },
             WalDelta::BindDirentry {
                 delta_index: 6,
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: NameKey::parse("log").expect("key"),
                 display_name: DisplayName::parse("log").expect("name"),
                 child_inode_id: InodeId(3),

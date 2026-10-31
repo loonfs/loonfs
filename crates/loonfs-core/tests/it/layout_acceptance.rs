@@ -234,5 +234,4 @@ async fn maintenance_preserves_writer_and_logical_head() {
     assert_eq!(after.writer_epoch, before.writer_epoch);
     assert_eq!(after.writer, before.writer);
     assert_eq!(after.seq, before.seq);
-    assert_eq!(after.next_inode_id, before.next_inode_id);
 }

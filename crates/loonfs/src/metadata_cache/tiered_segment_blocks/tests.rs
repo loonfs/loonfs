@@ -59,7 +59,7 @@ fn test_blocks() -> Vec<TestBlock> {
     let mut builder = SegmentBlocksBuilder::new(NonZeroUsize::MIN);
     for inode in 0..12 {
         let row = MetadataRow::Inode(InodeRecord {
-            inode_id: InodeId(inode + 2),
+            inode_id: InodeId(u128::from(inode) + 2),
             inode_kind: InodeKind::File,
             committed_seq: ChangeSeq(inode + 1),
             commit_id: CommitId::parse(format!("c_ssd_{inode:02}")).expect("commit id"),

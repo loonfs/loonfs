@@ -288,12 +288,12 @@ mod tests {
 
     fn bind(parent: u64, name: &str, child: u64, seq: u64) -> DirentryBindingRecord {
         DirentryBindingRecord {
-            parent_inode_id: InodeId(parent),
+            parent_inode_id: InodeId(u128::from(parent)),
             name_key: NameKey::parse(name).expect("valid name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("valid display name"),
             },
-            child_inode_id: InodeId(child),
+            child_inode_id: InodeId(u128::from(child)),
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,

@@ -23,7 +23,7 @@ pub struct PathEntry {
     #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
     /// The entry's stable inode ID.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The actor that created this inode, as the application supplied it.
     pub created_by: ActorId,
@@ -38,7 +38,7 @@ pub struct PathEntry {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::public_inode_id::option"
+        with = "crate::inode_id::public::option"
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub parent_inode_id: Option<InodeId>,
@@ -239,7 +239,7 @@ pub struct ListInodeChildrenResponse {
     /// The namespace that was read.
     pub namespace_id: NamespaceId,
     /// The directory inode whose children were returned.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub parent_inode_id: InodeId,
     /// The namespace head sequence that this listing was read at.
     pub head_seq: ChangeSeq,
@@ -256,7 +256,7 @@ pub struct ListInodeChildrenResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {
     /// The inode that the deletion hides.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// Whether the deleted root is a file or a directory. A newer server can return another kind.
     #[cfg_attr(feature = "openapi", schema(value_type = InodeKind))]
@@ -292,7 +292,7 @@ pub struct ListTrashResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FileRevision {
     /// The file inode that this revision belongs to.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The revision number within the file inode.
     pub revision_no: RevisionNo,
@@ -316,7 +316,7 @@ pub struct ListFileRevisionsResponse {
     /// The namespace that was read.
     pub namespace_id: NamespaceId,
     /// The file inode whose revisions were returned.
-    #[serde(with = "crate::public_inode_id")]
+    #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The namespace head sequence that the read used.
     pub head_seq: ChangeSeq,
@@ -346,7 +346,11 @@ mod tests {
         PathEntry {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             path: AbsolutePath::parse(path).expect("absolute path"),
-            inode_id: InodeId(if parent_inode_id.is_some() { 2 } else { 1 }),
+            inode_id: if parent_inode_id.is_some() {
+                InodeId(2)
+            } else {
+                crate::ROOT_INODE_ID
+            },
             created_by: ActorId::loonfs(),
             created_at_ms: 1_752_624_000_000,
             kind: PathEntryKind::Directory {},
@@ -360,18 +364,18 @@ mod tests {
 
     #[test]
     fn path_entries_keep_the_plain_string_wire_shape() {
-        let named = entry("/docs", Some(InodeId(1)), Some("docs"));
+        let named = entry("/docs", Some(crate::ROOT_INODE_ID), Some("docs"));
         assert_eq!(
             serde_json::to_value(&named).expect("serialize named entry"),
             serde_json::json!({
                 "namespace_id": "demo",
                 "path": "/docs",
-                "inode_id": "ino_2",
+                "inode_id": "ino_00000000000000000000000002",
                 "created_by": "loonfs",
                 "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "dir",
                 "head_seq": 3,
-                "parent_inode_id": "ino_1",
+                "parent_inode_id": "ino_00000000000000000000000000",
                 "display_name": "docs",
                 "binding_version": binding_version()
             })
@@ -393,12 +397,12 @@ mod tests {
                 "entries": [{
                     "namespace_id": "demo",
                     "path": "/docs",
-                    "inode_id": "ino_2",
+                    "inode_id": "ino_00000000000000000000000002",
                     "created_by": "loonfs",
                     "created_at_ms": 1_752_624_000_000_u64,
                     "inode_kind": "dir",
                     "head_seq": 3,
-                    "parent_inode_id": "ino_1",
+                    "parent_inode_id": "ino_00000000000000000000000000",
                     "display_name": "docs",
                     "binding_version": binding_version()
                 }]
@@ -409,7 +413,7 @@ mod tests {
     #[test]
     fn a_path_entry_decodes_a_derived_path_over_the_request_limits() {
         let name = DisplayName::parse("d").expect("display name");
-        let mut derived = entry("/d", Some(InodeId(1)), Some("d"));
+        let mut derived = entry("/d", Some(crate::ROOT_INODE_ID), Some("d"));
         derived.path =
             (0..=crate::MAX_PATH_DEPTH).fold(AbsolutePath::root(), |path, _| path.join(&name));
         let mut wire = serde_json::to_value(&derived).expect("serialize entry");
@@ -431,7 +435,11 @@ mod tests {
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
         );
-        let mut file = entry("/report.txt", Some(InodeId(1)), Some("report.txt"));
+        let mut file = entry(
+            "/report.txt",
+            Some(crate::ROOT_INODE_ID),
+            Some("report.txt"),
+        );
         file.kind = PathEntryKind::File {
             revision_no: RevisionNo(7),
             size_bytes: 5,
@@ -445,7 +453,7 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo",
                 "path": "/report.txt",
-                "inode_id": "ino_2",
+                "inode_id": "ino_00000000000000000000000002",
                 "created_by": "loonfs",
                 "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "file",
@@ -455,7 +463,7 @@ mod tests {
                 "revision_committed_by": "loonfs",
                 "revision_committed_at_ms": 1_752_624_000_000_u64,
                 "head_seq": 3,
-                "parent_inode_id": "ino_1",
+                "parent_inode_id": "ino_00000000000000000000000000",
                 "display_name": "report.txt",
                 "binding_version": binding_version()
             })
@@ -475,9 +483,13 @@ mod tests {
         assert_eq!(decoded.display_name, None);
         assert_eq!(decoded.binding_version, None);
 
-        let named_json = serde_json::to_value(entry("/docs", Some(InodeId(1)), Some("docs")))
-            .expect("serialize named entry");
-        assert_eq!(named_json["parent_inode_id"], "ino_1");
+        let named_json =
+            serde_json::to_value(entry("/docs", Some(crate::ROOT_INODE_ID), Some("docs")))
+                .expect("serialize named entry");
+        assert_eq!(
+            named_json["parent_inode_id"],
+            "ino_00000000000000000000000000"
+        );
         assert_eq!(named_json["display_name"], "docs");
         assert_eq!(named_json["binding_version"], binding_version().as_str());
     }
@@ -523,7 +535,7 @@ mod tests {
 
     #[test]
     fn requested_attributes_serialize_as_flat_prefixed_siblings() {
-        let mut projected = entry("/docs", Some(InodeId(1)), Some("docs"));
+        let mut projected = entry("/docs", Some(crate::ROOT_INODE_ID), Some("docs"));
         projected.attributes = Some(AttributesProjection {
             attributes_revision_no: crate::AttributesRevisionNo(7),
             attributes_updated_by: Some(ActorId::loonfs()),
@@ -561,7 +573,7 @@ mod tests {
 
     #[test]
     fn unrequested_attributes_omit_both_wire_keys() {
-        let unprojected = entry("/docs", Some(InodeId(1)), Some("docs"));
+        let unprojected = entry("/docs", Some(crate::ROOT_INODE_ID), Some("docs"));
         let unprojected_json =
             serde_json::to_value(&unprojected).expect("serialize unprojected entry");
         assert!(unprojected_json.get("attributes").is_none());
@@ -574,7 +586,7 @@ mod tests {
 
     #[test]
     fn never_written_attributes_serialize_as_revision_zero_and_empty_map() {
-        let mut projected = entry("/docs", Some(InodeId(1)), Some("docs"));
+        let mut projected = entry("/docs", Some(crate::ROOT_INODE_ID), Some("docs"));
         projected.attributes = Some(AttributesProjection {
             attributes_revision_no: crate::AttributesRevisionNo(0),
             attributes_updated_by: None,
@@ -605,13 +617,13 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&trash).expect("serialize trash entry"),
             serde_json::json!({
-                "inode_id": "ino_42",
+                "inode_id": "ino_0000000000000000000000001a",
                 "inode_kind": "file",
                 "deletion_seq": 417,
                 "deleted_at_ms": 1,
                 "deleted_by": "loonfs",
                 "deleted_binding": {
-                    "parent_inode_id": "ino_7",
+                    "parent_inode_id": "ino_00000000000000000000000007",
                     "name_key": "report.txt",
                     "display_name": "report.txt"
                 }
@@ -634,7 +646,10 @@ mod tests {
             },
         };
         let trash_json = serde_json::to_value(trash).expect("serialize trash entry");
-        assert_eq!(trash_json["inode_id"], serde_json::json!("ino_42"));
+        assert_eq!(
+            trash_json["inode_id"],
+            serde_json::json!("ino_0000000000000000000000001a")
+        );
         assert_eq!(trash_json["deletion_seq"], serde_json::json!(417));
 
         let operation_json = serde_json::json!({
@@ -677,7 +692,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(revision).expect("serialize file revision"),
             serde_json::json!({
-                "inode_id": "ino_2",
+                "inode_id": "ino_00000000000000000000000002",
                 "revision_no": 3,
                 "committed_seq": 7,
                 "commit_id": "c_revision_owner",

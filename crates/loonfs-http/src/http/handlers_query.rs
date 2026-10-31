@@ -39,7 +39,10 @@ pub(super) struct GrepQuery {
     /// An inode that limits matches to its descendants. It can't be combined with `path_prefix`.
     #[cfg_attr(
         feature = "openapi",
-        param(pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
+        param(
+            pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+            example = "ino_000000r0000013kje0d47gc8kw"
+        )
     )]
     inode_id: Option<String>,
     /// Whether a pattern with no required literal bytes can use a capped exhaustive scan. The

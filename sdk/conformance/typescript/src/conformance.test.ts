@@ -2212,7 +2212,7 @@ conformanceTest("inode_addressing", async (activeHarness, testCase) => {
     await assert.rejects(
         commit("conf-inode-addressing-access", {
             kind: "update_access_by_inode",
-            inode_id: "ino_1",
+            inode_id: "ino_00000000000000000000000000",
             boundary: false,
             grants: {},
         }),

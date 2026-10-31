@@ -13,6 +13,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::provider_detail::{
     assert_provider_markers_absent, POISON_PROVIDER_DETAIL,
 };
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     AbsolutePath, AttributeValue, AttributesProjection, ChangeSeq, DisplayName, InodeId,
     NamespaceId, PathEntry, PathEntryKind, StoreProbeCheck, StoreProbeCheckOutcome,
@@ -189,12 +190,16 @@ fn path_entry(path: &str, display_name: Option<&str>) -> PathEntry {
     PathEntry {
         namespace_id: NamespaceId::parse("demo").expect("namespace id"),
         path: AbsolutePath::parse(path).expect("absolute path"),
-        inode_id: InodeId(if display_name.is_some() { 2 } else { 1 }),
+        inode_id: if display_name.is_some() {
+            InodeId(2)
+        } else {
+            ROOT_INODE_ID
+        },
         created_by: loonfs_types::ActorId::loonfs(),
         created_at_ms: 1_752_624_000_000,
         kind: PathEntryKind::Directory {},
         head_seq: ChangeSeq(3),
-        parent_inode_id: display_name.map(|_| InodeId(1)),
+        parent_inode_id: display_name.map(|_| ROOT_INODE_ID),
         display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
         binding_version: None,
         attributes: None,
@@ -215,7 +220,7 @@ fn human_stat_omits_the_absent_root_name() {
     let root = human_success(&stat_output(path_entry("/", None)));
     for line in [
         "path: /",
-        "inode: ino_1",
+        "inode: ino_00000000000000000000000000",
         "kind: dir",
         "seq: 3",
         "created_by: loonfs",

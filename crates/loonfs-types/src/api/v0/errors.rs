@@ -91,7 +91,7 @@ pub struct ErrorDetails {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::public_inode_id::option"
+        with = "crate::inode_id::public::option"
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub inode_id: Option<InodeId>,
@@ -99,7 +99,7 @@ pub struct ErrorDetails {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::public_inode_id::option"
+        with = "crate::inode_id::public::option"
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_inode_id: Option<InodeId>,
@@ -107,7 +107,7 @@ pub struct ErrorDetails {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::public_inode_id::option"
+        with = "crate::inode_id::public::option"
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_inode_id: Option<InodeId>,

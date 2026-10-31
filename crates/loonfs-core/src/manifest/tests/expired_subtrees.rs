@@ -6,12 +6,13 @@ use super::*;
 use crate::authorize::{Absence, Authorizer, ReadAccess};
 use crate::metadata::{DirentryBindingRecord, RevisionRecord};
 use loonfs_types::format::manifest::{AccessRevisionRecord, DirentryBindingState, InodeRecord};
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     AccessGrants, AccessRevisionNo, AccessRight, ActorId, ContentId, ContentRef, DisplayName,
     EffectiveLimit, InodeKind, NameKey, PageRequest, PrincipalId, PrincipalSet, RevisionNo,
 };
 
-const ROOT: InodeId = InodeId(1);
+const ROOT: InodeId = ROOT_INODE_ID;
 /// `/old`, whose deletion expired.
 const OLD: InodeId = InodeId(2);
 /// `/old/notes.txt`.
@@ -137,7 +138,6 @@ async fn a_read_by_inode_whose_ancestry_was_compacted_away_is_refused_for_every_
         .expect("current projection");
     let mut head = current.head.clone();
     head.seq = ChangeSeq(5);
-    head.next_inode_id = InodeId(6);
     let manifest = build_namespace_manifest_from_metadata_state(
         &store,
         &namespace_id,

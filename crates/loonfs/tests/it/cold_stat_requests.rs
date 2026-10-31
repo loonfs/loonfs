@@ -14,8 +14,12 @@ use loonfs::{LoonFs, Namespace, NamespaceId, Writable};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
-use loonfs_types::format::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
-use loonfs_types::AbsolutePath;
+use loonfs_types::format::hex::hex_decode_bytes;
+use loonfs_types::format::manifest::{
+    decode_namespace_manifest_json, lookup_keys, MetadataRowFamily,
+};
+use loonfs_types::format::segment_blocks::{decode_filter_block, key_range_may_intersect};
+use loonfs_types::{AbsolutePath, DisplayName, NameKey};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -33,6 +37,43 @@ async fn publish_candidates(
     for outcome in futures::future::join_all(submissions).await {
         outcome.expect("publish batch member");
     }
+}
+
+/// How many segments of `family` in `runs` have a key range that meets
+/// `prefix` and an inline filter that admits `probe`. A newest-first lookup
+/// that reaches such a segment before the run with its row pays one
+/// whole-segment GET for it.
+fn segments_admitting(
+    runs: &[&loonfs_types::format::manifest::MetadataRunRef],
+    family: MetadataRowFamily,
+    prefix: &str,
+    probe: &str,
+) -> usize {
+    // Every prefix ends with `-`, and `.` is the next byte.
+    let upper_bound = format!("{}.", &prefix[..prefix.len() - 1]);
+    runs.iter()
+        .flat_map(|run| &run.segments)
+        .filter(|descriptor| descriptor.family == family)
+        .filter(|descriptor| {
+            key_range_may_intersect(
+                &descriptor.min_row_key,
+                &descriptor.max_row_key,
+                descriptor.row_count,
+                prefix,
+                Some(&upper_bound),
+            )
+        })
+        .filter(|descriptor| {
+            let inline = descriptor
+                .filter_inline
+                .as_deref()
+                .expect("every delta segment has an inline filter");
+            let bytes = hex_decode_bytes(inline).expect("inline filter hex");
+            decode_filter_block(&bytes, &descriptor.filter_block)
+                .expect("decode the inline filter")
+                .may_contain(probe)
+        })
+        .count()
 }
 
 #[tokio::test]
@@ -214,6 +255,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     // of a file that one run lists and of a file that every run lists.
     let mut segment_gets_per_stat = Vec::new();
     let mut gets_per_stat = Vec::new();
+    let mut inode_ids = Vec::new();
     for (name, revision_no) in [("file-000000042.txt", 1), ("hot.txt", RUNS as u64)] {
         let reader = LoonFs::builder_with_store(store.clone())
             .read_only()
@@ -275,10 +317,59 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         );
         segment_gets_per_stat.push((name, segment_gets.len()));
         gets_per_stat.push(gets.len());
+        inode_ids.push(entry.inode_id);
     }
+
+    // Each stat reads three segments: the first run's bindings for the parent
+    // directories, the run with the file's binding, and the run with its
+    // newest revision. The file's keys contain its inode ID, whose low bits
+    // are random, so a newer run's inline filter can admit a key by a false
+    // positive, and the newest-first lookup then reads that run's segment too.
+    // The batch runs are the newest `RUNS` delta runs, oldest first.
+    let directory = LoonFs::builder_with_store(store.clone())
+        .read_only()
+        .build()
+        .await
+        .expect("build reader")
+        .namespace(&namespace_id)
+        .stat("/tree/dir-000000")
+        .await
+        .expect("stat the directory")
+        .inode_id;
+    let mut batches: Vec<_> = manifest
+        .payload()
+        .runs
+        .iter()
+        .filter(|run| run.tier == loonfs_types::format::manifest::RunTier::Delta)
+        .collect();
+    batches.sort_by_key(|run| run.run_seq);
+    let batches = &batches[batches.len() - RUNS..];
+    let false_positive_gets = |name: &str, inode_id, binding_run: usize, revision_run: usize| {
+        let name_key = NameKey::for_display_name(&DisplayName::parse(name).expect("name"));
+        segments_admitting(
+            &batches[binding_run + 1..],
+            MetadataRowFamily::DirentryBinds,
+            &lookup_keys::direntry_bind_prefix(directory, &name_key),
+            &lookup_keys::direntry_bind_probe(directory, &name_key),
+        ) + segments_admitting(
+            &batches[revision_run + 1..],
+            MetadataRowFamily::Revisions,
+            &lookup_keys::revision_prefix(inode_id),
+            &lookup_keys::revision_probe(inode_id),
+        )
+    };
     assert_eq!(
         segment_gets_per_stat,
-        [("file-000000042.txt", 3), ("hot.txt", 3)],
+        [
+            (
+                "file-000000042.txt",
+                3 + false_positive_gets("file-000000042.txt", inode_ids[0], 42 % RUNS, 42 % RUNS)
+            ),
+            (
+                "hot.txt",
+                3 + false_positive_gets("hot.txt", inode_ids[1], 0, RUNS - 1)
+            ),
+        ],
         "segment GETs of each cold stat, of {gets_per_stat:?} GETs in all"
     );
 }

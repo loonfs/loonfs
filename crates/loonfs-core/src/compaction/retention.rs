@@ -421,6 +421,7 @@ pub(crate) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_types::ROOT_INODE_ID;
     use loonfs_types::{
         AccessRevisionNo, AttributesRevisionNo, DisplayName, InodeId, NameKey, RevisionNo,
     };
@@ -500,7 +501,7 @@ mod tests {
         match family {
             MetadataRowFamily::Access => {
                 MetadataRow::AccessRevision(crate::metadata::AccessRevisionRecord {
-                    inode_id: InodeId(inode),
+                    inode_id: InodeId(u128::from(inode)),
                     access_revision_no: AccessRevisionNo(revision),
                     committed_seq: ChangeSeq(committed_seq),
                     commit_id,
@@ -513,7 +514,7 @@ mod tests {
             }
             MetadataRowFamily::Revisions => {
                 MetadataRow::FileRevision(crate::metadata::RevisionRecord {
-                    inode_id: InodeId(inode),
+                    inode_id: InodeId(u128::from(inode)),
                     revision_no: RevisionNo(revision),
                     committed_seq: ChangeSeq(committed_seq),
                     commit_id,
@@ -530,7 +531,7 @@ mod tests {
                 })
             }
             _ => MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
-                inode_id: InodeId(inode),
+                inode_id: InodeId(u128::from(inode)),
                 attributes_revision_no: AttributesRevisionNo(revision),
                 committed_seq: ChangeSeq(committed_seq),
                 commit_id,
@@ -544,12 +545,12 @@ mod tests {
 
     fn bind_row(parent: u64, name: &str, child: u64, bind_seq: u64) -> MetadataRow {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(parent),
+            parent_inode_id: InodeId(u128::from(parent)),
             name_key: NameKey::parse(name).expect("name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
             },
-            child_inode_id: InodeId(child),
+            child_inode_id: InodeId(u128::from(child)),
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
@@ -560,7 +561,7 @@ mod tests {
 
     fn unbind_row(parent: u64, name: &str, unbind_seq: u64) -> MetadataRow {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-            parent_inode_id: InodeId(parent),
+            parent_inode_id: InodeId(u128::from(parent)),
             name_key: NameKey::parse(name).expect("name key"),
             child_inode_id: InodeId(42),
             child_kind: loonfs_types::InodeKind::File,
@@ -636,7 +637,7 @@ mod tests {
                 deleted_at_ms: 1_000,
                 deleted_by: loonfs_types::ActorId::loonfs(),
                 deleted_binding: loonfs_types::format::manifest::DeletedBinding {
-                    parent_inode_id: InodeId(1),
+                    parent_inode_id: ROOT_INODE_ID,
                     name_key: loonfs_types::NameKey::parse("deleted").expect("valid name key"),
                     display_name: loonfs_types::DisplayName::parse("deleted")
                         .expect("valid display name"),
@@ -790,7 +791,9 @@ mod tests {
             .expect_err("a second child bound in the slot at the floor is refused");
         assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert!(
-            error.to_string().contains("children `2` and `3`"),
+            error
+                .to_string()
+                .contains(&format!("children `{}` and `{}`", InodeId(2), InodeId(3))),
             "the error must name both children, got: {error}"
         );
     }
@@ -824,9 +827,11 @@ mod tests {
             .expect_err("a second edge bound for the child at the floor is refused");
         assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert!(
-            error
-                .to_string()
-                .contains("as `a.txt` under parent `7` and as `b.txt` under parent `8`"),
+            error.to_string().contains(&format!(
+                "as `a.txt` under parent `{}` and as `b.txt` under parent `{}`",
+                InodeId(7),
+                InodeId(8)
+            )),
             "the error must name both edges, got: {error}"
         );
     }

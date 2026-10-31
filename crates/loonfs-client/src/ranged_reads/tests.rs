@@ -87,7 +87,7 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
     assert_eq!(
         sent[1].url,
         format!(
-            "http://example.invalid/v0/namespaces/demo/inodes/ino_42/content?snapshot_id={snapshot_id}"
+            "http://example.invalid/v0/namespaces/demo/inodes/ino_0000000000000000000000001a/content?snapshot_id={snapshot_id}"
         )
     );
     assert_eq!(sent[1].header("range"), Some("bytes=7-"));

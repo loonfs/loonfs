@@ -361,11 +361,14 @@ mod tests {
             )
             .expect("parse s3 update flags");
             let subject = cli.selectors().subject;
-            let TopLevelCommand::Configured(Command::Profile {
-                command: ProfileCommand::Update { provider },
-            }) = cli.command
-            else {
+            let TopLevelCommand::Configured(command) = cli.command else {
                 panic!("expected profile update, got {:?}", cli.command);
+            };
+            let Command::Profile {
+                command: ProfileCommand::Update { provider },
+            } = *command
+            else {
+                panic!("expected profile update");
             };
             assert_eq!(provider.has_update_flags(&subject), !flags.is_empty());
 

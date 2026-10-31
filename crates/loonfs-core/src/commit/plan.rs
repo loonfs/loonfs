@@ -38,8 +38,6 @@ pub(crate) struct CommitPlan {
     pub(crate) deltas: Vec<WalCommitDelta>,
     pub(crate) appended: Vec<WalInlineContent>,
     pub(crate) inline_content: Vec<InlineContent>,
-    /// The namespace's next inode ID after the commit's creates.
-    pub(crate) resulting_next_inode_id: InodeId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

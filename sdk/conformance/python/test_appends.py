@@ -23,7 +23,7 @@ def endpoint(content, requests):
         assert not body.get("content_tokens")
         [operation] = body["operations"]
         assert operation["kind"] == "append_file" and operation["path"] == "/file"
-        assert operation["expected_inode_id"] == "ino_1"
+        assert operation["expected_inode_id"] == "ino_00000000000000000000000000"
         assert operation["expected_revision_no"] == 1
         assert "behavior" not in operation
         assert base64.b64decode(operation["inline_content"], validate=True) == content
@@ -48,7 +48,7 @@ def arguments(content):
         content=content,
         commit_id="stable",
         message="original",
-        expected_inode_id="ino_1",
+        expected_inode_id="ino_00000000000000000000000000",
         expected_revision_no=1,
         request_options={
             "max_retries": 0,

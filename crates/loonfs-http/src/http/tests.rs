@@ -19,6 +19,7 @@ use super::error::{status_for, ServedErrorCode};
 use super::middleware::{request_log_severity, RequestLogSeverity};
 use crate::{BindingState, JobMode};
 use loonfs::SharedObjectStore;
+use loonfs_types::ROOT_INODE_ID;
 mod fixtures;
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -401,7 +402,7 @@ fn error_detail_fields_match_the_api_spec_table() {
             active_writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             active_acquired_at_ms: 1,
         }),
-        inode_id: Some(InodeId(1)),
+        inode_id: Some(ROOT_INODE_ID),
         expected_inode_id: Some(InodeId(2)),
         actual_inode_id: Some(InodeId(3)),
         expected_binding_version: Some(
@@ -471,7 +472,7 @@ fn assert_api_spec_error_codes_are_registered(spec: &str) {
             continue;
         }
         // Valid inode IDs are examples, not error codes.
-        if loonfs_types::public_inode_id::decode(token).is_ok() {
+        if loonfs_types::InodeId::parse(token).is_ok() {
             continue;
         }
         assert!(
@@ -1838,7 +1839,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     );
     assert_eq!(body["param"], "inode_id");
     let grep_two_scopes_url = format!(
-        "http://{addr}/v0/namespaces/demo/grep?pattern=needle&path_prefix=/docs&inode_id=ino_27"
+        "http://{addr}/v0/namespaces/demo/grep?pattern=needle&path_prefix=/docs&inode_id=ino_0000000000000000000000000v"
     );
     let body = expect_enveloped(
         || {
@@ -2952,7 +2953,7 @@ mod direct_download {
             } else {
                 (
                     format!(
-                        "/v0/namespaces/{namespace}/inodes/ino_{}/revisions/1/downloads",
+                        "/v0/namespaces/{namespace}/inodes/{}/revisions/1/downloads",
                         entry.inode_id
                     ),
                     "{}".to_owned(),
@@ -3064,8 +3065,9 @@ mod direct_download {
         .expect("app");
         let snapshot_id = "pin_00000000000000000001-0000000000000002";
         let route = "/v0/namespaces/demo/filesystem/downloads";
-        let inode_route = "/v0/namespaces/demo/inodes/ino_1/downloads";
-        let revision_route = "/v0/namespaces/demo/inodes/ino_1/revisions/1/downloads";
+        let inode_route = "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/downloads";
+        let revision_route =
+            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/revisions/1/downloads";
         for (uri, body, param) in [
             (
                 format!("{route}?snapshot_id={snapshot_id}"),
@@ -3251,7 +3253,7 @@ mod direct_download {
             .await
             .expect("stat")
             .inode_id;
-        let inode = format!("/v0/namespaces/demo/inodes/ino_{inode_id}");
+        let inode = format!("/v0/namespaces/demo/inodes/{inode_id}");
         for uri in [
             format!("{inode}/downloads"),
             format!("{inode}/revisions/1/downloads"),
@@ -4451,7 +4453,7 @@ async fn scoped_commit_precondition_returns_409_with_its_index() {
                 .body(axum::body::Body::from(
                     serde_json::json!({
                         "commit_id": "stale-precondition",
-                        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_99", "expected_revision_no": 1}],
+                        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_00000000000000000000000033", "expected_revision_no": 1}],
                         "operations": [{"kind": "create_directory", "path": "/docs"}]
                     })
                     .to_string(),

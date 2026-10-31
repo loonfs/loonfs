@@ -15,7 +15,7 @@ use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStor
 use loonfs_types::CompleteUploadBody;
 use loonfs_types::{
     AbsolutePath, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, FilesystemChange,
-    InodeId, NamespaceId, RevisionNo, UploadSessionStatus,
+    NamespaceId, RevisionNo, UploadSessionStatus, ROOT_INODE_ID,
 };
 use std::assert_matches;
 use tempfile::tempdir;
@@ -428,7 +428,7 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
 }
 
 #[tokio::test]
-async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
+async fn a_rejected_batch_candidate_publishes_nothing_between_accepted_ones() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -443,21 +443,21 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
         &namespace_id,
         vec![
             CommitIntent::single(
-                commit_id("keep-first-allocation"),
+                commit_id("first"),
                 loonfs_test_support::test_actor(),
                 None,
                 create_dir("/first"),
             ),
             CommitIntent {
                 preconditions: Vec::new(),
-                commit_id: commit_id("discard-allocation"),
+                commit_id: commit_id("discarded"),
                 actor_id: loonfs_test_support::test_actor(),
                 subject: None,
                 message: None,
                 operations: vec![create_dir("/discarded"), delete_path("/missing")],
             },
             CommitIntent::single(
-                commit_id("reuse-discarded-allocation"),
+                commit_id("second"),
                 loonfs_test_support::test_actor(),
                 None,
                 create_dir("/second"),
@@ -479,13 +479,16 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
         ErrorCode::PathNotFound
     );
     second.as_ref().expect("third candidate commits");
-    assert_eq!(
-        resolve_path(&store, &namespace_id, "/second")
-            .await
-            .expect("second directory")
-            .inode_id,
-        InodeId(3)
-    );
+    let first_id = resolve_path(&store, &namespace_id, "/first")
+        .await
+        .expect("first directory")
+        .inode_id;
+    let second_id = resolve_path(&store, &namespace_id, "/second")
+        .await
+        .expect("second directory")
+        .inode_id;
+    assert_ne!(first_id, second_id);
+    assert!(![first_id, second_id].contains(&ROOT_INODE_ID));
     resolve_path(&store, &namespace_id, "/discarded")
         .await
         .expect_err("rejected candidate publishes nothing");

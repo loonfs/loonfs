@@ -274,7 +274,7 @@ pub(crate) enum CommandData {
         /// `loonfs undelete`.
         #[serde(
             skip_serializing_if = "Option::is_none",
-            with = "loonfs_types::public_inode_id::option"
+            with = "loonfs_types::inode_id::public::option"
         )]
         inode_id: Option<InodeId>,
         /// The `loonfs undelete` that puts this deletion back, set by `rm`
@@ -287,7 +287,7 @@ pub(crate) enum CommandData {
     /// caller asked for is simply there.
     DirectoryAlreadyExists {
         target: String,
-        #[serde(with = "loonfs_types::public_inode_id")]
+        #[serde(with = "loonfs_types::inode_id::public")]
         inode_id: InodeId,
         /// Namespace head the existing directory was observed at.
         head_seq: ChangeSeq,

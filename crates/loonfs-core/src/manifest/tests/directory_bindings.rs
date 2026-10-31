@@ -8,6 +8,7 @@ use crate::path::read::LoadedMetadataView;
 use loonfs_test_support::stores::ConcurrencyWatchStore;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::options::ListOptions;
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{InodeKind, ListPageCursor, PageRequest};
 use std::assert_matches;
 
@@ -372,28 +373,30 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
         .await
         .expect("created view");
     let access = ReadAccess::live(Authorizer::Unrestricted);
-    let mut inode_ids = Vec::new();
+    let mut children = Vec::new();
     for path in ["/b", "/c"] {
         let entry = created
             .resolve_path(path, AttributeInclusion::Omit, &access)
             .await
             .expect("created path");
-        inode_ids.push(entry.inode_id);
+        children.push((entry.inode_id, path));
     }
-    let (moved, replaced) = (inode_ids[0], inode_ids[1]);
-    assert!(
-        moved < replaced,
-        "the moved child must sort before the slot's earlier child"
-    );
+    // The moved child must sort before the slot's earlier child, and the test
+    // can't choose inode IDs, so the child with the lower ID is the one that
+    // moves.
+    children.sort_unstable();
+    let [(moved, moved_path), (_, replaced_path)] = children[..] else {
+        panic!("two children");
+    };
 
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .delete_path("/c", None)
+        .delete_path(replaced_path, None)
         .await
-        .expect("delete c");
+        .expect("delete the slot's earlier child");
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .move_path("/b", "/c", None)
+        .move_path(moved_path, replaced_path, None)
         .await
-        .expect("move b to c");
+        .expect("move the other child into the slot");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("fold the move");
@@ -433,7 +436,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
     assert_matches!(
         &forward[0],
         MetadataRow::DirentryBinding(binding) if binding.is_bound()
-            && binding.name_key.as_str() == "c"
+            && binding.name_key.as_str() == &replaced_path[1..]
             && binding.child_inode_id == moved
     );
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -441,7 +444,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
         .load_current_metadata_view()
         .await
         .expect("compacted view");
-    assert_names(&compacted, &[("/c", moved)]).await;
+    assert_names(&compacted, &[(replaced_path, moved)]).await;
 }
 
 #[tokio::test]
@@ -473,34 +476,31 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         .next()
         .expect("one result")
         .expect("create the parents");
+    // The child moves from the parent with the highest ID to the one with the
+    // lowest, so its last edge sorts before its earlier edges in the child
+    // index, which orders a child's edges by parent ID.
+    let mut parents = Vec::new();
+    for path in ["/a", "/b", "/c"] {
+        let inode_id = crate::test_support::visible_inode_id(&store, &namespace_id, path).await;
+        parents.push((inode_id, path));
+    }
+    parents.sort_unstable_by(|left, right| right.cmp(left));
+    let reports: Vec<String> = parents
+        .iter()
+        .map(|(_, path)| format!("{path}/report"))
+        .collect();
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/c/report", b"body", None)
+        .write_file_bytes(&reports[0], b"body", None)
         .await
         .expect("create the child");
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("fold the creates");
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let created = namespace
-        .load_current_metadata_view()
-        .await
-        .expect("created view");
+    let last_parent = parents[2].0;
+    let child = crate::test_support::visible_inode_id(&store, &namespace_id, &reports[0]).await;
     let access = ReadAccess::live(Authorizer::Unrestricted);
-    let mut inode_ids = Vec::new();
-    for path in ["/a", "/b", "/c", "/c/report"] {
-        let entry = created
-            .resolve_path(path, AttributeInclusion::Omit, &access)
-            .await
-            .expect("created path");
-        inode_ids.push(entry.inode_id);
-    }
-    let (last_parent, child) = (inode_ids[0], inode_ids[3]);
-    assert!(
-        inode_ids[0] < inode_ids[1] && inode_ids[1] < inode_ids[2],
-        "the child's last edge must sort before its earlier edges"
-    );
 
-    for (source, destination) in [("/c/report", "/b/report"), ("/b/report", "/a/report")] {
+    for (source, destination) in [(&reports[0], &reports[1]), (&reports[1], &reports[2])] {
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
             .move_path(source, destination, None)
             .await
@@ -576,9 +576,9 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         .expect("the child is bound");
     assert_eq!(parent.parent_inode_id, last_parent);
     for (path, bound) in [
-        ("/a/report", true),
-        ("/b/report", false),
-        ("/c/report", false),
+        (&reports[2], true),
+        (&reports[1], false),
+        (&reports[0], false),
     ] {
         let entry = compacted
             .resolve_path(path, AttributeInclusion::Omit, &access)
@@ -629,7 +629,7 @@ async fn a_listing_reads_only_the_slot_binding_family() {
     let children = view
         .metadata_view()
         .session()
-        .visible_children_page_by_name_key(InodeId(1), None, 16)
+        .visible_children_page_by_name_key(ROOT_INODE_ID, None, 16)
         .await
         .expect("list");
     assert_eq!(children.len(), 1);

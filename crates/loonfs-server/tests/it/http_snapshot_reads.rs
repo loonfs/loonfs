@@ -300,7 +300,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     };
     let first = harness
         .client
-        .list_by_inode_with_options(&namespace, loonfs_types::InodeId(1), &options)
+        .list_by_inode_with_options(&namespace, loonfs_types::ROOT_INODE_ID, &options)
         .page_limit(page_limit(1))
         .page()
         .await
@@ -310,7 +310,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     let cursor = first.next_cursor.as_deref().expect("children cursor");
     let error = harness
         .client
-        .list_by_inode(&namespace, loonfs_types::InodeId(1))
+        .list_by_inode(&namespace, loonfs_types::ROOT_INODE_ID)
         .page_limit(page_limit(1))
         .cursor(Some(cursor.to_owned()))
         .page()
@@ -319,7 +319,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     assert_eq!(error.code(), Some(loonfs_types::ErrorCode::InvalidRequest));
     let second = harness
         .client
-        .list_by_inode_with_options(&namespace, loonfs_types::InodeId(1), &options)
+        .list_by_inode_with_options(&namespace, loonfs_types::ROOT_INODE_ID, &options)
         .page_limit(page_limit(1))
         .cursor(Some(cursor.to_owned()))
         .page()
@@ -712,10 +712,8 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         ),
         (
             get_bytes(&format!(
-                "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/content?snapshot_id={}",
-                harness.server_url,
-                loonfs_types::public_inode_id::encode(inode_id),
-                live.snapshot_id
+                "{}/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/1/content?snapshot_id={}",
+                harness.server_url, live.snapshot_id
             ))
             .map(|_| serde_json::Value::Null),
             "snapshot_id",
@@ -723,9 +721,8 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         (
             post_json::<serde_json::Value>(
                 &format!(
-                    "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/downloads",
+                    "{}/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/1/downloads",
                     harness.server_url,
-                    loonfs_types::public_inode_id::encode(inode_id),
                 ),
                 serde_json::json!({"snapshot_id": live.snapshot_id}),
             ),

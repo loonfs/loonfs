@@ -1028,7 +1028,7 @@ mod tests {
             "path": "/docs/secret",
             "boundary": true,
             "grants": {"prn_ada": ["read", "write"]},
-            "expected_inode_id": "ino_9",
+            "expected_inode_id": "ino_00000000000000000000000009",
             "expected_access_revision_no": 2
         });
         let baseline_fingerprint =
@@ -1037,7 +1037,10 @@ mod tests {
             ("path", serde_json::json!("/docs/other")),
             ("boundary", serde_json::json!(false)),
             ("grants", serde_json::json!({"prn_ada": ["read"]})),
-            ("expected_inode_id", serde_json::json!("ino_10")),
+            (
+                "expected_inode_id",
+                serde_json::json!("ino_0000000000000000000000000a"),
+            ),
             ("expected_access_revision_no", serde_json::json!(3)),
         ] {
             let mut variant = baseline.clone();
@@ -1056,42 +1059,57 @@ mod tests {
             (
                 serde_json::json!({
                     "kind": "copy_by_inode",
-                    "inode_id": "ino_42",
-                    "destination_parent_inode_id": "ino_7",
+                    "inode_id": "ino_0000000000000000000000001a",
+                    "destination_parent_inode_id": "ino_00000000000000000000000007",
                     "destination_display_name": "copy.txt",
                     "behavior": "replace",
-                    "expected_destination_inode_id": "ino_9",
+                    "expected_destination_inode_id": "ino_00000000000000000000000009",
                     "expected_destination_revision_no": 2
                 }),
                 vec![
-                    ("inode_id", serde_json::json!("ino_43")),
-                    ("destination_parent_inode_id", serde_json::json!("ino_8")),
+                    (
+                        "inode_id",
+                        serde_json::json!("ino_0000000000000000000000001b"),
+                    ),
+                    (
+                        "destination_parent_inode_id",
+                        serde_json::json!("ino_00000000000000000000000008"),
+                    ),
                     ("destination_display_name", serde_json::json!("other.txt")),
-                    ("expected_destination_inode_id", serde_json::json!("ino_10")),
+                    (
+                        "expected_destination_inode_id",
+                        serde_json::json!("ino_0000000000000000000000000a"),
+                    ),
                     ("expected_destination_revision_no", serde_json::json!(3)),
                 ],
             ),
             (
                 serde_json::json!({
                     "kind": "restore_revision_by_inode",
-                    "inode_id": "ino_42",
+                    "inode_id": "ino_0000000000000000000000001a",
                     "source_revision_no": 3
                 }),
                 vec![
-                    ("inode_id", serde_json::json!("ino_43")),
+                    (
+                        "inode_id",
+                        serde_json::json!("ino_0000000000000000000000001b"),
+                    ),
                     ("source_revision_no", serde_json::json!(4)),
                 ],
             ),
             (
                 serde_json::json!({
                     "kind": "undelete",
-                    "inode_id": "ino_42",
+                    "inode_id": "ino_0000000000000000000000001a",
                     "deletion_seq": 17,
-                    "destination_parent_inode_id": "ino_7",
+                    "destination_parent_inode_id": "ino_00000000000000000000000007",
                     "destination_display_name": "report.txt"
                 }),
                 vec![
-                    ("destination_parent_inode_id", serde_json::json!("ino_8")),
+                    (
+                        "destination_parent_inode_id",
+                        serde_json::json!("ino_00000000000000000000000008"),
+                    ),
                     ("destination_display_name", serde_json::json!("other.txt")),
                     ("destination_path", serde_json::json!("/report.txt")),
                 ],
@@ -1099,13 +1117,16 @@ mod tests {
             (
                 serde_json::json!({
                     "kind": "update_attributes_by_inode",
-                    "inode_id": "ino_42",
+                    "inode_id": "ino_0000000000000000000000001a",
                     "set": {"owner": "ada"},
                     "remove": ["draft"],
                     "expected_attributes_revision_no": 3
                 }),
                 vec![
-                    ("inode_id", serde_json::json!("ino_43")),
+                    (
+                        "inode_id",
+                        serde_json::json!("ino_0000000000000000000000001b"),
+                    ),
                     ("set", serde_json::json!({"owner": "grace"})),
                     ("remove", serde_json::json!(["final"])),
                     ("expected_attributes_revision_no", serde_json::json!(4)),
@@ -1114,13 +1135,16 @@ mod tests {
             (
                 serde_json::json!({
                     "kind": "update_access_by_inode",
-                    "inode_id": "ino_9",
+                    "inode_id": "ino_00000000000000000000000009",
                     "boundary": true,
                     "grants": {"prn_ada": ["read", "write"]},
                     "expected_access_revision_no": 2
                 }),
                 vec![
-                    ("inode_id", serde_json::json!("ino_10")),
+                    (
+                        "inode_id",
+                        serde_json::json!("ino_0000000000000000000000000a"),
+                    ),
                     ("boundary", serde_json::json!(false)),
                     ("grants", serde_json::json!({"prn_ada": ["read"]})),
                     ("expected_access_revision_no", serde_json::json!(3)),

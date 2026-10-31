@@ -110,9 +110,9 @@ pub enum IndexGramsCodecError {
          order after inode {previous_inode}/revision {previous_revision}"
     )]
     PostingsOutOfOrder {
-        previous_inode: u64,
+        previous_inode: InodeId,
         previous_revision: u64,
-        inode: u64,
+        inode: InodeId,
         revision: u64,
     },
     #[error("malformed posting batch: {0}")]
@@ -120,34 +120,32 @@ pub enum IndexGramsCodecError {
     #[error("invalid gram hex: {reason}")]
     InvalidGram { reason: String },
     #[error("gram postings row first inode {declared} does not match its batch's {actual}")]
-    FirstInodeMismatch { declared: u64, actual: u64 },
+    FirstInodeMismatch { declared: InodeId, actual: InodeId },
 }
+
+/// Bytes of one posting's inode ID in a batch.
+const POSTING_INODE_ID_BYTES: usize = 16;
 
 /// Packs postings into the frozen batch layout. The slice must be
 /// non-empty and strictly ascending by `(inode_id, revision_no)`.
 pub(crate) fn encode_gram_postings(
     postings: &[GramPosting],
 ) -> Result<Vec<u8>, IndexGramsCodecError> {
-    let first = postings
-        .first()
-        .ok_or(IndexGramsCodecError::EmptyPostings)?;
-    let mut bytes = Vec::with_capacity(postings.len() * 3);
+    if postings.is_empty() {
+        return Err(IndexGramsCodecError::EmptyPostings);
+    }
+    // Each posting is its 16 inode ID bytes and a revision varint, which is
+    // usually one byte.
+    let mut bytes = Vec::with_capacity(1 + postings.len() * (POSTING_INODE_ID_BYTES + 1));
     write_varint(&mut bytes, postings.len() as u64);
-    write_varint(&mut bytes, first.inode_id.0);
-    write_varint(&mut bytes, first.revision_no.0);
-    let mut previous = *first;
-    for posting in &postings[1..] {
-        if *posting <= previous {
-            return Err(IndexGramsCodecError::PostingsOutOfOrder {
-                previous_inode: previous.inode_id.0,
-                previous_revision: previous.revision_no.0,
-                inode: posting.inode_id.0,
-                revision: posting.revision_no.0,
-            });
+    let mut previous: Option<GramPosting> = None;
+    for posting in postings {
+        if let Some(previous) = previous.filter(|previous| *posting <= *previous) {
+            return Err(out_of_order(previous, *posting));
         }
-        write_varint(&mut bytes, posting.inode_id.0 - previous.inode_id.0);
+        bytes.extend_from_slice(&posting.inode_id.to_be_bytes());
         write_varint(&mut bytes, posting.revision_no.0);
-        previous = *posting;
+        previous = Some(*posting);
     }
     Ok(bytes)
 }
@@ -162,43 +160,24 @@ pub(crate) fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, Ind
     }
     let count = usize::try_from(count)
         .map_err(|_| IndexGramsCodecError::Malformed("posting count exceeds usize".to_owned()))?;
-    if count > bytes.len() {
-        // Every posting costs at least two bytes past the count varint; a
-        // count beyond the byte length is corrupt, not just implausible.
+    if count > bytes.len() / (POSTING_INODE_ID_BYTES + 1) {
+        // Every posting costs at least seventeen bytes past the count varint;
+        // a count beyond that is corrupt, not just implausible.
         return Err(IndexGramsCodecError::Malformed(format!(
             "posting count {count} exceeds batch bytes {}",
             bytes.len()
         )));
     }
-    let mut postings = Vec::with_capacity(count);
-    let mut previous = GramPosting {
-        inode_id: InodeId(read_varint(bytes, &mut cursor).map_err(malformed_varint)?),
-        revision_no: read_revision_no(bytes, &mut cursor)?,
-    };
-    postings.push(previous);
-    for _ in 1..count {
-        let inode_delta = read_varint(bytes, &mut cursor).map_err(malformed_varint)?;
-        let inode_id = previous
-            .inode_id
-            .0
-            .checked_add(inode_delta)
-            .ok_or_else(|| {
-                IndexGramsCodecError::Malformed("posting inode delta overflows".to_owned())
-            })?;
+    let mut postings: Vec<GramPosting> = Vec::with_capacity(count);
+    for _ in 0..count {
         let posting = GramPosting {
-            inode_id: InodeId(inode_id),
+            inode_id: read_inode_id(bytes, &mut cursor)?,
             revision_no: read_revision_no(bytes, &mut cursor)?,
         };
-        if posting <= previous {
-            return Err(IndexGramsCodecError::PostingsOutOfOrder {
-                previous_inode: previous.inode_id.0,
-                previous_revision: previous.revision_no.0,
-                inode: posting.inode_id.0,
-                revision: posting.revision_no.0,
-            });
+        if let Some(previous) = postings.last().filter(|previous| posting <= **previous) {
+            return Err(out_of_order(*previous, posting));
         }
         postings.push(posting);
-        previous = posting;
     }
     if cursor != bytes.len() {
         return Err(IndexGramsCodecError::Malformed(format!(
@@ -207,6 +186,29 @@ pub(crate) fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, Ind
         )));
     }
     Ok(postings)
+}
+
+fn out_of_order(previous: GramPosting, posting: GramPosting) -> IndexGramsCodecError {
+    IndexGramsCodecError::PostingsOutOfOrder {
+        previous_inode: previous.inode_id,
+        previous_revision: previous.revision_no.0,
+        inode: posting.inode_id,
+        revision: posting.revision_no.0,
+    }
+}
+
+fn read_inode_id(bytes: &[u8], cursor: &mut usize) -> Result<InodeId, IndexGramsCodecError> {
+    let end = cursor
+        .checked_add(POSTING_INODE_ID_BYTES)
+        .filter(|end| *end <= bytes.len())
+        .ok_or_else(|| {
+            IndexGramsCodecError::Malformed("posting inode ID is truncated".to_owned())
+        })?;
+    let inode_id: [u8; POSTING_INODE_ID_BYTES] = bytes[*cursor..end]
+        .try_into()
+        .expect("the slice should have the inode ID's length");
+    *cursor = end;
+    Ok(InodeId::from_be_bytes(inode_id))
 }
 
 fn read_revision_no(bytes: &[u8], cursor: &mut usize) -> Result<RevisionNo, IndexGramsCodecError> {
@@ -261,10 +263,10 @@ impl IndexRow {
                 first_inode_id,
                 ..
             } => format!(
-                "{}{}-{:020}",
+                "{}{}-{}",
                 lookup::GRAM_ROW_PREFIX,
                 gram.as_hex(),
-                first_inode_id.0
+                first_inode_id.body()
             ),
         }
     }
@@ -293,8 +295,8 @@ impl IndexRow {
                     .inode_id;
                 if actual != *first_inode_id {
                     return Err(IndexGramsCodecError::FirstInodeMismatch {
-                        declared: first_inode_id.0,
-                        actual: actual.0,
+                        declared: *first_inode_id,
+                        actual,
                     });
                 }
                 Ok(decoded)
@@ -326,7 +328,7 @@ mod tests {
     use super::*;
     use std::assert_matches;
 
-    fn posting(inode: u64, revision: u64) -> GramPosting {
+    fn posting(inode: u128, revision: u64) -> GramPosting {
         GramPosting {
             inode_id: InodeId(inode),
             revision_no: RevisionNo(revision),
@@ -410,23 +412,37 @@ mod tests {
     }
 
     #[test]
+    fn posting_batches_pin_their_byte_layout() {
+        let bytes = encode_gram_postings(&[posting(7, 1), posting(1 << 120, 300)]).expect("encode");
+        let mut expected = vec![2];
+        expected.extend_from_slice(&7_u128.to_be_bytes());
+        expected.push(1);
+        expected.extend_from_slice(&(1_u128 << 120).to_be_bytes());
+        expected.extend_from_slice(&[0xac, 0x02]);
+        assert_eq!(bytes, expected);
+    }
+
+    /// Builds a batch from raw `(inode bytes, revision varint)` postings.
+    fn hand_built_batch(postings: &[(u128, u64)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_varint(&mut bytes, postings.len() as u64);
+        for (inode, revision) in postings {
+            bytes.extend_from_slice(&inode.to_be_bytes());
+            write_varint(&mut bytes, *revision);
+        }
+        bytes
+    }
+
+    #[test]
     fn posting_batch_decode_rejects_oversized_revisions_but_allows_full_inode_range() {
-        let mut full_inode_range = Vec::new();
-        write_varint(&mut full_inode_range, 1);
-        write_varint(&mut full_inode_range, u64::MAX);
-        write_varint(&mut full_inode_range, loonfs_types::MAX_PUBLIC_INTEGER);
+        let full_inode_range = hand_built_batch(&[(u128::MAX, loonfs_types::MAX_PUBLIC_INTEGER)]);
         assert_eq!(
             decode_gram_postings(&full_inode_range).expect("full-range inode id"),
-            vec![posting(u64::MAX, loonfs_types::MAX_PUBLIC_INTEGER)]
+            vec![posting(u128::MAX, loonfs_types::MAX_PUBLIC_INTEGER)]
         );
 
-        let mut first_revision_overflow = Vec::new();
-        write_varint(&mut first_revision_overflow, 1);
-        write_varint(&mut first_revision_overflow, 1);
-        write_varint(
-            &mut first_revision_overflow,
-            loonfs_types::MAX_PUBLIC_INTEGER + 1,
-        );
+        let first_revision_overflow =
+            hand_built_batch(&[(1, loonfs_types::MAX_PUBLIC_INTEGER + 1)]);
         let error = decode_gram_postings(&first_revision_overflow)
             .expect_err("first revision above the public range");
         assert_matches!(
@@ -435,15 +451,8 @@ mod tests {
                 if message.contains("must be an integer from 0 through 9007199254740991")
         );
 
-        let mut later_revision_overflow = Vec::new();
-        write_varint(&mut later_revision_overflow, 2);
-        write_varint(&mut later_revision_overflow, 1);
-        write_varint(&mut later_revision_overflow, 1);
-        write_varint(&mut later_revision_overflow, 1);
-        write_varint(
-            &mut later_revision_overflow,
-            loonfs_types::MAX_PUBLIC_INTEGER + 1,
-        );
+        let later_revision_overflow =
+            hand_built_batch(&[(1, 1), (2, loonfs_types::MAX_PUBLIC_INTEGER + 1)]);
         let error = decode_gram_postings(&later_revision_overflow)
             .expect_err("later revision above the public range");
         assert_matches!(
@@ -455,25 +464,20 @@ mod tests {
 
     #[test]
     fn posting_batch_decode_rejects_reordered_bytes() {
-        // A hand-built batch whose second posting repeats the first: valid
-        // varints, invalid order.
-        let mut bytes = Vec::new();
-        write_varint(&mut bytes, 2);
-        write_varint(&mut bytes, 5);
-        write_varint(&mut bytes, 3);
-        write_varint(&mut bytes, 0);
-        write_varint(&mut bytes, 3);
-        assert_matches!(
-            decode_gram_postings(&bytes),
-            Err(IndexGramsCodecError::PostingsOutOfOrder { .. })
-        );
+        // Valid postings in the wrong order: a repeat, then a lower inode.
+        for postings in [[(5, 3), (5, 3)], [(1 << 100, 1), (5, 1)]] {
+            assert_matches!(
+                decode_gram_postings(&hand_built_batch(&postings)),
+                Err(IndexGramsCodecError::PostingsOutOfOrder { .. })
+            );
+        }
     }
 
     #[test]
     fn row_keys_and_filter_keys_pin_their_shapes() {
         let row =
             IndexRow::gram_postings(Gram(*b"fox"), &[posting(42, 7), posting(43, 1)]).expect("row");
-        assert_eq!(row.row_key(), "gram-666f78-00000000000000000042");
+        assert_eq!(row.row_key(), "gram-666f78-0000000000000000000000001a");
         assert_eq!(row.filter_key(), "gram-666f78");
         assert_eq!(lookup::gram_prefix(Gram(*b"fox")), "gram-666f78-");
         assert_eq!(
@@ -512,8 +516,8 @@ mod tests {
         assert_matches!(
             row.postings(),
             Err(IndexGramsCodecError::FirstInodeMismatch {
-                declared: 9,
-                actual: 42
+                declared: InodeId(9),
+                actual: InodeId(42)
             })
         );
     }

@@ -396,6 +396,7 @@ mod tests {
     use super::*;
     use loonfs_types::format::manifest::DeltaPosition;
     use loonfs_types::NameKey;
+    use loonfs_types::ROOT_INODE_ID;
 
     fn commit_id() -> CommitId {
         CommitId::parse("c_model_metadata").expect("commit id")
@@ -411,7 +412,7 @@ mod tests {
                 4_200,
                 &[WalDelta::BindDirentry {
                     delta_index: 7,
-                    parent_inode_id: InodeId(1),
+                    parent_inode_id: ROOT_INODE_ID,
                     name_key: NameKey::parse("persisted-key").expect("valid name key"),
                     display_name: loonfs_types::DisplayName::parse("Report.TXT")
                         .expect("valid display name"),
@@ -440,7 +441,7 @@ mod tests {
                         delta_index: 1,
                         root_inode_id: InodeId(2),
                         deleted_binding: loonfs_types::format::manifest::DeletedBinding {
-                            parent_inode_id: InodeId(1),
+                            parent_inode_id: ROOT_INODE_ID,
                             name_key: NameKey::parse("report.txt").expect("valid name key"),
                             display_name: loonfs_types::DisplayName::parse("Report.TXT")
                                 .expect("valid display name"),
@@ -467,7 +468,7 @@ mod tests {
             vec![
                 SubtreeTombstoneAction::Set {
                     deleted_binding: DeletedBinding {
-                        parent_inode_id: InodeId(1),
+                        parent_inode_id: ROOT_INODE_ID,
                         name_key: "report.txt".to_owned(),
                         display_name: "Report.TXT".to_owned(),
                     },

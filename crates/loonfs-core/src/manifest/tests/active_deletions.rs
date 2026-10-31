@@ -15,6 +15,7 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::DirectoryBinding;
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 use loonfs_types::{EntryInodeKind, InodeKind};
 use std::assert_matches;
@@ -40,7 +41,7 @@ pub(super) fn tombstone_set(
         committed_by: loonfs_types::ActorId::loonfs(),
         action: TombstoneRowAction::Set {
             deleted_binding: DeletedBinding {
-                parent_inode_id: InodeId(1),
+                parent_inode_id: ROOT_INODE_ID,
                 name_key: NameKey::parse(name).expect("name key"),
                 display_name: DisplayName::parse(name).expect("display name"),
             },
@@ -113,7 +114,7 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
     assert_eq!(
         active_deletion_rows(&deleted),
         vec![(
-            "active-deletion-00000000000000000005-00000000000000000007-0000000001".to_owned(),
+            "active-deletion-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
             "listed"
         )],
         "a delete adds exactly one listed row, keyed by its own position"
@@ -127,11 +128,13 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
         active_deletion_rows(&undeleted),
         vec![
             (
-                "active-deletion-00000000000000000005-00000000000000000007-0000000000".to_owned(),
+                "active-deletion-00000000000000000005-00000000000000000000000007-0000000000"
+                    .to_owned(),
                 "removed"
             ),
             (
-                "active-deletion-00000000000000000005-00000000000000000007-0000000001".to_owned(),
+                "active-deletion-00000000000000000005-00000000000000000000000007-0000000001"
+                    .to_owned(),
                 "listed"
             ),
         ],
@@ -150,8 +153,8 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
             .map(|(row_key, _)| row_key)
             .collect::<Vec<_>>(),
         vec![
-            "active-deletion-00000000000000000005-00000000000000000007-0000000001".to_owned(),
-            "active-deletion-00000000000000000012-00000000000000000007-0000000001".to_owned(),
+            "active-deletion-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
+            "active-deletion-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
         ],
         "a re-delete lands at a new sequence and adds a new row"
     );
@@ -167,11 +170,13 @@ fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
         active_deletion_rows(&state),
         vec![
             (
-                "active-deletion-00000000000000000005-00000000000000000007-0000000000".to_owned(),
+                "active-deletion-00000000000000000005-00000000000000000000000007-0000000000"
+                    .to_owned(),
                 "removed"
             ),
             (
-                "active-deletion-00000000000000000005-00000000000000000007-0000000001".to_owned(),
+                "active-deletion-00000000000000000005-00000000000000000000000007-0000000001"
+                    .to_owned(),
                 "listed"
             ),
         ],
@@ -231,8 +236,8 @@ fn the_merge_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest() {
     assert_eq!(
         kept,
         vec![
-            "active-deletion-00000000000000000011-00000000000000000008-0000000001".to_owned(),
-            "active-deletion-00000000000000000012-00000000000000000007-0000000001".to_owned(),
+            "active-deletion-00000000000000000011-00000000000000000000000008-0000000001".to_owned(),
+            "active-deletion-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
         ],
         "the undeleted pair and the deletion at the acknowledged floor go, and both deletions \
          above it stay"
@@ -753,7 +758,7 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
     let wrong_kind = loonfs_types::encode_cursor(&loonfs_types::DirectoryPageCursor {
         head_seq: ChangeSeq(1),
         pin_id: None,
-        directory_inode_id: InodeId(1),
+        directory_inode_id: ROOT_INODE_ID,
         last_name_key: NameKey::parse("x").expect("name key"),
     })
     .expect("encode cursor");

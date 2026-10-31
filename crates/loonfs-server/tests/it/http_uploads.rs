@@ -7,10 +7,11 @@ use loonfs_test_support::http::{
     raw_agent, retry_on_macos_teardown_einval, retry_result_on_macos_teardown_einval,
 };
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, CompleteUploadBody, ContentRef,
     CreateUploadBody, DestinationBehavior, ErrorCode, ErrorResponse, FilesystemChange,
-    FilesystemOperation, InodeId, RevisionNo, UploadMode, UploadSession, UploadSessionStatus,
+    FilesystemOperation, RevisionNo, UploadMode, UploadSession, UploadSessionStatus,
     LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
 };
 use std::assert_matches;
@@ -352,7 +353,15 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
         .stat(&target)
         .await
         .expect("stat committed file");
-    assert_eq!(stat.inode_id, InodeId(2));
+    let created = commit
+        .events
+        .iter()
+        .find_map(|event| match event {
+            loonfs_types::FilesystemChange::FileCreated { inode_id, .. } => Some(*inode_id),
+            _ => None,
+        })
+        .expect("the commit creates the file");
+    assert_eq!(stat.inode_id, created);
     assert_eq!(stat.content_ref(), Some(&content_ref));
     let read_back = harness
         .client
@@ -381,13 +390,15 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     assert_matches!(
         &change.events[0],
         FilesystemChange::FileCreated {
-            inode_id: InodeId(2),
-            parent_inode_id: InodeId(1),
+            inode_id,
+            parent_inode_id: ROOT_INODE_ID,
             display_name,
             revision_no: RevisionNo(1),
             content_ref: created_ref,
             ..
-        } if display_name.as_str() == "uploaded.txt" && *created_ref == content_ref
+        } if display_name.as_str() == "uploaded.txt"
+            && *created_ref == content_ref
+            && *inode_id == created
     );
 
     let empty = harness

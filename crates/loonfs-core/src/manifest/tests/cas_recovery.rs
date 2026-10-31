@@ -333,7 +333,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             .expect("build")
             .into_payload();
         } else {
-            payload.next_inode_id = InodeId(payload.next_inode_id.0 + 1);
+            payload.next_run_no = RunNo(payload.next_run_no.0 + 1);
         }
         let second = encode_manifest(payload);
         store.reset();

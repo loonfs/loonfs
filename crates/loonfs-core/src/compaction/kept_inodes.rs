@@ -75,8 +75,8 @@ impl KeptInodeFilter {
     }
 }
 
-fn filter_key(inode_id: InodeId) -> [u8; 8] {
-    inode_id.0.to_le_bytes()
+fn filter_key(inode_id: InodeId) -> [u8; 16] {
+    inode_id.to_be_bytes()
 }
 
 /// Whether a base merge of `group` removes the rows of hidden inodes.

@@ -2,7 +2,7 @@
 
 use loonfs_types::format::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{ActorId, ChangeSeq, InodeId, NamespaceAccess, NamespaceId, WalNo, WriterEpoch};
+use loonfs_types::{ActorId, ChangeSeq, NamespaceAccess, NamespaceId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,7 +16,6 @@ pub struct NamespaceReadState {
     pub writer_epoch: WriterEpoch,
     pub writer: Option<WriterBlock>,
     pub seq: ChangeSeq,
-    pub next_inode_id: InodeId,
     pub wal_no: WalNo,
     pub folded_wal_no: WalNo,
     /// The lowest basis floor that the WAL object after `wal_no` can
@@ -34,7 +33,6 @@ impl NamespaceReadState {
     ) -> Self {
         Self {
             seq: payload.head_seq,
-            next_inode_id: payload.next_inode_id,
             wal_no: payload.wal_no,
             basis_floor_seq: payload.basis_floor_seq,
             ..self.clone()
@@ -59,7 +57,6 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             writer_epoch: manifest.writer_epoch,
             writer: manifest.writer.clone(),
             seq: manifest.head_seq,
-            next_inode_id: manifest.next_inode_id,
             wal_no: manifest.folded_wal_no,
             folded_wal_no: manifest.folded_wal_no,
             basis_floor_seq: manifest.acknowledged_floor_seq,

@@ -421,7 +421,7 @@ mod tests {
         let mut builder = SegmentBlocksBuilder::default();
         for inode in 0..20_000 {
             let row = MetadataRow::Inode(InodeRecord {
-                inode_id: InodeId(inode + 2),
+                inode_id: InodeId(u128::from(inode) + 2),
                 inode_kind: InodeKind::File,
                 committed_seq: ChangeSeq(inode + 1),
                 commit_id: CommitId::generate(),

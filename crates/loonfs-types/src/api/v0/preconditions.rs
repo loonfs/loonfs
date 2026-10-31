@@ -27,7 +27,7 @@ pub struct DestinationPrecondition {
         rename = "expected_destination_inode_id",
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::public_inode_id::option"
+        with = "crate::inode_id::public::option"
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_inode_id: Option<InodeId>,
