@@ -5,12 +5,12 @@
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::pagers::encode_next_list_cursor;
 use crate::{
-    ChangeSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
-    FileContentStream, InodeId, ListChangesResponse, ListInodeChildrenResponse, ListOptions,
-    ListPathEntriesResponse, NamespaceId, PathEntry, PinId, ReadFileStreamOptions, Result,
-    RevisionNo, SharedObjectStore, StatOptions,
+    ChangeSeq, ContentRef, CoreError, CurrentFileState, DiffOptions, DownloadOptions, Error,
+    FileBytes, FileContentStream, InodeId, ListChangesResponse, ListInodeChildrenResponse,
+    ListOptions, ListPathEntriesResponse, NamespaceId, PathEntry, PinId, ReadFileStreamOptions,
+    Result, RevisionNo, SharedObjectStore, StatOptions,
 };
-use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
+use loonfs_core::{DiffPage, NamespaceReaderEngine, RuntimeReadContext};
 use loonfs_types::{AbsolutePath, EffectiveLimit, ListPageCursor, PageRequest};
 
 /// A reader engine and the read context it reads at.
@@ -48,6 +48,27 @@ impl PinnedRead {
                 },
                 error => error.into(),
             })
+    }
+
+    /// Reads one page of the diff from `from_seq`. A read with a subject
+    /// requires an administrator, as the change feed does.
+    pub(crate) async fn diff_page(
+        &self,
+        from_seq: ChangeSeq,
+        options: &DiffOptions,
+    ) -> Result<DiffPage> {
+        self.engine.ensure_administrator(&self.context).await?;
+        Ok(self
+            .engine
+            .diff_page(
+                from_seq,
+                options.to_seq,
+                options.after_seq,
+                options.limit,
+                &options.path,
+                &self.context,
+            )
+            .await?)
     }
 
     pub(crate) async fn stat(

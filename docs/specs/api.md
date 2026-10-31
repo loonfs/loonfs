@@ -199,7 +199,7 @@ The codes that populate it:
 | `stale_access` | `inode_id`, `expected_access_revision_no` (absent when the caller stated no expectation), and `actual_access_revision_no` (absent when the inode isn't visible), plus `precondition_index` for a failed request precondition. |
 | `binding_version_mismatch` | `inode_id`, `expected_binding_version` (the request's token as supplied), and `actual_binding_version` (the current binding's token, absent when the inode isn't visible), plus `precondition_index` for a failed request precondition. Clients MUST NOT parse or order the tokens. |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the server detected the conflict from a durable commit receipt. `committed_seq` is the sequence that `commit_id` was already committed at, and `committed_fingerprint` is the semantic identity of what was committed there (see [Commit identity and preconditions](#51-commit-identity-and-preconditions)). The sequence comes from the receipt, and the fingerprint comes from the retained commit row at that sequence, so both are present or neither is. Both are absent when nothing has been committed under the ID yet and two live requests are claiming it at once. |
-| `rebootstrap_required` | `after_seq` and `retention_floor_seq`. |
+| `rebootstrap_required` | The sequence that fell below the floor, as `after_seq` for a change feed request or `from_seq` for a diff request, and `retention_floor_seq`. |
 | `stale_head` | `expected_head_seq` and `actual_head_seq` for a caller-supplied head precondition, plus `precondition_index` for a failed request precondition. |
 | `forbidden` | `inode_id`. |
 | `not_deleted` | `inode_id`, plus `expected_deletion_seq` and `actual_deletion_seq` when a live deletion exists at a different sequence. |
@@ -246,7 +246,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `upload_already_completed` | 409 | The upload session is already completed, so it can't select other content and can't be aborted. |
 | `upload_content_conflict` | 409 | Different bytes were already staged under this upload ID. Open a new session. (Staging the same bytes again succeeds.) |
 | `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index can't narrow the candidates. Rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
-| `rebootstrap_required` | 409 | A change feed's `after_seq` is below the retention floor, so the feed no longer contains the changes after it. Rebuild state from a fresh listing or snapshot. |
+| `rebootstrap_required` | 409 | The sequence that the request starts from is below the retention floor, so the namespace no longer has the history after it. The sequence is a change feed's `after_seq` or a diff's `from_seq`. Rebuild state from a fresh listing or snapshot. |
 | `not_supported` | 501 | The deployment doesn't implement the requested operation or feature. |
 | `commit_outcome_unknown` | 503 | The outcome of the publication wasn't observed, so the commit might or might not be visible. Retry with the same commit ID, or reconcile. |
 | `outcome_unknown` | 503 | The outcome of a write other than a commit wasn't observed, so the operation might or might not have taken effect. Read the resource before retrying. |
@@ -540,7 +540,7 @@ Four request headers contain identity information. `Loonfs-Actor` is for attribu
 | `create_commit` | Required. Recorded as `committed_by`. | Required in an ACL namespace. |
 | `create_namespace` | Required. Recorded as `created_by`. | Not read. |
 | `fork_namespace` | Required. Recorded as `created_by`. | Optional. When it's present, an ACL source requires an administrator subject. When it's absent, the request acts as the token holder. |
-| `delete_namespace`, `create_snapshot`, `list_snapshots`, `get_snapshot`, `extend_snapshot`, `delete_snapshot`, `list_changes` | Not required. | Optional, with the same administrator rule as `fork_namespace`. |
+| `delete_namespace`, `create_snapshot`, `list_snapshots`, `get_snapshot`, `extend_snapshot`, `delete_snapshot`, `list_changes`, `list_diff` | Not required. | Optional, with the same administrator rule as `fork_namespace`. |
 | Path and inode reads, downloads, `list_trash`, `grep`, and upload-session operations | Not required. | Required in an ACL namespace. |
 | `run_maintenance` | Required by `recover_administrator`, which records it as `committed_by` on the recovery commit. Other jobs don't record it, but they still reject a malformed value. | Not read. |
 | `get_capabilities`, `get_namespace`, the other maintenance operations, and the health, readiness, and metrics routes | Not read. | Not read. |
@@ -724,6 +724,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Read an upload session | `get_upload` | `idempotent` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`. A completed session returns a new `content_token`. |
 | Abort an upload session | `abort_upload` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable, and a completed session can't be aborted) |
 | Read committed changes | `list_changes` | `idempotent` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100&snapshot_id=...` (`snapshot_id` is optional) |
+| Read the differences between two sequences | `list_diff` | `idempotent` | `GET /v0/namespaces/{ns}/diff?from_seq=418&to_seq=425&path=/docs&after_seq=418&limit=100` (`to_seq`, `path`, and `after_seq` are optional) |
 | Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`. Requires `name`, and accepts `ttl_ms`. |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
 | Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (returns an expired snapshot that garbage collection hasn't deleted, and a missing ID returns `snapshot_not_found`) |
@@ -740,7 +741,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable` (idempotent) |
 | Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/disable` (idempotent) |
-| Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#614-get-metrics).) |
+| Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#615-get-metrics).) |
 
 ### Maintenance runs
 
@@ -1329,7 +1330,7 @@ In a runtime with the namespace's writer session, a read with either setting sta
 
 A pinned read (a read with `snapshot_id`, or a read through a read view) has no consistency setting, because the pin selects the state that the read sees. A request that sets `consistency` together with `snapshot_id` returns `invalid_request` with `param` set to `consistency`. In the Rust runtime, the options of a read that can read a snapshot say what the read reads at (`at`): the live head with an optional consistency (`ReadAt::Live`), or a snapshot (`ReadAt::Snapshot`), so a Rust read can't set both. A Rust read through a read view that sets a consistency returns `invalid_request` with `param` set to `consistency`. LoonFS confirms the live head that a pinned read finds its snapshot in, and the head that a read view captures, the way a `strong` read does.
 
-An `eventual` read can read an older head than one that a caller learned from a fresher read, such as a `strong` read or a response from another server. An `after_seq` above the head that a change feed request reads returns `invalid_request` (see [`GET /changes`](#611-get-changes)), and so does a directory cursor issued at a newer head. So a poller that learned its `after_seq` from a fresher read retries the request as `strong`.
+An `eventual` read can read an older head than one that a caller learned from a fresher read, such as a `strong` read or a response from another server. An `after_seq` above the head that a change feed request reads returns `invalid_request` (see [`GET /changes`](#611-get-changes)), and so do a diff's `to_seq` above that head (see [`GET /diff`](#612-get-diff)) and a directory cursor issued at a newer head. So a poller that learned its `after_seq` or `to_seq` from a fresher read retries the request as `strong`.
 
 Why is `eventual` the default? A read that follows a write in the same process already sees the write. A read that follows a write in another process is the case that needs a request, so that read asks for `strong`. A process that opens a namespace for the first time loads it by discovery, which is as fresh as `strong`. Other reads send no request within their maximum staleness. A deployment whose readers always follow writes in other processes sets `strong` as the default in the server's configuration, and pays a request on every read.
 
@@ -2017,14 +2018,14 @@ The same not-found and forbidden rule applies to reads. A subject with no right 
 | Snapshot stat, listing, content, or download | `read` and `history` on the historical inode, evaluated at the current head. Administrator, when an expired deletion (one at or below the current head's retention floor) hides the inode at the current head, or the inode's ancestry there is disconnected. |
 | Trash listing | `read` on each deletion's saved original parent. |
 | Batch file resolution and grep candidates | `read` on the candidate inode. Snapshot resolution also requires `history`. |
-| Change feed or bare content reference read | Administrator. |
+| Change feed, diff, or bare content reference read | Administrator. |
 | Bare content reference import | Administrator on the reference's owner namespace. |
 
 Names belong to the directory, so a subject with `read` on a directory sees every child in a listing. A child that the subject can't read keeps its entry fields, but its `attributes` projection is left out, even when attributes were requested. A recursive listing also returns a child directory that the subject can't read, but it doesn't descend into that directory. For a snapshot read, LoonFS evaluates rights at the current head, on the historical inode that the snapshot resolves, never on the inode that occupies the path today. Every snapshot read of an inode also requires `history`. If an expired deletion hides that inode at the current head, which means that the deletion is at or below the retention floor of the current head's manifest, or if the inode's ancestry there is disconnected (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)), a snapshot read of it requires an administrator, and any other subject receives `path_not_found` or `inode_not_found`, as a live read of the inode does. For example, if a snapshot captured `/team/hr/salaries.csv` before `/team/hr` was deleted, then once the floor reaches that deletion, a principal with `read` and `history` on `/team/hr` can no longer read the file through the snapshot, but an administrator can.
 
 The trash listing filters out entries whose saved original parent the subject can't read. A filtered page can be short and still include `next_cursor`. Grep filters out candidates that the subject can't read before it reads their content, but those candidates still count against the page's candidate budget.
 
-When a subject is supplied, change feed reads, bare content reference reads, and bare content reference imports require an administrator. An import checks the reference's owner namespace, including when the owner is also the destination or has been deleted. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. The checkpoint inventory and maintenance operations still read as the service.
+When a subject is supplied, change feed reads, diff reads, bare content reference reads, and bare content reference imports require an administrator. An import checks the reference's owner namespace, including when the owner is also the destination or has been deleted. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. The checkpoint inventory and maintenance operations still read as the service.
 
 Why does a snapshot read of an expired subtree require an administrator? LoonFS evaluates a snapshot read's rights on the access rows at the current head, and after a deletion expires, base compactions remove the head's rows under it a family group at a time. So at the head, a boundary row can be gone while a grant above it is still stored, and evaluating another subject's rights on those rows could widen them. An administrator's rights don't depend on those rows.
 
@@ -2413,7 +2414,97 @@ If either bound ends the page before the namespace head, the response includes `
 
 Why does an append's event include `append_offset`, when a consumer could compare content IDs? An append keeps the content ID only when it extends the [chain's](glossary.md#chain) full current length. Otherwise it starts a new content ID (for example, in a fork or after a restore). A consumer that compared content IDs would treat that append as a replacement and read the whole file again.
 
-### 6.12 `POST /forks`
+### 6.12 `GET /diff`
+
+Returns a page of the differences between two sequences of a namespace: the inodes whose visible state at `to_seq` differs from their state at `from_seq`.
+
+LoonFS finds the differences in the commits between the two sequences. It compares the states at the two sequences of each inode that those commits touched, so a diff doesn't list the subtree at either sequence.
+
+The route takes these query parameters:
+
+| Parameter | Meaning |
+| --- | --- |
+| `from_seq` | Required. The sequence that the diff starts after. The diff compares each inode's state at this sequence with its state at `to_seq`. |
+| `to_seq` | The sequence that the diff ends at, inclusive. The default is the head that the first page reads. |
+| `path` | The absolute path of the directory whose subtree the diff reports. The default is the root. |
+| `after_seq` | The `next_after_seq` that the previous page returned. The default is `from_seq`. |
+| `limit` | The maximum number of commits that the page reads, with the same default and maximum as the change feed's `limit`. |
+| `consistency`, `max_staleness_ms` | How recently the page confirms the head, as on the read routes (see [Read consistency](#read-consistency)). |
+
+The sequences MUST be in order: the retention floor, `from_seq`, `after_seq`, `to_seq`, and the head that the request reads, each at or above the one before. A `from_seq` below the retention floor returns `rebootstrap_required`, whose details include `from_seq` and `retention_floor_seq`. A `to_seq` above the head that the request reads returns `invalid_request`, and a client that gets this error from an `eventual` request retries it as `strong`, as a change feed poller does. A `from_seq` after `to_seq`, or an `after_seq` outside `from_seq` through `to_seq`, also returns `invalid_request`, and `param` identifies the parameter. A `from_seq` equal to `to_seq` returns an empty page.
+
+In an ACL namespace, the diff requires an administrator when the request includes subject headers. Without subject headers, the request reads as the token holder, as the change feed does.
+
+Representative response:
+
+```json
+{
+  "namespace_id": "demo",
+  "from_seq": 418,
+  "to_seq": 425,
+  "after_seq": 418,
+  "next_after_seq": 421,
+  "retention_floor_seq": 400,
+  "entries": [
+    {
+      "inode_id": "ino_000000r0000013kje0d47gc8kw",
+      "inode_kind": "file",
+      "kind": "moved",
+      "path": "/docs/archive/report.txt",
+      "previous_path": "/docs/report.txt",
+      "binding_version": "opaque-token",
+      "revision_no": 9
+    },
+    {
+      "inode_id": "ino_00000ct000000sne6s8ae5c5ka",
+      "inode_kind": "file",
+      "kind": "created",
+      "path": "/docs/summary.txt",
+      "binding_version": "opaque-token",
+      "revision_no": 1
+    }
+  ]
+}
+```
+
+An inode's state at a sequence is its visible state there. The state records whether the inode exists, and whether a deletion of the inode or of one of its ancestors hides it, as a read at that sequence finds it (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). For a visible inode, the state also includes its parent and name, its content revision if it's a file, and its attribute and access revisions. The diff has one entry for each inode whose state at `from_seq` differs from its state at `to_seq`, and each entry's `kind` says how:
+
+| Kind | At `from_seq` | At `to_seq` | Fields |
+| --- | --- | --- | --- |
+| `created` | The inode didn't exist. | Visible. | `path`, `binding_version`, and `revision_no` for a file. |
+| `undeleted` | A deletion hid the inode. | Visible. | `path`, `binding_version`, and `revision_no` for a file. |
+| `deleted` | Visible. | A deletion hides the inode. | `previous_path`. |
+| `moved` | Visible under one parent and name. | Visible under another parent or name. | `path`, `previous_path`, `binding_version`, and each revision that differs. |
+| `changed` | Visible under one parent and name. | Visible under the same parent and name, with a different content, attribute, or access revision. | `path`, `binding_version`, and each revision that differs. |
+
+Every entry includes `inode_id`, `inode_kind`, and `kind`. `path` is the inode's path at `to_seq`, and `previous_path` is its path at `from_seq`. Each revision field (`revision_no`, `attributes_revision_no`, and `access_revision_no`) has the inode's value at `to_seq`. A `moved` or `changed` entry includes a revision field only when the value differs between the two sequences, so the fields that are present say what changed. A move that also rewrote the file is a `moved` entry with `revision_no`. Clients MUST skip an entry whose `kind` they don't recognize.
+
+A kind applies to the entry's whole subtree, and the diff doesn't list the descendants that change with it:
+
+- A `deleted` directory deletes everything below it.
+- A `moved` directory moves everything below it, and its descendants aren't entries for the move.
+- An `undeleted` directory brings back its visible descendants, which aren't entries. A client that keeps a copy of the namespace lists the directory to find them.
+- A `created` directory needs no listing, because each child it has at `to_seq` was created, moved in, or undeleted in the range, and is an entry of its own.
+
+A descendant that a commit in the range touched is still an entry of its own. For example, a file that was rewritten before its directory was deleted is a `deleted` entry next to the directory's. An inode whose state is the same at the two sequences isn't an entry, even when commits in the range touched it. For example, a file created and deleted in the range has no entry, and neither does a file deleted and undeleted in place with no other change.
+
+An entry is under `path` when its path at `from_seq` or its path at `to_seq` is `path` or below it. So a subtree moved into `path` from outside appears once, as `moved`, and a subtree moved out of `path` appears too. Names compare as they do in path lookups (see [Names and paths](format.md#14-names-and-paths)).
+
+Entries describe the states at the two sequences, not the commits between them, and no fixed order of applying them is correct in every case. For example, a file moved into a directory that was created in the same range, or two entries that swap paths, can't be applied one at a time in a fixed order. A client that keeps a copy of the namespace reconciles its copy by inode ID.
+
+A page reads the commits after `after_seq` in sequence order, at most `limit` of them, within the change feed's byte budget, and it never splits a commit across pages. It reports each inode at the last commit in the range that touched the inode, so an inode is an entry on one page only, and a page can have no entries and still have a next page. A page can also have more entries than `limit`, because one commit can touch many inodes. A page also ends after the commit that brings the inodes it has examined to a bound (16,384 in the reference implementation, counting an inode once for each commit that touched it), and the next page starts with the commit after it. While commits remain before `to_seq`, the response includes `next_after_seq`. The client's next request repeats `from_seq`, passes the returned `to_seq`, and sets `after_seq` to `next_after_seq`, so every page compares the same two sequences, and the server keeps no state between pages. Each page checks `from_seq` against the retention floor of the head that it reads before it reads anything else, so a retention advance between two pages fails the later page with `rebootstrap_required`.
+
+A fork's diff against its source is this route on the fork, with `from_seq` set to the fork's `fork_basis.source_head_seq` (see [`POST /forks`](#613-post-forks)). It compares the fork's head with the source state that the fork captured, not with the source's current head.
+
+To find out whether anything under a directory changed since a sequence, a client reads pages until one has an entry or a page has no `next_after_seq`.
+
+The diff reads every commit in its range once, and resolves the state and path of each inode it reports at both sequences. So its cost grows with the number of commits between the two sequences and with the number of entries it reports, not with the size of the subtree. A fork's diff against its source, or a poll from a recent sequence, reads few commits. A diff over a long range of a namespace with many commits reads many, so a client that diffs often keeps its `from_seq` recent.
+
+Why does a page report each inode at the last commit that touched it? Every page can tell whether a commit is an inode's last touch in the range from the inode's own rows at `to_seq`. So each inode is reported once, with no state on the server and no duplicates for the client to remove.
+
+Why doesn't the diff list the descendants of a moved or deleted directory? Listing them would make the cost of a diff grow with the size of the subtree. A client that needs the descendants already has them in its copy, or lists the directory.
+
+### 6.13 `POST /forks`
 
 Creates a new namespace that starts as a copy of a source namespace, at the source's current head or at a snapshot.
 
@@ -2473,7 +2564,7 @@ The response contains the new namespace's initial state. Its head sequence and r
 
 If the target ID is active, the server returns `namespace_exists` before it writes a source pin. If the target ID is deleted, the server returns `namespace_deleted` before it writes a source pin. If the fork pin can't be verified, the server returns `checkpoint_unavailable`, and no target namespace is installed.
 
-### 6.13 `GET /grep`
+### 6.14 `GET /grep`
 
 Searches the content of the namespace's files for lines that match a pattern, and returns a page of matches.
 
@@ -2535,7 +2626,7 @@ The `path_prefix` value is a complete absolute path, not a partial prefix of a p
 
 If the namespace has no active grep index, the request returns `not_supported` with the `feature` field set to `query.grep`, the same key that the capability document uses to advertise grep (see [Data-dependent features](#23-data-dependent-features)).
 
-### 6.14 `GET /metrics`
+### 6.15 `GET /metrics`
 
 Returns metrics about what the process has been doing, in Prometheus text exposition format 0.0.4, with `Content-Type: text/plain; version=0.0.4`.
 

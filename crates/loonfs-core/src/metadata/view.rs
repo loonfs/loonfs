@@ -98,8 +98,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         segments: &'a VerifiedMetadataSegments<'store, S>,
         wal_tail: &'a ProjectedWalTail,
     ) -> Self {
+        Self::over_loaded_basis(segments, wal_tail, head.seq)
+    }
+
+    /// Creates a view of a manifest's segments and the WAL tail replayed
+    /// above them, at `visible_seq`, which can be below the head that the
+    /// tail reaches and below the manifest's head.
+    pub(crate) fn over_loaded_basis(
+        segments: &'a VerifiedMetadataSegments<'store, S>,
+        wal_tail: &'a ProjectedWalTail,
+        visible_seq: ChangeSeq,
+    ) -> Self {
         Self {
-            visible_seq: head.seq,
+            visible_seq,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -149,7 +160,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
-    pub(super) fn visible_seq(&self) -> ChangeSeq {
+    pub(crate) fn visible_seq(&self) -> ChangeSeq {
         self.visible_seq
     }
 

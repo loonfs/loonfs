@@ -203,6 +203,21 @@ pub enum CoreError {
         after_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
+    /// A diff's `from_seq` is below the retention floor. The error has the
+    /// change feed's code, and its details report `from_seq` where the
+    /// feed's report `after_seq`.
+    #[error("diff start `{from_seq}` is older than retention floor `{retention_floor_seq}`")]
+    DiffRebootstrapRequired {
+        from_seq: ChangeSeq,
+        retention_floor_seq: ChangeSeq,
+    },
+    /// A diff's `from_seq`, `to_seq`, or `after_seq` is out of order with the
+    /// others or with the head. `param` identifies the parameter.
+    #[error("invalid diff `{param}`: {message}")]
+    InvalidDiffRange {
+        param: &'static str,
+        message: String,
+    },
     #[error("namespace corrupt: {0}")]
     NamespaceCorrupt(String),
     /// This writer session's epoch was superseded. Terminal for the session:
@@ -427,6 +442,7 @@ impl CoreError {
             | CoreError::InvalidGcOptions(_)
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
+            | CoreError::InvalidDiffRange { .. }
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
@@ -471,7 +487,9 @@ impl CoreError {
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
-            CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
+            CoreError::RebootstrapRequired { .. } | CoreError::DiffRebootstrapRequired { .. } => {
+                ErrorCode::RebootstrapRequired
+            }
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
@@ -569,7 +587,9 @@ impl CoreError {
             | CoreError::UploadContentConflict { .. }
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
+            | CoreError::InvalidDiffRange { .. }
             | CoreError::RebootstrapRequired { .. }
+            | CoreError::DiffRebootstrapRequired { .. }
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
             | CoreError::OutcomeUnknown { .. }
@@ -624,6 +644,14 @@ impl CoreError {
                 retention_floor_seq,
             } => Some(ErrorDetails {
                 after_seq: Some(*after_seq),
+                retention_floor_seq: Some(*retention_floor_seq),
+                ..ErrorDetails::default()
+            }),
+            CoreError::DiffRebootstrapRequired {
+                from_seq,
+                retention_floor_seq,
+            } => Some(ErrorDetails {
+                from_seq: Some(*from_seq),
                 retention_floor_seq: Some(*retention_floor_seq),
                 ..ErrorDetails::default()
             }),

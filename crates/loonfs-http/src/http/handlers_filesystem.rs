@@ -1,6 +1,6 @@
 //! Path-oriented filesystem handlers: directory listing, stat, content
-//! reads, revision listings, filesystem mutations, and the committed-change
-//! feed.
+//! reads, revision listings, filesystem mutations, the committed-change
+//! feed, and the diff.
 
 use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
@@ -16,14 +16,14 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    ChangeSeq, ErrorCode, ListChangesOptions, ListFileRevisionsOptions, ListOptions,
-    ListTrashOptions, PinId, ReadConsistency, ReadFileStreamOptions, StatOptions,
+    AbsolutePath, ChangeSeq, DiffOptions, ErrorCode, ListChangesOptions, ListFileRevisionsOptions,
+    ListOptions, ListTrashOptions, PinId, ReadConsistency, ReadFileStreamOptions, StatOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    Commit, CommitRequest, FileRevisionsPageCursor, FilesystemOperation, ListChangesResponse,
-    ListFileRevisionsResponse, ListTrashResponse, RevisionNo, TrashPageCursor,
+    Commit, CommitRequest, DiffResponse, FileRevisionsPageCursor, FilesystemOperation,
+    ListChangesResponse, ListFileRevisionsResponse, ListTrashResponse, RevisionNo, TrashPageCursor,
 };
 use std::sync::Arc;
 
@@ -209,6 +209,40 @@ pub(super) struct ChangesQuery {
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
     /// head before the read. It can't be combined with `snapshot_id`.
+    consistency: Option<ReadConsistency>,
+    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
+    /// milliseconds. The default is the server's `max_staleness_ms`.
+    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    max_staleness_ms: Option<u64>,
+}
+
+/// The query of a diff page.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[serde(deny_unknown_fields)]
+pub(super) struct DiffQuery {
+    /// The sequence that the diff starts after. Each entry compares an inode's state at this
+    /// sequence with its state at `to_seq`. It can't be below the namespace's retention floor.
+    #[cfg_attr(feature = "openapi", param(required = true))]
+    from_seq: Option<ChangeSeq>,
+    /// The sequence that the diff ends at, inclusive. The default is the head that the request
+    /// reads. A later page passes the `to_seq` that the first page returned.
+    to_seq: Option<ChangeSeq>,
+    /// The absolute path of the directory whose subtree the diff reports. The default is the root.
+    path: Option<String>,
+    /// The `next_after_seq` that the previous page returned. The default is `from_seq`.
+    after_seq: Option<ChangeSeq>,
+    /// The maximum number of commits that the page reads.
+    #[cfg_attr(
+        feature = "openapi",
+        param(minimum = 1, maximum = 1000, default = 1000)
+    )]
+    limit: Option<u32>,
+    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
+    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
+    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
+    /// head before the read.
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
@@ -631,6 +665,60 @@ pub(super) async fn list_changes(
         .list_changes_with_options(after_seq, &options)
         .page_limit(limit)
         .page()
+        .await
+        .map_err(ApiResponseError::runtime)?;
+    Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        operation_id = "list_diff",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/namespaces/{namespace_id}/diff",
+        tag = "filesystem",
+        summary = "List the differences between two sequences",
+        description = "Returns a page of the inodes whose visible state at `to_seq` differs from their state at `from_seq`, read from the commits between the two sequences.",
+        params(
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            DiffQuery
+        ),
+        responses(
+            (status = 200, description = "A page of the diff", body = DiffResponse),
+            (status = 400, description = "Invalid sequence, path, limit, or consistency, a `to_seq` above the head that the request reads, or an `after_seq` outside `from_seq` through `to_seq`", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 409, description = "`from_seq` is below the retention floor, so the namespace no longer has the history after it. Rebuild state from a fresh listing or snapshot, and diff from that state's head.", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn list_diff(
+    State(state): State<Arc<BindingState>>,
+    SubjectHeaders(subject): SubjectHeaders,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<DiffQuery>,
+) -> Result<Json<DiffResponse>, ApiResponseError> {
+    let runtime = state.runtime_for(subject);
+    let from_seq = required_query_param(query.from_seq, "from_seq")?;
+    let path = match query.path {
+        Some(path) => AbsolutePath::parse(&path).map_err(|error| {
+            ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("path")
+        })?,
+        None => AbsolutePath::root(),
+    };
+    let options = DiffOptions {
+        path,
+        to_seq: query.to_seq,
+        after_seq: query.after_seq,
+        limit: effective_page_limit(query.limit)?,
+        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+    };
+    let response = runtime
+        .namespace(&namespace_id)
+        .diff_with_options(from_seq, &options)
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))

@@ -71,6 +71,48 @@ fn read_head_sources_reach_the_registered_instruments() {
     }
 }
 
+/// Checks that each count of a diff page's work reaches its own counter.
+#[test]
+fn a_diff_page_reaches_the_diff_counters() {
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let instruments = RuntimeInstruments::new(Some(recorder.clone()));
+    let entry = loonfs_types::DiffEntry {
+        inode_id: loonfs_types::InodeId(7),
+        inode_kind: loonfs_types::EntryInodeKind::File,
+        kind: loonfs_types::DiffEntryKind::Created,
+        path: Some(loonfs_types::AbsolutePath::parse("/a.txt").expect("path")),
+        previous_path: None,
+        binding_version: None,
+        revision_no: Some(loonfs_types::RevisionNo(1)),
+        attributes_revision_no: None,
+        access_revision_no: None,
+    };
+    instruments.diff_page(&loonfs_core::DiffPage {
+        response: loonfs_types::DiffResponse {
+            namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+            from_seq: loonfs_types::ChangeSeq(1),
+            to_seq: loonfs_types::ChangeSeq(4),
+            after_seq: loonfs_types::ChangeSeq(1),
+            next_after_seq: None,
+            retention_floor_seq: loonfs_types::ChangeSeq(0),
+            entries: vec![entry.clone(), entry],
+        },
+        commits_scanned: 3,
+        touches_examined: 5,
+        path_resolutions: 4,
+    });
+
+    let snapshot = recorder.snapshot();
+    for (name, value) in [
+        ("loonfs.diff.commits_scanned", 3),
+        ("loonfs.diff.touches_examined", 5),
+        ("loonfs.diff.entries_emitted", 2),
+        ("loonfs.diff.path_resolutions", 4),
+    ] {
+        assert_eq!(counter(&snapshot, name, &[]), value, "{name}");
+    }
+}
+
 #[test]
 fn a_bridged_sample_moves_every_object_store_instrument() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());

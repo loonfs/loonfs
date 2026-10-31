@@ -1,6 +1,7 @@
-//! Commit requests, commit responses, and change-feed shapes for the v0 HTTP API.
+//! Commit requests, commit responses, and the shapes of the change feed and the diff for the v0
+//! HTTP API.
 
-use super::{ContentToken, FilesystemOperation};
+use super::{ContentToken, EntryInodeKind, FilesystemOperation};
 use crate::options::CommitOptions;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, BindingVersion,
@@ -209,6 +210,118 @@ pub struct ListChangesResponse {
     pub next_after_seq: Option<ChangeSeq>,
     /// The logical commits after `after_seq`, in ascending namespace sequence order.
     pub changes: Vec<Commit>,
+}
+
+/// One page of a diff: the inodes whose visible state at `to_seq` differs from their state at
+/// `from_seq`.
+///
+/// A page reads the commits after `after_seq` in sequence order, and reports each inode at the
+/// last commit in the range that changed it, so an inode appears on one page only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DiffResponse {
+    /// The namespace that was read.
+    pub namespace_id: NamespaceId,
+    /// The sequence that the diff starts after. Each entry compares an inode's state at this
+    /// sequence with its state at `to_seq`.
+    pub from_seq: ChangeSeq,
+    /// The sequence that the diff ends at, inclusive. When the request leaves out `to_seq`, it's
+    /// the head that the page read, and the next page's request passes it back.
+    pub to_seq: ChangeSeq,
+    /// The sequence that this page's scan starts after. It's the request's `after_seq`, or
+    /// `from_seq` when the request leaves `after_seq` out.
+    pub after_seq: ChangeSeq,
+    /// The `after_seq` of the next page, when commits remain before `to_seq`. It's absent on the
+    /// page that reaches `to_seq`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub next_after_seq: Option<ChangeSeq>,
+    /// The namespace's retention floor when this page was read.
+    pub retention_floor_seq: ChangeSeq,
+    /// The inodes whose state differs, in the order of the commits that last changed them. A page
+    /// ends at a bound on the commits and on the inodes that it examines, so it can have no
+    /// entries and still have a `next_after_seq`, when every inode it examined has a later touch.
+    pub entries: Vec<DiffEntry>,
+}
+
+/// One inode whose visible state at the end of a diff differs from its state at the start.
+///
+/// `kind` says how the state differs, and which other fields are present depends on it. Each
+/// revision field reports the value at `to_seq`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DiffEntry {
+    /// The inode whose state differs.
+    #[serde(with = "crate::inode_id::public")]
+    pub inode_id: InodeId,
+    /// Whether the inode is a file or a directory. A newer server can return another kind.
+    #[cfg_attr(feature = "openapi", schema(value_type = crate::InodeKind))]
+    pub inode_kind: EntryInodeKind,
+    /// How the inode's state at `to_seq` differs from its state at `from_seq`.
+    pub kind: DiffEntryKind,
+    /// The inode's path at `to_seq`. It's absent for `deleted`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::path::deserialize_optional_derived_path"
+    )]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub path: Option<AbsolutePath>,
+    /// The inode's path at `from_seq`. It's present for `moved` and `deleted`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::path::deserialize_optional_derived_path"
+    )]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub previous_path: Option<AbsolutePath>,
+    /// The opaque ID of the inode's binding at `to_seq`. It's absent for `deleted` and for the
+    /// namespace root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub binding_version: Option<BindingVersion>,
+    /// The file's revision at `to_seq`. A `created` or `undeleted` file has it, and a `changed` or
+    /// `moved` file has it when its revision differs between the two sequences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub revision_no: Option<RevisionNo>,
+    /// The inode's attribute revision at `to_seq`, on a `changed` or `moved` entry whose
+    /// attribute revision differs between the two sequences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub attributes_revision_no: Option<AttributesRevisionNo>,
+    /// The inode's access revision at `to_seq`, on a `changed` or `moved` entry whose access
+    /// revision differs between the two sequences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub access_revision_no: Option<AccessRevisionNo>,
+}
+
+/// How an inode's visible state at the end of a diff differs from its state at the start.
+///
+/// A newer server can return a kind that isn't listed here. Clients should skip an entry whose
+/// kind they don't recognize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DiffEntryKind {
+    /// The inode didn't exist at `from_seq`, and it's visible at `to_seq`.
+    Created,
+    /// A deletion hid the inode at `from_seq`, and it's visible at `to_seq`. The visible
+    /// descendants of an undeleted directory come back with it, and they aren't entries.
+    Undeleted,
+    /// The inode was visible at `from_seq`, and a deletion hides it at `to_seq`. A deleted
+    /// directory deletes everything below it.
+    Deleted,
+    /// The inode is visible at both sequences, under a different parent or name. A moved directory
+    /// moves everything below it, and its descendants aren't entries for the move.
+    Moved,
+    /// The inode is visible at both sequences under the same parent and name, with a different
+    /// content, attribute, or access revision.
+    Changed,
+    /// A kind from a newer server. It serializes as `unknown`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A condition that a commit must meet before its operations run.

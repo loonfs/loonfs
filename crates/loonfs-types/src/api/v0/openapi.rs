@@ -36,6 +36,7 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.composite::<UploadSession, UploadSessionStatus>("status", Some("unknown"));
     named.composite::<GrepIndex, GrepIndexStatus>("status", Some("unknown"));
     named.composite::<StoreProbeCheck, StoreProbeCheckOutcome>("outcome", Some("unknown"));
+    named.plain::<DiffEntryKind>("unknown");
     named.plain::<MetadataMaintenanceOutcome>("unknown");
     named.plain::<UploadMode>("unknown");
     named.object::<ErrorDetails>();

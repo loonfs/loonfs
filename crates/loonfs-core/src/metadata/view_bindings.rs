@@ -70,6 +70,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         Ok(latest)
     }
 
+    /// Returns the root's newest tombstone event at the view's sequence, a
+    /// `set` or a `revoke`.
+    pub(crate) async fn newest_subtree_tombstone(
+        &self,
+        root_inode_id: InodeId,
+    ) -> Result<Option<SubtreeTombstoneRecord>> {
+        let tombstones = self.tombstones_for_root(root_inode_id).await?;
+        Ok(super::rows::newest_tombstone_from_records(
+            tombstones.iter().cloned(),
+            self.visible_seq(),
+        ))
+    }
+
     /// The root's latest tombstone event, when it hides the subtree.
     pub(crate) async fn hiding_subtree_tombstone(
         &self,

@@ -1,9 +1,11 @@
 //! The change feed: committed changes after a sequence number, with each
-//! commit's durable WAL deltas mapped to semantic filesystem events.
+//! commit's durable WAL deltas mapped to semantic filesystem events. The
+//! commit scan that pages the feed also pages the diff.
 
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::HeapBytes;
 use crate::limits::CHANGE_FEED_PAGE_BYTES;
+use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
@@ -43,36 +45,105 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         });
     }
 
+    let mut scan = CommitScan::new(view.metadata_view(), after_seq, limit);
     let mut changes = Vec::new();
-    let mut event_bytes = 0_usize;
-    let mut through_seq = after_seq;
-    while changes.len() < limit.as_usize() && through_seq < head.seq {
-        let records = view.metadata_view().commits_after(through_seq, 1).await?;
-        let Some(record) = records.first() else {
-            through_seq = head.seq;
-            break;
-        };
-        let change = committed_change_from_wal_record(namespace_id, record)?;
-        let next_event_bytes = event_bytes.saturating_add(change.events.heap_bytes());
-        if !changes.is_empty() && next_event_bytes > CHANGE_FEED_PAGE_BYTES {
-            break;
-        }
-        event_bytes = next_event_bytes;
-        through_seq = change.committed_seq;
-        changes.push(change);
-        if event_bytes >= CHANGE_FEED_PAGE_BYTES {
-            break;
+    while let Some(record) = scan.next().await? {
+        let change = committed_change_from_wal_record(namespace_id, &record)?;
+        if scan.admit(change.committed_seq, change.events.heap_bytes()) {
+            changes.push(change);
         }
     }
-    let next_after_seq = (through_seq < head.seq).then_some(through_seq);
 
     Ok(ListChangesResponse {
         namespace_id: namespace_id.clone(),
         after_seq,
         head_seq: head.seq,
-        next_after_seq,
+        next_after_seq: scan.next_after_seq(),
         changes,
     })
+}
+
+/// The page loop that the change feed and the diff share. It reads the
+/// commits after one sequence in order, through the sequence of its view.
+///
+/// A caller takes each commit from [`Self::next`], builds what its page
+/// reports for that commit, and offers the commit to [`Self::admit`] with
+/// the heap bytes of what it built. The page ends after `limit` commits, at
+/// the view's sequence, or at [`CHANGE_FEED_PAGE_BYTES`]. A commit that would
+/// take a page with other commits past the budget is left for the next page,
+/// so no commit is split across pages, and a commit larger than the budget
+/// is a page of its own.
+pub(crate) struct CommitScan<'a, 'store, S: ObjectStore + ?Sized> {
+    view: MetadataView<'a, 'store, S>,
+    limit: EffectiveLimit,
+    /// The last commit on the page, or the page's start before the first.
+    through_seq: ChangeSeq,
+    commits: usize,
+    page_bytes: usize,
+    /// Whether the byte budget or the caller ended the page.
+    full: bool,
+}
+
+impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
+    /// Starts a page of the commits after `after_seq` that `view` contains.
+    pub(crate) fn new(
+        view: MetadataView<'a, 'store, S>,
+        after_seq: ChangeSeq,
+        limit: EffectiveLimit,
+    ) -> Self {
+        Self {
+            view,
+            limit,
+            through_seq: after_seq,
+            commits: 0,
+            page_bytes: 0,
+            full: false,
+        }
+    }
+
+    /// Returns the commit after the page's last one, or `None` once the page
+    /// has ended. The caller offers each commit to [`Self::admit`] before it
+    /// asks for the next one.
+    pub(crate) async fn next(&mut self) -> Result<Option<WalCommitPayload>> {
+        let end_seq = self.view.visible_seq();
+        if self.full || self.commits >= self.limit.as_usize() || self.through_seq >= end_seq {
+            return Ok(None);
+        }
+        let record = self.view.commits_after(self.through_seq, 1).await?.pop();
+        if record.is_none() {
+            self.through_seq = end_seq;
+        }
+        Ok(record)
+    }
+
+    /// Puts the commit at `committed_seq` on the page if `heap_bytes` more
+    /// fit, and returns whether they did. A commit that doesn't fit ends the
+    /// page, and the next page starts with it.
+    pub(crate) fn admit(&mut self, committed_seq: ChangeSeq, heap_bytes: usize) -> bool {
+        let page_bytes = self.page_bytes.saturating_add(heap_bytes);
+        if self.commits > 0 && page_bytes > CHANGE_FEED_PAGE_BYTES {
+            self.full = true;
+            return false;
+        }
+        self.page_bytes = page_bytes;
+        self.through_seq = committed_seq;
+        self.commits += 1;
+        self.full = page_bytes >= CHANGE_FEED_PAGE_BYTES;
+        true
+    }
+
+    /// Ends the page after the commit that [`Self::admit`] took last, so
+    /// [`Self::next`] returns `None`, and the next page starts after that
+    /// commit.
+    pub(crate) fn end_page(&mut self) {
+        self.full = true;
+    }
+
+    /// Returns the sequence that the next page starts after, or `None` when
+    /// this page reached the view's sequence.
+    pub(crate) fn next_after_seq(&self) -> Option<ChangeSeq> {
+        (self.through_seq < self.view.visible_seq()).then_some(self.through_seq)
+    }
 }
 
 /// Converts one WAL commit record into the shared API change shape.

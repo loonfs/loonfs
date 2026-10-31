@@ -1,19 +1,19 @@
-//! Path reads, revision history, trash, and change feeds.
+//! Path reads, revision history, trash, change feeds, and diffs.
 
 use crate::operations::{self, Operation};
 use crate::read_at_fields::ReadAtFields;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, NamespacePath, PayloadStream, Result};
 use loonfs_types::options::{
-    ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions, ReadAt,
-    ReadConsistency, ReadFileOptions, StatOptions,
+    DiffOptions, ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions,
+    ReadAt, ReadConsistency, ReadFileOptions, StatOptions,
 };
-use loonfs_types::ListChangesResponse;
 use loonfs_types::{
     ChangeSeq, EffectiveLimit, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListTrashResponse, NamespaceId, PageRequest, Pager, PathEntry,
     RevisionNo,
 };
+use loonfs_types::{DiffResponse, ListChangesResponse};
 
 /// Adds the query parameters that say what a read reads at.
 fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
@@ -338,6 +338,41 @@ impl Client {
         query.push("limit", limit.get());
         push_read_at(&mut query, &options.at);
         self.send_json(self.request(operations::LIST_CHANGES, &query.build()))
+            .await
+    }
+
+    /// Returns the first page of the diff of the whole namespace from
+    /// `from_seq` to the head that the page reads.
+    pub async fn diff(
+        &self,
+        namespace_id: &NamespaceId,
+        from_seq: ChangeSeq,
+    ) -> Result<DiffResponse> {
+        self.diff_with_options(namespace_id, from_seq, &DiffOptions::default())
+            .await
+    }
+
+    /// Returns one page of the diff from `from_seq`, as `options` asks. To
+    /// read the next page, pass the returned `to_seq` and `next_after_seq` as
+    /// `options.to_seq` and `options.after_seq`.
+    pub async fn diff_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        from_seq: ChangeSeq,
+        options: &DiffOptions,
+    ) -> Result<DiffResponse> {
+        let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/diff"));
+        query.push("from_seq", from_seq.0);
+        if let Some(to_seq) = options.to_seq {
+            query.push("to_seq", to_seq.0);
+        }
+        query.push("path", options.path.as_str());
+        if let Some(after_seq) = options.after_seq {
+            query.push("after_seq", after_seq.0);
+        }
+        query.push("limit", options.limit.get());
+        push_read_at(&mut query, &ReadAt::Live(options.consistency));
+        self.send_json(self.request(operations::LIST_DIFF, &query.build()))
             .await
     }
 

@@ -18,13 +18,13 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::FilesystemChange;
 use loonfs_types::{
-    AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,
-    Checksum, ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName,
-    InodeId, MetadataSegmentId, NameKey, NamespaceId, PayloadChecksum, PinId, PrincipalId,
-    PrincipalScope, UploadId, WriterId,
+    AbsolutePath, AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion,
+    ChangeSeq, Checksum, ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef,
+    DisplayName, InodeId, MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum,
+    PinId, PrincipalId, PrincipalScope, UploadId, WriterId,
 };
+use loonfs_types::{DiffEntry, FilesystemChange};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 
@@ -234,6 +234,23 @@ impl HeapBytes for FilesystemChange {
             Self::AccessChanged { grants, .. } => grants.heap_bytes(),
             Self::Unknown => 0,
         }
+    }
+}
+
+impl HeapBytes for DiffEntry {
+    fn heap_bytes(&self) -> usize {
+        self.path.heap_bytes() + self.previous_path.heap_bytes() + self.binding_version.heap_bytes()
+    }
+}
+
+// The normalized spelling, and each component's own copy of its name in the
+// component vector.
+impl HeapBytes for AbsolutePath {
+    fn heap_bytes(&self) -> usize {
+        self.components()
+            .iter()
+            .map(|component| size_of::<PathComponent>() + component.as_str().len())
+            .fold(self.as_str().len(), usize::saturating_add)
     }
 }
 
