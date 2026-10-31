@@ -502,6 +502,8 @@ pub struct DeletedBinding {
 pub enum TombstoneRowAction {
     /// The subtree rooted at the row's inode is deleted.
     Set {
+        /// Classification copied from the deleted root's inode.
+        root_kind: InodeKind,
         /// The binding the delete removed.
         deleted_binding: DeletedBinding,
     },

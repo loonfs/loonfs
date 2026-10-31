@@ -304,7 +304,9 @@ impl HeapBytes for RevisionRecord {
 impl HeapBytes for SubtreeTombstoneRecord {
     fn heap_bytes(&self) -> usize {
         let action = match &self.action {
-            TombstoneRowAction::Set { deleted_binding } => deleted_binding.heap_bytes(),
+            TombstoneRowAction::Set {
+                deleted_binding, ..
+            } => deleted_binding.heap_bytes(),
             TombstoneRowAction::Revoke { .. } => 0,
         };
         self.commit_id.heap_bytes() + self.committed_by.heap_bytes() + action

@@ -55,6 +55,7 @@ const TOMBSTONE_BYTES: usize = delta_bytes(
     "tombstone_subtree",
     &[
         ("root_inode_id", INODE_ID_BYTES),
+        ("root_kind", cbor_string_bytes("file".len())),
         (
             "deleted_binding",
             cbor_map_bytes(&[

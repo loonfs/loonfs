@@ -56,12 +56,7 @@ pub(crate) fn manifest_rows_for_family(
         MetadataRowFamily::ActiveDeletions => metadata_state
             .subtree_tombstones()
             .iter()
-            .map(|tombstone| {
-                let inode = metadata_state
-                    .inode_at_seq(tombstone.root_inode_id, tombstone.committed_seq)
-                    .expect("manifest projection should include deletion root inodes");
-                active_deletion_from_tombstone(tombstone, inode.inode_kind)
-            })
+            .map(active_deletion_from_tombstone)
             .map(MetadataRow::ActiveDeletion)
             .collect::<Vec<_>>(),
         MetadataRowFamily::ContentLayouts => metadata_state

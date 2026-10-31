@@ -346,6 +346,7 @@ fn sample_wal_payload() -> WalObjectPayload {
             delta: WalDelta::TombstoneSubtree {
                 delta_index: 4,
                 root_inode_id: InodeId(9),
+                root_kind: InodeKind::File,
                 deleted_binding: DeletedBinding {
                     parent_inode_id: ROOT_INODE_ID,
                     name_key: NameKey::parse("old.txt").expect("valid name key"),
@@ -1569,6 +1570,7 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
             delta: WalDelta::TombstoneSubtree {
                 delta_index: 0,
                 root_inode_id: InodeId(9),
+                root_kind: InodeKind::File,
                 deleted_binding: DeletedBinding {
                     parent_inode_id: ROOT_INODE_ID,
                     name_key: name_key("old.txt"),
@@ -1603,6 +1605,36 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
             "delta {position}, field `{field}`"
         );
     }
+}
+
+#[test]
+fn wal_decode_rejects_a_tombstone_delta_without_the_root_kind() {
+    let envelope = wal_payload_with_deltas(vec![WalCommitDelta {
+        semantic_operation_index: 0,
+        delta: WalDelta::TombstoneSubtree {
+            delta_index: 0,
+            root_inode_id: InodeId(9),
+            root_kind: InodeKind::File,
+            deleted_binding: DeletedBinding {
+                parent_inode_id: ROOT_INODE_ID,
+                name_key: name_key("old.txt"),
+                display_name: loonfs_types::DisplayName::parse("Old.txt")
+                    .expect("valid display name"),
+            },
+        },
+    }]);
+    let document = wal_document_with_payload_edit(&envelope, |payload| {
+        cbor_map_of(commit_delta(payload, 0)).retain(|(key, _)| key.as_text() != Some("root_kind"));
+    });
+
+    let error = decode_wal_object_envelope_zstd(&document)
+        .expect_err("a tombstone delta states the deleted root's kind");
+    assert_matches!(
+        &error,
+        WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
+            if message.contains("missing field `root_kind`"),
+        "unexpected corruption error: {error}"
+    );
 }
 
 #[test]
@@ -1848,6 +1880,7 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::TombstoneSubtree {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
+                root_kind: InodeKind::File,
                 deleted_binding: DeletedBinding {
                     parent_inode_id: ROOT_INODE_ID,
                     name_key: name_key("a"),
@@ -1906,6 +1939,7 @@ fn sample_tombstone_set_row() -> MetadataRow {
         delta_index: 0,
         commit_id: commit_id(),
         action: TombstoneRowAction::Set {
+            root_kind: InodeKind::Directory,
             deleted_binding: DeletedBinding {
                 parent_inode_id: ROOT_INODE_ID,
                 name_key: name_key("docs-archive"),
@@ -1944,6 +1978,7 @@ fn sample_tombstone_reset_row() -> MetadataRow {
         delta_index: 0,
         commit_id: commit_id(),
         action: TombstoneRowAction::Set {
+            root_kind: InodeKind::Directory,
             deleted_binding: DeletedBinding {
                 parent_inode_id: ROOT_INODE_ID,
                 name_key: name_key("docs-archive"),
@@ -2540,6 +2575,18 @@ fn tombstone_rows_reject_a_partial_deleted_binding() {
 }
 
 #[test]
+fn tombstone_set_rows_require_the_root_kind() {
+    let mut row = row_cbor(&sample_tombstone_set_row());
+    cbor_map_of(cbor_entry(&mut row, "action"))
+        .retain(|(key, _)| key.as_text() != Some("root_kind"));
+    let refusal = assert_row_is_corrupt(&row, "a `set` states the deleted root's kind");
+    assert!(
+        refusal.contains("missing field `root_kind`"),
+        "unexpected refusal: {refusal}"
+    );
+}
+
+#[test]
 fn tombstone_rows_reject_unknown_fields_at_every_level() {
     let expected = sample_tombstone_set_row();
     let paths: [&[&str]; 3] = [&[], &["action"], &["action", "deleted_binding"]];
@@ -2721,10 +2768,8 @@ fn sample_deleted_binding_cbor() -> ciborium::Value {
 
 /// Moves binding fields out of `set` to test rejection of a malformed action.
 fn with_flat_binding(mut row: ciborium::Value) -> ciborium::Value {
-    *cbor_entry(&mut row, "action") = ciborium::Value::Map(vec![(
-        ciborium::Value::from("kind"),
-        ciborium::Value::from("set"),
-    )]);
+    cbor_map_of(cbor_entry(&mut row, "action"))
+        .retain(|(key, _)| key.as_text() != Some("deleted_binding"));
     cbor_map_of(&mut row).append(cbor_map_of(&mut sample_deleted_binding_cbor()));
     row
 }
@@ -2825,12 +2870,12 @@ fn content_layout_rows_match_golden_bytes_and_lookup_grammar() {
     let row = sample_content_layout_row();
     let key = format!(
         "content-layout-{}-18446744073709551603-18446744073709551613",
-        sample_content_ref().content_id
+        sample_content_ref().content_id.body()
     );
     assert_eq!(row.row_key(), key);
     assert_eq!(
         row.filter_key_for_family(MetadataRowFamily::ContentLayouts),
-        format!("content-layout-{}", sample_content_ref().content_id)
+        format!("content-layout-{}", sample_content_ref().content_id.body())
     );
     assert_rows_match_single_block_golden(
         "sst_block_data_content_layouts.v1.bin",

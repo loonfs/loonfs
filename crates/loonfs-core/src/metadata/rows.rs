@@ -71,7 +71,8 @@ pub(crate) fn hiding_tombstone_from_records(
 }
 
 /// Converts a tombstone event into its derived `ActiveDeletions` row. A `set`
-/// adds a deletion to the listing, and a `revoke` removes that position.
+/// adds a deletion to the listing, with the root's kind that the event
+/// stores, and a `revoke` removes that position.
 ///
 /// It reduces target-aware where the newest-event-wins rule in
 /// [`hiding_tombstone_from_records`] reduces target-blind. Commit validation
@@ -81,14 +82,16 @@ pub(crate) fn hiding_tombstone_from_records(
 /// root's whole history.
 pub(crate) fn active_deletion_from_tombstone(
     tombstone: &SubtreeTombstoneRecord,
-    inode_kind: InodeKind,
 ) -> ActiveDeletionRecord {
     match &tombstone.action {
-        TombstoneRowAction::Set { deleted_binding } => ActiveDeletionRecord {
+        TombstoneRowAction::Set {
+            root_kind,
+            deleted_binding,
+        } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
             deletion_seq: tombstone.committed_seq,
             action: ActiveDeletionRowAction::Listed {
-                inode_kind,
+                inode_kind: *root_kind,
                 deleted_at_ms: tombstone.committed_at_ms,
                 deleted_by: tombstone.committed_by.clone(),
                 deleted_binding: deleted_binding.clone(),

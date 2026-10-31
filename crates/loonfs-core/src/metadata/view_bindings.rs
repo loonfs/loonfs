@@ -5,7 +5,7 @@ use super::durable_cache::{ParentNameCacheKey, SharedRows};
 use super::manifest_index;
 use super::manifest_tail_merge::{ManifestPage, ManifestTailMerge, TieOrder};
 use super::visibility;
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::metadata::view::latest_visible_binding;
 use crate::metadata::view::MetadataView;
 use crate::metadata::{
@@ -198,16 +198,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .flat_map(|state| state.subtree_tombstones())
             .filter(|tombstone| tombstone.committed_seq <= visible_seq)
         {
-            let inode = self
-                .inode_at_seq(tombstone.root_inode_id)
-                .await?
-                .ok_or_else(|| {
-                    CoreError::NamespaceCorrupt(format!(
-                        "deletion root inode `{}` is missing",
-                        tombstone.root_inode_id
-                    ))
-                })?;
-            let record = active_deletion_from_tombstone(tombstone, inode.inode_kind);
+            let record = active_deletion_from_tombstone(tombstone);
             let row_key = record.row_key();
             if range.contains(&row_key) {
                 tail.push((row_key, record));

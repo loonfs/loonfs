@@ -201,6 +201,7 @@ impl MetadataState {
             WalDelta::TombstoneSubtree {
                 delta_index,
                 root_inode_id,
+                root_kind,
                 deleted_binding,
             } => {
                 self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
@@ -211,6 +212,7 @@ impl MetadataState {
                     committed_at_ms,
                     committed_by: actor.clone(),
                     action: TombstoneRowAction::Set {
+                        root_kind: *root_kind,
                         deleted_binding: deleted_binding.clone(),
                     },
                 });

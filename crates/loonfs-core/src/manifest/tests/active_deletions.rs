@@ -31,6 +31,7 @@ pub(super) fn tombstone_set(
     root_inode_id: InodeId,
     seq: u64,
     name: &str,
+    root_kind: InodeKind,
 ) -> SubtreeTombstoneRecord {
     SubtreeTombstoneRecord {
         root_inode_id,
@@ -40,6 +41,7 @@ pub(super) fn tombstone_set(
         committed_at_ms: 1_000 + seq,
         committed_by: loonfs_types::ActorId::loonfs(),
         action: TombstoneRowAction::Set {
+            root_kind,
             deleted_binding: DeletedBinding {
                 parent_inode_id: ROOT_INODE_ID,
                 name_key: NameKey::parse(name).expect("name key"),
@@ -110,7 +112,12 @@ fn active_deletion_rows(state: &MetadataState) -> Vec<(String, &'static str)> {
 
 #[test]
 fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
-    let deleted = state_from_tombstones(vec![tombstone_set(InodeId(7), 5, "notes.txt")]);
+    let deleted = state_from_tombstones(vec![tombstone_set(
+        InodeId(7),
+        5,
+        "notes.txt",
+        InodeKind::File,
+    )]);
     assert_eq!(
         active_deletion_rows(&deleted),
         vec![(
@@ -121,7 +128,7 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
     );
 
     let undeleted = state_from_tombstones(vec![
-        tombstone_set(InodeId(7), 5, "notes.txt"),
+        tombstone_set(InodeId(7), 5, "notes.txt", InodeKind::File),
         tombstone_revoke(InodeId(7), 9, 5),
     ]);
     assert_eq!(
@@ -142,9 +149,9 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
     );
 
     let redeleted = state_from_tombstones(vec![
-        tombstone_set(InodeId(7), 5, "notes.txt"),
+        tombstone_set(InodeId(7), 5, "notes.txt", InodeKind::File),
         tombstone_revoke(InodeId(7), 9, 5),
-        tombstone_set(InodeId(7), 12, "notes.txt"),
+        tombstone_set(InodeId(7), 12, "notes.txt", InodeKind::File),
     ]);
     assert_eq!(
         active_deletion_rows(&redeleted)
@@ -163,7 +170,7 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
 #[test]
 fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
     let state = state_from_tombstones(vec![
-        tombstone_set(InodeId(7), 5, "notes.txt"),
+        tombstone_set(InodeId(7), 5, "notes.txt", InodeKind::File),
         tombstone_revoke(InodeId(7), 9, 5),
     ]);
     assert_eq!(
@@ -209,11 +216,11 @@ fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
 #[test]
 fn the_merge_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest() {
     let state = state_from_tombstones(vec![
-        tombstone_set(InodeId(7), 5, "notes.txt"),
+        tombstone_set(InodeId(7), 5, "notes.txt", InodeKind::File),
         tombstone_revoke(InodeId(7), 9, 5),
-        tombstone_set(InodeId(9), 10, "old.txt"),
-        tombstone_set(InodeId(8), 11, "report.txt"),
-        tombstone_set(InodeId(7), 12, "notes.txt"),
+        tombstone_set(InodeId(9), 10, "old.txt", InodeKind::File),
+        tombstone_set(InodeId(8), 11, "report.txt", InodeKind::File),
+        tombstone_set(InodeId(7), 12, "notes.txt", InodeKind::File),
     ]);
     let mut rows_by_family = std::collections::BTreeMap::from([(
         ApiMetadataRowFamily::ActiveDeletions,
@@ -422,7 +429,10 @@ fn trash_by_walking_every_tombstone(
         .filter_map(|(root_inode_id, records)| {
             let active = hiding_tombstone_from_records(records, head_seq)
                 .filter(|active| active.committed_seq > retention_floor_seq)?;
-            let TombstoneRowAction::Set { deleted_binding } = active.action else {
+            let TombstoneRowAction::Set {
+                deleted_binding, ..
+            } = active.action
+            else {
                 return None;
             };
             Some(TrashEntry {

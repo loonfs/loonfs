@@ -105,7 +105,10 @@ fn compacted_bindings_state(namespace_id: &NamespaceId) -> MetadataState {
         ..binding(ROOT, KEEP, "keep", 5)
     });
     builder.push_direntry_binding(binding(KEEP, KEPT_FILE, "a.txt", 1));
-    for tombstone in [tombstone_set(OLD, 3, "old"), tombstone_set(KEEP, 5, "keep")] {
+    for tombstone in [
+        tombstone_set(OLD, 3, "old", InodeKind::Directory),
+        tombstone_set(KEEP, 5, "keep", InodeKind::Directory),
+    ] {
         builder.push_subtree_tombstone(tombstone);
     }
     for inode_id in [NOTES, KEPT_FILE] {

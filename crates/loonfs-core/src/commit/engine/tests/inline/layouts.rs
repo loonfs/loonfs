@@ -1464,8 +1464,11 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             .segments
             .scan_range_page_with_keys(
                 MetadataRowFamily::ContentLayouts,
-                &format!("content-layout-{}-", content_ref.content_id),
-                Some(&format!("content-layout-{}.", content_ref.content_id)),
+                &format!("content-layout-{}-", content_ref.content_id.body()),
+                Some(&format!(
+                    "content-layout-{}.",
+                    content_ref.content_id.body()
+                )),
                 32,
             )
             .await

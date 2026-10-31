@@ -60,22 +60,21 @@ async fn pin_fold_reads(
         .await
         .expect("create namespace");
     let namespace = runtime.open_namespace(&demo()).expect("open namespace");
-    for path in ["/first", "/second"] {
+    for path in ["/first.log", "/second.log"] {
         namespace
-            .create_directory(path, &test_actor())
+            .put_file(path, b"first line\n", &test_actor())
             .await
-            .expect("create directory");
+            .expect("put log");
     }
     let maintenance = runtime.maintenance(writer_id("pin-maintenance"));
-    maintenance
-        .fold_wal(&demo())
-        .await
-        .expect("fold directories");
-    for path in ["/first", "/second"] {
+    maintenance.fold_wal(&demo()).await.expect("fold logs");
+    // Each append extends its folded chain, so the fold that writes the
+    // appended bytes reads the chain's layout from the folded segments.
+    for path in ["/first.log", "/second.log"] {
         namespace
-            .delete_path(path, &test_actor())
+            .append_file(path, b"next line\n", &test_actor())
             .await
-            .expect("delete directory");
+            .expect("append to log");
     }
     assert!(
         loonfs_core::test_support::namespace_store(store.as_ref(), &demo())
@@ -153,7 +152,10 @@ async fn folds_and_pin_folds_use_the_shared_pool_and_segment_cache() {
         let default_memo_reads =
             pin_fold_reads(creation, crate::DEFAULT_MAX_READ_WORKING_BYTES, 0).await;
         let warm_cache_reads = pin_fold_reads(creation, 1, 1024 * 1024).await;
-        assert!(default_memo_reads > 0, "{creation:?} reads deletion roots");
+        assert!(
+            default_memo_reads > 0,
+            "{creation:?} reads the chains' layouts"
+        );
         assert!(
             small_memo_reads > default_memo_reads,
             "{creation:?}: a one-byte memo must reread blocks: {small_memo_reads} against {default_memo_reads}"

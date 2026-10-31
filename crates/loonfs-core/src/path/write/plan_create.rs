@@ -98,7 +98,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     ) -> Result<CompiledFilesystemOperation> {
         let deletion = self.view.metadata.recoverable_deletion(inode_id).await?;
         let deleted_binding = match deletion.map(|record| record.action) {
-            Some(TombstoneRowAction::Set { deleted_binding }) => deleted_binding,
+            Some(TombstoneRowAction::Set {
+                deleted_binding, ..
+            }) => deleted_binding,
             _ => {
                 let authorization_target = self
                     .view

@@ -176,6 +176,7 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
     vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode_id,
+        root_kind: loonfs_types::InodeKind::Directory,
         deleted_binding: DeletedBinding {
             parent_inode_id: ROOT_INODE_ID,
             name_key: NameKey::parse("docs").expect("valid name key"),

@@ -2,9 +2,7 @@
 
 use super::frame::WalObjectError;
 use crate::heap_bytes::{arc_bytes, hash_map_table_bytes, HeapBytes};
-use crate::metadata::{
-    CommitReceiptRecord, ContentLayoutRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
-};
+use crate::metadata::{CommitReceiptRecord, ContentLayoutRecord, MetadataState, RevisionRecord};
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
 use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
@@ -240,12 +238,6 @@ impl ProjectedWalTail {
         self.chunks
             .iter()
             .flat_map(|chunk| chunk.rows.content_layouts())
-    }
-
-    pub(crate) fn subtree_tombstones(&self) -> impl Iterator<Item = &SubtreeTombstoneRecord> {
-        self.chunks
-            .iter()
-            .flat_map(|chunk| chunk.rows.subtree_tombstones())
     }
 
     pub(crate) fn find_commit_receipt(&self, commit_id: &CommitId) -> Option<&CommitReceiptRecord> {
