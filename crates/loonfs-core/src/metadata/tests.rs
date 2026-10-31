@@ -217,7 +217,6 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
                 display_name: loonfs_types::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
                 revision: Some(crate::test_support::revision_summary()),
-                subtree_seq: None,
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::File,
@@ -287,7 +286,6 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                     display_name: loonfs_types::DisplayName::parse("docs")
                         .expect("valid display name"),
                     revision: None,
-                    subtree_seq: Some(ChangeSeq(1)),
                 },
                 child_inode_id: InodeId(2),
                 child_kind: loonfs_types::InodeKind::Directory,
@@ -310,7 +308,6 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                     display_name: loonfs_types::DisplayName::parse("report.txt")
                         .expect("valid display name"),
                     revision: Some(crate::test_support::revision_summary()),
-                    subtree_seq: None,
                 },
                 child_inode_id: InodeId(3),
                 child_kind: loonfs_types::InodeKind::File,
@@ -491,7 +488,6 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                     display_name: loonfs_types::DisplayName::parse("report")
                         .expect("valid display name"),
                     revision: Some(crate::test_support::revision_summary()),
-                    subtree_seq: None,
                 },
                 child_inode_id: InodeId(2),
                 child_kind: loonfs_types::InodeKind::File,
@@ -532,7 +528,6 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                     display_name: loonfs_types::DisplayName::parse("report")
                         .expect("valid display name"),
                     revision: Some(crate::test_support::revision_summary()),
-                    subtree_seq: None,
                 },
                 child_inode_id: InodeId(3),
                 child_kind: loonfs_types::InodeKind::File,
@@ -602,7 +597,6 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
                 display_name: loonfs_types::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
                 revision: Some(crate::test_support::revision_summary()),
-                subtree_seq: None,
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::File,
@@ -1215,7 +1209,6 @@ fn has_visible_children_sees_through_unbinds() {
                 display_name: loonfs_types::DisplayName::parse("doc.txt")
                     .expect("valid display name"),
                 revision: Some(crate::test_support::revision_summary()),
-                subtree_seq: None,
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::File,

@@ -6,7 +6,8 @@
 use super::*;
 use loonfs_types::DisplayName;
 
-/// The subtree sequence of the directory at `path` in `state` at `seq`.
+/// The subtree sequence of the directory at `path` in `state` at `seq`: the
+/// sequence of its edge's newest slot-index row at `seq`.
 fn subtree_seq_at(state: &MetadataState, path: &str, seq: ChangeSeq) -> ChangeSeq {
     let resolved = state
         .resolve_visible_path(&AbsolutePath::parse(path).expect("path"), seq)
@@ -20,8 +21,9 @@ fn subtree_seq_at(state: &MetadataState, path: &str, seq: ChangeSeq) -> ChangeSe
             &NameKey::for_display_name(&display_name),
             seq,
         )
-        .and_then(|binding| binding.subtree_seq())
-        .expect("a bound directory row has a subtree sequence")
+        .filter(|binding| binding.is_bound())
+        .expect("the directory is bound")
+        .committed_seq
 }
 
 /// Checks that a namespace folded twice reports the subtree sequences of an

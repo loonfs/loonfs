@@ -592,7 +592,6 @@ mod tests {
         record.state = loonfs_types::format::manifest::DirentryBindingState::Bound {
             display_name: DisplayName::parse("docs").expect("display name"),
             revision: None,
-            subtree_seq: Some(ChangeSeq(seq)),
         };
         MetadataRow::DirentryBinding(record)
     }

@@ -354,7 +354,6 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
                 revision: None,
-                subtree_seq: Some(ChangeSeq(seq)),
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -425,7 +424,6 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
                 revision: None,
-                subtree_seq: Some(ChangeSeq(1)),
             },
             child_inode_id: InodeId(2),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -795,11 +793,14 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
             .expect("the parity checks accept the slot index's subtree row");
-    assert!(materialized
-        .metadata_state
-        .direntry_binds()
-        .iter()
-        .any(|row| row.subtree_seq().is_some() && !row.is_binding_event()));
+    assert!(
+        materialized
+            .metadata_state
+            .direntry_binds()
+            .iter()
+            .any(|row| row.child_kind == loonfs_types::InodeKind::Directory
+                && !row.is_binding_event())
+    );
     let base = base_tier(&materialized.manifest);
     let child_binds = base
         .iter()

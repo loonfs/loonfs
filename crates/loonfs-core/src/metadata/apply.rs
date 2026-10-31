@@ -109,9 +109,6 @@ impl MetadataState {
                     state: DirentryBindingState::Bound {
                         display_name: display_name.clone(),
                         revision: revision.clone(),
-                        // A directory's new edge starts at the bind's own
-                        // sequence.
-                        subtree_seq: (*child_kind == InodeKind::Directory).then_some(committed_seq),
                     },
                 });
             }
@@ -198,7 +195,6 @@ impl MetadataState {
                             revision_committed_by: actor.clone(),
                             revision_committed_at_ms: committed_at_ms,
                         }),
-                        subtree_seq: None,
                     },
                 });
             }
@@ -213,7 +209,8 @@ impl MetadataState {
                 bind_position,
             } => {
                 // The subtree row of the directory's edge, which the slot
-                // index stores and the child index doesn't.
+                // index stores and the child index doesn't. Its sequence is
+                // the directory's new subtree sequence.
                 self.push_direntry_binding_record(DirentryBindingRecord {
                     parent_inode_id: *parent_inode_id,
                     name_key: name_key.clone(),
@@ -230,7 +227,6 @@ impl MetadataState {
                     state: DirentryBindingState::Bound {
                         display_name: display_name.clone(),
                         revision: None,
-                        subtree_seq: Some(committed_seq),
                     },
                 });
             }

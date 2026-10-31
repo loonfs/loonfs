@@ -680,7 +680,6 @@ async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_curre
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name,
                 revision: None,
-                subtree_seq: Some(ChangeSeq(1)),
             },
             child_inode_id,
             child_kind: InodeKind::Directory,

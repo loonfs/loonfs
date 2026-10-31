@@ -20,8 +20,8 @@ use loonfs_types::{InodeId, InodeKind, NameKey};
 #[derive(Debug, Clone)]
 pub(crate) struct VisibleChildEntry {
     /// The edge's value at the session's sequence: a bound slot-index row,
-    /// which includes a file's revision summary or a directory's subtree
-    /// sequence.
+    /// which includes a file's revision summary, and whose sequence is a
+    /// directory's subtree sequence.
     pub(crate) binding: DirentryBindingRecord,
 }
 

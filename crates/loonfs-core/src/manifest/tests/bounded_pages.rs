@@ -35,7 +35,6 @@ pub(super) fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                     revision: Some(crate::test_support::revision_summary()),
-                    subtree_seq: None,
                 },
                 child_inode_id: InodeId(u128::from(index as u64 + 2)),
                 child_kind: loonfs_types::InodeKind::File,
@@ -742,7 +741,6 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         binding.state = loonfs_types::format::manifest::DirentryBindingState::Bound {
             display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
             revision: Some(crate::test_support::revision_summary()),
-            subtree_seq: None,
         };
     }
     let mut descriptor = segment(&store, &expected).await;

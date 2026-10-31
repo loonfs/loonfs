@@ -1385,7 +1385,6 @@ async fn install_synthetic_bindings_base(
                 state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                     revision: Some(crate::test_support::revision_summary()),
-                    subtree_seq: None,
                 },
                 child_inode_id: InodeId(u128::from(100_000 + index)),
                 child_kind: loonfs_types::InodeKind::File,

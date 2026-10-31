@@ -38,7 +38,6 @@ fn binding(parent: InodeId, child: InodeId, name: &str, seq: u64) -> DirentryBin
             display_name,
             revision: matches!(child, NOTES | KEPT_FILE)
                 .then(crate::test_support::revision_summary),
-            subtree_seq: (!matches!(child, NOTES | KEPT_FILE)).then_some(ChangeSeq(seq)),
         },
         child_inode_id: child,
         child_kind: if matches!(child, NOTES | KEPT_FILE) {

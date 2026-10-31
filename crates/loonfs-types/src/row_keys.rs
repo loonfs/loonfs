@@ -625,7 +625,6 @@ mod tests {
                     revision_committed_by: crate::ActorId::loonfs(),
                     revision_committed_at_ms: 4_200,
                 }),
-                subtree_seq: None,
             },
             child_inode_id: InodeId(42),
             child_kind: crate::InodeKind::File,

@@ -602,7 +602,6 @@ mod tests {
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
                 revision: Some(crate::test_support::revision_summary()),
-                subtree_seq: None,
             },
             child_inode_id: InodeId(42),
             child_kind: loonfs_types::InodeKind::File,

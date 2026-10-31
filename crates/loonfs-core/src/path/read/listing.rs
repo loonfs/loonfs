@@ -494,8 +494,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<PathEntry> {
         let resolved = &child.resolved;
         let kind = match resolved.inode_kind {
+            // The edge's newest row at the read's sequence is the binding
+            // row, and its sequence is the directory's subtree sequence.
             InodeKind::Directory => PathEntryKind::Directory {
-                subtree_seq: listed_subtree_seq(&child.binding)?,
+                subtree_seq: child.binding.committed_seq,
             },
             InodeKind::File => {
                 let revision = child.binding.revision().ok_or_else(|| {
@@ -523,7 +525,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
     /// Returns the subtree sequence of the directory `resolved` at this
     /// view's sequence: the head sequence for the root, which has no edge
-    /// row, and otherwise the sequence in the directory's slot-index row
+    /// row, and otherwise the sequence of the commit that wrote the newest
+    /// row of the directory's edge in the slot index
     /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
     ///
     /// A path's resolution read that row, so a stat by path finds it in the
@@ -554,7 +557,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     resolved.inode_id
                 ))
             })?;
-        listed_subtree_seq(&binding)
+        Ok(binding.committed_seq)
     }
 
     /// Assembles an entry of `resolved` with `kind`.
@@ -629,16 +632,6 @@ impl ListedChild {
             readable: scanned.readable,
         }
     }
-}
-
-/// Returns the subtree sequence in a bound directory's slot-index row.
-fn listed_subtree_seq(binding: &DirentryBindingRecord) -> Result<ChangeSeq> {
-    binding.subtree_seq().ok_or_else(|| {
-        CoreError::NamespaceCorrupt(format!(
-            "the binding of directory `{}` under directory `{}` has no subtree sequence",
-            binding.child_inode_id, binding.parent_inode_id
-        ))
-    })
 }
 
 /// Resolves the path of `binding`'s child, a visible child of `directory`.

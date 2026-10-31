@@ -222,8 +222,8 @@ pub struct InodeRecord {
 }
 
 /// Stores one value of a directory edge: a binding event in both binding
-/// indexes, or a file's revision summary or a directory's subtree sequence in
-/// the slot index.
+/// indexes, or a file's summary row or a directory's subtree row in the slot
+/// index.
 ///
 /// See [directory bindings](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,7 +241,10 @@ pub struct DirentryBindingRecord {
     pub child_created_by: crate::ActorId,
     /// Unix milliseconds of the child's creating commit.
     pub child_created_at_ms: u64,
-    /// Commit that wrote this row.
+    /// Commit that wrote this row. In the slot index, a bound directory's
+    /// newest row at a read's sequence was written by the commit that last
+    /// changed the directory's binding or anything below it, so this is the
+    /// directory's subtree sequence.
     pub committed_seq: ChangeSeq,
     /// Order within the commit.
     pub delta_index: u32,
@@ -286,15 +289,6 @@ impl DirentryBindingRecord {
         }
     }
 
-    /// Returns the bound directory's subtree sequence, which a file, an
-    /// unbound row, and a corrupt directory row don't have.
-    pub fn subtree_seq(&self) -> Option<ChangeSeq> {
-        match &self.state {
-            DirentryBindingState::Bound { subtree_seq, .. } => *subtree_seq,
-            DirentryBindingState::Unbound => None,
-        }
-    }
-
     /// Returns whether the slot has a child at this position.
     pub fn is_bound(&self) -> bool {
         matches!(self.state, DirentryBindingState::Bound { .. })
@@ -321,11 +315,6 @@ pub enum DirentryBindingState {
         /// The file's current revision as of this row. A directory has none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revision: Option<RevisionSummary>,
-        /// The directory's subtree sequence as of this row: the sequence of
-        /// the commit that wrote the row, which bound the directory or
-        /// advanced its subtree sequence. A file has none.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        subtree_seq: Option<ChangeSeq>,
     },
     /// The slot is available.
     Unbound,

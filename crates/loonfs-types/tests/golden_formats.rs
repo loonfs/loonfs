@@ -2237,7 +2237,6 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
                 revision: Some(sample_revision_summary()),
-                subtree_seq: None,
             },
             child_inode_id: InodeId(2),
             child_kind: InodeKind::File,
@@ -2260,7 +2259,6 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
                 display_name: loonfs_types::DisplayName::parse("docs-archive")
                     .expect("valid display name"),
                 revision: None,
-                subtree_seq: Some(ChangeSeq(6)),
             },
             child_inode_id: InodeId(5),
             child_kind: loonfs_types::InodeKind::Directory,
@@ -3180,19 +3178,17 @@ fn sample_binding_rows() -> Vec<MetadataRow> {
             revision_no: RevisionNo(revision_no),
             ..sample_revision_summary()
         }),
-        subtree_seq: None,
     };
-    let directory = |subtree_seq: u64| DirentryBindingState::Bound {
+    let directory = DirentryBindingState::Bound {
         display_name: loonfs_types::DisplayName::parse("Reports").expect("display name"),
         revision: None,
-        subtree_seq: Some(ChangeSeq(subtree_seq)),
     };
     vec![
         sample_binding_row(InodeKind::File, file(1), 3, 1, (3, 1)),
-        sample_binding_row(InodeKind::Directory, directory(3), 3, 2, (3, 2)),
+        sample_binding_row(InodeKind::Directory, directory.clone(), 3, 2, (3, 2)),
         sample_binding_row(InodeKind::File, file(2), 4, 0, (3, 1)),
         sample_binding_row(InodeKind::File, DirentryBindingState::Unbound, 5, 0, (3, 1)),
-        sample_binding_row(InodeKind::Directory, directory(6), 6, 0, (3, 2)),
+        sample_binding_row(InodeKind::Directory, directory, 6, 0, (3, 2)),
     ]
 }
 
