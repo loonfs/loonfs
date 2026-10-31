@@ -87,7 +87,7 @@ later numbered WAL -> committed changes ---+            |
 
 A new namespace's first manifest describes only the root directory. A fork's first manifest lists the metadata runs it inherited from its source.
 
-LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records the content's owner namespace, a content ID, a size, and a checksum. The owner and content ID determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
+LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records a content ID, a size, and a checksum. The content ID and the namespace's family root, which its manifest records, determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
 
 Directory listings use committed metadata for names and file sizes, so listing a directory doesn't download any files. Reading a file verifies its complete size and checksum. If an object needed to recover the namespace is missing or corrupt, the read fails.
 
@@ -99,7 +99,7 @@ Why fail instead of reading an older version of the files? A fallback would retu
 
 A "fork" is a new namespace that starts as a copy of another namespace at one point in its history. To create one, LoonFS writes and verifies a [pin](glossary.md#pin) on the source's manifest, and then writes the fork's manifest 1, which lists the source's metadata runs. The fork shares the source's content and metadata objects, so nothing is copied (and the cost of a fork doesn't depend on how much data the source stores). Forking the source's current head may first fold the source's WAL tail, which writes its inline content to content objects. After the fork, commits to one namespace never appear in the other.
 
-A fork can keep reading objects owned by its source and the source's ancestors. When the fork publishes its own manifests, those objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
+A fork and its source belong to one fork family, and every member of the family stores its content objects under the family root's prefix, so the fork reads inherited content and content of its own with the same kind of key. When the fork publishes its own manifests, the inherited objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
 
 A snapshot is a pin too. A caller creates a snapshot to keep one version of a namespace readable, and the read endpoints and forks accept its `snapshot_id`. A snapshot can have an expiry time, or none. Each create call writes a new pin with a new ID, so a snapshot's name is a label, not a key (two snapshots can have the same name). The maintenance API's checkpoint inventory lists every pin, snapshots and fork pins, so an operator can see what keeps old manifests.
 
@@ -121,6 +121,6 @@ An expired snapshot still protects its manifest until garbage collection deletes
 
 Deleting a file records a subtree tombstone, which can be undone. Deleting a namespace publishes a final manifest with a deleted status. Neither one deletes shared content right away.
 
-A deleted namespace's own content is deleted when the namespace is retired, which happens once a grace period has passed and no pins on the namespace remain (see [Retirement](format.md#95-retirement)). Retirement also deletes a fork's pin on its source (see [Sweeping a retired owner's content](format.md#118-sweeping-a-retired-owners-content)).
+A namespace is retired once a grace period has passed and no pins on the namespace remain (see [Retirement](format.md#95-retirement)). Retiring a fork deletes its pin on its source. Retiring a family root, which can happen only after every fork of it is retired, deletes the family's content (see [Sweeping a retired owner's content](format.md#118-sweeping-a-retired-owners-content)).
 
 Hosts decide when maintenance runs and which namespaces it covers. The format defines what each operation can publish or delete. Extensions such as grep have their own manifests and garbage collection rules, and core garbage collection never deletes their objects.

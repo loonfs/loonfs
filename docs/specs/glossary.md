@@ -114,21 +114,25 @@ A deleted namespace's final manifest, which records that the namespace was delet
 
 ### Content object
 
-An immutable object that stores file bytes, under the owner namespace's prefix (`namespaces/{owner_namespace_id}/content/`). A file's bytes can be stored in one content object or spread across several. See [File contents and ownership](format.md#15-file-contents-and-ownership).
+An immutable object that stores file bytes, under the family root's prefix (`namespaces/{family_root_id}/content/`). A file's bytes can be stored in one content object or spread across several. See [File contents and ownership](format.md#15-file-contents-and-ownership).
 
 ### Content reference
 
-The record in a file revision that identifies its bytes: the owner namespace, a content ID, a size, and a checksum. A content reference identifies content, but it doesn't prove that a content object contains those bytes yet (they may still be stored in the WAL).
+The record in a file revision that identifies its bytes: a content ID, a size, and a checksum. The reader's manifest supplies the family root, so a reference identifies the same object in every member of a fork family. A content reference identifies content, but it doesn't prove that a content object contains those bytes yet (they may still be stored in the WAL).
 
 ### Chain
 
 The bytes stored under one content ID. A chain grows when a file is appended to, and each content reference identifies a prefix of the chain. For example, a log file's first revision might refer to the first 100 bytes of chain A. After two appends, revisions 2 and 3 might refer to the first 200 and the first 210 bytes of the same chain.
 
+### Chain creator
+
+The namespace whose commit started a chain, recorded in the chain's layout row. Only the creator's commits extend the chain in place. When another member of the fork family appends to the chain, LoonFS starts a new chain that lists the first chain's extents as shared base extents. See [Operations and WAL deltas](format.md#66-operations-and-wal-deltas).
+
 ### Extent
 
 A byte range of one content object that stores part of a chain. Content objects are immutable, so the bytes appended to a chain are written to new content objects, and a chain's bytes usually end up spread across several objects. Each extent records which content object it's in, the offset in that object, and the length.
 
-Most extents are "own extents", which store bytes written for the chain itself. A "shared base extent" stores bytes of an earlier chain that this chain was started from. For example, a fork inherits `/log.txt`, whose bytes are in a content object owned by the source namespace. The fork doesn't own that chain, so when it appends 10 bytes to the file, it starts a new chain. The new chain's layout lists the source's object as a shared base extent, followed by an own extent that stores the 10 new bytes. A fold never merges a shared base extent with other extents, so the shared bytes are never copied.
+Most extents are "own extents", which store bytes written for the chain itself. A "shared base extent" stores bytes of an earlier chain that this chain was started from. For example, a fork inherits `/log.txt`, whose chain the source namespace created. The fork isn't the chain's creator, so when it appends 10 bytes to the file, it starts a new chain. The new chain's layout lists the first chain's object as a shared base extent, followed by an own extent that stores the 10 new bytes. A fold never merges a shared base extent with other extents, so the shared bytes are never copied.
 
 ### Layout
 
@@ -156,7 +160,7 @@ An object that an assembly writes for intermediate results (for example, when GC
 
 ### Upload session
 
-The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
+The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. Both records are stored under the family root's prefix, and each one records the namespace that created the session. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
 
 ### Admission evidence
 
@@ -164,7 +168,7 @@ Proof that a content reference's bytes were verified in a completed upload. A co
 
 ### Content root
 
-A reference that keeps a namespace's content objects from being deleted. There are three kinds: the layouts in a manifest that garbage collection protects, the WAL tail, and upload session records. See [Content roots](format.md#119-content-roots).
+A reference that keeps a fork family's content objects from being deleted. A root in any member of the family counts. There are three kinds: the layouts in a manifest that garbage collection protects, the WAL tail, and upload session records. See [Content roots](format.md#119-content-roots).
 
 ## Metadata storage
 
@@ -241,7 +245,15 @@ The maintenance API's "checkpoint" inventory lists every pin of a namespace, so 
 
 ### Fork
 
-A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. After the fork, commits to one namespace never appear in the other. See [Forking a namespace](format.md#92-forking-a-namespace).
+A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's fork family, so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace never appear in the other. See [Forking a namespace](format.md#92-forking-a-namespace).
+
+### Fork family
+
+A namespace that was created without a source, and every namespace forked from it, directly or through other forks. The members of a family store their content objects and upload records under one prefix, the family root's, so a content reference identifies the same object in every member, and one garbage collection pass collects the family's content. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+
+### Family root
+
+The member of a fork family that was created without a source. Every manifest in the family records it (`family_root_id`), and its prefix stores the family's content objects and upload records. A family root can't be retired while any fork of it exists. See [File contents and ownership](format.md#15-file-contents-and-ownership).
 
 ### Writer position
 
@@ -313,7 +325,7 @@ How old an unreferenced manifest, WAL object, content object, or temporary objec
 
 ### Namespace retirement
 
-The point at which a deleted namespace's own content, and its pin on its source if it's a fork, can be deleted. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
+The point at which a deleted fork's pin on its source is deleted, and a deleted family root's content prefix is swept. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
 
 ## API
 
