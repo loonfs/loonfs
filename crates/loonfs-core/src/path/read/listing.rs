@@ -494,8 +494,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<PathEntry> {
         let resolved = &child.resolved;
         let kind = match resolved.inode_kind {
-            // The edge's newest row at the read's sequence is the binding
-            // row, and its sequence is the directory's subtree sequence.
+            // The child's binding is its edge's newest row at the read's
+            // sequence, so the row's `committed_seq` is the directory's
+            // subtree sequence.
             InodeKind::Directory => PathEntryKind::Directory {
                 subtree_seq: child.binding.committed_seq,
             },

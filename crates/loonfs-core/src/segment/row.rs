@@ -106,8 +106,8 @@ pub(crate) fn manifest_rows_for_family(
 /// are in row-key order, and drops the edge's older subtree rows.
 ///
 /// A fold writes the rows of the commits it folds, so a directory edge keeps
-/// its subtree sequence as of the fold's last commit, and a read at a
-/// sequence inside the fold's range can find an older subtree sequence
+/// its subtree sequence as of the fold's last commit. A read at a sequence
+/// inside the fold's range can then find an older subtree sequence
 /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
 /// The binding events and the summary rows stay.
 fn keep_newest_subtree_rows(rows: &mut Vec<MetadataRow>) {
@@ -134,8 +134,8 @@ fn keep_newest_subtree_rows(rows: &mut Vec<MetadataRow>) {
     });
 }
 
-/// Returns whether an `advance_subtree` delta wrote `binding`: a directory
-/// row that isn't a binding event.
+/// Returns whether an `advance_subtree` delta wrote `binding`, which is true
+/// of a directory row that isn't a binding event.
 fn is_subtree_row(binding: &DirentryBindingRecord) -> bool {
     binding.child_kind == InodeKind::Directory && !binding.is_binding_event()
 }

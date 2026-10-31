@@ -1,5 +1,5 @@
-//! The `advance_subtree` deltas that end a commit: one for each ancestor
-//! directory, below the root, of every inode that the commit changes
+//! The `advance_subtree` deltas that end a commit, one for each directory
+//! below the root that is an ancestor of an inode that the commit changes
 //! ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
 
 use super::session::CommitValidationSession;
@@ -50,8 +50,8 @@ impl FirstAncestor {
 #[derive(Default)]
 struct AncestorWalks {
     /// The depth of every directory that a walk reached, counted from the
-    /// top of its walk: the root's child, or a directory whose edge the
-    /// commit unbound, which is at depth 0.
+    /// top of its walk, which is at depth 0: the root, or a directory whose
+    /// edge the commit unbound.
     depths: HashMap<InodeId, usize>,
     /// The current edge of each directory to advance, with its depth, in the
     /// order that the walks reached the directories, parents first.
@@ -62,14 +62,13 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     /// Returns the `advance_subtree` deltas that follow `deltas`, the deltas
     /// of the commit's operations, and adds their rows to the commit's rows.
     ///
-    /// Every ancestor directory of every inode that `deltas` change, from the
-    /// inode's parent up to the root and excluding it, gets one delta under
-    /// its current edge after the operations. A directory whose current edge
-    /// this commit bound gets none, because its bind row already has the
-    /// commit's sequence. A directory whose edge this commit unbound gets
-    /// none either, and its ancestors are advanced through the unbind's
-    /// parent. The deltas are ordered by the directory's depth, parents
-    /// first.
+    /// Each directory below the root that is an ancestor of an inode that
+    /// `deltas` change gets one delta under its current edge, after the
+    /// operations. A directory whose current edge this commit bound gets
+    /// none, because its bind row already has the commit's sequence. A
+    /// directory whose edge this commit unbound gets none either, and its
+    /// ancestors are advanced through the unbind's parent. The deltas are
+    /// ordered by the directory's depth, parents first.
     pub(crate) async fn advance_subtrees(
         &mut self,
         deltas: &[WalCommitDelta],
@@ -96,8 +95,8 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         if walks.advanced.is_empty() {
             return Ok(Vec::new());
         }
-        // A stable sort keeps the order the walks reached directories in
-        // within one depth.
+        // A stable sort keeps the directories of one depth in the order that
+        // the walks reached them.
         walks.advanced.sort_by_key(|(depth, _)| *depth);
         let op_index = self.numbering.reserve_op_index()?;
         let mut advances = Vec::with_capacity(walks.advanced.len());
@@ -133,7 +132,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     /// walk refuses a parent-binding cycle, so the walks of one commit read
     /// each directory's binding at most once. Commit validation reads the
     /// same bindings when it checks that no tombstone covers a target, so
-    /// these reads find them cached.
+    /// these reads find the bindings cached.
     async fn walk_ancestors(&self, first: InodeId, walks: &mut AncestorWalks) -> Result<()> {
         let mut reads = self.view().reads();
         let mut walk = AncestorWalk::new(first);

@@ -586,8 +586,9 @@ fn single_line(message: &str) -> String {
     message.lines().collect::<Vec<_>>().join(" | ")
 }
 
-/// One listed entry: its kind, a file's size, a directory's subtree
-/// sequence, its creation time and actor, and its path.
+/// Renders one listed entry as tab-separated columns: its kind, a file's
+/// size, a directory's subtree sequence, its creation time and actor, and
+/// its path.
 pub(crate) fn human_path_entry(entry: &loonfs_types::PathEntry) -> String {
     let size = entry
         .size_bytes()

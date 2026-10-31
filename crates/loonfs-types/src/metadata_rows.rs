@@ -243,8 +243,8 @@ pub struct DirentryBindingRecord {
     pub child_created_at_ms: u64,
     /// Commit that wrote this row. In the slot index, a bound directory's
     /// newest row at a read's sequence was written by the commit that last
-    /// changed the directory's binding or anything below it, so this is the
-    /// directory's subtree sequence.
+    /// changed the directory's binding or anything below it, so that row's
+    /// `committed_seq` is the directory's subtree sequence.
     pub committed_seq: ChangeSeq,
     /// Order within the commit.
     pub delta_index: u32,

@@ -295,12 +295,13 @@ pub enum WalDelta {
         /// The inode's complete direct grants after this update.
         grants: AccessGrants,
     },
-    /// Advances one directory's subtree sequence to this delta's commit.
+    /// Advances one directory's subtree sequence to this delta's commit
+    /// sequence.
     ///
     /// Replay writes a subtree row under the directory's current edge in the
     /// slot index, so the delta records that edge, the way a revision delta
-    /// records the file's edge. A commit writes one for each ancestor
-    /// directory of every inode it changes, after its other deltas
+    /// records the file's edge. A commit writes one of these deltas for each
+    /// ancestor directory of the inodes it changes, after its other deltas
     /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
     AdvanceSubtree {
         /// Stable position of this delta within its commit.
@@ -345,7 +346,7 @@ pub struct WalCommitDelta {
 ///
 /// Indices are local to the commit and need not be consecutive. The commit's
 /// `advance_subtree` deltas follow its operations' deltas under an index of
-/// their own, and no operation produced them, so their group is left out.
+/// their own. No operation produced them, so the function skips their group.
 pub fn semantic_operation_groups(
     deltas: &[WalCommitDelta],
 ) -> impl Iterator<Item = &[WalCommitDelta]> {

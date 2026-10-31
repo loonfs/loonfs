@@ -209,8 +209,8 @@ impl MetadataState {
                 bind_position,
             } => {
                 // The subtree row of the directory's edge, which the slot
-                // index stores and the child index doesn't. Its sequence is
-                // the directory's new subtree sequence.
+                // index stores and the child index doesn't. The row's
+                // `committed_seq` is the directory's new subtree sequence.
                 self.push_direntry_binding_record(DirentryBindingRecord {
                     parent_inode_id: *parent_inode_id,
                     name_key: name_key.clone(),
