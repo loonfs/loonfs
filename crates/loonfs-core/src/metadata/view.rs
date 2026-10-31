@@ -166,11 +166,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ///
     /// Use it only when every derived view has a `visible_seq` at or after the
     /// sequence used to load the durable layers. Overlay rows are still applied
-    /// separately for each lookup.
+    /// separately for each lookup. The cache keeps only the manifest's newest
+    /// row of each edge and of each tombstone root, so it doesn't have the
+    /// older row that a view below the manifest's head would read.
     pub(crate) fn with_durable_cache(
         mut self,
         durable_cache: &'a DurableVisibilityCache,
     ) -> MetadataView<'a, 'store, S> {
+        assert!(
+            self.visible_seq >= self.sources.manifest.manifest().payload().head_seq,
+            "a view with a durable cache is at or above its manifest's head"
+        );
         self.sources.durable_cache = Some(durable_cache);
         self
     }
@@ -322,7 +328,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .durable_row_states()
             .find_map(|state| state.inode_at_seq(inode_id, self.visible_seq()));
         if durable.is_none() {
-            durable = manifest_index::inode_at_seq(self.manifest_segments(), inode_id).await?;
+            durable = manifest_index::inode_at_seq(
+                self.manifest_segments(),
+                inode_id,
+                self.visible_seq(),
+            )
+            .await?;
         }
         if let Some(cache) = self.sources.durable_cache {
             cache.insert(|inner| &mut inner.inodes, inode_id, durable.clone());
@@ -346,7 +357,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .cloned();
         Ok(newest(
             row_receipt,
-            manifest_index::commit_receipt(self.manifest_segments(), commit_id).await?,
+            manifest_index::commit_receipt(self.manifest_segments(), commit_id, self.visible_seq())
+                .await?,
             |receipt| receipt.committed_seq,
         ))
     }

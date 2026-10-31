@@ -19,6 +19,7 @@ mod newest_first_lookups;
 mod read_ahead_windows;
 mod retention;
 mod streaming_compaction;
+mod views_below_the_head;
 
 use super::error::ManifestLoadError;
 use super::load::{

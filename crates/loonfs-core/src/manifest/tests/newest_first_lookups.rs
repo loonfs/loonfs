@@ -260,11 +260,15 @@ async fn many_run_fixture() -> ManyRunFixture {
     }
 }
 
-fn newest_revision(merged: &MetadataState, inode_id: InodeId) -> Option<RevisionRecord> {
+fn newest_revision(
+    merged: &MetadataState,
+    inode_id: InodeId,
+    visible_seq: ChangeSeq,
+) -> Option<RevisionRecord> {
     merged
         .revisions()
         .iter()
-        .filter(|record| record.inode_id == inode_id)
+        .filter(|record| record.inode_id == inode_id && record.committed_seq <= visible_seq)
         .max_by_key(|record| (record.revision_no, record.committed_seq, record.delta_index))
         .cloned()
 }
@@ -351,13 +355,11 @@ async fn newest_first_lookups_return_what_the_merge_of_every_run_returns() {
                 newest_access(&merged, inode_id, visible_seq),
                 "{context}"
             );
-            // The revision lookup reads its manifest rows whatever the
-            // view's sequence, so the merge it matches reads them all too.
             assert_eq!(
                 view.latest_revision_record(inode_id)
                     .await
                     .expect("revision"),
-                newest_revision(&merged, inode_id),
+                newest_revision(&merged, inode_id, visible_seq),
                 "{context}"
             );
         }
@@ -396,7 +398,7 @@ async fn visibility_over_newest_first_lookups_matches_the_merge() {
                 .expect("revision head"),
             merged
                 .visible_inode(inode_id, head)
-                .and_then(|_| newest_revision(&merged, inode_id)),
+                .and_then(|_| newest_revision(&merged, inode_id, head)),
             "inode {inode_id:?}"
         );
     }
@@ -580,7 +582,7 @@ async fn a_false_positive_in_a_newer_run_falls_through_to_the_run_with_the_row()
         .await
         .expect("revision");
     assert!(revision.is_some());
-    assert_eq!(revision, newest_revision(&merged, keys.revision));
+    assert_eq!(revision, newest_revision(&merged, keys.revision, head));
     assert!(
         cache.stats().filter_false_positives >= false_positives + 2,
         "both lookups open a delta segment that has no row for the key: {:?}",

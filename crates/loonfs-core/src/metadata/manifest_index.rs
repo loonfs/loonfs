@@ -21,16 +21,20 @@ use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey, RevisionNo};
 
+/// Returns the inode's row if the inode was created at or below
+/// `visible_seq`.
 pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
+    visible_seq: ChangeSeq,
 ) -> Result<Option<InodeRecord>> {
     let key = lookup_keys::inode_key(inode_id);
-    segments
+    Ok(segments
         .find_row(MetadataRowFamily::Inodes, &key, &key)
         .await?
         .map(inode_from_manifest_row)
-        .transpose()
+        .transpose()?
+        .filter(|inode| inode.committed_seq <= visible_seq))
 }
 
 pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
@@ -257,38 +261,40 @@ impl RevisionPagePosition {
     }
 }
 
-/// The inode's revision with the highest number in the manifest, whatever
-/// the read's sequence, as [`super::MetadataView::latest_revision_record`]
-/// expects.
+/// Returns the inode's newest revision at or below `visible_seq`.
+///
+/// An inode's revision numbers increase with the sequence, so the family's
+/// order (highest revision number first) is also newest sequence first, and
+/// the first row at or below `visible_seq` is the newest revision at that
+/// sequence.
 pub(super) async fn latest_revision_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
+    visible_seq: ChangeSeq,
 ) -> Result<Option<RevisionRecord>> {
-    let prefix = lookup_keys::revision_prefix(inode_id);
-    segments
-        .scan_prefix_in_newest_run_for_lookup(
-            MetadataRowFamily::Revisions,
-            &prefix,
-            &prefix,
-            &lookup_keys::revision_probe(inode_id),
-            1,
-            Readahead::Enabled,
-        )
-        .await?
-        .into_iter()
-        .next()
-        .map(|(_, row)| revision_from_manifest_row(row))
-        .transpose()
+    newest_row_by_inode(
+        segments,
+        MetadataRowFamily::Revisions,
+        lookup_keys::revision_prefix(inode_id),
+        lookup_keys::revision_probe(inode_id),
+        visible_seq,
+        revision_from_manifest_row,
+        |record| record.committed_seq,
+    )
+    .await
 }
 
+/// Returns revision `revision_no` of the inode if that revision was
+/// committed at or below `visible_seq`.
 pub(super) async fn revision_by_inode_no<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     revision_no: RevisionNo,
+    visible_seq: ChangeSeq,
 ) -> Result<Option<RevisionRecord>> {
     let exact_prefix = lookup_keys::revision_no_prefix(inode_id, revision_no);
     let filter_probe = lookup_keys::revision_probe(inode_id);
-    segments
+    Ok(segments
         .scan_range_page_for_lookup(
             MetadataRowFamily::Revisions,
             &exact_prefix,
@@ -300,7 +306,8 @@ pub(super) async fn revision_by_inode_no<S: ObjectStore + ?Sized>(
         .into_iter()
         .next()
         .map(revision_from_manifest_row)
-        .transpose()
+        .transpose()?
+        .filter(|revision| revision.committed_seq <= visible_seq))
 }
 
 pub(super) async fn revisions_by_inode_page_desc<S: ObjectStore + ?Sized>(
@@ -380,6 +387,15 @@ pub(super) async fn newest_tombstone_for_root<S: ObjectStore + ?Sized>(
     .await
 }
 
+/// Returns the longest layout of `content_id` in the manifest, whatever the
+/// read's sequence.
+///
+/// Layout rows aren't history, and a longer layout of a chain covers every
+/// shorter prefix, so a read that takes a revision's size from its revision
+/// row locates the same bytes through a layout committed after the read's
+/// sequence. The callers that use a layout's own size or its presence
+/// (append planning and the published-content checks) run on views at or
+/// above the manifest's head.
 pub(super) async fn content_layout<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     content_id: &loonfs_types::ContentId,
@@ -415,9 +431,11 @@ async fn first_content_layout<S: ObjectStore + ?Sized>(
         .transpose()
 }
 
+/// Returns the newest receipt of `commit_id` at or below `visible_seq`.
 pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     commit_id: &CommitId,
+    visible_seq: ChangeSeq,
 ) -> Result<Option<CommitReceiptRecord>> {
     let filter_probe = lookup_keys::commit_receipt_probe(commit_id);
     let prefix = lookup_keys::commit_receipt_prefix(commit_id);
@@ -434,6 +452,7 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
         .collect::<Result<_>>()?;
     Ok(receipts
         .into_iter()
+        .filter(|receipt| receipt.committed_seq <= visible_seq)
         .max_by_key(|receipt| receipt.committed_seq))
 }
 
@@ -476,11 +495,11 @@ pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// The newest row of `inode_id` at or below `visible_seq` in a family whose
-/// keys sort one inode's rows newest first (a whole-state family, which
-/// inverts the revision, the sequence, and the delta index, or
-/// `tombstones`, which inverts the sequence and the delta index), so the
-/// first row at or below the sequence is the result.
+/// Returns the newest row of `inode_id` at or below `visible_seq` in a
+/// family whose keys sort one inode's rows newest first (`revisions` or a
+/// whole-state family, which invert the revision number, the sequence, and
+/// the delta index, or `tombstones`, which inverts the sequence and the
+/// delta index), so the first row at or below the sequence is the result.
 ///
 /// A read that sees every row of the manifest takes the first row of the
 /// newest run that has one. A read below a run's sequence merges every run,
