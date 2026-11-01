@@ -220,8 +220,19 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
     }
 
     /// Classifies `inode_id` by its states at the two ends, and returns its
-    /// entry when the states differ and its path at either end is the
-    /// requested path or below it.
+    /// entry when the states differ and the entry is under the requested
+    /// path.
+    ///
+    /// An entry is under the requested path when the inode's path at either
+    /// end is the requested path or below it. An entry is also under the
+    /// requested path when the inode is a `deleted`, `moved`, or `undeleted`
+    /// directory whose path at either end is above the requested path,
+    /// because the kind applies to everything below the directory, and the
+    /// diff doesn't list those descendants. A directory above the requested
+    /// path is classified by its states and edges, and its revisions at
+    /// `from_seq` are read only for a `moved` entry, so classifying a directory
+    /// above the path that kept its parent and name reads no more than
+    /// classifying an inode outside the path.
     async fn entry(
         &mut self,
         inode_id: InodeId,
@@ -229,18 +240,24 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
     ) -> Result<Option<DiffEntry>> {
         let from = self.from.state(inode_id).await?;
         let to = self.to.state(inode_id).await?;
-        if ![&from, &to]
-            .into_iter()
-            .filter_map(State::visible)
-            .any(|resolved| is_at_or_below(&resolved.absolute_path, &self.subtree))
+        let visible = || [&from, &to].into_iter().filter_map(State::visible);
+        let at_or_below =
+            visible().any(|resolved| is_at_or_below(&resolved.absolute_path, &self.subtree));
+        if !at_or_below
+            && !visible().any(|resolved| {
+                resolved.inode_kind == InodeKind::Directory
+                    && is_above(&resolved.absolute_path, &self.subtree)
+            })
         {
             return Ok(None);
         }
         let (kind, from_revisions) = match (&from, &to) {
-            (State::Absent, State::Visible(_)) => (DiffEntryKind::Created, None),
+            (State::Absent, State::Visible(_)) if at_or_below => (DiffEntryKind::Created, None),
             (State::Hidden, State::Visible(_)) => (DiffEntryKind::Undeleted, None),
             (State::Visible(_), State::Absent | State::Hidden) => (DiffEntryKind::Deleted, None),
-            (State::Visible(from_path), State::Visible(to_path)) => {
+            (State::Visible(from_path), State::Visible(to_path))
+                if at_or_below || edge(from_path) != edge(to_path) =>
+            {
                 let (from_revisions, _) =
                     self.from.revisions(inode_id, from_path.inode_kind).await?;
                 let kind = if edge(from_path) != edge(to_path) {
@@ -252,6 +269,14 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
                 };
                 (kind, Some(from_revisions))
             }
+            // A directory above the requested path that was created, or that
+            // kept its parent and name, isn't an entry. Each inode that a
+            // created directory contains at `to_seq` and that's under the
+            // requested path was created, moved in, or undeleted in the range,
+            // so it's an entry of its own. A change to the directory's own
+            // revisions doesn't change the state of an inode below the
+            // directory.
+            (State::Absent | State::Visible(_), State::Visible(_)) => return Ok(None),
             (State::Absent | State::Hidden, State::Absent | State::Hidden) => return Ok(None),
         };
         let (from, to) = (from.into_visible(), to.into_visible());
@@ -454,11 +479,13 @@ fn name_keys(path: &AbsolutePath) -> Vec<NameKey> {
 /// below it. Names compare by name key, as path lookups compare them, so a
 /// request can spell the path in another case.
 fn is_at_or_below(path: &AbsolutePath, subtree: &[NameKey]) -> bool {
-    path.components().len() >= subtree.len()
-        && name_keys(path)
-            .iter()
-            .zip(subtree)
-            .all(|(name_key, subtree_key)| name_key == subtree_key)
+    path.components().len() >= subtree.len() && name_keys(path).starts_with(subtree)
+}
+
+/// Returns whether `path` is above the path whose name keys are `subtree`,
+/// comparing names as [`is_at_or_below`] does.
+fn is_above(path: &AbsolutePath, subtree: &[NameKey]) -> bool {
+    path.components().len() < subtree.len() && subtree.starts_with(&name_keys(path))
 }
 
 #[cfg(test)]

@@ -7,8 +7,9 @@ use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::test_support::{namespace_store, writer_at, NamespaceFixture};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::{
-    AccessGrants, AccessRight, AccessRights, Commit, CommitId, EntryInodeKind, FilesystemChange,
-    NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, Commit, CommitId,
+    EntryInodeKind, FilesystemChange, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet,
+    Subject, SubjectId,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -480,6 +481,161 @@ async fn a_subtree_moved_in_from_outside_the_path_appears_once_as_moved() {
         .diff(from_seq, "/inside/kept.txt", 1000)
         .await
         .is_empty());
+}
+
+/// Checks that a diff of a moved directory's path, or of a path below it
+/// before the move or after it, reports the move.
+#[tokio::test]
+async fn a_move_of_a_directory_above_the_path_is_an_entry() {
+    let history = History::unrestricted().await;
+    history.write("/a/b/file.txt").await;
+    let from_seq = history.write("/other/kept.txt").await.committed_seq;
+    history.move_path("/a", "/x").await;
+    let directory = history.inode_id("/x").await;
+
+    for path in ["/a/b", "/x/b", "/X/B", "/a/b/file.txt", "/a", "/x"] {
+        let entries = history.diff(from_seq, path, 1000).await;
+        let summaries: Vec<_> = entries.iter().map(summary).collect();
+        assert_eq!(
+            summaries,
+            [(DiffEntryKind::Moved, Some("/x"), Some("/a"))],
+            "under {path}"
+        );
+        assert_eq!(entries[0].inode_id, directory, "under {path}");
+    }
+    assert!(history.diff(from_seq, "/other", 1000).await.is_empty());
+}
+
+/// Checks that a diff of a path below a directory reports the directory's
+/// deletion, and its undelete in place.
+#[tokio::test]
+async fn a_deletion_or_undelete_of_a_directory_above_the_path_is_an_entry() {
+    let history = History::unrestricted().await;
+    let written = history.write("/a/b/file.txt").await.committed_seq;
+    let directory = history.inode_id("/a").await;
+    let deletion = history.delete("/a").await;
+    let deleted = history.diff(written, "/a/b", 1000).await;
+    let summaries: Vec<_> = deleted.iter().map(summary).collect();
+    assert_eq!(summaries, [(DiffEntryKind::Deleted, None, Some("/a"))]);
+    assert_eq!(deleted[0].inode_id, directory);
+
+    history
+        .commit(FilesystemOperation::Undelete {
+            inode_id: directory,
+            deletion_seq: deletion.committed_seq,
+            destination_path: None,
+            destination_parent_inode_id: None,
+            destination_display_name: None,
+        })
+        .await;
+    let undeleted = history.diff(deletion.committed_seq, "/a/b", 1000).await;
+    let summaries: Vec<_> = undeleted.iter().map(summary).collect();
+    assert_eq!(summaries, [(DiffEntryKind::Undeleted, Some("/a"), None)]);
+    assert_eq!(undeleted[0].inode_id, directory);
+}
+
+/// Checks that a directory created above the path isn't an entry, because
+/// each inode that the directory contains under the path is an entry of its
+/// own.
+#[tokio::test]
+async fn a_directory_created_above_the_path_is_not_an_entry() {
+    let history = History::unrestricted().await;
+    let from_seq = history.write("/kept.txt").await.committed_seq;
+    history.write("/a/b/f.txt").await;
+
+    let entries = history.diff(from_seq, "/a/b", 1000).await;
+    let summaries: Vec<_> = entries.iter().map(summary).collect();
+    assert_eq!(
+        summaries,
+        [
+            (DiffEntryKind::Created, Some("/a/b"), None),
+            (DiffEntryKind::Created, Some("/a/b/f.txt"), None),
+        ]
+    );
+}
+
+/// Checks that a directory above the path is one entry when the diff reads
+/// the directory's two moves on different pages.
+#[tokio::test]
+async fn a_directory_above_the_path_touched_on_two_pages_is_one_entry() {
+    let history = History::unrestricted().await;
+    let from_seq = history.write("/a/b/file.txt").await.committed_seq;
+    history.move_path("/a", "/y").await;
+    history.write("/other.txt").await;
+    history.move_path("/y", "/x").await;
+
+    for limit in [1, 1000] {
+        let entries = history.diff(from_seq, "/a/b", limit).await;
+        let summaries: Vec<_> = entries.iter().map(summary).collect();
+        assert_eq!(
+            summaries,
+            [(DiffEntryKind::Moved, Some("/x"), Some("/a"))],
+            "limit {limit}"
+        );
+    }
+}
+
+/// Checks that a directory whose attribute and access revisions changed is a
+/// `changed` entry under its own path, and not an entry under a path below
+/// it.
+#[tokio::test]
+async fn an_attribute_or_access_change_of_a_directory_above_the_path_is_not_an_entry() {
+    let history = History::new(NamespaceAccess::Acl {
+        principal_scope: PrincipalScope::parse("org_demo").expect("principal scope"),
+        root_grants: AccessGrants::new(BTreeMap::from([(
+            PrincipalId::parse("prn_root").expect("principal id"),
+            AccessRights::ADMIN,
+        )]))
+        .expect("root grants"),
+    })
+    .await;
+    let from_seq = administer_put(&history, "/a/b/file.txt")
+        .await
+        .committed_seq;
+    let path = |path: &str| AbsolutePath::parse(path).expect("path");
+    administer(
+        &history,
+        |_| FilesystemOperation::UpdateAttributes {
+            path: path("/a"),
+            set: BTreeMap::from([(
+                AttributeKey::parse("owner").expect("attribute key"),
+                AttributeValue::parse("reader").expect("attribute value"),
+            )]),
+            remove: Vec::new(),
+            expected_inode_id: None,
+            expected_attributes_revision_no: None,
+        },
+        None,
+    )
+    .await;
+    administer(
+        &history,
+        |_| FilesystemOperation::UpdateAccess {
+            path: path("/a"),
+            boundary: false,
+            grants: AccessGrants::new(BTreeMap::from([(
+                PrincipalId::parse("prn_reader").expect("principal id"),
+                AccessRight::Read.into(),
+            )]))
+            .expect("grants"),
+            expected_inode_id: None,
+            expected_access_revision_no: None,
+        },
+        None,
+    )
+    .await;
+
+    assert!(history.diff(from_seq, "/a/b", 1000).await.is_empty());
+    let entries = history.diff(from_seq, "/a", 1000).await;
+    let summaries: Vec<_> = entries.iter().map(summary).collect();
+    assert_eq!(summaries, [(DiffEntryKind::Changed, Some("/a"), None)]);
+    assert_eq!(
+        (
+            entries[0].attributes_revision_no,
+            entries[0].access_revision_no
+        ),
+        (Some(AttributesRevisionNo(1)), Some(AccessRevisionNo(1)))
+    );
 }
 
 /// Checks that a page ends after the commit that brings its touches to the
