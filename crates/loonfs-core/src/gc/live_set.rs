@@ -4,9 +4,9 @@
 //! rooted while their successor is younger than the pass's grace window or has
 //! no provider timestamp.
 
-use super::charged_set::{Charge, ChargedMap, ChargedSet, PassMemory};
+use super::charged_set::{Charge, ChargedMap, ChargedQueue, ChargedSet, PassMemory};
 use super::families::CandidateFamily;
-use super::fork_family::FamilyWalkReport;
+use super::fork_family::{FamilyWalkReport, MemberState};
 use super::pins::{GraceAge, PinSweep};
 use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use super::uploads::ListedUploadSession;
@@ -76,8 +76,6 @@ pub(super) struct ListedPins {
     /// Whether the listing returned any key, recognized or not, which keeps a
     /// tombstone from retirement.
     any_key: bool,
-    /// The target of each fork pin, when the read finds forks.
-    pub(super) fork_targets: Vec<NamespaceId>,
 }
 
 pub(super) struct LiveSet {
@@ -103,6 +101,12 @@ pub(super) struct LiveSet {
     pub(super) content_layout_rows: u64,
     /// What the pass read of its fork family's roots.
     pub(super) family: FamilyWalkReport,
+    /// Every member of the fork family that the walk has found, the family
+    /// root included. The pass on a fork finds no members.
+    pub(super) members: ChargedMap<NamespaceId, MemberState>,
+    /// The members whose roots the pass hasn't read yet, in the order that
+    /// the fork pin listings found them.
+    pub(super) member_queue: ChargedQueue<NamespaceId>,
     has_pins: bool,
     grace_window_ms: u64,
     now_ms: u64,
@@ -116,9 +120,9 @@ impl LiveSet {
     /// every other member of the fork family. Reads go through the
     /// namespace's segment cache, with up to `STORE_READS_IN_FLIGHT` root
     /// manifests loading at once, and the object keys, content IDs, completed
-    /// sessions, and manifests that the pass keeps are charged to its read
-    /// working memory as they arrive. The pass doesn't read the record of a
-    /// completed session that `session_cache` has.
+    /// sessions, manifests, and fork family members that the pass keeps are
+    /// charged to its read working memory as they arrive. The pass doesn't
+    /// read the record of a completed session that `session_cache` has.
     pub(super) async fn load<S: ObjectStore>(
         namespace: &NamespaceStore<S>,
         session_cache: Option<&CompletedUploadSessionCache>,
@@ -170,6 +174,8 @@ impl LiveSet {
             pin_records: ChargedMap::new(&memory),
             content_layout_rows: 0,
             family: FamilyWalkReport::own_roots(),
+            members: ChargedMap::new(&memory),
+            member_queue: ChargedQueue::new(&memory),
             manifests: Vec::new(),
             manifest_charge: Charge::new(&memory),
             memory,
@@ -178,14 +184,19 @@ impl LiveSet {
             now_ms: clock.request_at_ms(),
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
+        // The family root is a member before its pin listing, so that a fork
+        // pin can't add it to the walk's queue.
+        if roots == Roots::CollectedFamilyRoot {
+            live.members
+                .insert(namespace_id.clone(), MemberState::Read)?;
+        }
         let pins = live
             .load_namespace_roots(namespace, &anchor, roots, grace_window_ms, clock)
             .await?;
         live.has_pins = pins.any_key;
         if roots == Roots::CollectedFamilyRoot {
-            live.family = live
-                .load_family_roots(namespace, pins.fork_targets, grace_window_ms, clock)
-                .await;
+            live.load_family_roots(namespace, grace_window_ms, clock)
+                .await?;
         }
         Ok(live)
     }
@@ -243,8 +254,9 @@ impl LiveSet {
     /// Protects the manifest of each listed pin, loading up to
     /// `STORE_READS_IN_FLIGHT` manifests at once, and adds each loaded number
     /// to `rooted`. When `roots` finds forks, it also reads each pin record
-    /// and returns the targets of the fork pins, and it keeps the records of
-    /// the collected namespace's own pins for the pin sweep.
+    /// and adds each fork pin's target to the walk as the listing streams,
+    /// and it keeps the records of the collected namespace's own pins for the
+    /// pin sweep.
     ///
     /// The first listed pin for a manifest number loads that manifest, and
     /// later pins for the number use the result. A pin whose manifest is
@@ -261,7 +273,6 @@ impl LiveSet {
     ) -> Result<ListedPins> {
         let prefix = pin_prefix(&namespace.namespace_id);
         let mut any_key = false;
-        let mut fork_targets = Vec::new();
         let mut requested = rooted.clone();
         {
             // `try_buffered` keeps listing order, so a pin that reuses an
@@ -305,7 +316,7 @@ impl LiveSet {
                         target_namespace_id,
                     } = &record.owner
                     {
-                        fork_targets.push(target_namespace_id.clone());
+                        self.add_fork_target(target_namespace_id)?;
                     }
                     if roots == Roots::CollectedFamilyRoot {
                         self.pin_records.insert(key.clone(), record)?;
@@ -346,10 +357,7 @@ impl LiveSet {
                 }
             }
         }
-        Ok(ListedPins {
-            any_key,
-            fork_targets,
-        })
+        Ok(ListedPins { any_key })
     }
 
     /// Protects each manifest below the current one, `current_manifest_no`,

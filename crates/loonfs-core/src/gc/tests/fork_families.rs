@@ -121,6 +121,25 @@ async fn exists<S: ObjectStore>(store: &S, key: &str) -> bool {
     store.head(key).await.expect("head").is_some()
 }
 
+/// Runs the pass of `namespace_id` with a read working memory of
+/// `limit_bytes`, and checks that the pass releases the memory it held.
+async fn gc_within<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    limit_bytes: usize,
+    clock: &OperationClock,
+) -> crate::error::Result<GcResponse> {
+    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(limit_bytes, None));
+    let report = crate::NamespaceStore {
+        segment_cache: Arc::new(root_scan_cache(Arc::clone(&memory))),
+        ..crate::test_support::namespace_store(store, namespace_id)
+    }
+    .gc(None, &options(), clock)
+    .await;
+    assert_eq!(memory.in_use(), 0, "the pass released what it held");
+    report
+}
+
 #[tokio::test]
 async fn content_that_only_a_member_view_refers_to_stays_through_every_generation() {
     let directory = tempdir().expect("directory");
@@ -302,6 +321,54 @@ async fn a_pass_past_the_family_roots_budget_skips_the_content_sweep() {
         .gc(None, &options(), &aged.clock())
         .await
         .expect("a pass within the budget");
+    assert_eq!(report.deleted.content_objects, 1);
+    assert!(!exists(&store, &unreferenced).await);
+}
+
+#[tokio::test]
+async fn a_pass_fails_when_a_members_fork_targets_do_not_fit_the_read_memory() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let family = family(&store, &["root", "fork"]).await;
+    let (root, fork) = (&family[0], &family[1]);
+    let limit_bytes = 32 * 1024;
+    gc_within(
+        &store,
+        root,
+        limit_bytes,
+        &aged_context(&store, &family).await.clock(),
+    )
+    .await
+    .expect("the family's roots fit the read memory");
+    // Each target is an installation that hasn't finished. The walk keeps a
+    // copy of each target's 128-byte ID in its members and another in its
+    // queue, so the targets alone need more than the read memory.
+    for index in 0..limit_bytes / 128 {
+        let target_namespace_id =
+            NamespaceId::parse(format!("pending-{index:0120}")).expect("namespace");
+        crate::test_support::namespace_store(&store, fork)
+            .create_pin(
+                PinOwner::Fork {
+                    target_namespace_id,
+                },
+                &context(1_000).clock(),
+            )
+            .await
+            .expect("fork pin");
+    }
+    let unreferenced = plant(&store, root, &ContentId::generate()).await;
+    let aged = aged_context(&store, &family).await;
+    let error = gc_within(&store, root, limit_bytes, &aged.clock())
+        .await
+        .expect_err("the fork's targets don't fit the read memory");
+    assert_matches!(
+        error,
+        CoreError::LiveSetExceedsReadMemory { limit, .. } if limit == limit_bytes
+    );
+    assert!(exists(&store, &unreferenced).await);
+    let report = gc_within(&store, root, 64 * 1024 * 1024, &aged.clock())
+        .await
+        .expect("a pass with enough read memory");
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
 }
