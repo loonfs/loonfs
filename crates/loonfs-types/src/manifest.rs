@@ -227,6 +227,11 @@ pub struct NamespaceManifestPayload {
     /// Fork provenance and source checkpoint identity for this namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_basis: Option<ForkBasis>,
+    /// The namespace whose prefix stores the content of this namespace's
+    /// [fork family](https://github.com/loonfs/loonfs/blob/main/docs/specs/glossary.md#fork-family).
+    /// A plain create records the namespace itself, a fork copies its
+    /// source's value, and a successor can't change it.
+    pub family_root_id: NamespaceId,
     /// Lifecycle state of this namespace.
     pub status: NamespaceStatus,
     /// Writer that acquired the current epoch.
@@ -288,7 +293,14 @@ impl NamespaceManifestPayload {
             .unwrap_or(self.head_seq)
     }
 
-    /// Constructs manifest 1 with no retention window.
+    /// Returns whether this namespace is the root of its fork family, which
+    /// is true exactly when it wasn't forked from another namespace.
+    pub fn is_family_root(&self) -> bool {
+        self.family_root_id == self.namespace_id
+    }
+
+    /// Constructs manifest 1 with no retention window, as the root of its own
+    /// fork family.
     pub fn initial(
         namespace_id: NamespaceId,
         created_at_ms: u64,
@@ -296,6 +308,7 @@ impl NamespaceManifestPayload {
         access: NamespaceAccess,
     ) -> Self {
         Self {
+            family_root_id: namespace_id.clone(),
             namespace_id,
             created_at_ms,
             created_by,
@@ -318,7 +331,8 @@ impl NamespaceManifestPayload {
     }
 
     /// Constructs manifest 1 of a fork of `source` at `fork_basis`, which lists
-    /// the runs of `source` and starts its floors at the fork's head.
+    /// the runs of `source`, records the family root of `source`, and starts
+    /// its floors at the fork's head.
     pub fn initial_fork(
         namespace_id: NamespaceId,
         created_at_ms: u64,
@@ -330,6 +344,7 @@ impl NamespaceManifestPayload {
         Self {
             retention_window_ms: source.retention_window_ms,
             fork_basis: Some(fork_basis),
+            family_root_id: source.family_root_id.clone(),
             head_seq: source.head_seq,
             next_run_no: source.next_run_no,
             retention_floor_seq: fork_seq,
@@ -357,6 +372,7 @@ impl NamespaceManifestPayload {
             access: self.access.clone(),
             retention_window_ms: self.retention_window_ms,
             fork_basis: self.fork_basis.clone(),
+            family_root_id: self.family_root_id.clone(),
             status: self.status,
             writer: self.writer.clone(),
             folded_wal_no: self.folded_wal_no,
@@ -486,6 +502,9 @@ impl NamespaceManifestPayload {
         }
         if successor.fork_basis != self.fork_basis {
             return invalid("fork_basis");
+        }
+        if successor.family_root_id != self.family_root_id {
+            return invalid("family_root_id");
         }
         if self.status.is_deleted() {
             return invalid("status");
@@ -652,6 +671,7 @@ mod tests {
             ("created_at_ms", 1),
             ("fork_basis", 2),
             ("access", 3),
+            ("family_root_id", 4),
         ] {
             let mut successor = next.clone();
             match change {
@@ -671,6 +691,7 @@ mod tests {
                         .expect("checkpoint"),
                     })
                 }
+                4 => successor.family_root_id = NamespaceId::parse("another").expect("namespace"),
                 _ => {
                     successor.access = super::NamespaceAccess::Acl {
                         principal_scope: crate::PrincipalScope::parse("org_test").expect("scope"),
@@ -836,6 +857,7 @@ mod tests {
             access: super::NamespaceAccess::Unrestricted {},
             retention_window_ms: None,
             fork_basis: None,
+            family_root_id: NamespaceId::parse("demo").expect("valid namespace id"),
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),
@@ -881,6 +903,7 @@ mod tests {
             access: super::NamespaceAccess::Unrestricted {},
             retention_window_ms: None,
             fork_basis: None,
+            family_root_id: NamespaceId::parse("demo").expect("valid namespace id"),
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),

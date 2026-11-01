@@ -1248,6 +1248,7 @@ Returns the metadata of one namespace, without listing every namespace. A missin
   "access": {"kind": "unrestricted"},
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
+  "family_root_id": "demo",
   "head_seq": 418,
   "retention_floor_seq": 120
 }
@@ -1262,6 +1263,7 @@ The `NamespaceMetadata` object has exactly these fields:
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
+| `family_root_id` | The namespace's [family root](glossary.md#family-root), whose prefix stores the content objects and upload records of the namespace's [fork family](glossary.md#fork-family) (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork is its own family root, and a fork has the same family root as its source. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
 | `retention_window_ms` | The namespace's [retention window](glossary.md#retention-window), in milliseconds. Only a namespace with its own window has this field. |
@@ -2532,6 +2534,7 @@ Representative response:
     "source_namespace_id": "demo",
     "source_head_seq": 418
   },
+  "family_root_id": "demo",
   "head_seq": 418,
   "retention_floor_seq": 418
 }

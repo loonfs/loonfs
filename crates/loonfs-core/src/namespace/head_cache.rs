@@ -418,6 +418,7 @@ mod tests {
                     created_by: loonfs_test_support::test_actor(),
                     access: loonfs_types::NamespaceAccess::Unrestricted {},
                     fork_basis: None,
+                    family_root_id: namespace_id.clone(),
                     status: NamespaceStatus::Active {},
                     writer_epoch: WriterEpoch(1),
                     writer: None,

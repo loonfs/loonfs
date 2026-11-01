@@ -57,6 +57,10 @@ pub struct NamespaceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub fork_basis: Option<NamespaceForkBasis>,
+    /// The namespace whose prefix stores the content of this namespace's fork family. For a
+    /// namespace that wasn't created by a fork, this is the namespace itself. A fork has the same
+    /// family root as its source.
+    pub family_root_id: NamespaceId,
     /// The sequence of the namespace's newest visible commit.
     pub head_seq: ChangeSeq,
     /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
@@ -166,6 +170,7 @@ mod tests {
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             fork_basis: None,
+            family_root_id: NamespaceId::parse("demo").expect("namespace id"),
             head_seq: ChangeSeq(11),
             retention_floor_seq: ChangeSeq(4),
             retention_window_ms: None,
@@ -177,6 +182,7 @@ mod tests {
                 "access": {"kind": "unrestricted"},
                 "created_at_ms": 1000,
                 "created_by": "test",
+                "family_root_id": "demo",
                 "head_seq": 11,
                 "retention_floor_seq": 4
             })

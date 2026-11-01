@@ -445,6 +445,7 @@ impl HeapBytes for NamespaceManifestPayload {
             + self.created_by.heap_bytes()
             + self.access.heap_bytes()
             + self.fork_basis.heap_bytes()
+            + self.family_root_id.heap_bytes()
             + self.writer.heap_bytes()
             + self.runs.heap_bytes()
     }
@@ -468,6 +469,7 @@ impl HeapBytes for NamespaceReadState {
             + self.created_by.heap_bytes()
             + self.access.heap_bytes()
             + self.fork_basis.heap_bytes()
+            + self.family_root_id.heap_bytes()
             + self.writer.heap_bytes()
     }
 }

@@ -830,6 +830,7 @@ async fn retry_policy_read_retries() {
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
         fork_basis: None,
+        family_root_id: namespace_id.clone(),
         namespace_id: namespace_id.clone(),
         head_seq: ChangeSeq(0),
         retention_floor_seq: ChangeSeq(0),

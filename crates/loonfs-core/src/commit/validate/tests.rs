@@ -224,6 +224,7 @@ fn validation_context(metadata_state: &MetadataState, seq: ChangeSeq) -> TestVal
         created_by: loonfs_test_support::test_actor(),
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         fork_basis: None,
+        family_root_id: namespace_id.clone(),
         namespace_id: namespace_id.clone(),
         seq,
         writer_epoch: WriterEpoch(1),
