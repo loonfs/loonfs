@@ -20,6 +20,10 @@ use std::sync::atomic::AtomicU64;
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Collects one namespace.
     ///
+    /// On a family root, the pass also reads the roots of every other member
+    /// of its fork family, which it finds through fork pins, and protects the
+    /// content that any member refers to.
+    ///
     /// The root scan reads each distinct layout segment of the rooted manifests
     /// once per scan, through the segment cache, and charges exact content
     /// roots to that cache's read working memory. The shared base filter has a

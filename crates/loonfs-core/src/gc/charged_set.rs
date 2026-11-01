@@ -126,7 +126,10 @@ impl<K: Eq + std::hash::Hash + HeapBytes, V: HeapBytes> ChargedMap<K, V> {
         }
     }
 
-    pub(super) fn get(&self, key: &K) -> Option<&V> {
+    pub(super) fn get<Q: Eq + std::hash::Hash + ?Sized>(&self, key: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+    {
         self.entries.get(key)
     }
 

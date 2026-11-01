@@ -5,6 +5,7 @@ mod collect;
 mod content;
 mod deletes;
 mod families;
+mod fork_family;
 mod live_set;
 mod options;
 mod pins;

@@ -22,6 +22,7 @@ pub(super) enum PinSweep {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
+    /// Reads the pin record at `key` and decides what to do with the pin.
     pub(super) async fn sweep_pin(
         &self,
         key: &str,
@@ -29,11 +30,24 @@ impl<S: ObjectStore> NamespaceStore<S> {
         live: &LiveSet,
         clock: &OperationClock,
     ) -> Result<PinSweep> {
-        let record = match load_pin_at_key(&self.store, key).await {
-            Ok(loaded) => loaded.state,
-            Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(PinSweep::Gone),
-            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
-        };
+        match self.load_listed_pin(key).await? {
+            Some(record) => {
+                self.sweep_pin_record(key, &record, grace_window_ms, live, clock)
+                    .await
+            }
+            None => Ok(PinSweep::Gone),
+        }
+    }
+
+    /// Decides what to do with the pin at `key`, whose record is `record`.
+    pub(super) async fn sweep_pin_record(
+        &self,
+        key: &str,
+        record: &PinPayload,
+        grace_window_ms: u64,
+        live: &LiveSet,
+        clock: &OperationClock,
+    ) -> Result<PinSweep> {
         let deletion = match &record.owner {
             PinOwner::User { .. } => PinSweep::DeleteUser,
             PinOwner::Fork {
@@ -41,7 +55,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             } => {
                 return Ok(
                     match self
-                        .fork_pin_is_retained(&record, target_namespace_id, grace_window_ms, clock)
+                        .fork_pin_is_retained(record, target_namespace_id, grace_window_ms, clock)
                         .await?
                     {
                         false => PinSweep::DeleteFork,
@@ -70,6 +84,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
+    /// Loads the pin record at `key`, a key from a listing, or returns `None`
+    /// when the record is gone.
+    pub(super) async fn load_listed_pin(&self, key: &str) -> Result<Option<PinPayload>> {
+        match load_pin_at_key(&self.store, key).await {
+            Ok(loaded) => Ok(Some(loaded.state)),
+            Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
+            Err(error) => Err(CoreError::ControlObjectLoad(error)),
+        }
+    }
+
     async fn fork_pin_is_retained(
         &self,
         record: &PinPayload,
@@ -80,16 +104,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
         if clock.request_at_ms().saturating_sub(record.created_at_ms) < grace_window_ms {
             return Ok(true);
         }
+        // A target whose current manifest can't be loaded, whether the store
+        // failed or the manifest is invalid, is a member whose roots the
+        // family root's pass can't read. That stops only the family's content
+        // sweep (format spec, "One complete pass"), and keeping the pin
+        // protects more, never less.
         match self
             .with_namespace(target_namespace_id.clone())
             .target_retains_pin(record)
             .await
         {
-            Err(CoreError::ControlObjectLoad(error @ ControlObjectLoadError::Store { .. })) => {
+            Err(CoreError::ControlObjectLoad(error)) => {
                 tracing::warn!(
                     namespace_id = %target_namespace_id,
                     error = %error,
-                    "the fork target did not read; retaining its source pin"
+                    "the fork target's current manifest couldn't be loaded; retaining its source pin"
                 );
                 Ok(true)
             }
