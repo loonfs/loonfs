@@ -22,24 +22,37 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             catalog.access(),
             self.subject.as_ref(),
         )?;
-        let loaded = self.namespace.load_upload_session_state(upload_id).await?;
+        let loaded = self
+            .namespace
+            .load_upload_session_state(&catalog, upload_id)
+            .await?;
         ensure_session_subject(&loaded.session, self.subject.as_ref())?;
         let evidence = match &loaded.outcome {
             Some(UploadOutcome::Completed {
                 completed_at_ms,
                 content_ref,
-            }) => evidence_within_window(content_ref, *completed_at_ms, now_ms),
+            }) => evidence_within_window(
+                &loaded.session.namespace_id,
+                content_ref,
+                *completed_at_ms,
+                now_ms,
+            ),
             Some(UploadOutcome::Aborted { .. }) | None => None,
         };
         let (uploaded, direct_put_object_key) = match (&loaded.outcome, &loaded.session.mode) {
             (None, UploadSessionMode::ServiceProxied {}) => (
-                find_proxied_content_ref(&self.namespace.store, &loaded.session).await?,
+                find_proxied_content_ref(
+                    &self.namespace.store,
+                    catalog.family_root_id(),
+                    &loaded.session,
+                )
+                .await?,
                 None,
             ),
             (None, UploadSessionMode::DirectPut { .. }) => (
                 None,
                 Some(content_blob(
-                    &self.namespace.namespace_id,
+                    catalog.family_root_id(),
                     &loaded.session.content_id,
                 )),
             ),

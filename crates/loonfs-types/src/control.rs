@@ -9,7 +9,7 @@ use crate::{
     PayloadChecksum, PinId, SubjectId, UploadId,
 };
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
 /// Selects one independently versioned control-object family.
@@ -288,7 +288,9 @@ impl UploadSessionMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UploadSessionPayload {
-    /// Namespace authorized to consume the uploaded content.
+    /// The namespace that created the session, and the only namespace whose
+    /// commits the session's content admits. The record is stored under the
+    /// prefix of that namespace's family root.
     pub namespace_id: NamespaceId,
     /// Durable session identity used by upload and completion requests.
     pub upload_id: UploadId,
@@ -366,56 +368,15 @@ pub struct UploadAlreadyCompletedError;
 /// and never changes it. It counts only while the session record exists.
 ///
 /// See [upload sessions](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#51-upload-sessions).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UploadOutcomePayload {
-    /// Namespace of the session.
+    /// The namespace that created the session.
     pub namespace_id: NamespaceId,
     /// The session that ended.
     pub upload_id: UploadId,
     /// How the session ended.
     pub outcome: UploadOutcome,
-}
-
-impl UploadOutcomePayload {
-    fn validate(&self) -> Result<(), String> {
-        let UploadOutcome::Completed { content_ref, .. } = &self.outcome else {
-            return Ok(());
-        };
-        if content_ref.owner_namespace_id != self.namespace_id {
-            return Err(format!(
-                "upload outcome `{}` belongs to namespace `{}` but holds a reference owned by \
-                 namespace `{}`",
-                self.upload_id, self.namespace_id, content_ref.owner_namespace_id,
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictUploadOutcomePayload {
-    namespace_id: NamespaceId,
-    upload_id: UploadId,
-    outcome: UploadOutcome,
-}
-
-impl<'de> Deserialize<'de> for UploadOutcomePayload {
-    /// Reads one outcome record and refuses one that `validate` finds
-    /// disagreeing with itself, like any other corruption.
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let record = StrictUploadOutcomePayload::deserialize(deserializer)?;
-        let outcome = Self {
-            namespace_id: record.namespace_id,
-            upload_id: record.upload_id,
-            outcome: record.outcome,
-        };
-        outcome.validate().map_err(serde::de::Error::custom)?;
-        Ok(outcome)
-    }
 }
 
 /// Control state decoded through its checked durable codec.
@@ -460,42 +421,4 @@ where
     )?;
 
     Ok(decoded)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Checksum, ContentRefKind};
-
-    #[test]
-    fn a_completed_outcome_rejects_a_reference_owned_by_another_namespace() {
-        let content_ref = |owner: &str| ContentRef {
-            kind: ContentRefKind::BlobV1,
-            owner_namespace_id: NamespaceId::parse(owner).expect("namespace id"),
-            content_id: ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
-            size_bytes: 5,
-            checksum: Checksum::crc64nvme(b"hello"),
-        };
-        for (owner, valid) in [("demo", true), ("other", false)] {
-            let record = UploadOutcomePayload {
-                namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-                upload_id: UploadId::parse("upl_014d2pf2dbsqqg28t5cy4tqkff").expect("upload id"),
-                outcome: UploadOutcome::Completed {
-                    completed_at_ms: 2_000,
-                    content_ref: content_ref(owner),
-                },
-            };
-            let encoded = serde_json::to_value(&record).expect("encode outcome");
-            let decoded = serde_json::from_value::<UploadOutcomePayload>(encoded);
-            if valid {
-                assert_eq!(decoded.expect("valid outcome"), record);
-            } else {
-                let error = decoded
-                    .expect_err("a foreign reference is corrupt")
-                    .to_string();
-                assert!(error.contains(record.upload_id.as_str()));
-                assert!(error.contains("owned by namespace `other`"));
-            }
-        }
-    }
 }

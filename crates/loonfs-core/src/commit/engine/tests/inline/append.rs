@@ -98,7 +98,7 @@ async fn current_ref(
 async fn same_chain_appends_keep_pending_bytes_in_the_wal_without_content_writes() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
-    let original = inline(&namespace_id, Bytes::from_static(b"hello"));
+    let original = inline(Bytes::from_static(b"hello"));
     publish(
         &mut engine,
         &context,
@@ -170,7 +170,6 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
     assert_eq!(
         current_ref(&store, &namespace_id, "/file-0").await,
         ContentRef::blob_v1(
-            namespace_id.clone(),
             original.content_id.clone(),
             b"hello world",
             loonfs_types::ChecksumAlgorithm::Crc64nvme
@@ -204,7 +203,7 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
 async fn appends_in_one_commit_chain_in_operation_order_after_a_put() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
-    let value = inline(&namespace_id, Bytes::from_static(b"ab"));
+    let value = inline(Bytes::from_static(b"ab"));
     let mut chain = request(
         "chain",
         vec![
@@ -518,14 +517,13 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
                     revision_no: RevisionNo(revision_no),
                     content_ref: ContentRef {
                         kind: ContentRefKind::BlobV1,
-                        owner_namespace_id: namespace_id.clone(),
                         content_id: content_id.clone(),
                         size_bytes: 6,
                         checksum: checksum.clone(),
                     },
                     layout: Some(loonfs_types::ContentLayout {
+                        creator_namespace_id: family_root_id(),
                         extents: vec![loonfs_types::ContentExtent {
-                            owner_namespace_id: namespace_id.clone(),
                             content_id,
                             object: loonfs_types::ExtentObject::Whole,
                             offset: 0,
@@ -639,7 +637,7 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             let prefix = vec![b'a'; MAX_WAL_INLINE_CONTENT_BYTES / 2];
             let resident = vec![b'b'; MAX_WAL_INLINE_CONTENT_BYTES / 2 + 10];
             let suffix = vec![b'?'; MAX_WAL_INLINE_CONTENT_BYTES];
-            let value = inline(&namespace_id, Bytes::copy_from_slice(&prefix));
+            let value = inline(Bytes::copy_from_slice(&prefix));
             if folded {
                 publish(
                     &mut engine,
@@ -753,7 +751,8 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             );
             let extent = row.layout.extents.last().expect("new extent");
             assert_eq!(extent.content_id, fresh.content_id);
-            let key = crate::storage::content_location::extent_object_key(extent);
+            let key =
+                crate::storage::content_location::extent_object_key(&family_root_id(), extent);
             assert_eq!(
                 store.get(&key, None).await.expect("get").expect("object"),
                 suffix
@@ -769,10 +768,7 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
         let (_directory, store, mut engine, context) = setup().await;
         let namespace_id = engine.namespace.namespace_id.clone();
         let bytes = vec![b'x'; MAX_WAL_INLINE_CONTENT_BYTES];
-        let mut base = candidate(
-            "base",
-            vec![inline(&namespace_id, Bytes::copy_from_slice(&bytes))],
-        );
+        let mut base = candidate("base", vec![inline(Bytes::copy_from_slice(&bytes))]);
         base.intent_mut()
             .operations
             .extend((1..count).map(|_| append("/base-0", &bytes)));
@@ -822,7 +818,7 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
 async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
-    let value = inline(&namespace_id, Bytes::from_static(b"abc"));
+    let value = inline(Bytes::from_static(b"abc"));
     publish(
         &mut engine,
         &context,
@@ -853,8 +849,8 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
             whole,
             offset,
             Some(loonfs_types::ContentLayout {
+                creator_namespace_id: family_root_id(),
                 extents: vec![loonfs_types::ContentExtent {
-                    owner_namespace_id: namespace_id.clone(),
                     content_id: value.content_ref().content_id.clone(),
                     object: loonfs_types::ExtentObject::Whole,
                     offset: 0,

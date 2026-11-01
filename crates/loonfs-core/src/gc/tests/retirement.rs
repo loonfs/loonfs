@@ -88,7 +88,9 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let store = RecordingStore::new(
         inner,
         KeyPredicate::new(|key| {
-            key.starts_with("namespaces/source/segments/") || key.contains("/content/")
+            key.starts_with("namespaces/source/segments/")
+                || key.contains("/content/")
+                || key.contains("/uploads/")
         }),
     );
     let first = crate::test_support::namespace_store(&store, &target)
@@ -99,16 +101,11 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         )
         .await
         .expect("release source pin with retained session");
-    assert_eq!(first.deleted.retired_content_objects, 1);
+    // A fork's prefix stores no content and no upload records, so its
+    // retirement releases its source pin and lists neither.
+    assert_eq!(first.deleted.retired_content_objects, 0);
     assert_eq!(first.deleted_checkpoints_by_owner.fork, 1);
-    let requests = store.take();
-    assert_eq!(requests.len(), 2);
-    assert!(requests.iter().any(|operation| matches!(operation,
-        loonfs_test_support::stores::RecordedOperation::List { prefix } if prefix == "namespaces/target/content/"
-    )));
-    assert!(requests.iter().any(|operation| matches!(operation,
-        loonfs_test_support::stores::RecordedOperation::Delete { key } if key.starts_with("namespaces/target/content/")
-    )));
+    assert_eq!(store.take(), []);
     assert!(!pin_exists(&store, &source, source_pin).await);
     assert!(read_upload_session(&store, &target, &upload.upload_id)
         .await
@@ -128,26 +125,23 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
             .await
             .expect("collect source segment");
     }
+    store.reset();
     let expired_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS;
     let repeated = crate::test_support::namespace_store(&store, &target)
         .gc(None, &options(), &context(expired_at_ms).clock())
         .await
         .expect("repeat retirement after source collection");
     assert_eq!(repeated.deleted.retired_content_objects, 0);
+    assert_eq!(repeated.deleted.upload_sessions, 0);
     assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
-    let finished = crate::test_support::namespace_store(&store, &target)
-        .gc(None, &options(), &context(expired_at_ms + GRACE_MS).clock())
-        .await
-        .expect("finish retirement after session cleanup");
-    assert_eq!(finished.deleted.retired_content_objects, 0);
-    assert_eq!(finished.deleted.upload_sessions, 1);
-    assert!(read_upload_session(&store, &target, &upload.upload_id)
-        .await
-        .is_none());
     assert!(store
         .snapshot()
         .iter()
         .all(|operation| { !operation.key().starts_with("namespaces/source/") }));
+    // The family root's pass, not the fork's, collects the fork's session.
+    assert!(read_upload_session(&store, &target, &upload.upload_id)
+        .await
+        .is_some());
 }
 
 #[tokio::test]

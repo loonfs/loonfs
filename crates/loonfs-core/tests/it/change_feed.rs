@@ -336,7 +336,7 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
         else {
             panic!("expected one `content_changed` event, folded: {folded}");
         };
-        assert_eq!(content_ref.owner_namespace_id, fork);
+        assert_eq!(content_ref.size_bytes, 11, "folded: {folded}");
         assert_eq!(*append_offset, Some(5), "folded: {folded}");
     }
 }

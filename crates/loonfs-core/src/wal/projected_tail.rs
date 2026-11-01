@@ -6,7 +6,7 @@ use crate::metadata::{CommitReceiptRecord, ContentLayoutRecord, MetadataState, R
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
 use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef, NamespaceId};
+use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef};
 use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -106,17 +106,16 @@ impl ProjectedWalTail {
         }
     }
 
-    /// Appends one WAL object of `namespace_id`'s WAL as a chunk. An object
-    /// with no records, such as a fence, adds no chunk.
+    /// Appends one WAL object as a chunk. An object with no records, such as
+    /// a fence, adds no chunk.
     pub(crate) fn push_object(
         &mut self,
-        namespace_id: &NamespaceId,
         records: &[WalCommitPayload],
     ) -> Result<(), WalObjectError> {
         if records.is_empty() {
             return Ok(());
         }
-        self.push_chunk(Arc::new(TailChunk::from_records(namespace_id, records)?))
+        self.push_chunk(Arc::new(TailChunk::from_records(records)?))
     }
 
     fn push_chunk(&mut self, chunk: Arc<TailChunk>) -> Result<(), WalObjectError> {
@@ -282,12 +281,8 @@ impl TailChunk {
         }
     }
 
-    /// Applies each commit of one WAL object of `namespace_id`'s WAL: its
-    /// pieces, then its rows.
-    fn from_records(
-        namespace_id: &NamespaceId,
-        records: &[WalCommitPayload],
-    ) -> Result<Self, WalObjectError> {
+    /// Applies each commit of one WAL object: its pieces, then its rows.
+    fn from_records(records: &[WalCommitPayload]) -> Result<Self, WalObjectError> {
         let first_seq = records
             .first()
             .expect("push_object should skip a WAL object with no records")
@@ -297,7 +292,7 @@ impl TailChunk {
             let activity = committed_activity(record)
                 .and_then(|activity| chunk.activity.checked_add(activity))
                 .ok_or(WalObjectError::ActivityOverflow)?;
-            for (content_ref, entry) in inline_content_refs(namespace_id, record) {
+            for (content_ref, entry) in inline_content_refs(record) {
                 chunk.insert_piece(content_ref, entry, record.committed_seq);
             }
             chunk.rows.apply_committed_wal_record_mut(record);
@@ -310,9 +305,6 @@ impl TailChunk {
         self.content_positions
             .get(&content_ref.content_id)
             .map(|position| &self.contents[*position])
-            .filter(|content| {
-                content.content_ref.owner_namespace_id == content_ref.owner_namespace_id
-            })
     }
 
     fn decoded_bytes(&self) -> usize {
@@ -361,19 +353,20 @@ impl TailChunk {
 }
 
 /// Pairs each inline entry of `record` with the largest same-commit
-/// reference `namespace_id` owns to its content.
-pub(crate) fn inline_content_refs<'r>(
-    namespace_id: &'r NamespaceId,
-    record: &'r WalCommitPayload,
-) -> impl Iterator<Item = (&'r ContentRef, &'r WalInlineContent)> + 'r {
+/// reference to its content ID.
+///
+/// A WAL includes pieces only for chains that its namespace created (rule 1
+/// of the WAL records), so the content ID alone identifies the chain.
+pub(crate) fn inline_content_refs(
+    record: &WalCommitPayload,
+) -> impl Iterator<Item = (&ContentRef, &WalInlineContent)> + '_ {
     record.inline_content.iter().map(move |entry| {
         let content_ref = record
             .deltas
             .iter()
             .filter_map(|delta| match &delta.delta {
                 WalDelta::AppendFileRevision { content_ref, .. }
-                    if content_ref.content_id == entry.content_id
-                        && &content_ref.owner_namespace_id == namespace_id =>
+                    if content_ref.content_id == entry.content_id =>
                 {
                     Some(content_ref)
                 }
@@ -390,17 +383,9 @@ mod tests {
     use super::ProjectedWalTail;
     use crate::metadata::MetadataState;
     use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
-    use loonfs_types::{
-        ChangeSeq, CommitId, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo,
-    };
+    use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef, InodeId, RevisionNo};
 
-    fn commit(
-        namespace_id: &NamespaceId,
-        seq: u64,
-        content_id: &ContentId,
-        whole: &[u8],
-        offset: usize,
-    ) -> WalCommitPayload {
+    fn commit(seq: u64, content_id: &ContentId, whole: &[u8], offset: usize) -> WalCommitPayload {
         WalCommitPayload {
             committed_seq: ChangeSeq(seq),
             commit_id: CommitId::parse(format!("c_{seq:032x}")).expect("commit id"),
@@ -425,7 +410,6 @@ mod tests {
                     child_created_at_ms: 0,
                     revision_no: RevisionNo(seq),
                     content_ref: ContentRef::blob_v1(
-                        namespace_id.clone(),
                         content_id.clone(),
                         whole,
                         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -444,24 +428,17 @@ mod tests {
 
     #[test]
     fn contents_keep_first_commit_order_and_count_piece_bytes() {
-        let namespace_id = NamespaceId::parse("pieces").expect("namespace id");
         let ids: Vec<_> = (0..64)
             .rev()
             .map(|number| ContentId::parse(format!("con_{number:026}")).expect("content id"))
             .collect();
         let mut tail = ProjectedWalTail::default();
         for (seq, content_id) in (1..).zip(&ids) {
-            tail.push_object(
-                &namespace_id,
-                &[commit(&namespace_id, seq, content_id, b"value", 0)],
-            )
-            .expect("value");
+            tail.push_object(&[commit(seq, content_id, b"value", 0)])
+                .expect("value");
         }
-        tail.push_object(
-            &namespace_id,
-            &[commit(&namespace_id, 65, &ids[17], b"value appended", 5)],
-        )
-        .expect("append");
+        tail.push_object(&[commit(65, &ids[17], b"value appended", 5)])
+            .expect("append");
 
         let contents = tail.contents();
         assert_eq!(
@@ -486,7 +463,6 @@ mod tests {
 
     #[test]
     fn appended_pieces_merge_across_chunks_and_an_earlier_view_skips_later_chunks() {
-        let namespace_id = NamespaceId::parse("pieces").expect("namespace id");
         let content_id = ContentId::parse(format!("con_{:026}", 1)).expect("content id");
         let mut tail = ProjectedWalTail::default();
         for (seq, whole, offset) in [
@@ -494,14 +470,10 @@ mod tests {
             (2, b"value appended", 5),
             (3, b"value appended twice", 14),
         ] {
-            tail.push_object(
-                &namespace_id,
-                &[commit(&namespace_id, seq, &content_id, whole, offset)],
-            )
-            .expect("chunk");
+            tail.push_object(&[commit(seq, &content_id, whole, offset)])
+                .expect("chunk");
         }
         let newest = ContentRef::blob_v1(
-            namespace_id.clone(),
             content_id.clone(),
             b"value appended twice",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,

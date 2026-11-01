@@ -51,13 +51,11 @@ impl PreparedCandidate {
 
     pub(super) fn with_inline_placement(
         candidate: CommitCandidate,
-        namespace_id: &NamespaceId,
         retained_inline_content: &[loonfs_core::publish::InlineContent],
         staged_inline_content: &[loonfs_core::publish::InlineContent],
     ) -> std::result::Result<Self, CoreError> {
         Ok(Self {
             estimated_retained_bytes: candidate.estimated_retained_bytes_after_inline_staging(
-                namespace_id,
                 retained_inline_content,
                 staged_inline_content,
             )?,

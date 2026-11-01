@@ -138,7 +138,6 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
     let payload = b"the bytes the grant described".to_vec();
     let served = b"something else entirely, and a different length".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -166,7 +165,6 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
 fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
     ContentRef {
         kind: loonfs_types::ContentRefKind::BlobV1,
-        owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         content_id: ContentId::generate(),
         size_bytes: bytes.len() as u64,
         checksum: loonfs_types::Checksum::crc32c(bytes),
@@ -335,7 +333,6 @@ async fn a_failed_range_open_is_returned_by_every_later_read() {
 async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     let payload = b"exactly the bytes the grant described".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -360,7 +357,6 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
 async fn ranges_up_to_the_window_are_requested_while_the_current_one_is_read() {
     let payload: Vec<u8> = (0u8..50).collect();
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -402,7 +398,6 @@ async fn ranges_up_to_the_window_are_requested_while_the_current_one_is_read() {
 async fn a_held_next_range_does_not_time_out_while_the_current_one_is_read() {
     let payload = b"abcde".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -464,7 +459,6 @@ async fn a_resume_takes_a_new_grant_and_sends_the_headers_it_returns() {
     let payload = b"the first half and then the second half".to_vec();
     let held: usize = 10;
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -526,7 +520,6 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
     let payload = b"the first half and then the second half".to_vec();
     let held: usize = 10;
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -593,7 +586,6 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
 #[tokio::test]
 async fn grants_send_only_the_fields_of_what_they_read_at() {
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         b"report",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -674,7 +666,6 @@ async fn grants_send_only_the_fields_of_what_they_read_at() {
 async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     let payload = b"a whole object".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -701,7 +692,6 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
 async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() {
     let payload = b"unused".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -729,7 +719,6 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
 async fn a_grant_from_past_the_start_is_refused_before_any_request() {
     let payload = b"ten bytes!".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,

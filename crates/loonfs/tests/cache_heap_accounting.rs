@@ -162,7 +162,6 @@ impl Shape {
     /// A dense commit also replaces the grants of `directories`.
     fn candidate(
         &self,
-        namespace_id: &NamespaceId,
         label: &str,
         entries: std::ops::Range<usize>,
         directories: std::ops::Range<usize>,
@@ -170,7 +169,6 @@ impl Shape {
     ) -> CommitCandidate {
         let inline = |bytes: usize| {
             InlineContent::new(
-                namespace_id.clone(),
                 ContentId::generate(),
                 Bytes::from(vec![b'x'; bytes]),
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -198,7 +196,10 @@ impl Shape {
                 };
                 let put = FilesystemOperation::PutFile {
                     path: path.clone(),
-                    content: loonfs_types::FileContent::Ref(content_ref),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref,
+                        source_namespace_id: None,
+                    },
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -326,7 +327,6 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
             .expect("open namespace");
         namespace
             .commit_candidate(shape.candidate(
-                &namespace_id,
                 "seed",
                 0..shape.folded_entries,
                 0..DIRECTORIES,
@@ -343,7 +343,6 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
             let end = next + shape.tail_entries_per_commit;
             namespace
                 .commit_candidate(shape.candidate(
-                    &namespace_id,
                     &format!("tail-{commit}"),
                     next..end,
                     commit..commit + 1,

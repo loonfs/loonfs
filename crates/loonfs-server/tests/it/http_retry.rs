@@ -124,7 +124,10 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         content_tokens: vec![token],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/retry.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref(content_ref),
+            content: loonfs_types::FileContent::Ref {
+                content_ref,
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -562,7 +565,10 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
                 operations: vec![
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/batch.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref(staged.content_ref.clone()),
+                        content: loonfs_types::FileContent::Ref {
+                            content_ref: staged.content_ref.clone(),
+                            source_namespace_id: None,
+                        },
                         behavior: DestinationBehavior::Replace,
                         expected_inode_id: None,
                         expected_revision_no: None,

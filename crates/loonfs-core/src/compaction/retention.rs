@@ -441,18 +441,17 @@ mod tests {
         use super::retention_clusters;
         use loonfs_types::format::manifest::{ContentLayoutRecord, MetadataFamilyGroup};
         use loonfs_types::{ContentExtent, ContentId, ContentLayout, ExtentObject, NamespaceId};
-        let owner = NamespaceId::parse("owner").expect("namespace");
+        let creator = NamespaceId::parse("creator").expect("namespace");
         let first = ContentId::generate();
         let second = ContentId::generate();
         let row = |content_id: ContentId, committed_seq| {
             MetadataRow::ContentLayout(ContentLayoutRecord {
-                owner_namespace_id: owner.clone(),
                 content_id: content_id.clone(),
                 committed_seq: ChangeSeq(committed_seq),
                 size_bytes: 1,
                 layout: ContentLayout {
+                    creator_namespace_id: creator.clone(),
                     extents: vec![ContentExtent {
-                        owner_namespace_id: owner.clone(),
                         content_id,
                         object: ExtentObject::Whole,
                         offset: 0,
@@ -530,7 +529,6 @@ mod tests {
                     committed_at_ms: 1_000 + committed_seq,
                     delta_index: 0,
                     content_ref: loonfs_types::ContentRef::blob_v1(
-                        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                         loonfs_types::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
                             .expect("content id"),
                         b"body",

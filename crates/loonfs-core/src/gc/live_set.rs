@@ -45,7 +45,7 @@ pub(super) enum RetirementStatus {
 }
 
 /// Whose roots one read adds to the live set.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Roots {
     /// The namespace that the pass collects, when it was forked from another
     /// namespace.
@@ -79,6 +79,11 @@ pub(super) struct ListedPins {
 }
 
 pub(super) struct LiveSet {
+    /// Whether the collected namespace is a fork or the root of its fork
+    /// family. Only the pass on a family root collects content and upload
+    /// records, because the family root's prefix stores them for the whole
+    /// family.
+    pub(super) collected: Roots,
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: ChargedSet<String>,
@@ -139,16 +144,16 @@ impl LiveSet {
         };
         // Sessions are listed before the WAL tail is read. A session this pass
         // misses is newer than the pass, or it ended before the tail read and
-        // the tail or a rooted manifest names every commit of its content. A
-        // deleted family root's pass still sweeps content, so its sessions are
-        // still roots.
+        // the tail or a rooted manifest names every commit of its content. Only
+        // a family root's prefix stores upload sessions, and a deleted family
+        // root's pass still sweeps content, so its sessions are still roots.
         let memory = PassMemory::new(
             namespace_id,
             read_working_memory(Some(namespace.segment_cache.as_ref())),
         );
         let mut content_ids = ChargedSet::new(&memory);
         let mut completed_sessions = ChargedMap::new(&memory);
-        if roots == Roots::CollectedFamilyRoot || !manifest.payload().status.is_deleted() {
+        if roots == Roots::CollectedFamilyRoot {
             namespace
                 .load_upload_sessions(session_cache, |listed| match listed {
                     ListedUploadSession::Completed { upload_id, session } => {
@@ -166,6 +171,7 @@ impl LiveSet {
             .await?;
         let head = anchor.manifest.payload();
         let mut live = Self {
+            collected: roots,
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
             objects: ChargedSet::new(&memory),
@@ -220,7 +226,7 @@ impl LiveSet {
             .content_layout_rows
             .saturating_add(content_layout_rows(head));
         // A tombstone roots its runs like any current manifest: an import from
-        // a deleted owner is still authorized against its final access state.
+        // a deleted source is still authorized against its final access state.
         self.protect_manifest(&anchor.manifest, roots)?;
         // A tombstone's runs cover its whole WAL, so it has no tail.
         if !head.status.is_deleted() {
@@ -443,6 +449,12 @@ impl LiveSet {
                 | CandidateFamily::Content
                 | CandidateFamily::Temporary => false,
             }
+    }
+
+    /// Returns whether the pass collects content and upload records, which
+    /// only the pass on a family root does.
+    pub(super) fn collects_family_content(&self) -> bool {
+        self.collected == Roots::CollectedFamilyRoot
     }
 
     pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {

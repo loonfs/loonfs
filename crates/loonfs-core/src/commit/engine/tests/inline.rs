@@ -35,7 +35,7 @@ async fn setup() -> (
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let namespace_id = NamespaceId::parse("inline").expect("namespace");
+    let namespace_id = family_root_id();
     let context = WriterAt {
         writer_id: WriterId::parse("writer").expect("writer"),
         now_ms: 1_000,
@@ -57,9 +57,14 @@ async fn setup() -> (
     (directory, store, engine, context)
 }
 
-fn inline(namespace_id: &NamespaceId, bytes: Bytes) -> InlineContent {
+/// The namespace that [`setup`] creates, which is the root of its own fork
+/// family, so its prefix stores its content.
+fn family_root_id() -> NamespaceId {
+    NamespaceId::parse("inline").expect("namespace")
+}
+
+fn inline(bytes: Bytes) -> InlineContent {
     InlineContent::new(
-        namespace_id.clone(),
         ContentId::generate(),
         bytes,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -69,7 +74,10 @@ fn inline(namespace_id: &NamespaceId, bytes: Bytes) -> InlineContent {
 fn put(path: &str, content_ref: &ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content: loonfs_types::FileContent::Ref(content_ref.clone()),
+        content: loonfs_types::FileContent::Ref {
+            content_ref: content_ref.clone(),
+            source_namespace_id: None,
+        },
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -115,10 +123,7 @@ async fn folded_file(
     context: &WriterAt,
     bytes: &[u8],
 ) -> (InodeId, ContentRef) {
-    let value = inline(
-        &engine.namespace.namespace_id,
-        Bytes::copy_from_slice(bytes),
-    );
+    let value = inline(Bytes::copy_from_slice(bytes));
     publish(engine, context, candidate("file", vec![value.clone()]))
         .await
         .expect("publish");
@@ -159,7 +164,6 @@ async fn commit_piece(
             .await
             .expect("base view");
         let base = ContentRef::blob_v1(
-            namespace_id.clone(),
             content_id.clone(),
             &whole[..offset],
             store.checksum_algorithm(),
@@ -170,6 +174,7 @@ async fn commit_piece(
                 crate::storage::tail_content::ContentWrites::new(
                     store,
                     &crate::test_support::content_writes(),
+                    view.head(),
                 ),
                 &view.projected_metadata_view(),
                 content.as_ref(),
@@ -181,12 +186,7 @@ async fn commit_piece(
     } else {
         layout
     };
-    let content_ref = ContentRef::blob_v1(
-        namespace_id.clone(),
-        content_id.clone(),
-        whole,
-        store.checksum_algorithm(),
-    );
+    let content_ref = ContentRef::blob_v1(content_id.clone(), whole, store.checksum_algorithm());
     crate::test_support::namespace_store(store, namespace_id)
         .append_wal_commit(
             vec![WalDelta::AppendFileRevision {
@@ -248,12 +248,9 @@ fn assert_no_writes(store: &RecordingStore<LocalFsStore>) {
 async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order() {
     let (_directory, store, mut engine, context) = setup().await;
     let values = vec![
-        inline(&engine.namespace.namespace_id, Bytes::from_static(b"first")),
-        inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"second"),
-        ),
-        inline(&engine.namespace.namespace_id, Bytes::new()),
+        inline(Bytes::from_static(b"first")),
+        inline(Bytes::from_static(b"second")),
+        inline(Bytes::new()),
     ];
     let mut candidate = candidate("publish", values.clone());
     candidate.inline_content.reverse();
@@ -318,18 +315,12 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
 #[tokio::test]
 async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
     let (_directory, store, mut engine, context) = setup().await;
-    let original = inline(&engine.namespace.namespace_id, Bytes::from_static(b"hello"));
+    let original = inline(Bytes::from_static(b"hello"));
     let first = candidate("retry", vec![original.clone()]);
     let committed = publish(&mut engine, &context, first.clone())
         .await
         .expect("publish");
-    let retry = candidate(
-        "retry",
-        vec![inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"hello"),
-        )],
-    );
+    let retry = candidate("retry", vec![inline(Bytes::from_static(b"hello"))]);
     assert_ne!(
         first.inline_content[0].content_ref().content_id,
         retry.inline_content[0].content_ref().content_id
@@ -351,13 +342,7 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
             .expect("receipt precedes content validation"),
         committed
     );
-    let changed = candidate(
-        "retry",
-        vec![inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"other"),
-        )],
-    );
+    let changed = candidate("retry", vec![inline(Bytes::from_static(b"other"))]);
     assert_matches!(
         publish(&mut engine, &context, changed).await,
         Err(CoreError::CommitIdReuseConflict { .. })
@@ -368,9 +353,11 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         .store_bytes_as_content(b"hello")
         .await
         .expect("stage");
-    let proof = PreparedContent::for_durable_content_write(staged.content_ref().clone());
-    let inline = InlineContent::new(
+    let proof = PreparedContent::for_durable_content_write(
         engine.namespace.namespace_id.clone(),
+        staged.content_ref().clone(),
+    );
+    let inline = InlineContent::new(
         staged.content_ref().content_id.clone(),
         Bytes::from_static(b"hello"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -392,36 +379,23 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
 #[tokio::test]
 async fn invalid_inline_candidates_write_nothing() {
     let (_directory, store, mut engine, context) = setup().await;
-    let value = inline(&engine.namespace.namespace_id, Bytes::from_static(b"value"));
+    let value = inline(Bytes::from_static(b"value"));
     let mut unreferenced = candidate("unreferenced", vec![value.clone()]);
-    unreferenced.inline_content.push(inline(
-        &engine.namespace.namespace_id,
-        Bytes::from_static(b"extra"),
-    ));
+    unreferenced
+        .inline_content
+        .push(inline(Bytes::from_static(b"extra")));
     let duplicate = candidate("duplicate", vec![value.clone(), value]);
-    let foreign = candidate(
-        "foreign",
-        vec![inline(
-            &NamespaceId::parse("other").expect("namespace"),
-            Bytes::from_static(b"value"),
-        )],
-    );
     let oversized = candidate(
         "oversized",
-        vec![inline(
-            &engine.namespace.namespace_id,
-            Bytes::from(vec![0; MAX_WAL_INLINE_CONTENT_BYTES + 1]),
-        )],
+        vec![inline(Bytes::from(vec![
+            0;
+            MAX_WAL_INLINE_CONTENT_BYTES + 1
+        ]))],
     );
     let excessive_total = candidate(
         "total",
         (0..=MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES)
-            .map(|_| {
-                inline(
-                    &engine.namespace.namespace_id,
-                    Bytes::from(vec![0; MAX_WAL_INLINE_CONTENT_BYTES]),
-                )
-            })
+            .map(|_| inline(Bytes::from(vec![0; MAX_WAL_INLINE_CONTENT_BYTES])))
             .collect(),
     );
     let staged = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
@@ -429,7 +403,6 @@ async fn invalid_inline_candidates_write_nothing() {
         .await
         .expect("stage");
     let different = InlineContent::new(
-        engine.namespace.namespace_id.clone(),
         staged.content_ref().content_id.clone(),
         Bytes::from_static(b"inline bytes"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -441,11 +414,12 @@ async fn invalid_inline_candidates_write_nothing() {
         .push(put("/staged", staged.content_ref()));
     mismatched.content =
         ContentPreparation::Ready(vec![PreparedContent::for_durable_content_write(
+            engine.namespace.namespace_id.clone(),
             staged.content_ref().clone(),
         )]);
     let mut wrong_checksum = mismatched.clone();
     if let FilesystemOperation::PutFile {
-        content: loonfs_types::FileContent::Ref(content_ref),
+        content: loonfs_types::FileContent::Ref { content_ref, .. },
         ..
     } = &mut wrong_checksum.intent_mut().operations[0]
     {
@@ -454,7 +428,6 @@ async fn invalid_inline_candidates_write_nothing() {
     for candidate in [
         unreferenced,
         duplicate,
-        foreign,
         oversized,
         excessive_total,
         mismatched,
@@ -500,7 +473,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         ("second", Bytes::from_static(b"second")),
         ("empty", Bytes::new()),
     ] {
-        let value = inline(&engine.namespace.namespace_id, bytes);
+        let value = inline(bytes);
         values.push(value.clone());
         let candidate = candidate(name, vec![value]);
         publish(&mut engine, &context, candidate.clone())
@@ -540,7 +513,10 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
             fold::assert_content_before_metadata(&store, values.len());
             for value in &values {
-                let key = crate::storage::content::content_object_key_for_ref(value.content_ref());
+                let key = crate::storage::content::content_object_key_for_ref(
+                    &family_root_id(),
+                    value.content_ref(),
+                );
                 assert_eq!(
                     store
                         .get(&key, None)

@@ -483,7 +483,6 @@ mod tests {
 
     fn sample_content_ref() -> ContentRef {
         ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("valid content id"),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
@@ -566,12 +565,11 @@ mod tests {
     #[test]
     fn filesystem_change_events_use_snake_case_kind_tags() {
         let sample_content_ref = crate::ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("valid content id"),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
         );
-        let sample_content_ref_json = r#"{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_014d2pf2dbsqqg28t5cy4tqkff","size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}}"#;
+        let sample_content_ref_json = r#"{"kind":"blob_v1","content_id":"con_014d2pf2dbsqqg28t5cy4tqkff","size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}}"#;
 
         let version = binding_version();
         let directory_created = FilesystemChange::DirectoryCreated {

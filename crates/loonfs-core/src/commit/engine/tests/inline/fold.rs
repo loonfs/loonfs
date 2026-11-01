@@ -34,25 +34,13 @@ fn content_assemblies(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
 #[tokio::test]
 async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
     let (_directory, store, mut engine, context) = setup().await;
-    let before = candidate(
-        "before",
-        vec![inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"before"),
-        )],
-    );
+    let before = candidate("before", vec![inline(Bytes::from_static(b"before"))]);
     publish(&mut engine, &context, before)
         .await
         .expect("before");
     let input = engine.writer_position().expect("fold input");
     engine.invalidate_projection();
-    let during = candidate(
-        "during",
-        vec![inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"during"),
-        )],
-    );
+    let during = candidate("during", vec![inline(Bytes::from_static(b"during"))]);
     publish(&mut engine, &context, during.clone())
         .await
         .expect("during");
@@ -228,13 +216,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
 #[tokio::test]
 async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
     let (_directory, store, mut engine, context) = setup().await;
-    let before = candidate(
-        "before",
-        vec![inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"before"),
-        )],
-    );
+    let before = candidate("before", vec![inline(Bytes::from_static(b"before"))]);
     publish(&mut engine, &context, before)
         .await
         .expect("before fold");
@@ -259,13 +241,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
         )
         .await
         .expect("claim and fence");
-    let after = candidate(
-        "after",
-        vec![inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"after"),
-        )],
-    );
+    let after = candidate("after", vec![inline(Bytes::from_static(b"after"))]);
     let error = publish(&mut engine, &context, after)
         .await
         .expect_err("fenced");
@@ -301,11 +277,8 @@ pub(super) fn assert_content_before_metadata(store: &RecordingStore<LocalFsStore
 async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     let (_directory, store, mut engine, context) = setup().await;
     let values = vec![
-        inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"retained"),
-        ),
-        inline(&engine.namespace.namespace_id, Bytes::new()),
+        inline(Bytes::from_static(b"retained")),
+        inline(Bytes::new()),
     ];
     publish(
         &mut engine,
@@ -346,7 +319,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         *input.read_basis.basis.manifest()
     );
     for value in &values {
-        let key = content_object_key_for_ref(value.content_ref());
+        let key = content_object_key_for_ref(&family_root_id(), value.content_ref());
         assert_eq!(
             store
                 .get(&key, None)
@@ -402,10 +375,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
 #[tokio::test]
 async fn competing_engines_materialize_identical_objects_and_publish_one_manifest() {
     let (_directory, store, mut first, context) = setup().await;
-    let values = vec![inline(
-        &first.namespace.namespace_id,
-        Bytes::from_static(b"shared"),
-    )];
+    let values = vec![inline(Bytes::from_static(b"shared"))];
     let candidate = candidate("race", values);
     publish(&mut first, &context, candidate.clone())
         .await
@@ -482,7 +452,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
 #[tokio::test]
 async fn an_existing_different_object_is_corruption_and_stops_manifest_publication() {
     let (_directory, store, mut engine, context) = setup().await;
-    let value = inline(&engine.namespace.namespace_id, Bytes::from_static(b"right"));
+    let value = inline(Bytes::from_static(b"right"));
     publish(
         &mut engine,
         &context,
@@ -491,7 +461,7 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
     .await
     .expect("publish");
     let input = engine.writer_position().expect("tail");
-    let key = content_object_key_for_ref(value.content_ref());
+    let key = content_object_key_for_ref(&family_root_id(), value.content_ref());
     store
         .put(&key, Bytes::from_static(b"wrong"), PutMode::CreateIfAbsent)
         .await
@@ -527,7 +497,7 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
 #[tokio::test]
 async fn a_materialization_transport_failure_remains_retryable() {
     let (_directory, store, mut engine, context) = setup().await;
-    let value = inline(&engine.namespace.namespace_id, Bytes::from_static(b"right"));
+    let value = inline(Bytes::from_static(b"right"));
     publish(
         &mut engine,
         &context,
@@ -536,7 +506,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
     .await
     .expect("publish");
     let input = engine.writer_position().expect("tail");
-    let key = content_object_key_for_ref(value.content_ref());
+    let key = content_object_key_for_ref(&family_root_id(), value.content_ref());
     store
         .put(&key, value.bytes().clone(), PutMode::CreateIfAbsent)
         .await
@@ -576,23 +546,14 @@ async fn a_materialization_transport_failure_remains_retryable() {
 #[tokio::test]
 async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     let (_directory, store, mut engine, context) = setup().await;
-    let before = candidate(
-        "before",
-        vec![inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"before"),
-        )],
-    );
+    let before = candidate("before", vec![inline(Bytes::from_static(b"before"))]);
     publish(&mut engine, &context, before)
         .await
         .expect("before fold");
     let input = engine.writer_position().expect("fold input");
     let mut expected = crate::wal::ProjectedWalTail::default();
     for name in ["during-one", "during-two"] {
-        let value = inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"during"),
-        );
+        let value = inline(Bytes::from_static(b"during"));
         publish(&mut engine, &context, candidate(name, vec![value.clone()]))
             .await
             .expect("during fold");
@@ -616,10 +577,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
             .expect("WAL object");
         let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("WAL decode");
         expected
-            .push_object(
-                &engine.namespace.namespace_id,
-                &wal_object.payload().records,
-            )
+            .push_object(&wal_object.payload().records)
             .expect("later rows");
     }
     let cached = engine
@@ -670,13 +628,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     assert_eq!(retained.age_at(&observed), 0);
     assert_eq!(observed.age_at(retained), 0);
     store.reset();
-    let after = candidate(
-        "after",
-        vec![inline(
-            &engine.namespace.namespace_id,
-            Bytes::from_static(b"after"),
-        )],
-    );
+    let after = candidate("after", vec![inline(Bytes::from_static(b"after"))]);
     publish(&mut engine, &context, after)
         .await
         .expect("after fold");
@@ -693,10 +645,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
 #[tokio::test]
 async fn a_published_fold_moves_the_position_with_its_tail() {
     let (_directory, store, mut engine, context) = setup().await;
-    let folded_value = inline(
-        &engine.namespace.namespace_id,
-        Bytes::from_static(b"folded"),
-    );
+    let folded_value = inline(Bytes::from_static(b"folded"));
     publish(
         &mut engine,
         &context,
@@ -712,7 +661,7 @@ async fn a_published_fold_moves_the_position_with_its_tail() {
         .await
         .expect("a maintenance fold");
     let published = folded.published().expect("the fold publishes a manifest");
-    let kept = inline(&engine.namespace.namespace_id, Bytes::from_static(b"kept"));
+    let kept = inline(Bytes::from_static(b"kept"));
     publish(&mut engine, &context, candidate("kept", vec![kept.clone()]))
         .await
         .expect("commit after the fold");

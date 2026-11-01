@@ -16,7 +16,7 @@ async fn layout(
     store: &RecordingStore<LocalFsStore>,
     reference: &ContentRef,
 ) -> ContentLayoutRecord {
-    crate::test_support::namespace_store(store, &reference.owner_namespace_id)
+    crate::test_support::namespace_store(store, &family_root_id())
         .load_current_metadata_view()
         .await
         .expect("view")
@@ -61,6 +61,7 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
             CommitCandidate::prepared(
                 request,
                 vec![PreparedContent::for_durable_content_write(
+                    namespace_id.clone(),
                     stored.content_ref().clone(),
                 )],
             ),
@@ -204,7 +205,6 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
     assert_eq!(store.counts().gets, 3);
     assert_eq!(store.counts().heads, 0);
     let prefix = ContentRef::blob_v1(
-        namespace_id.clone(),
         original.content_id.clone(),
         &bytes[..105],
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -312,10 +312,10 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
     .expect("tail");
     let content = tail.content(&reference).expect("pieces");
     let first = write_tail_content(
-        ContentWrites::new(&store, &crate::test_support::content_writes()),
+        ContentWrites::new(&store, &crate::test_support::content_writes(), view.head()),
         &view.projected_metadata_view(),
         &content,
-        assemble_tail_content(&content).expect("pieces"),
+        assemble_tail_content(&family_root_id(), &content).expect("pieces"),
     )
     .await
     .expect("first write");
@@ -333,7 +333,7 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
 async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
-    let original = inline(&namespace_id, Bytes::from_static(b"first"));
+    let original = inline(Bytes::from_static(b"first"));
     publish(
         &mut engine,
         &context,
@@ -355,10 +355,10 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     let view = namespace.load_current_metadata_view().await.expect("view");
     let content = tail.content(original.content_ref()).expect("content");
     write_tail_content(
-        ContentWrites::new(&store, &crate::test_support::content_writes()),
+        ContentWrites::new(&store, &crate::test_support::content_writes(), view.head()),
         &view.projected_metadata_view(),
         &content,
-        assemble_tail_content(&content).expect("pieces"),
+        assemble_tail_content(&family_root_id(), &content).expect("pieces"),
     )
     .await
     .expect("whole before manifest");
@@ -602,7 +602,7 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
         .await
         .expect("previous revision");
     assert_eq!(previous.ranges, target.ranges[..1]);
-    let empty = inline(&namespace_id, Bytes::new());
+    let empty = inline(Bytes::new());
     engine.invalidate_projection();
     publish(
         &mut engine,
@@ -647,7 +647,6 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
     let value = InlineContent::new(
-        namespace_id.clone(),
         ContentId::parse("con_10000000000000000000000000").expect("base id"),
         Bytes::from_static(b"hello"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -693,7 +692,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         .expect("fold");
     let other = crate::storage::content_staging::stage_bytes_under_content_id(
         &store,
-        namespace_id.clone(),
+        &namespace_id,
         ContentId::parse("con_40000000000000000000000000").expect("other id"),
         b"other",
     )
@@ -707,6 +706,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
             put("/other", other.content_ref()),
         ),
         vec![PreparedContent::for_durable_content_write(
+            namespace_id.clone(),
             other.content_ref().clone(),
         )],
     );
@@ -984,7 +984,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         .expect("collect after grace");
     assert_eq!(report.deleted.content_objects, 0);
     for extent in &shared_layout.layout.extents {
-        let key = crate::storage::content_location::extent_object_key(extent);
+        let key = crate::storage::content_location::extent_object_key(&family_root_id(), extent);
         assert!(store.head(&key).await.expect("head").is_some(), "{key}");
     }
     assert_eq!(
@@ -1009,7 +1009,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
     ] {
         let (_directory, store, mut engine, context) = setup().await;
         let namespace_id = engine.namespace.namespace_id.clone();
-        let original = inline(&namespace_id, Bytes::from_static(b"first"));
+        let original = inline(Bytes::from_static(b"first"));
         publish(
             &mut engine,
             &context,
@@ -1105,8 +1105,8 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
     let values = vec![
-        inline(&namespace_id, Bytes::from_static(b"first")),
-        inline(&namespace_id, Bytes::from_static(b"second")),
+        inline(Bytes::from_static(b"first")),
+        inline(Bytes::from_static(b"second")),
     ];
     publish(&mut engine, &context, candidate("files", values))
         .await
@@ -1157,7 +1157,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     let namespace_id = engine.namespace.namespace_id.clone();
     let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
     engine.invalidate_projection();
-    let target = inline(&namespace_id, Bytes::from_static(b"target"));
+    let target = inline(Bytes::from_static(b"target"));
     publish(&mut engine, &context, candidate("target", vec![target]))
         .await
         .expect("target");
@@ -1182,7 +1182,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
         view.head(),
         view.wal_tail(),
         view.projected_metadata_view(),
-        ContentWrites::new(&namespace.store, &content_writes),
+        ContentWrites::new(&namespace.store, &content_writes, view.head()),
         context.now_ms,
     );
     let plan = session
@@ -1254,10 +1254,7 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
         &context,
         candidate(
             "file",
-            vec![
-                inline(&namespace_id, Bytes::from_static(b"pieces")),
-                inline(&namespace_id, Bytes::new()),
-            ],
+            vec![inline(Bytes::from_static(b"pieces")), inline(Bytes::new())],
         ),
     )
     .await
@@ -1314,7 +1311,6 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             candidate(
                 "target",
                 vec![InlineContent::new(
-                    namespace_id.clone(),
                     ContentId::parse("con_00000000000000000000000001").expect("content"),
                     Bytes::from_static(b"target"),
                     loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -1329,7 +1325,6 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             .expect("fold target");
         engine.invalidate_projection();
         let original = InlineContent::new(
-            namespace_id.clone(),
             ContentId::parse("con_00000000000000000000000004").expect("content"),
             Bytes::from_static(b"hello"),
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -1381,7 +1376,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             view.head(),
             view.wal_tail(),
             view.projected_metadata_view(),
-            ContentWrites::new(&namespace.store, &content_writes),
+            ContentWrites::new(&namespace.store, &content_writes, view.head()),
             context.now_ms,
         );
         let mut plan = session
@@ -1408,7 +1403,6 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         assert!(plan.appended.is_empty());
         drop(view);
         let replacement = InlineContent::new(
-            namespace_id.clone(),
             ContentId::parse("con_00000000000000000000000003").expect("content"),
             Bytes::from_static(b"replacement"),
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -1420,7 +1414,10 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse("/file-0").expect("path"),
-                    content: loonfs_types::FileContent::Ref(replacement.content_ref().clone()),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref: replacement.content_ref().clone(),
+                        source_namespace_id: None,
+                    },
                     behavior: loonfs_types::DestinationBehavior::Replace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -1489,7 +1486,8 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             .await
             .expect("collect");
         for extent in &carried.extents {
-            let key = crate::storage::content_location::extent_object_key(extent);
+            let key =
+                crate::storage::content_location::extent_object_key(&family_root_id(), extent);
             assert!(store.head(&key).await.expect("head").is_some(), "{key}");
         }
         for folded in [false, true] {

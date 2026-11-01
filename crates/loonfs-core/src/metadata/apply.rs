@@ -155,7 +155,6 @@ impl MetadataState {
             } => {
                 if let Some(layout) = layout {
                     self.push_content_layout_record(ContentLayoutRecord {
-                        owner_namespace_id: content_ref.owner_namespace_id.clone(),
                         content_id: content_ref.content_id.clone(),
                         committed_seq,
                         size_bytes: layout.size_bytes(),

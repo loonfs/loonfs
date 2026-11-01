@@ -48,18 +48,22 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         })
     }
 
+    /// Plans `bytes` after `base_row`'s content, as the same chain when this
+    /// namespace created the chain and the base is the chain's head, and as a
+    /// new chain that shares the base's extents otherwise.
     async fn append_to(&self, base_row: &RevisionRecord, bytes: &[u8]) -> Result<AppendedContent> {
         let namespace_id = self.view.namespace_id;
         let base = &base_row.content_ref;
-        let head_size = self
-            .view
-            .metadata
-            .content_head(&base.content_id)
-            .await?
-            .unwrap_or(base.size_bytes);
-        let extends_base = base.owner_namespace_id == *namespace_id
-            && head_size == base.size_bytes
-            && base.size_bytes > 0;
+        let head = self.view.metadata.content_head(&base.content_id).await?;
+        let head_size = head
+            .as_ref()
+            .map_or(base.size_bytes, |head| head.size_bytes);
+        // A chain without a layout row exists only in this namespace's own
+        // unfolded tail, so this namespace created it.
+        let created_here = head
+            .and_then(|head| head.creator_namespace_id)
+            .is_none_or(|creator_namespace_id| creator_namespace_id == *namespace_id);
+        let extends_base = created_here && head_size == base.size_bytes && base.size_bytes > 0;
         let added = bytes.len() as u64;
         let size_bytes = base.size_bytes.checked_add(added).ok_or_else(|| {
             CoreError::NamespaceCorrupt(format!(
@@ -93,20 +97,19 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             None
         } else {
             let content = self.pieces.content(base);
-            Some(
-                materialize_content_layout(
-                    self.content_writes,
-                    &self.view.metadata,
-                    content.as_ref(),
-                    base,
-                )
-                .await?,
+            let mut layout = materialize_content_layout(
+                self.content_writes,
+                &self.view.metadata,
+                content.as_ref(),
+                base,
             )
+            .await?;
+            layout.creator_namespace_id = namespace_id.clone();
+            Some(layout)
         };
         Ok(AppendedContent {
             content_ref: ContentRef {
                 kind: ContentRefKind::BlobV1,
-                owner_namespace_id: namespace_id.clone(),
                 content_id: content_id.clone(),
                 size_bytes,
                 checksum,

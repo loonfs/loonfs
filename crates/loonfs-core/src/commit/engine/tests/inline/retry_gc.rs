@@ -12,7 +12,7 @@ use std::assert_matches;
 async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_commit() {
     let (_directory, store, engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
-    let original = inline(&namespace_id, Bytes::from_static(b"durable bytes"));
+    let original = inline(Bytes::from_static(b"durable bytes"));
     let failed = FailStore::new(
         store.clone(),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
@@ -83,7 +83,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .is_empty());
 
     // Inline retry identity is based on bytes, not the newly allocated ID.
-    let retried_value = inline(&namespace_id, original.bytes().clone());
+    let retried_value = inline(original.bytes().clone());
     assert_ne!(original.content_ref(), retried_value.content_ref());
     let retry = candidate("lost-ack", vec![retried_value]);
     store.reset();
@@ -113,7 +113,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     );
     let changed = candidate(
         "lost-ack",
-        vec![inline(&namespace_id, Bytes::from_static(b"changed bytes"))],
+        vec![inline(Bytes::from_static(b"changed bytes"))],
     );
     assert_matches!(
         publish(&mut restarted, &context, changed).await,

@@ -11,6 +11,7 @@ use crate::error::{CoreError, Result};
 use crate::metadata::row_decode::content_layout_from_manifest_row;
 use crate::segment::{visit_segment_rows, ScanDescriptor};
 use crate::storage::content_location::extent_object_key;
+use crate::storage::tail_content::is_own_extent;
 use futures::TryStreamExt;
 use loonfs_objectstore::keys::{content_prefix, metadata_segment_object_key};
 use loonfs_objectstore::layout::content_id_of;
@@ -57,12 +58,11 @@ impl<'a> ContentSweep<'a> {
         let live = sweep.live;
         let namespace_id = &sweep.namespace.namespace_id;
         let (family_members, family_members_read) = (live.family.members, live.family.members_read);
-        // A deleted fork sweeps no content until it's retired. A family root
-        // sweeps its family's content whether it's active or deleted, until
-        // its retirement lists and deletes the whole content prefix.
-        if live.current_tombstone.as_ref().is_some_and(|tombstone| {
-            !tombstone.is_family_root() || live.retirement_status() == RetirementStatus::Eligible
-        }) {
+        // A fork's content prefix stores nothing. A family root sweeps its
+        // family's content whether it's active or deleted, until its
+        // retirement lists and deletes the whole content prefix.
+        if !live.collects_family_content() || live.retirement_status() == RetirementStatus::Eligible
+        {
             tracing::info!(namespace_id = %namespace_id, shard_width = 0,
                 layout_segments = 0, family_members, family_members_read, "collecting namespace");
             return Ok(None);
@@ -103,10 +103,11 @@ impl<'a> ContentSweep<'a> {
         tracing::info!(namespace_id = %namespace_id, shard_width,
             layout_segments = segments.len(), family_members, family_members_read,
             "collecting namespace");
+        let family_root_id = &sweep.namespace.namespace_id;
         let scanned = scan_layout_extents(sweep, &segments, "", |row, extent| {
-            if extent.content_id != row.content_id
+            if !is_own_extent(extent, &row.content_id)
                 && shared
-                    .insert(extent_object_key(extent).as_bytes())
+                    .insert(extent_object_key(family_root_id, extent).as_bytes())
                     .is_none()
             {
                 return Ok(ControlFlow::Break(()));
@@ -133,20 +134,20 @@ impl<'a> ContentSweep<'a> {
         sweep: &Sweep<'_, S>,
         report: &mut GcResponse,
     ) -> Result<()> {
+        // Only a family root's pass sweeps content, so the collected
+        // namespace's prefix is the family's.
+        let family_root_id = &sweep.namespace.namespace_id;
         for body_prefix in generated_id_body_prefixes(self.shard_width) {
             let id_prefix = format!("con_{body_prefix}");
             let mut keys = ChargedSet::new(&sweep.live.memory);
             let _ = scan_layout_extents(sweep, &self.segments, &body_prefix, |_, extent| {
                 if extent.content_id.as_str().starts_with(&id_prefix) {
-                    keys.insert(extent_object_key(extent))?;
+                    keys.insert(extent_object_key(family_root_id, extent))?;
                 }
                 Ok(ControlFlow::Continue(()))
             })
             .await?;
-            let prefix = format!(
-                "{}{id_prefix}",
-                content_prefix(&sweep.namespace.namespace_id)
-            );
+            let prefix = format!("{}{id_prefix}", content_prefix(family_root_id));
             let decisions = sweep
                 .namespace
                 .store
@@ -218,8 +219,6 @@ async fn scan_layout_extents<S: ObjectStore>(
         &prefix,
         upper_bound.as_deref(),
         |row| {
-            // A member's rows can refer to objects of any owner, and the key
-            // of an object outside the swept prefix matches no listed key.
             let row = content_layout_from_manifest_row(row)?;
             for extent in &row.layout.extents {
                 if visit(&row, extent)?.is_break() {

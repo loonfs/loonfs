@@ -546,7 +546,6 @@ pub(super) async fn create_commit(
         mut operations,
     } = request;
     let inline_content = super::commit_content::prepare_inline_content(
-        &namespace_id,
         &mut operations,
         state
             .runtime
@@ -563,6 +562,17 @@ pub(super) async fn create_commit(
         .open(&namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime(error).with_commit_id(&commit_id))?;
+    let importer = match &subject {
+        Some(subject) => namespace.with_subject(subject.clone()),
+        None => namespace.clone(),
+    };
+    let imported_content = super::commit_content::prepare_imported_content(
+        state.namespaces.as_ref(),
+        &importer,
+        &mut operations,
+    )
+    .await
+    .map_err(|error| error.with_commit_id(&commit_id))?;
     // Every put in the request shares one preparation pass: a proof belongs
     // to the content, not to the operation that names it.
     let put_content_refs = operations
@@ -579,6 +589,7 @@ pub(super) async fn create_commit(
                 state.content_tokens(),
                 &put_content_refs,
                 &content_tokens,
+                imported_content,
             )
             .await?,
         )

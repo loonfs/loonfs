@@ -42,9 +42,13 @@ async fn fork<S: ObjectStore + Clone>(store: S, source: &NamespaceId, target: &N
         .expect("fork");
 }
 
-/// Writes an object under the prefix of `owner` and returns its key.
-async fn plant<S: ObjectStore>(store: &S, owner: &NamespaceId, content_id: &ContentId) -> String {
-    let key = content_blob(owner, content_id);
+/// Writes an object under the prefix of `family_root` and returns its key.
+async fn plant<S: ObjectStore>(
+    store: &S,
+    family_root: &NamespaceId,
+    content_id: &ContentId,
+) -> String {
+    let key = content_blob(family_root, content_id);
     store
         .put_if_absent(&key, Bytes::from_static(b"x"))
         .await
@@ -53,16 +57,14 @@ async fn plant<S: ObjectStore>(store: &S, owner: &NamespaceId, content_id: &Cont
 }
 
 /// Publishes the next manifest of `namespace_id` with one more delta run,
-/// whose layout row refers to the object of `content_id` under the prefix of
-/// `family_root`.
+/// whose layout row, created by `namespace_id`, refers to the object of
+/// `content_id` under the prefix of its family root.
 ///
-/// A commit can't refer to an object under another namespace's prefix until
-/// every member of a fork family stores its content under the family root's
-/// prefix, so the test writes the row directly.
-async fn publish_layout_under<S: ObjectStore>(
+/// The test writes the row directly, so a planted object is the only object
+/// that the member's view refers to.
+async fn publish_layout<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
-    family_root: &NamespaceId,
     content_id: &ContentId,
 ) {
     let current = crate::test_support::namespace_store(store, namespace_id)
@@ -73,13 +75,12 @@ async fn publish_layout_under<S: ObjectStore>(
     head.seq = ChangeSeq(head.seq.0 + 1);
     let mut state = MetadataStateBuilder::default();
     state.push_content_layout(ContentLayoutRecord {
-        owner_namespace_id: namespace_id.clone(),
         content_id: content_id.clone(),
         size_bytes: 1,
         committed_seq: head.seq,
         layout: ContentLayout {
+            creator_namespace_id: namespace_id.clone(),
             extents: vec![ContentExtent {
-                owner_namespace_id: family_root.clone(),
                 content_id: content_id.clone(),
                 object: ExtentObject::Whole,
                 offset: 0,
@@ -153,7 +154,7 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
     for member in &family[1..] {
         let content_id = ContentId::generate();
         referenced.push(plant(&store, root, &content_id).await);
-        publish_layout_under(&store, member, root, &content_id).await;
+        publish_layout(&store, member, &content_id).await;
     }
     let unreferenced = plant(&store, root, &ContentId::generate()).await;
     let aged = aged_context(&store, &family).await;
@@ -189,10 +190,10 @@ async fn content_that_only_a_fork_tail_refers_to_stays() {
     let store = LocalFsStore::new(directory.path()).expect("store");
     let family = family(&store, &["root", "fork"]).await;
     let root = &family[0];
-    // Every member of a fork family writes its uploads under the family
-    // root's prefix, so the object below stands for the fork's upload.
+    // The fork's upload is stored under the family root's prefix.
     let content_ref = put_file_content(&store, &family[1], "/tail", b"tail").await;
-    let referenced = plant(&store, root, &content_ref.content_id).await;
+    let referenced = content_blob(root, &content_ref.content_id);
+    assert!(exists(&store, &referenced).await);
     let unreferenced = plant(&store, root, &ContentId::generate()).await;
     let aged = aged_context(&store, &family).await;
     let report = crate::test_support::namespace_store(&store, root)
@@ -212,7 +213,7 @@ async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_fork_is_reti
     let (root, fork) = (&family[0], &family[1]);
     let content_id = ContentId::generate();
     let referenced = plant(&store, root, &content_id).await;
-    publish_layout_under(&store, fork, root, &content_id).await;
+    publish_layout(&store, fork, &content_id).await;
     crate::test_support::NamespaceFixture::new(&store, fork, &context(1_000))
         .engine()
         .delete_namespace(DeleteNamespaceOptions::default())
@@ -408,4 +409,48 @@ async fn a_deleted_root_with_a_live_fork_sweeps_unreferenced_content() {
         .await
         .expect("the fork reads inherited content");
     assert_eq!(bytes.bytes, b"shared");
+}
+
+#[tokio::test]
+async fn a_fork_pass_lists_no_content_and_no_upload_sessions() {
+    let directory = tempdir().expect("directory");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::new(|key| key.contains("/content/") || key.contains("/uploads/")),
+    );
+    let family = family(&store, &["root", "fork"]).await;
+    let (root, fork) = (&family[0], &family[1]);
+    let content_ref = put_file_content(&store, fork, "/upload", b"upload").await;
+    crate::test_support::NamespaceFixture::new(&store, fork, &context(1_000))
+        .engine()
+        .begin_upload()
+        .await
+        .expect("open an upload in the fork");
+    // The fork's content and upload records are stored under the family
+    // root's prefix.
+    assert!(exists(&store, &content_blob(root, &content_ref.content_id)).await);
+    for prefix in [
+        loonfs_objectstore::keys::content_prefix(fork),
+        loonfs_objectstore::keys::upload_session_prefix(fork),
+    ] {
+        assert_eq!(
+            store.list_prefix(&prefix).await.expect("list"),
+            Vec::<String>::new()
+        );
+    }
+    let aged = aged_context(&store, &family).await;
+    store.reset();
+    let report = crate::test_support::namespace_store(&store, fork)
+        .gc(None, &options(), &aged.clock())
+        .await
+        .expect("the fork's pass");
+    assert_eq!(store.take(), []);
+    assert_eq!(report.deleted.content_objects, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
+    let report = crate::test_support::namespace_store(&store, root)
+        .gc(None, &options(), &aged.clock())
+        .await
+        .expect("the root's pass");
+    assert_eq!(report.deleted.content_objects, 0);
+    assert!(exists(&store, &content_blob(root, &content_ref.content_id)).await);
 }

@@ -55,8 +55,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Lists the uploads prefix and pairs each session record with its outcome
     /// record.
     ///
-    /// An outcome key sorts directly after its session key, so the pairing looks
-    /// one key ahead and keeps no other state across the listing.
+    /// Only the pass on a family root lists its uploads prefix, which stores
+    /// the upload records of every member of its fork family. An outcome key
+    /// sorts directly after its session key, so the pairing looks one key
+    /// ahead and keeps no other state across the listing.
     pub(super) fn list_uploads(&self) -> impl Stream<Item = Result<ListedUpload>> + Send + 'static {
         let prefix = upload_session_prefix(&self.namespace_id);
         let entries = self
@@ -170,7 +172,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             if let Some(UploadOutcome::Completed {
                 completed_at_ms,
                 content_ref,
-            }) = self.load_upload_outcome(&upload_id).await?
+            }) = self
+                .load_upload_outcome(&self.namespace_id, &upload_id)
+                .await?
+                .map(|record| record.outcome)
             {
                 return Ok(Some(ListedUploadSession::Completed {
                     upload_id,
@@ -182,7 +187,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }
         }
         Ok(self
-            .load_upload_session_record(&upload_id)
+            .load_upload_session_record(&self.namespace_id, &upload_id)
             .await?
             .map(|session| ListedUploadSession::Incomplete {
                 content_id: session.content_id,
@@ -202,11 +207,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         outcome_listing: OutcomeListing,
     ) -> Result<Option<UploadSessionState>> {
         let outcome = match outcome_listing {
-            OutcomeListing::Listed => self.load_upload_outcome(upload_id).await?,
+            OutcomeListing::Listed => self
+                .load_upload_outcome(&self.namespace_id, upload_id)
+                .await?
+                .map(|record| record.outcome),
             OutcomeListing::Absent => None,
         };
         Ok(self
-            .load_upload_session_record(upload_id)
+            .load_upload_session_record(&self.namespace_id, upload_id)
             .await?
             .map(|session| UploadSessionState { session, outcome }))
     }
@@ -232,7 +240,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 }
                 // Repeat provider cleanup so a later pass completes work left by a crash
                 // after the abort.
-                if !AbandonedUpload::of(&state.session)
+                if !AbandonedUpload::of(&self.namespace_id, &state.session)
                     .release(&self.store)
                     .await
                 {
@@ -271,10 +279,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let aborted = UploadOutcome::Aborted {
             aborted_at_ms: clock.request_at_ms(),
         };
-        match self.create_upload_outcome(session, &aborted).await {
+        match self
+            .create_upload_outcome(&self.namespace_id, session, &aborted)
+            .await
+        {
             // Keep the newly aborted session until its post-abort grace period expires.
             Ok(OutcomeCreation::Created) => {
-                let _ = AbandonedUpload::of(session).release(&self.store).await;
+                let _ = AbandonedUpload::of(&self.namespace_id, session)
+                    .release(&self.store)
+                    .await;
                 Ok(retain_until(
                     clock.request_at_ms().saturating_add(grace_window_ms),
                 ))

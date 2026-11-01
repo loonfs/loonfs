@@ -11,8 +11,20 @@ use crate::metadata::{
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AccessRevisionNo, Attributes, AttributesProjection, AttributesRevisionNo, ChangeSeq, InodeId,
-    InodeKind, RevisionNo,
+    InodeKind, NamespaceId, RevisionNo,
 };
+
+/// A chain's head in one view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContentHead {
+    /// The chain's largest visible size.
+    pub(crate) size_bytes: u64,
+    /// The chain's creator, as the chain's layout row records it. `None` when
+    /// the view has no layout row for the chain, which happens only when the
+    /// chain exists as revisions in the namespace's own unfolded tail, so the
+    /// namespace created it.
+    pub(crate) creator_namespace_id: Option<NamespaceId>,
+}
 
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn latest_revision_head(
@@ -186,12 +198,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         })
     }
 
-    /// Returns the largest visible chain size so a shorter restore or copy cannot
-    /// shrink the head and allow conflicting appends.
+    /// Returns the chain's head: its largest visible size, so a shorter
+    /// restore or copy cannot shrink the head and allow conflicting appends,
+    /// and the creator that its longest layout row records.
     pub(crate) async fn content_head(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> Result<Option<u64>> {
+    ) -> Result<Option<ContentHead>> {
         let tail_size = self
             .row_states()
             .flat_map(|state| state.revisions())
@@ -200,11 +213,18 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             })
             .map(|row| row.content_ref.size_bytes)
             .max();
-        let layout_size = self
-            .content_layout(content_id)
-            .await?
-            .map(|row| row.size_bytes);
-        Ok(tail_size.into_iter().chain(layout_size).max())
+        let layout = self.content_layout(content_id).await?;
+        let Some(size_bytes) = tail_size
+            .into_iter()
+            .chain(layout.as_ref().map(|row| row.size_bytes))
+            .max()
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ContentHead {
+            size_bytes,
+            creator_namespace_id: layout.map(|row| row.layout.creator_namespace_id),
+        }))
     }
 
     pub(crate) async fn content_published(

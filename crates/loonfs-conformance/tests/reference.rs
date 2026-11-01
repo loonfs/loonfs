@@ -1464,7 +1464,10 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 operations: vec![FilesystemOperation::CreateFileByInode {
                     parent_inode_id,
                     display_name: display_name(&request.inode_file_name),
-                    content: loonfs_types::FileContent::Ref(content_ref),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref,
+                        source_namespace_id: None,
+                    },
                 }],
             },
         )
@@ -1530,7 +1533,10 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 content_tokens,
                 operations: vec![FilesystemOperation::PutFileRevisionByInode {
                     inode_id: file_inode_id,
-                    content: loonfs_types::FileContent::Ref(content_ref),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref,
+                        source_namespace_id: None,
+                    },
                     expected_revision_no,
                 }],
             },

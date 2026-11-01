@@ -1,6 +1,10 @@
 //! Independent exploration of namespace retirement and fork record deletion.
 //! The deadline is measured from the call clock. The budget bounds how far
-//! behind that clock can be at the moment of publication.
+//! behind that clock can be at the moment of publication. The three
+//! namespaces form one fork family, whose root (namespace 0) stores the
+//! content of every member under its prefix, so a fork's retirement releases
+//! its source record and only the root's retirement makes content
+//! collectable.
 
 use std::collections::HashSet;
 
@@ -24,8 +28,8 @@ struct Record {
 struct Model {
     namespaces: [Option<Status>; 3],
     records: [Option<Record>; 3],
-    collectable: [bool; 3],
-    inherited_owners: [u8; 3],
+    /// Whether the family root's retirement swept the family's content.
+    collectable: bool,
     capabilities_until: [u64; 3],
     calls: [Option<u64>; 3],
     clock: u64,
@@ -53,8 +57,7 @@ impl Model {
         Self {
             namespaces: [Some(Status::Active), None, None],
             records: [None; 3],
-            collectable: [false; 3],
-            inherited_owners: [1, 2, 4],
+            collectable: false,
             capabilities_until: [0; 3],
             calls: [None; 3],
             clock: 0,
@@ -70,7 +73,6 @@ impl Model {
                     return false;
                 }
                 self.namespaces[target] = Some(Status::Active);
-                self.inherited_owners[target] |= self.inherited_owners[source];
                 self.records[target] = Some(Record { source });
             }
             Action::Issue(namespace) => {
@@ -129,33 +131,24 @@ impl Model {
                 deadline: started + GRACE,
             });
         }
-        self.collectable[namespace] |= retired;
+        // A fork's prefix stores no content, so only the family root's
+        // retirement sweeps content.
+        self.collectable |= retired && namespace == 0;
     }
 
     fn safe(&self) -> bool {
-        if self
-            .records
-            .iter()
-            .flatten()
-            .any(|record| self.collectable[record.source])
-        {
+        if !self.collectable {
+            return true;
+        }
+        if self.records.iter().flatten().next().is_some() {
             return false;
         }
-        for namespace in 0..3 {
-            let protected = matches!(
+        (0..3).all(|namespace| {
+            !matches!(
                 self.namespaces[namespace],
                 Some(Status::Active | Status::Deleted)
-            ) || self.clock < self.capabilities_until[namespace];
-            if !protected {
-                continue;
-            }
-            for owner in 0..3 {
-                if self.inherited_owners[namespace] & (1 << owner) != 0 && self.collectable[owner] {
-                    return false;
-                }
-            }
-        }
-        true
+            ) && self.clock >= self.capabilities_until[namespace]
+        })
     }
 
     fn converges(mut self) -> bool {
@@ -172,10 +165,16 @@ impl Model {
                 }
             }
         }
-        (0..3).all(|namespace| match self.namespaces[namespace] {
-            None | Some(Status::Active) => !self.collectable[namespace],
-            Some(Status::Deleted | Status::Retired { .. }) => self.collectable[namespace],
-        })
+        let ended = self
+            .namespaces
+            .iter()
+            .flatten()
+            .all(|status| !matches!(status, Status::Active));
+        self.collectable == ended
+            && (0..3).all(|namespace| {
+                self.namespaces[namespace] == Some(Status::Active)
+                    || self.records[namespace].is_none()
+            })
     }
 }
 
@@ -213,7 +212,7 @@ fn explore(
 use Action::{Advance, Delete, Fork, Gc, Issue, Start};
 
 #[test]
-fn every_bounded_interleaving_preserves_owners_and_deleted_families_converge() {
+fn every_bounded_interleaving_preserves_the_family_content_and_deleted_families_converge() {
     let family = [
         Fork(0, 1),
         Fork(1, 2),
@@ -299,6 +298,6 @@ fn retirement_after_the_call_budget_can_collect_a_live_capability() {
         }
         assert!(model.clock < model.capabilities_until[0]);
         assert_eq!(model.safe(), matches!(rule, Rule::Correct));
-        assert_eq!(model.collectable[0], matches!(rule, Rule::Backdate));
+        assert_eq!(model.collectable, matches!(rule, Rule::Backdate));
     }
 }

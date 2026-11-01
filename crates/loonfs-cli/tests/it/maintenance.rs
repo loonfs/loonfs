@@ -57,7 +57,10 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
         .map(|index| loonfs::publish::FilesystemOperation::PutFile {
             path: loonfs_types::AbsolutePath::parse(format!("/unindexed/{index:04}.txt"))
                 .expect("path"),
-            content: loonfs_types::FileContent::Ref(prepared.content_ref().clone()),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: prepared.content_ref().clone(),
+                source_namespace_id: None,
+            },
             behavior: loonfs_types::DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

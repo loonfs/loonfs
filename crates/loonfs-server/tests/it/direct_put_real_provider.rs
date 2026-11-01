@@ -206,7 +206,10 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
             content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {
                 path: target.absolute_path().clone(),
-                content: loonfs_types::FileContent::Ref(content_ref),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref,
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1166,7 +1169,10 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {
                 path: target.absolute_path().clone(),
-                content: loonfs_types::FileContent::Ref(content_ref),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref,
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

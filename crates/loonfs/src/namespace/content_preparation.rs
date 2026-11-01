@@ -9,7 +9,7 @@ use crate::ContentRef;
 use crate::Result;
 use crate::{Namespace, Writable};
 use futures::StreamExt;
-use loonfs_types::u64_from_usize;
+use loonfs_types::{u64_from_usize, NamespaceId};
 
 impl Namespace<Writable> {
     /// Prepares content for publication.
@@ -39,7 +39,6 @@ impl Namespace<Writable> {
             .is_some_and(|threshold| bytes.len() <= threshold)
         {
             return Ok(PreparedContent::inline(
-                self.namespace_id.clone(),
                 bytes::Bytes::copy_from_slice(bytes),
                 self.core.store().checksum_algorithm(),
             ));
@@ -87,7 +86,6 @@ impl Namespace<Writable> {
             while buffered.len() <= threshold {
                 let Some(chunk) = body.next().await else {
                     return Ok(PreparedContent::inline(
-                        self.namespace_id.clone(),
                         buffered.freeze(),
                         self.core.store().checksum_algorithm(),
                     ));
@@ -121,13 +119,22 @@ impl Namespace<Writable> {
             .await?)
     }
 
-    /// Imports an existing content reference for later publication.
+    /// Imports an existing content reference from `source_namespace_id`,
+    /// which can be this namespace, for later publication.
     ///
-    /// Preparation verifies the source bytes and stages them under a fresh
-    /// identity owned by this namespace. Later publication performs no content
-    /// I/O. A subject must be an administrator of the reference's owner namespace.
-    /// See the API specification's content preparation contract.
-    pub async fn prepare_content_ref(&self, content_ref: ContentRef) -> Result<PreparedContent> {
+    /// When the source is a member of this namespace's fork family and its
+    /// view refers to the content, preparation copies no bytes, and the
+    /// commit records the chain's layout from the source's view. Otherwise
+    /// preparation verifies the source bytes and stages them under a fresh
+    /// content ID in this namespace's fork family, and later publication
+    /// performs no content I/O. A subject must be an administrator of the
+    /// source namespace. See the API specification's content preparation
+    /// contract.
+    pub async fn prepare_content_ref(
+        &self,
+        content_ref: ContentRef,
+        source_namespace_id: &NamespaceId,
+    ) -> Result<PreparedContent> {
         trace::in_operation(
             operation_span!(
                 self.core,
@@ -135,7 +142,7 @@ impl Namespace<Writable> {
                 self.namespace_id,
                 payload_class = trace::payload_class(content_ref.size_bytes)
             ),
-            self.prepare_content_ref_inner(content_ref),
+            self.prepare_content_ref_inner(content_ref, source_namespace_id),
         )
         .await
     }
@@ -143,31 +150,37 @@ impl Namespace<Writable> {
     pub(super) async fn prepare_content_ref_inner(
         &self,
         content_ref: ContentRef,
+        source_namespace_id: &NamespaceId,
     ) -> Result<PreparedContent> {
         let catalog = self
             .core
             .load_namespace_catalog_cached(&self.namespace_id)
             .await?;
         let engine = self.engine();
+        let prepared_at_ms = self.core.now_ms();
         let crate::pinned_read::PinnedRead {
-            engine: owner,
+            engine: source,
             context,
         } = self
             .core
-            .pinned_read(&content_ref.owner_namespace_id, crate::Consistency::Strong)
+            .pinned_read(source_namespace_id, crate::Consistency::Strong)
             .await?;
-        owner.ensure_administrator(&context).await?;
-        let owner_location = Some(
-            owner
-                .resolve_content_location(&content_ref, &context)
-                .await?,
-        );
+        source.ensure_administrator(&context).await?;
+        if let Some(prepared) = source
+            .prepare_family_content_ref(&catalog, &content_ref, &context, prepared_at_ms)
+            .await?
+        {
+            return Ok(prepared);
+        }
+        let source_location = source
+            .resolve_content_location(&content_ref, &context)
+            .await?;
         match engine
             .import_content_ref(
                 &catalog,
                 self.core.subject().map(|subject| &subject.subject_id),
                 &content_ref,
-                owner_location,
+                source_location,
             )
             .await
         {
@@ -177,7 +190,7 @@ impl Namespace<Writable> {
                 },
             )) if context.read_basis.head.status.is_deleted() => {
                 Err(crate::CoreError::NamespaceDeleted {
-                    namespace_id: content_ref.owner_namespace_id,
+                    namespace_id: source_namespace_id.clone(),
                 }
                 .into())
             }

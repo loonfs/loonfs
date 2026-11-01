@@ -1106,14 +1106,12 @@ fn repeated_content_in_one_commit_emits_one_publication() {
 #[test]
 fn appends_record_revision_checksums_and_the_chain_head() {
     let content_id = ContentId::generate();
-    let namespace_id = content_ref("unused").owner_namespace_id;
     let appended = |delta_index, revision_no, bytes: &[u8]| {
         revision(
             delta_index,
             InodeId(2),
             RevisionNo(revision_no),
             ContentRef::blob_v1(
-                namespace_id.clone(),
                 content_id.clone(),
                 bytes,
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -1126,7 +1124,6 @@ fn appends_record_revision_checksums_and_the_chain_head() {
         ROOT_INODE_ID,
         "log",
         ContentRef::blob_v1(
-            namespace_id.clone(),
             content_id.clone(),
             b"one",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -1170,7 +1167,6 @@ async fn planned_appends_match_the_model() {
         expected_revision_no: None,
     };
     let value = InlineContent::new(
-        namespace_id.clone(),
         ContentId::generate(),
         bytes::Bytes::from_static(b"one"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -1179,7 +1175,10 @@ async fn planned_appends_match_the_model() {
         vec![
             FilesystemOperation::PutFile {
                 path: path("/log"),
-                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: value.content_ref().clone(),
+                    source_namespace_id: None,
+                },
                 behavior: loonfs_types::DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1276,7 +1275,6 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         .expect("namespace");
     let upload = ContentRef {
         kind: loonfs_types::ContentRefKind::BlobV1,
-        owner_namespace_id: namespace_id.clone(),
         content_id: ContentId::generate(),
         size_bytes: 6,
         checksum: Checksum::crc64nvme(b"direct"),
@@ -1299,7 +1297,10 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
     let operations = [
         FilesystemOperation::PutFile {
             path: path(),
-            content: loonfs_types::FileContent::Ref(upload),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: upload,
+                source_namespace_id: None,
+            },
             behavior: loonfs_types::DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1840,7 +1841,6 @@ fn assert_attributed_commits_match_model(
                     row.committed_seq,
                     row.size_bytes,
                     &row.layout,
-                    &row.owner_namespace_id,
                 ),
             )
         })
@@ -1859,7 +1859,6 @@ fn assert_attributed_commits_match_model(
                 row.committed_seq,
                 row.size_bytes,
                 &row.layout,
-                &row.owner_namespace_id,
             ))
             .collect::<Vec<_>>()
     );

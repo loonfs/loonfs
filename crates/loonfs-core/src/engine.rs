@@ -8,6 +8,7 @@ use crate::commit::engine::NamespaceCommitEngine;
 use crate::commit::publish_view::WriterPosition;
 use crate::diff::DiffPage;
 use crate::error::{CoreError, Result};
+use crate::limits::DIRECT_TRANSFER_URL_TTL_MS;
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::ReadBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -17,6 +18,7 @@ use crate::path::read::{
     LoadedMetadataView,
 };
 use crate::storage::content::DurableContentValidationError;
+use crate::storage::content_admission::PreparedContent;
 use crate::storage::content_location::ContentLocation;
 use crate::storage::content_stream::{FileContentStream, StreamRange};
 use crate::wal::ProjectedWalTail;
@@ -505,8 +507,56 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         {
             view.resolve_content_location(content_ref).await
         } else {
-            Ok(ContentLocation::whole(content_ref))
+            Ok(ContentLocation::whole(
+                &context.read_basis.head.family_root_id,
+                content_ref,
+            ))
         }
+    }
+
+    /// Prepares `content_ref`, which this namespace's view at `context`
+    /// refers to, for a commit of the namespace that `catalog` describes,
+    /// without copying its bytes. Returns `None` when that namespace is in
+    /// another fork family, or when no revision or layout in this view refers
+    /// to the chain (such as an upload that no commit refers to yet), and the
+    /// caller copies the bytes instead.
+    ///
+    /// The proof includes the chain's layout in this view, with the chain's
+    /// creator, after writing the chain's pending pieces to content objects,
+    /// as a copy within the namespace does. It expires one direct transfer
+    /// lifetime after `prepared_at_ms`, a time read before `context` was
+    /// pinned, because garbage collection keeps every manifest of this view
+    /// for longer than that, the way it does for a direct download.
+    pub async fn prepare_family_content_ref(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        content_ref: &ContentRef,
+        context: &RuntimeReadContext,
+        prepared_at_ms: u64,
+    ) -> Result<Option<PreparedContent>> {
+        if context.read_basis.head.family_root_id != *catalog.family_root_id() {
+            return Ok(None);
+        }
+        let view = self
+            .namespace
+            .load_metadata_view_for_authorization(context)
+            .await?;
+        if !view
+            .metadata_view()
+            .content_published(&content_ref.content_id)
+            .await?
+        {
+            return Ok(None);
+        }
+        let layout = view
+            .materialize_content_layout(content_ref, &self.namespace.content_writes)
+            .await?;
+        Ok(Some(PreparedContent::for_family_member(
+            catalog.namespace_id().clone(),
+            content_ref.clone(),
+            layout,
+            prepared_at_ms.saturating_add(DIRECT_TRANSFER_URL_TTL_MS),
+        )))
     }
 
     /// Reads and verifies the bytes named by a published reference.

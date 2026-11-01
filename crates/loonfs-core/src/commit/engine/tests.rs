@@ -72,12 +72,14 @@ fn admission_weight_includes_annotation_proofs_and_preparation_errors() {
             .expect("weight")
             >= empty_annotation + 4096
     );
-    let proof = PreparedContent::for_durable_content_write(ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
-        ContentId::generate(),
-        b"proof",
-        loonfs_types::ChecksumAlgorithm::Crc64nvme,
-    ));
+    let proof = PreparedContent::for_durable_content_write(
+        NamespaceId::parse("demo").expect("namespace"),
+        ContentRef::blob_v1(
+            ContentId::generate(),
+            b"proof",
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+        ),
+    );
     let prepared = CommitCandidate::prepared(request.clone(), vec![proof; 100]);
     assert!(
         prepared.estimated_retained_bytes().expect("weight")
@@ -153,12 +155,11 @@ fn semantic_identity_ignores_current_request_limits() {
     oversized_ops.semantic_identity(&namespace_id);
 
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         b"proof",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
-    let prepared = PreparedContent::for_durable_content_write(content_ref);
+    let prepared = PreparedContent::for_durable_content_write(namespace_id.clone(), content_ref);
     let oversized_proofs = CommitCandidate::prepared(
         create_dir_request("too-many-proofs", "docs"),
         vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],

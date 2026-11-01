@@ -49,6 +49,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     let session = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
     let session_key = crate::test_support::write_upload_records(
         &store,
+        &namespace_id,
         &session,
         Some(UploadOutcome::Aborted {
             aborted_at_ms: 2_000,

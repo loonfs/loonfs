@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Plants test content under a fresh identity owned by the current namespace.
+    /// Plants test content under a fresh identity, under the prefix of the
+    /// current namespace's family root.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -28,10 +29,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     )]
     #[cfg(any(test, feature = "test-support"))]
     pub async fn store_bytes_as_content(&self, bytes: &[u8]) -> Result<StoredContent> {
-        self.load_catalog_entry().await?;
+        let catalog = self.load_catalog_entry().await?;
         stage_bytes_under_content_id(
             &self.store,
-            self.namespace_id.clone(),
+            catalog.family_root_id(),
             ContentId::generate(),
             bytes,
         )
@@ -54,20 +55,21 @@ pub(crate) enum StreamedPayloadKind {
     ContentImport,
 }
 
-/// Stages and hashes a payload without buffering the complete stream.
+/// Stages and hashes a payload under the prefix of `family_root_id`, without
+/// buffering the complete stream.
 ///
 /// The write is create-only, and the store enforces that atomically with
 /// completion at every size, so when two requests write one content ID,
 /// only one of them creates the object and the other finds it present.
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
-    owner_namespace_id: NamespaceId,
+    family_root_id: &NamespaceId,
     content_id: ContentId,
     body: ByteStream,
     payload_kind: StreamedPayloadKind,
     check_ownership: impl Future<Output = Result<()>>,
 ) -> Result<StagedStream> {
-    let object_key = content_blob(&owner_namespace_id, &content_id);
+    let object_key = content_blob(family_root_id, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::new(store.checksum_algorithm())));
     let (request_check, check_requested) = oneshot::channel();
     let (allow_completion, completion_allowed) = oneshot::channel();
@@ -146,7 +148,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     };
 
     Ok(StagedStream {
-        content_ref: observed.into_content_ref(owner_namespace_id, content_id),
+        content_ref: observed.into_content_ref(content_id),
         already_present,
     })
 }
@@ -170,14 +172,9 @@ impl StreamedPayload {
         self.checksum.update(chunk);
     }
 
-    fn into_content_ref(
-        self,
-        owner_namespace_id: NamespaceId,
-        content_id: ContentId,
-    ) -> ContentRef {
+    fn into_content_ref(self, content_id: ContentId) -> ContentRef {
         ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id,
             content_id,
             size_bytes: self.size_bytes,
             checksum: self.checksum.finish(),
@@ -186,20 +183,16 @@ impl StreamedPayload {
 }
 
 /// Stages bytes under an identity the caller already allocated, for writers
-/// that minted the id earlier (an upload session allocates at `begin`).
+/// that minted the id earlier (an upload session allocates at `begin`), under
+/// the prefix of `family_root_id`.
 pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
-    owner_namespace_id: NamespaceId,
+    family_root_id: &NamespaceId,
     content_id: ContentId,
     bytes: &[u8],
 ) -> Result<StoredContent> {
-    let content_ref = ContentRef::blob_v1(
-        owner_namespace_id,
-        content_id,
-        bytes,
-        store.checksum_algorithm(),
-    );
-    let object_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
+    let content_ref = ContentRef::blob_v1(content_id, bytes, store.checksum_algorithm());
+    let object_key = content_blob(family_root_id, &content_ref.content_id);
     store
         .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
         .await
@@ -233,7 +226,7 @@ mod tests {
 
         let first = stage_bytes_under_content_id(
             &store,
-            loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+            &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
         )
@@ -241,7 +234,7 @@ mod tests {
         .expect("first stage");
         let second = stage_bytes_under_content_id(
             &store,
-            loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+            &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
         )
@@ -295,14 +288,10 @@ mod tests {
             ),
         ];
         for (store, bytes, reason) in cases {
-            let error = stage_bytes_under_content_id(
-                store,
-                namespace_id.clone(),
-                content_id.clone(),
-                bytes,
-            )
-            .await
-            .expect_err("occupied key");
+            let error =
+                stage_bytes_under_content_id(store, &namespace_id, content_id.clone(), bytes)
+                    .await
+                    .expect_err("occupied key");
             assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
             assert_matches!(
                 error,

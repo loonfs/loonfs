@@ -4346,7 +4346,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
             let entry = namespace.stat("/large.bin").await.expect("entry");
 
             let key = loonfs_objectstore::keys::content_blob(
-                &entry.content_ref().expect("file").owner_namespace_id,
+                &ns,
                 &entry.content_ref().expect("file").content_id,
             );
             let mut changed = payload.clone();

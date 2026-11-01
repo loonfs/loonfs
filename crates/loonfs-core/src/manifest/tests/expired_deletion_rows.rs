@@ -117,7 +117,10 @@ async fn put<S: ObjectStore>(
         .expect("load namespace catalog");
     let operation = FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content: loonfs_types::FileContent::Ref(content_ref),
+        content: loonfs_types::FileContent::Ref {
+            content_ref,
+            source_namespace_id: None,
+        },
         behavior: DestinationBehavior::Replace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -1288,7 +1291,6 @@ async fn a_base_compaction_walks_the_tree_once_the_acknowledged_floor_is_above_z
             committed_at_ms: 1_000,
             delta_index: 0,
             content_ref: loonfs_types::ContentRef::blob_v1(
-                namespace_id.clone(),
                 loonfs_types::ContentId::parse("con_00000000000000000000000000")
                     .expect("content id"),
                 b"probe",

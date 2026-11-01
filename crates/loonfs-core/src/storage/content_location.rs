@@ -10,7 +10,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::{ContentExtent, ContentId, ContentRef, ExtentObject};
+use loonfs_types::{ContentExtent, ContentId, ContentRef, ExtentObject, NamespaceId};
 
 #[async_trait::async_trait]
 pub(crate) trait LayoutLookup: Sync {
@@ -26,11 +26,13 @@ pub(crate) struct LocatedExtent {
     pub(crate) extent: ContentExtent,
 }
 
-pub(crate) fn extent_object_key(extent: &ContentExtent) -> String {
+/// Returns the key of the object that `extent` reads, under the prefix of the
+/// reading namespace's family root.
+pub(crate) fn extent_object_key(family_root_id: &NamespaceId, extent: &ContentExtent) -> String {
     match extent.object {
-        ExtentObject::Whole => content_blob(&extent.owner_namespace_id, &extent.content_id),
+        ExtentObject::Whole => content_blob(family_root_id, &extent.content_id),
         ExtentObject::Span { start, end } => {
-            content_span(&extent.owner_namespace_id, &extent.content_id, start, end)
+            content_span(family_root_id, &extent.content_id, start, end)
         }
     }
 }
@@ -41,17 +43,23 @@ pub struct ContentLocation {
     object_key: String,
     pub(crate) extents: Vec<LocatedExtent>,
     pieces: Vec<Bytes>,
+    /// The chain's creator, as the layout row that the extents came from
+    /// records it, or `None` when the location read no layout row.
+    pub(crate) creator_namespace_id: Option<NamespaceId>,
 }
 
 impl ContentLocation {
     /// Truncates the layout at the lowest tail offset, then takes the pieces.
-    /// A nonzero folded prefix without a layout is corruption.
+    /// A nonzero folded prefix without a layout is corruption. Every key is
+    /// under the prefix of `family_root_id`, the reading namespace's family
+    /// root.
     pub(crate) async fn resolve<L: LayoutLookup>(
         lookup: &L,
+        family_root_id: &NamespaceId,
         content: Option<&ProjectedContent>,
         content_ref: &ContentRef,
     ) -> Result<Self> {
-        let object_key = content_object_key_for_ref(content_ref);
+        let object_key = content_object_key_for_ref(family_root_id, content_ref);
         let mut end = content_ref.size_bytes;
         let content = content.filter(|content| content.pieces[0].offset <= end);
         let mut pieces = Vec::new();
@@ -79,6 +87,7 @@ impl ContentLocation {
             end = content.pieces[0].offset;
         }
         let mut extents = Vec::new();
+        let mut creator_namespace_id = None;
         if end > 0 {
             let row = lookup
                 .content_layout(&content_ref.content_id)
@@ -89,42 +98,42 @@ impl ContentLocation {
                         content_ref.content_id
                     ))
                 })?;
-            if row.owner_namespace_id != content_ref.owner_namespace_id
-                || row.size_bytes < end
-                || row.layout.validate(row.size_bytes).is_err()
-            {
+            if row.size_bytes < end || row.layout.validate(row.size_bytes).is_err() {
                 return Err(CoreError::NamespaceCorrupt(format!(
-                    "content `{}` requires a layout owned by `{}` covering {end} bytes",
-                    content_ref.content_id, content_ref.owner_namespace_id
+                    "content `{}` requires a layout covering {end} bytes",
+                    content_ref.content_id
                 )));
             }
+            creator_namespace_id = Some(row.layout.creator_namespace_id);
             let mut remaining = end;
             for mut extent in row.layout.extents {
                 if remaining == 0 {
                     break;
                 }
-                let object_key = extent_object_key(&extent);
+                let object_key = extent_object_key(family_root_id, &extent);
                 extent.length = extent.length.min(remaining);
                 remaining -= extent.length;
                 extents.push(LocatedExtent { object_key, extent });
             }
         } else if content_ref.size_bytes == 0 && content.is_none() {
-            return Ok(Self::whole(content_ref));
+            return Ok(Self::whole(family_root_id, content_ref));
         }
         Ok(Self {
             object_key,
             extents,
             pieces,
+            creator_namespace_id,
         })
     }
 
-    pub(crate) fn whole(content_ref: &ContentRef) -> Self {
-        let object_key = content_object_key_for_ref(content_ref);
+    /// Returns the location of a reference whose bytes are the start of the
+    /// whole object under the prefix of `family_root_id`, such as an upload's.
+    pub(crate) fn whole(family_root_id: &NamespaceId, content_ref: &ContentRef) -> Self {
+        let object_key = content_object_key_for_ref(family_root_id, content_ref);
         Self {
             extents: vec![LocatedExtent {
                 object_key: object_key.clone(),
                 extent: ContentExtent {
-                    owner_namespace_id: content_ref.owner_namespace_id.clone(),
                     content_id: content_ref.content_id.clone(),
                     object: ExtentObject::Whole,
                     offset: 0,
@@ -133,6 +142,7 @@ impl ContentLocation {
             }],
             object_key,
             pieces: Vec::new(),
+            creator_namespace_id: None,
         }
     }
 

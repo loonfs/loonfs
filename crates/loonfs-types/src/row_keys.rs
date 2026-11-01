@@ -774,7 +774,6 @@ mod tests {
             committed_by: crate::ActorId::loonfs(),
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
-                crate::NamespaceId::parse("demo").expect("namespace id"),
                 crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
                     .expect("valid content id"),
                 b"row key sample",
@@ -869,7 +868,6 @@ mod tests {
             committed_by: crate::ActorId::loonfs(),
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
-                crate::NamespaceId::parse("demo").expect("namespace id"),
                 crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
                     .expect("valid content id"),
                 b"row key prefix sample",
@@ -894,14 +892,13 @@ mod tests {
             (
                 MetadataRowFamily::ContentLayouts,
                 MetadataRow::ContentLayout(ContentLayoutRecord {
-                    owner_namespace_id: NamespaceId::parse("demo").expect("namespace"),
                     content_id: crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
                         .expect("content id"),
                     committed_seq: ChangeSeq(12),
                     size_bytes: 5,
                     layout: crate::ContentLayout {
+                        creator_namespace_id: NamespaceId::parse("demo").expect("namespace"),
                         extents: vec![crate::ContentExtent {
-                            owner_namespace_id: NamespaceId::parse("demo").expect("namespace"),
                             content_id: crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
                                 .expect("content id"),
                             object: crate::ExtentObject::Whole,
@@ -1017,7 +1014,6 @@ mod tests {
                         committed_by: actor.clone(),
                         delta_index: 3,
                         content_ref: crate::ContentRef::blob_v1(
-                            crate::NamespaceId::parse("demo").expect("namespace id"),
                             crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
                                 .expect("content id"),
                             b"attribution key test",

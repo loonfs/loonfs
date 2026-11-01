@@ -65,7 +65,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.subject.as_ref(),
         )?;
         let content_id = ContentId::generate();
-        let object_key = content_blob(&self.namespace.namespace_id, &content_id);
+        let object_key = content_blob(catalog.family_root_id(), &content_id);
         let session = create_upload_session(
             &self.namespace.store,
             &catalog,
@@ -100,7 +100,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.subject.as_ref(),
         )?;
         let content_id = ContentId::generate();
-        let object_key = content_blob(&self.namespace.namespace_id, &content_id);
+        let object_key = content_blob(catalog.family_root_id(), &content_id);
         let provider_upload_id = self
             .namespace
             .store
@@ -121,7 +121,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 Err(error) => {
                     let _ = abort_unpublished_multipart_upload(
                         &self.namespace.store,
-                        &self.namespace.namespace_id,
+                        catalog.family_root_id(),
                         &content_id,
                         &provider_upload_id,
                     )

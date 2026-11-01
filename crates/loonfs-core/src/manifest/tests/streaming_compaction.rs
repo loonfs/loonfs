@@ -3680,7 +3680,6 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_even_past_the_filter
         RecordingStore::metadata_segments(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = NamespaceId::parse("layouts").expect("namespace");
     let reference = ContentRef::blob_v1(
-        namespace_id.clone(),
         ContentId::parse("con_00000000000000000000000000").expect("content"),
         b"four",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -3703,13 +3702,12 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_even_past_the_filter
         (absent.clone(), 4, ChangeSeq(1)),
     ] {
         state.push_content_layout(ContentLayoutRecord {
-            owner_namespace_id: namespace_id.clone(),
             content_id: content_id.clone(),
             size_bytes,
             committed_seq,
             layout: ContentLayout {
+                creator_namespace_id: namespace_id.clone(),
                 extents: vec![ContentExtent {
-                    owner_namespace_id: namespace_id.clone(),
                     content_id,
                     object: ExtentObject::Whole,
                     offset: 0,

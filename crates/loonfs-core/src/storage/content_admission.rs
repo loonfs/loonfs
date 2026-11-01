@@ -1,9 +1,9 @@
 //! Content preparation proofs and short-lived tokens used by producers.
 //!
 //! A token can be created only from a durable, completed upload session. It
-//! proves that the named content was verified before publication. Namespace,
-//! content reference, and token expiry are preserved when converting it to
-//! [`PreparedContent`] and checked again when a publish batch admits the
+//! proves that the named content was verified before publication. The
+//! namespace, content reference, and token expiry are preserved when converting
+//! it to [`PreparedContent`] and checked again when a publish batch admits the
 //! proof.
 
 use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
@@ -12,12 +12,15 @@ use crate::storage::inline_content::InlineContent;
 use loonfs_types::ContentToken;
 use loonfs_types::{
     decode_token, decode_token_bytes, encode_token, encode_token_bytes, ChecksumAlgorithm,
-    ContentId, ContentRef, NamespaceId, OpaqueToken, OpaqueTokenError, UploadId,
+    ContentId, ContentLayout, ContentRef, NamespaceId, OpaqueToken, OpaqueTokenError, UploadId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const CONTENT_TOKEN_FORMAT_VERSION: u8 = 1;
+/// The version of the token payload. Version 2 binds the token to the
+/// namespace that completed the upload, because a content reference no longer
+/// records a namespace.
+const CONTENT_TOKEN_FORMAT_VERSION: u8 = 2;
 
 /// Evidence read from a durable upload session in its completed state.
 ///
@@ -26,13 +29,21 @@ const CONTENT_TOKEN_FORMAT_VERSION: u8 = 1;
 /// from an in-memory expectation or an unverified provider response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedUploadEvidence {
+    namespace_id: NamespaceId,
     content_ref: ContentRef,
     completed_at_ms: u64,
 }
 
 impl CompletedUploadEvidence {
-    pub(crate) fn for_completed_session(content_ref: ContentRef, completed_at_ms: u64) -> Self {
+    /// Builds the evidence of a session that `namespace_id` created and that
+    /// completed with `content_ref`.
+    pub(crate) fn for_completed_session(
+        namespace_id: NamespaceId,
+        content_ref: ContentRef,
+        completed_at_ms: u64,
+    ) -> Self {
         Self {
+            namespace_id,
             content_ref,
             completed_at_ms,
         }
@@ -53,23 +64,30 @@ pub struct PreparedContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PreparedContentKind {
     Inline(InlineContent),
+    /// Content that an upload session of `namespace_id` stored, which only
+    /// that namespace's commits admit, so a chain has one creator.
     Staged {
+        namespace_id: NamespaceId,
         content_ref: ContentRef,
         expires_at_ms: u64,
         upload_id: Option<UploadId>,
+    },
+    /// Content of another member of the fork family, or of `namespace_id`
+    /// itself, that `namespace_id` imports without a copy. The layout is the
+    /// one that the source's view finds, and it records the chain's creator.
+    Shared {
+        namespace_id: NamespaceId,
+        content_ref: ContentRef,
+        layout: ContentLayout,
+        expires_at_ms: u64,
     },
 }
 
 impl PreparedContent {
     /// Prepares bytes without store access or an expiry.
-    pub fn inline(
-        namespace_id: NamespaceId,
-        bytes: bytes::Bytes,
-        algorithm: ChecksumAlgorithm,
-    ) -> Self {
+    pub fn inline(bytes: bytes::Bytes, algorithm: ChecksumAlgorithm) -> Self {
         Self {
             kind: PreparedContentKind::Inline(InlineContent::new(
-                namespace_id,
                 ContentId::generate(),
                 bytes,
                 algorithm,
@@ -81,31 +99,28 @@ impl PreparedContent {
     pub fn inline_content(&self) -> Option<&InlineContent> {
         match &self.kind {
             PreparedContentKind::Inline(value) => Some(value),
-            PreparedContentKind::Staged { .. } => None,
+            PreparedContentKind::Staged { .. } | PreparedContentKind::Shared { .. } => None,
         }
     }
 
     pub(crate) fn estimated_payload_bytes(&self) -> usize {
         match &self.kind {
             PreparedContentKind::Inline(value) => value.bytes().len(),
-            PreparedContentKind::Staged { content_ref, .. } => content_ref
-                .owner_namespace_id
+            PreparedContentKind::Staged { content_ref, .. }
+            | PreparedContentKind::Shared { content_ref, .. } => content_ref
+                .content_id
                 .as_str()
                 .len()
-                .saturating_add(content_ref.content_id.as_str().len())
                 .saturating_add(content_ref.checksum.value().as_str().len()),
         }
     }
 
-    pub(crate) fn estimated_owned_staging_payload_bytes(
-        namespace_id: &NamespaceId,
-        value: &InlineContent,
-    ) -> usize {
+    pub(crate) fn estimated_owned_staging_payload_bytes(value: &InlineContent) -> usize {
         let content_ref = value.content_ref();
-        namespace_id
+        content_ref
+            .content_id
             .as_str()
             .len()
-            .saturating_add(content_ref.content_id.as_str().len())
             .saturating_add(content_ref.checksum.value().as_str().len())
     }
 
@@ -114,20 +129,44 @@ impl PreparedContent {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_durable_content_write(content_ref: ContentRef) -> Self {
-        Self::for_completed_upload(content_ref, u64::MAX, None)
+    pub(crate) fn for_durable_content_write(
+        namespace_id: NamespaceId,
+        content_ref: ContentRef,
+    ) -> Self {
+        Self::for_completed_upload(namespace_id, content_ref, u64::MAX, None)
     }
 
     pub(crate) fn for_completed_upload(
+        namespace_id: NamespaceId,
         content_ref: ContentRef,
         expires_at_ms: u64,
         upload_id: Option<UploadId>,
     ) -> Self {
         Self {
             kind: PreparedContentKind::Staged {
+                namespace_id,
                 content_ref,
                 expires_at_ms,
                 upload_id,
+            },
+        }
+    }
+
+    /// Prepares content that `namespace_id` imports from a member of its own
+    /// fork family, with the layout that the source's view finds, until
+    /// `expires_at_ms`.
+    pub(crate) fn for_family_member(
+        namespace_id: NamespaceId,
+        content_ref: ContentRef,
+        layout: ContentLayout,
+        expires_at_ms: u64,
+    ) -> Self {
+        Self {
+            kind: PreparedContentKind::Shared {
+                namespace_id,
+                content_ref,
+                layout,
+                expires_at_ms,
             },
         }
     }
@@ -136,10 +175,12 @@ impl PreparedContent {
     pub fn upload_id(&self) -> Option<&UploadId> {
         match &self.kind {
             PreparedContentKind::Staged { upload_id, .. } => upload_id.as_ref(),
-            PreparedContentKind::Inline(_) => None,
+            PreparedContentKind::Inline(_) | PreparedContentKind::Shared { .. } => None,
         }
     }
 
+    /// Returns whether this proof admits `content_ref` in a commit of
+    /// `namespace_id` at `now_ms`.
     pub(crate) fn admits(
         &self,
         namespace_id: &NamespaceId,
@@ -149,14 +190,43 @@ impl PreparedContent {
         match &self.kind {
             PreparedContentKind::Inline(_) => false,
             PreparedContentKind::Staged {
+                namespace_id: prepared_for,
+                content_ref: expected_content_ref,
+                expires_at_ms,
+                ..
+            }
+            | PreparedContentKind::Shared {
+                namespace_id: prepared_for,
                 content_ref: expected_content_ref,
                 expires_at_ms,
                 ..
             } => {
-                &expected_content_ref.owner_namespace_id == namespace_id
+                prepared_for == namespace_id
                     && expected_content_ref == content_ref
                     && now_ms < *expires_at_ms
             }
+        }
+    }
+
+    /// Returns the layout that a revision of the prepared reference records,
+    /// in a commit of `namespace_id`.
+    ///
+    /// An upload is one whole object, and `namespace_id` is its creator. An
+    /// import from a member of the fork family records the source's layout,
+    /// whose creator is the chain's.
+    pub(crate) fn revision_layout(&self, namespace_id: &NamespaceId) -> Option<ContentLayout> {
+        match &self.kind {
+            PreparedContentKind::Inline(_) => None,
+            PreparedContentKind::Staged { content_ref, .. } => Some(ContentLayout {
+                creator_namespace_id: namespace_id.clone(),
+                extents: vec![loonfs_types::ContentExtent {
+                    content_id: content_ref.content_id.clone(),
+                    object: loonfs_types::ExtentObject::Whole,
+                    offset: 0,
+                    length: content_ref.size_bytes,
+                }],
+            }),
+            PreparedContentKind::Shared { layout, .. } => Some(layout.clone()),
         }
     }
 
@@ -164,13 +234,17 @@ impl PreparedContent {
     pub fn content_ref(&self) -> &ContentRef {
         match &self.kind {
             PreparedContentKind::Inline(value) => value.content_ref(),
-            PreparedContentKind::Staged { content_ref, .. } => content_ref,
+            PreparedContentKind::Staged { content_ref, .. }
+            | PreparedContentKind::Shared { content_ref, .. } => content_ref,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ContentTokenPayload {
+    /// The namespace whose upload session completed the content, which is the
+    /// only namespace that the token admits the content in.
+    namespace_id: NamespaceId,
     content_ref: ContentRef,
     expires_at_ms: u64,
 }
@@ -219,6 +293,7 @@ pub fn mint_content_token(
         .checked_add(CONTENT_RECEIPT_TTL_MS)
         .ok_or(ContentTokenError::TimeOverflow)?;
     let payload = ContentTokenPayload {
+        namespace_id: evidence.namespace_id.clone(),
         content_ref: evidence.content_ref.clone(),
         expires_at_ms,
     };
@@ -261,7 +336,7 @@ pub fn verify_content_token(
             OpaqueTokenError::InvalidJson(message) => ContentTokenError::Codec(message),
             _ => ContentTokenError::Malformed,
         })?;
-    if payload.content_ref.owner_namespace_id != *catalog.namespace_id() {
+    if payload.namespace_id != *catalog.namespace_id() {
         return Err(ContentTokenError::NamespaceMismatch);
     }
     if payload.content_ref != token.content_ref {
@@ -272,6 +347,7 @@ pub fn verify_content_token(
     }
 
     Ok(PreparedContent::for_completed_upload(
+        payload.namespace_id,
         payload.content_ref,
         payload.expires_at_ms,
         None,
@@ -297,21 +373,24 @@ mod tests {
         ))
     }
 
-    fn evidence(content_ref: &ContentRef) -> CompletedUploadEvidence {
-        CompletedUploadEvidence::for_completed_session(content_ref.clone(), 1_000)
+    fn evidence(namespace_id: &NamespaceId, content_ref: &ContentRef) -> CompletedUploadEvidence {
+        CompletedUploadEvidence::for_completed_session(
+            namespace_id.clone(),
+            content_ref.clone(),
+            1_000,
+        )
     }
 
     #[test]
     fn minted_content_token_passes_unchanged_into_embedded_verification() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let value = InlineContent::new(
-            namespace.clone(),
             ContentId::generate(),
             bytes::Bytes::from_static(b"hello"),
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let content = value.content_ref().clone();
-        let evidence = CompletedUploadEvidence::for_completed_session(content.clone(), 1_000);
+        let evidence = evidence(&namespace, &content);
         let token = mint_content_token("secret", &evidence, 1_000).expect("mint");
         let catalog = catalog_entry(namespace);
 
@@ -322,17 +401,42 @@ mod tests {
         assert!(prepared.admits(catalog.namespace_id(), &content, 1_000,));
     }
 
+    /// Checks that a token is bound to the namespace whose upload completed
+    /// the content, so another member of the same fork family refuses it.
+    #[test]
+    fn a_token_is_refused_by_another_member_of_its_fork_family() {
+        let root = NamespaceId::parse("root").expect("namespace");
+        let content = fixed_content();
+        let token = mint_content_token("secret", &evidence(&root, &content), 1_000).expect("mint");
+        let mut fork = NamespaceReadState::initial(
+            NamespaceId::parse("fork").expect("namespace"),
+            1_000,
+            loonfs_test_support::test_actor(),
+        );
+        fork.family_root_id = root.clone();
+        let fork = VerifiedNamespaceCatalogEntry::from_head(&fork);
+        assert_eq!(fork.family_root_id(), &root);
+        assert_eq!(
+            verify_content_token("secret", &fork, &token, 1_000),
+            Err(ContentTokenError::NamespaceMismatch)
+        );
+        let prepared = verify_content_token("secret", &catalog_entry(root.clone()), &token, 1_000)
+            .expect("the uploading namespace verifies its token");
+        assert!(prepared.admits(&root, &content, 1_000));
+        assert!(!prepared.admits(fork.namespace_id(), &content, 1_000));
+    }
+
     #[test]
     fn prepared_admission_remains_bound_to_its_namespace() {
         let namespace = NamespaceId::parse("source").expect("namespace");
         let other_namespace = NamespaceId::parse("target").expect("namespace");
         let content = ContentRef::blob_v1(
-            namespace.clone(),
             ContentId::generate(),
             b"hello",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
-        let token = mint_content_token("secret", &evidence(&content), 1_000).expect("mint");
+        let token =
+            mint_content_token("secret", &evidence(&namespace, &content), 1_000).expect("mint");
         let catalog = catalog_entry(namespace);
         let admission =
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
@@ -340,9 +444,8 @@ mod tests {
         assert!(!admission.admits(&other_namespace, &content, 1_000,));
     }
 
-    fn fixed_content(namespace: &NamespaceId) -> ContentRef {
+    fn fixed_content() -> ContentRef {
         ContentRef::blob_v1(
-            namespace.clone(),
             ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
             b"hello",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -352,8 +455,9 @@ mod tests {
     #[test]
     fn a_content_token_matches_its_golden_bytes() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
-        let content = fixed_content(&namespace);
-        let token = mint_content_token("golden-secret", &evidence(&content), 1_000).expect("mint");
+        let content = fixed_content();
+        let token = mint_content_token("golden-secret", &evidence(&namespace, &content), 1_000)
+            .expect("mint");
 
         crate::test_support::assert_matches_golden_token("content_token.txt", &token.token);
         let catalog = catalog_entry(namespace);
@@ -365,9 +469,9 @@ mod tests {
     #[test]
     fn a_content_token_with_a_hex_payload_or_signature_is_rejected() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
-        let content = fixed_content(&namespace);
-        let current =
-            mint_content_token("golden-secret", &evidence(&content), 1_000).expect("mint");
+        let content = fixed_content();
+        let current = mint_content_token("golden-secret", &evidence(&namespace, &content), 1_000)
+            .expect("mint");
         let (payload_part, _) = current.token.split_once('.').expect("signed token");
         let hex_signature = hex_encode_bytes(&loonfs_types::crypto::hmac_sha256(
             b"golden-secret",
@@ -405,7 +509,7 @@ mod tests {
         }
 
         let namespace = NamespaceId::parse("demo").expect("namespace");
-        let content = fixed_content(&namespace);
+        let content = fixed_content();
         let payload = OtherTokenPayload {
             content_ref: content.clone(),
             expires_at_ms: 2_000,
@@ -430,14 +534,14 @@ mod tests {
     fn tokens_and_proofs_are_valid_before_their_expiry_and_expired_at_it() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(
-            namespace.clone(),
             ContentId::generate(),
             b"hello",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let issued_at_ms = 1_000;
         let expires_at_ms = issued_at_ms + CONTENT_RECEIPT_TTL_MS;
-        let token = mint_content_token("secret", &evidence(&content), issued_at_ms).expect("mint");
+        let token = mint_content_token("secret", &evidence(&namespace, &content), issued_at_ms)
+            .expect("mint");
         let catalog = catalog_entry(namespace);
 
         let prepared = verify_content_token("secret", &catalog, &token, expires_at_ms - 1)
@@ -455,19 +559,18 @@ mod tests {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let other_namespace = NamespaceId::parse("other").expect("namespace");
         let content = ContentRef::blob_v1(
-            namespace.clone(),
             ContentId::generate(),
             b"hello",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let other_content = ContentRef::blob_v1(
-            namespace.clone(),
             ContentId::generate(),
             b"other",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let issued_at_ms = 1_000;
-        let token = mint_content_token("secret", &evidence(&content), issued_at_ms).expect("mint");
+        let token = mint_content_token("secret", &evidence(&namespace, &content), issued_at_ms)
+            .expect("mint");
         let catalog = catalog_entry(namespace.clone());
         let other_catalog = catalog_entry(other_namespace);
 

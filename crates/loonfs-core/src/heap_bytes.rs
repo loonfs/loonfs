@@ -195,9 +195,7 @@ impl HeapBytes for MemberState {
 
 impl HeapBytes for ContentRef {
     fn heap_bytes(&self) -> usize {
-        self.owner_namespace_id.heap_bytes()
-            + self.content_id.heap_bytes()
-            + self.checksum.heap_bytes()
+        self.content_id.heap_bytes() + self.checksum.heap_bytes()
     }
 }
 
@@ -351,9 +349,7 @@ impl HeapBytes for ActiveDeletionRecord {
 
 impl HeapBytes for ContentLayoutRecord {
     fn heap_bytes(&self) -> usize {
-        self.owner_namespace_id.heap_bytes()
-            + self.content_id.heap_bytes()
-            + self.layout.heap_bytes()
+        self.content_id.heap_bytes() + self.layout.heap_bytes()
     }
 }
 
@@ -536,13 +532,12 @@ impl HeapBytes for SegmentIndexEntry {
 
 impl HeapBytes for loonfs_types::ContentLayout {
     fn heap_bytes(&self) -> usize {
-        self.extents.capacity() * size_of::<loonfs_types::ContentExtent>()
+        self.creator_namespace_id.heap_bytes()
+            + self.extents.capacity() * size_of::<loonfs_types::ContentExtent>()
             + self
                 .extents
                 .iter()
-                .map(|extent| {
-                    extent.owner_namespace_id.heap_bytes() + extent.content_id.heap_bytes()
-                })
+                .map(|extent| extent.content_id.heap_bytes())
                 .sum::<usize>()
     }
 }

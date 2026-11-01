@@ -3,13 +3,13 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 
-async fn assert_leaf_reads_every_owner(store: &LocalFsStore, namespaces: &[NamespaceId; 3]) {
+async fn assert_leaf_reads_every_members_file(store: &LocalFsStore, namespaces: &[NamespaceId; 3]) {
     let namespace = crate::test_support::namespace_store(store, &namespaces[2]);
     let view = namespace
         .load_current_metadata_view()
         .await
         .expect("fresh leaf view");
-    for (index, owner) in namespaces.iter().enumerate() {
+    for (index, writer) in namespaces.iter().enumerate() {
         let file = view
             .read_file_bytes(
                 &format!("/owned-{index}"),
@@ -18,7 +18,7 @@ async fn assert_leaf_reads_every_owner(store: &LocalFsStore, namespaces: &[Names
             )
             .await
             .expect("read inherited or local content");
-        assert_eq!(file.bytes, owner.as_str().as_bytes());
+        assert_eq!(file.bytes, writer.as_str().as_bytes());
     }
 }
 
@@ -75,7 +75,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
         assert!(pin_exists(&store, &namespaces[0], &middle_pin.pin_id).await);
         assert!(pin_exists(&store, &namespaces[1], &leaf_pin.pin_id).await);
-        assert_leaf_reads_every_owner(&store, &namespaces).await;
+        assert_leaf_reads_every_members_file(&store, &namespaces).await;
     }
 
     crate::test_support::NamespaceFixture::new(&store, &namespaces[2], &setup)
@@ -92,22 +92,27 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         assert_eq!(report.deleted.retired_content_objects, 0);
     }
     for index in [2, 1, 0] {
-        crate::test_support::namespace_store(&store, &namespaces[index])
+        let report = crate::test_support::namespace_store(&store, &namespaces[index])
             .gc(None, &options(), &aged.clock())
             .await
             .expect("retire from leaf to root");
-        assert!(store
-            .head(&keys[index])
-            .await
-            .expect("retired object")
-            .is_none());
-        // Retirement may delete only this owner's objects, not inherited ones.
-        for key in &keys[..index] {
-            assert!(store.head(key).await.expect("ancestor object").is_some());
-        }
         if index > 0 {
+            // A fork's retirement releases its source pin and deletes no
+            // content, because the family root's prefix stores the content
+            // that the fork wrote.
+            assert_eq!(report.deleted.retired_content_objects, 0);
+            for key in &keys {
+                assert!(store.head(key).await.expect("family object").is_some());
+            }
             let pin = if index == 2 { &leaf_pin } else { &middle_pin };
             assert!(!pin_exists(&store, &namespaces[index - 1], &pin.pin_id).await);
+        } else {
+            // The family root retires last, and its retirement sweeps the
+            // content of the whole family.
+            assert!(report.deleted.retired_content_objects >= keys.len() as u64);
+            for key in &keys {
+                assert!(store.head(key).await.expect("retired object").is_none());
+            }
         }
     }
 }

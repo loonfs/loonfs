@@ -6,14 +6,16 @@ use crate::error::{CoreError, Result};
 use crate::path::read::loaded_view::LoadedMetadataView;
 use crate::storage::content_location::extent_object_key;
 use crate::storage::content_location::ContentLocation;
-use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
+use crate::storage::tail_content::{
+    assemble_tail_content, materialize_content_layout, write_tail_content, ContentWrites,
+};
 use crate::PermitPool;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AbsolutePath, AccessRight, ContentExtent, ContentRef, InodeId, InodeKind, PathEntry,
-    PathEntryKind, RevisionNo,
+    AbsolutePath, AccessRight, ContentExtent, ContentLayout, ContentRef, InodeId, InodeKind,
+    NamespaceId, PathEntry, PathEntryKind, RevisionNo,
 };
 
 /// File bytes plus the metadata entry they came from.
@@ -156,7 +158,31 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         content_ref: &ContentRef,
     ) -> Result<ContentLocation> {
         let content = self.wal_tail.content(content_ref);
-        ContentLocation::resolve(&self.metadata_view(), content.as_ref(), content_ref).await
+        ContentLocation::resolve(
+            &self.metadata_view(),
+            &self.head.family_root_id,
+            content.as_ref(),
+            content_ref,
+        )
+        .await
+    }
+
+    /// Returns the layout of `content_ref` in this view, with the chain's
+    /// creator, after writing the chain's pending pieces to content objects
+    /// under the family root's prefix, as a copy within the namespace does.
+    pub(crate) async fn materialize_content_layout(
+        &self,
+        content_ref: &ContentRef,
+        content_writes: &PermitPool,
+    ) -> Result<ContentLayout> {
+        let content = self.wal_tail.content(content_ref);
+        materialize_content_layout(
+            ContentWrites::new(self.segments.store(), content_writes, &self.head),
+            &self.metadata_view(),
+            content.as_ref(),
+            content_ref,
+        )
+        .await
     }
 
     async fn download_ranges(
@@ -223,10 +249,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .content(content_ref)
                 .expect("resident pieces should name a projected chain");
             write_tail_content(
-                ContentWrites::new(store, content_writes),
+                ContentWrites::new(store, content_writes, &self.head),
                 &self.metadata_view(),
                 &content,
-                assemble_tail_content(&content)?,
+                assemble_tail_content(&self.head.family_root_id, &content)?,
             )
             .await
             .map_err(cannot_write)?
@@ -240,6 +266,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .collect()
         };
         Ok(granted_ranges(
+            &self.head.family_root_id,
             extents,
             start_offset,
             content_ref.size_bytes,
@@ -339,9 +366,10 @@ pub(crate) fn file_content_ref(entry: &PathEntry) -> Result<ContentRef> {
     }
 }
 
-/// Returns the ranges of `extents` that store the bytes of a
-/// `size_bytes`-byte file from `start_offset` to its end.
+/// Returns the ranges of `extents`, under the prefix of `family_root_id`, that
+/// store the bytes of a `size_bytes`-byte file from `start_offset` to its end.
 fn granted_ranges(
+    family_root_id: &NamespaceId,
     extents: Vec<ContentExtent>,
     start_offset: u64,
     size_bytes: u64,
@@ -354,7 +382,7 @@ fn granted_ranges(
         let last = end.min(size_bytes);
         if first < last {
             ranges.push(GrantedRange {
-                object_key: extent_object_key(&extent),
+                object_key: extent_object_key(family_root_id, &extent),
                 object_start: extent.offset + (first - offset),
                 length: last - first,
             });

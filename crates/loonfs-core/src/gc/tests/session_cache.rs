@@ -148,7 +148,7 @@ async fn put_session(
     outcome: Option<UploadOutcome>,
 ) -> UploadId {
     let session = crate::test_support::proxied_upload_session(namespace_id, expires_at_ms);
-    crate::test_support::write_upload_records(store, &session, outcome).await;
+    crate::test_support::write_upload_records(store, namespace_id, &session, outcome).await;
     session.upload_id
 }
 

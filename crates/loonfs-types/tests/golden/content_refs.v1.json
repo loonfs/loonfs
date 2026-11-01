@@ -1,7 +1,6 @@
 [
   {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
     "size_bytes": 12,
     "checksum": {
@@ -11,7 +10,6 @@
   },
   {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_7yvjx9gxjm688fxq5tk1v58cgg",
     "size_bytes": 11534336,
     "checksum": {
@@ -21,7 +19,6 @@
   },
   {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_0024h36h2ncsvrh6daqf6dvvqz",
     "size_bytes": 4096,
     "checksum": {

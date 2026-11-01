@@ -105,7 +105,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             plan.apply_after_seq, self.head.seq,
             "a commit plan should be accepted at the head it was planned against"
         );
-        for (content_ref, entry) in inline_content_refs(&self.head.namespace_id, preview) {
+        for (content_ref, entry) in inline_content_refs(preview) {
             self.accepted_pieces.insert_piece(
                 self.tail.content(content_ref).as_ref(),
                 content_ref,
@@ -205,7 +205,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                     {
                         return value.layout.clone();
                     }
-                    candidate.revision_layout(content_ref)
+                    candidate.revision_layout(content_ref, &head.namespace_id)
                 })
                 .await
                 .map_err(|error| error.at_operation(index))?;
@@ -344,7 +344,10 @@ mod tests {
         absolute_path: &str,
         content_ref: loonfs_types::ContentRef,
     ) -> CommitCandidate {
-        let admission = PreparedContent::for_durable_content_write(content_ref.clone());
+        let admission = PreparedContent::for_durable_content_write(
+            NamespaceId::parse("demo").expect("valid namespace id"),
+            content_ref.clone(),
+        );
         CommitCandidate::prepared(
             CommitIntent::single(
                 CommitId::parse(commit_id).expect("valid commit id"),
@@ -352,7 +355,10 @@ mod tests {
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(absolute_path).expect("path"),
-                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref: content_ref.clone(),
+                        source_namespace_id: None,
+                    },
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -421,7 +427,7 @@ mod tests {
                 view.head(),
                 view.wal_tail(),
                 view.projected_metadata_view(),
-                ContentWrites::new(&namespace.store, &content_writes),
+                ContentWrites::new(&namespace.store, &content_writes, view.head()),
                 1,
             );
             let plan = session
@@ -485,7 +491,7 @@ mod tests {
             view.head(),
             view.wal_tail(),
             view.projected_metadata_view(),
-            ContentWrites::new(&namespace.store, &content_writes),
+            ContentWrites::new(&namespace.store, &content_writes, view.head()),
             1,
         );
 
@@ -495,7 +501,10 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: staged.content_ref().clone(),
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -517,7 +526,10 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: staged.content_ref().clone(),
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

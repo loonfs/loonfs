@@ -222,7 +222,6 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
 pub(crate) fn validate_inline_content_references<'a>(
     request: &CommitIntent,
     inline_content: &'a [InlineContent],
-    namespace_id: &NamespaceId,
 ) -> Result<HashMap<&'a ContentId, &'a loonfs_types::ContentRef>> {
     let references: HashSet<_> = request
         .operations
@@ -244,11 +243,6 @@ pub(crate) fn validate_inline_content_references<'a>(
         {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "inline content `{content_id}` appears more than once"
-            )));
-        }
-        if reference.owner_namespace_id != *namespace_id {
-            return Err(CoreError::InvalidCommitRequest(format!(
-                "inline content `{content_id}` is not owned by the committing namespace"
             )));
         }
     }
@@ -274,8 +268,7 @@ fn validate_commit_content_references(
     namespace_id: &NamespaceId,
     now_ms: u64,
 ) -> Result<()> {
-    let inline_by_content_id =
-        validate_inline_content_references(request, inline_content, namespace_id)?;
+    let inline_by_content_id = validate_inline_content_references(request, inline_content)?;
     let mut admissions_by_content_id: HashMap<&ContentId, Vec<&PreparedContent>> =
         HashMap::with_capacity(admissions.len());
     for admission in admissions {

@@ -40,7 +40,6 @@ function fakeFetch(
 ): typeof fetch {
     const claim = {
         kind: "blob_v1",
-        owner_namespace_id: "demo",
         content_id: "con_00000000000000000000000001",
         size_bytes: fixture.size_bytes,
         checksum: { algorithm: fixture.algorithm, value: fixture.checksum },
@@ -261,7 +260,6 @@ test("verified streams bound chunks and stop reading when the consumer closes", 
         body,
         {
             kind: "blob_v1",
-            owner_namespace_id: "demo",
             content_id: "con_00000000000000000000000001",
             size_bytes: bytes.length,
             checksum: digest.finish(),

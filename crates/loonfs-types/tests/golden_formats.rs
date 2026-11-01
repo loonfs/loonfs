@@ -132,7 +132,6 @@ fn content_id(value: &str) -> ContentId {
 
 fn sample_content_ref() -> ContentRef {
     ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         content_id("con_014d2pf2dbsqqg28t5cy4tqkff"),
         b"golden bytes",
         crate::ChecksumAlgorithm::Crc64nvme,
@@ -142,7 +141,6 @@ fn sample_content_ref() -> ContentRef {
 fn sample_crc_content_ref() -> ContentRef {
     ContentRef {
         kind: ContentRefKind::BlobV1,
-        owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         content_id: content_id("con_7yvjx9gxjm688fxq5tk1v58cgg"),
         size_bytes: 11_534_336,
         checksum: Checksum::new(
@@ -160,7 +158,6 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
         sample_crc_content_ref(),
         ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: content_id("con_0024h36h2ncsvrh6daqf6dvvqz"),
             size_bytes: 4_096,
             checksum: Checksum::new(
@@ -330,8 +327,8 @@ fn sample_wal_payload() -> WalObjectPayload {
                 revision_no: RevisionNo(2),
                 content_ref: sample_content_ref(),
                 layout: Some(loonfs_types::ContentLayout {
+                    creator_namespace_id: namespace_id(),
                     extents: vec![loonfs_types::ContentExtent {
-                        owner_namespace_id: sample_content_ref().owner_namespace_id,
                         content_id: sample_content_ref().content_id,
                         object: loonfs_types::ExtentObject::Whole,
                         offset: 0,
@@ -391,8 +388,8 @@ fn sample_wal_payload() -> WalObjectPayload {
                 revision_no: RevisionNo(1),
                 content_ref: sample_content_ref(),
                 layout: Some(loonfs_types::ContentLayout {
+                    creator_namespace_id: namespace_id(),
                     extents: vec![loonfs_types::ContentExtent {
-                        owner_namespace_id: namespace_id(),
                         content_id: sample_content_ref().content_id,
                         object: loonfs_types::ExtentObject::Whole,
                         offset: 0,
@@ -470,7 +467,6 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
         },
     ];
     let empty_content_ref = ContentRef::blob_v1(
-        namespace_id(),
         payload.records[0].inline_content[1].content_id.clone(),
         b"",
         crate::ChecksumAlgorithm::Crc64nvme,
@@ -511,14 +507,13 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             child_created_at_ms: 0,
             revision_no: RevisionNo(2),
             content_ref: ContentRef::blob_v1(
-                namespace_id(),
                 chain_id,
                 b"golden chain",
                 crate::ChecksumAlgorithm::Crc64nvme,
             ),
             layout: Some(loonfs_types::ContentLayout {
+                creator_namespace_id: namespace_id(),
                 extents: vec![loonfs_types::ContentExtent {
-                    owner_namespace_id: namespace_id(),
                     content_id: sample_content_ref().content_id,
                     object: loonfs_types::ExtentObject::Whole,
                     offset: 0,
@@ -1172,17 +1167,17 @@ fn upload_sessions_require_a_tagged_mode_and_reject_unknown_fields() {
 }
 
 #[test]
-fn upload_outcomes_reject_a_reference_owned_by_another_namespace() {
+fn upload_outcomes_reject_a_reference_that_records_a_namespace() {
     let message = assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
         "control_upload_outcome_completed.v1.json",
         ControlObjectKind::UploadOutcome,
         |payload| {
             payload["outcome"]["content_ref"]["owner_namespace_id"] =
-                serde_json::Value::from("other");
+                serde_json::Value::from("demo");
         },
     );
     assert!(
-        message.contains("holds a reference owned by namespace `other`"),
+        message.contains("unknown field `owner_namespace_id`"),
         "unexpected refusal: {message}"
     );
 }
@@ -2843,21 +2838,19 @@ fn every_metadata_row_rejects_unknown_fields() {
 fn sample_content_layout_row() -> MetadataRow {
     let reference = sample_content_ref();
     MetadataRow::ContentLayout(loonfs_types::format::manifest::ContentLayoutRecord {
-        owner_namespace_id: reference.owner_namespace_id.clone(),
         content_id: reference.content_id.clone(),
         committed_seq: ChangeSeq(2),
         size_bytes: 12,
         layout: loonfs_types::ContentLayout {
+            creator_namespace_id: namespace_id(),
             extents: vec![
                 loonfs_types::ContentExtent {
-                    owner_namespace_id: reference.owner_namespace_id.clone(),
                     content_id: reference.content_id.clone(),
                     object: loonfs_types::ExtentObject::Whole,
                     offset: 0,
                     length: 8,
                 },
                 loonfs_types::ContentExtent {
-                    owner_namespace_id: reference.owner_namespace_id,
                     content_id: reference.content_id,
                     object: loonfs_types::ExtentObject::Span { start: 8, end: 12 },
                     offset: 0,
@@ -2957,12 +2950,10 @@ fn inline_commit_wire_bytes_match_golden() {
             id.clone(),
             loonfs_types::InlineContentIdentity::from_bytes(bytes),
         );
-        *content = loonfs_types::FileContent::Ref(ContentRef::blob_v1(
-            namespace.clone(),
-            id,
-            bytes,
-            crate::ChecksumAlgorithm::Crc64nvme,
-        ));
+        *content = loonfs_types::FileContent::Ref {
+            content_ref: ContentRef::blob_v1(id, bytes, crate::ChecksumAlgorithm::Crc64nvme),
+            source_namespace_id: None,
+        };
     }
     assert_eq!(fingerprint(&resolved, &ids), expected);
 }

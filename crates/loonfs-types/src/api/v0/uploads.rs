@@ -450,7 +450,6 @@ mod tests {
     #[test]
     fn open_sessions_name_the_store_algorithm_and_their_modes_fields() {
         let content_ref = ContentRef::blob_v1(
-            NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
@@ -576,7 +575,6 @@ mod tests {
             status: UploadSessionStatus::Completed {
                 completed_at_ms: 3_000,
                 content_ref: ContentRef::blob_v1(
-                    crate::NamespaceId::parse("demo").expect("namespace id"),
                     ContentId::generate(),
                     b"hello",
                     crate::ChecksumAlgorithm::Crc64nvme,
@@ -600,7 +598,6 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("upload id");
         let content_ref = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
@@ -635,7 +632,6 @@ mod tests {
             serde_json::json!({
                 "content_ref": {
                     "kind": "blob_v1",
-                    "owner_namespace_id": "demo",
                     "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
                     "size_bytes": 5,
                     "checksum": {

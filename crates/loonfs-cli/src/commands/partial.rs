@@ -201,7 +201,6 @@ mod tests {
     fn meta_for(bytes: &[u8]) -> PartialDownloadMetadata {
         PartialDownloadMetadata::describe(
             &ContentRef::blob_v1(
-                loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                 ContentId::generate(),
                 bytes,
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -213,7 +212,6 @@ mod tests {
     fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
         ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(bytes),

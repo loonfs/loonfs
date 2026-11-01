@@ -4,7 +4,7 @@
 use crate::wal::WalCommitPayload;
 use crate::{
     AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId,
-    ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
+    ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -399,15 +399,13 @@ pub struct ActiveDeletionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContentLayoutRecord {
-    /// Namespace that owns the chain.
-    pub owner_namespace_id: NamespaceId,
     /// Chain whose bytes the layout lists.
     pub content_id: ContentId,
     /// Newest commit whose bytes the layout covers.
     pub committed_seq: ChangeSeq,
     /// Total length covered by the extents.
     pub size_bytes: u64,
-    /// Objects in chain order.
+    /// Objects in chain order, and the chain's creator.
     pub layout: crate::ContentLayout,
 }
 

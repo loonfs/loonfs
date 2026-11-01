@@ -68,7 +68,6 @@ fn request(id: &str, who: &str, operation: FilesystemOperation) -> CommitIntent 
 
 fn inline(id: &str, who: &str, bytes: &'static [u8]) -> CommitCandidate {
     let value = InlineContent::new(
-        namespace(),
         ContentId::generate(),
         Bytes::from_static(bytes),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -79,7 +78,10 @@ fn inline(id: &str, who: &str, bytes: &'static [u8]) -> CommitCandidate {
             who,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/team/file").expect("path"),
-                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: value.content_ref().clone(),
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,

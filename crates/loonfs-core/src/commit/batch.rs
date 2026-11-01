@@ -397,7 +397,6 @@ mod tests {
             .expect("publish view");
         let candidates = [("expired", 1_001), ("valid", 2_000)].map(|(name, expires_at_ms)| {
             let content_ref = PreparedContent::inline(
-                namespace_id.clone(),
                 bytes::Bytes::from_static(b"content"),
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
             )
@@ -410,13 +409,17 @@ mod tests {
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/{name}")).expect("path"),
-                        content: loonfs_types::FileContent::Ref(content_ref.clone()),
+                        content: loonfs_types::FileContent::Ref {
+                            content_ref: content_ref.clone(),
+                            source_namespace_id: None,
+                        },
                         behavior: loonfs_types::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
                     },
                 ),
                 vec![PreparedContent::for_completed_upload(
+                    namespace_id.clone(),
                     content_ref,
                     expires_at_ms,
                     None,

@@ -11,9 +11,14 @@ use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::GcResponse;
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Deletes a namespace's content and the source pin of its fork basis once
-    /// the namespace is eligible for retirement, and returns whether the pass
-    /// listed the namespace's content.
+    /// Deletes a family root's content prefix, which stores the content of its
+    /// whole fork family, and the source pin of a fork's basis, once the
+    /// namespace is eligible for retirement. Returns whether the pass listed
+    /// the content prefix.
+    ///
+    /// A family root is retired after every other member of its family, and
+    /// a fork's content prefix stores nothing, so a fork's retirement deletes
+    /// no content.
     pub(super) async fn reclaim_namespace(
         &self,
         live: &LiveSet,
@@ -26,13 +31,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .current_tombstone
             .as_ref()
             .expect("eligible namespace should have a tombstone");
-        self.sweep_content(tombstone, report).await?;
+        let content_listed = tombstone.is_family_root();
+        if content_listed {
+            self.sweep_content(tombstone, report).await?;
+        }
         if let Some(basis) = &tombstone.fork_basis {
             if self.delete_source_pin(basis).await? {
                 report.deleted_checkpoints_by_owner.fork += 1;
             }
         }
-        Ok(true)
+        Ok(content_listed)
     }
 
     async fn sweep_content(

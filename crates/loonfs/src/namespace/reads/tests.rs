@@ -143,7 +143,6 @@ async fn create_compacted_directory(
     let per_batch = FILES / BATCHES;
     for batch in 0..BATCHES {
         let content = InlineContent::new(
-            namespace_id.clone(),
             ContentId::generate(),
             bytes::Bytes::new(),
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -158,7 +157,10 @@ async fn create_compacted_directory(
                         .expect("file path");
                 let put = FilesystemOperation::PutFile {
                     path: path.clone(),
-                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref: content_ref.clone(),
+                        source_namespace_id: None,
+                    },
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

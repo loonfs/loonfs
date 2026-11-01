@@ -56,7 +56,6 @@ pub enum DirentryBindingState {
 /// Upload layouts copied from deltas; the model never folds and sees no fold rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentLayoutRecord {
-    pub owner_namespace_id: loonfs_types::NamespaceId,
     pub content_id: loonfs_types::ContentId,
     pub committed_seq: ChangeSeq,
     pub size_bytes: u64,
@@ -239,7 +238,6 @@ impl MetadataState {
                 } => {
                     if let Some(layout) = layout {
                         metadata_state.content_layouts.push(ContentLayoutRecord {
-                            owner_namespace_id: content_ref.owner_namespace_id.clone(),
                             content_id: content_ref.content_id.clone(),
                             committed_seq,
                             size_bytes: layout.size_bytes(),

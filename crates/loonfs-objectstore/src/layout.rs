@@ -53,7 +53,7 @@ pub enum DurableObjectFamily {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedObjectKey<'a> {
     family: DurableObjectFamily,
-    owner_namespace_id: &'a str,
+    prefix_namespace_id: &'a str,
     identifier: Option<&'a str>,
 }
 
@@ -63,9 +63,11 @@ impl<'a> ParsedObjectKey<'a> {
         self.family
     }
 
-    /// Returns the namespace path component.
-    pub fn owner_namespace_id(&self) -> &'a str {
-        self.owner_namespace_id
+    /// Returns the namespace whose prefix contains the key: the family root
+    /// for a content object or an upload record, the owner for a metadata
+    /// segment, and the namespace itself for every other family.
+    pub fn prefix_namespace_id(&self) -> &'a str {
+        self.prefix_namespace_id
     }
 
     /// Returns the family-specific identifier when the key has one.
@@ -81,16 +83,16 @@ impl<'a> ParsedObjectKey<'a> {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        [NAMESPACES_DIRECTORY, owner_namespace_id, CONTENT_DIRECTORY, content_id]
+        [NAMESPACES_DIRECTORY, family_root_id, CONTENT_DIRECTORY, content_id]
             if content_id.len() == CONTENT_ID_BYTES =>
         {
             Some(parsed(
                 DurableObjectFamily::ContentBlob,
-                owner_namespace_id,
+                family_root_id,
                 Some(content_id),
             ))
         }
-        [NAMESPACES_DIRECTORY, owner_namespace_id, CONTENT_DIRECTORY, object]
+        [NAMESPACES_DIRECTORY, family_root_id, CONTENT_DIRECTORY, object]
             if object.len() == CONTENT_SPAN_NAME_BYTES
                 && object.is_ascii()
                 && object.as_bytes()[CONTENT_ID_BYTES] == b'-'
@@ -104,7 +106,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         {
             Some(parsed(
                 DurableObjectFamily::ContentBlob,
-                owner_namespace_id,
+                family_root_id,
                 Some(&object[..CONTENT_ID_BYTES]),
             ))
         }
@@ -136,11 +138,11 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         [NAMESPACES_DIRECTORY, namespace, PIN_DIRECTORY, pin] => pin
             .strip_suffix(PIN_SUFFIX)
             .map(|identifier| parsed(DurableObjectFamily::Pin, namespace, Some(identifier))),
-        [NAMESPACES_DIRECTORY, namespace, UPLOAD_DIRECTORY, upload] => {
+        [NAMESPACES_DIRECTORY, family_root_id, UPLOAD_DIRECTORY, upload] => {
             match upload.strip_suffix(UPLOAD_OUTCOME_SUFFIX) {
                 Some(identifier) => Some(parsed(
                     DurableObjectFamily::UploadOutcome,
-                    namespace,
+                    family_root_id,
                     Some(identifier),
                 )),
                 None => upload
@@ -148,7 +150,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                     .map(|identifier| {
                         parsed(
                             DurableObjectFamily::UploadSession,
-                            namespace,
+                            family_root_id,
                             Some(identifier),
                         )
                     }),
@@ -283,12 +285,12 @@ pub async fn list_namespace_ids<S: ObjectStore + ?Sized>(
 
 fn parsed<'a>(
     family: DurableObjectFamily,
-    owner_namespace_id: &'a str,
+    prefix_namespace_id: &'a str,
     identifier: Option<&'a str>,
 ) -> ParsedObjectKey<'a> {
     ParsedObjectKey {
         family,
-        owner_namespace_id,
+        prefix_namespace_id,
         identifier,
     }
 }
@@ -309,10 +311,10 @@ mod tests {
 
     #[test]
     fn spans_use_the_chain_id_and_require_exact_decimal_bounds() {
-        let owner = NamespaceId::parse("owner").expect("namespace");
+        let family_root_id = NamespaceId::parse("root").expect("namespace");
         let content_id = ContentId::generate();
-        let own_key = content_blob(&owner, &content_id);
-        let key = crate::keys::content_span(&owner, &content_id, 2, 19);
+        let own_key = content_blob(&family_root_id, &content_id);
+        let key = crate::keys::content_span(&family_root_id, &content_id, 2, 19);
         assert_eq!(
             key,
             format!("{own_key}-00000000000000000002-00000000000000000019")
@@ -335,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn built_keys_parse_to_their_family_owner_and_identifier() {
+    fn built_keys_parse_to_their_family_prefix_namespace_and_identifier() {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
         let wal_no = WalNo(1);
         let manifest_object_id = ManifestNo(400);
@@ -393,18 +395,21 @@ mod tests {
         for (key, family, identifier) in cases {
             let parsed = parse_object_key(&key).expect("built key should parse");
             assert_eq!(parsed.family(), family);
-            assert_eq!(parsed.owner_namespace_id(), "ns-1");
+            assert_eq!(parsed.prefix_namespace_id(), "ns-1");
             assert_eq!(parsed.identifier(), identifier);
         }
-        for owner in ["a", "ab"] {
-            let owner = NamespaceId::parse(owner).expect("owner");
-            let key = content_blob(&owner, &content_id);
-            assert_eq!(key, format!("namespaces/{owner}/content/{content_id}"));
+        for family_root_id in ["a", "ab"] {
+            let family_root_id = NamespaceId::parse(family_root_id).expect("family root");
+            let key = content_blob(&family_root_id, &content_id);
+            assert_eq!(
+                key,
+                format!("namespaces/{family_root_id}/content/{content_id}")
+            );
             assert_eq!(
                 parse_object_key(&key)
                     .expect("content key")
-                    .owner_namespace_id(),
-                owner.as_str()
+                    .prefix_namespace_id(),
+                family_root_id.as_str()
             );
         }
     }

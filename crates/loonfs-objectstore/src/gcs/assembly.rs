@@ -32,11 +32,12 @@ struct TemporaryObjects {
 }
 
 impl TemporaryObjects {
-    /// Starts the temporary objects of an assembly of `key`, which belong to
-    /// the namespace that owns `key`.
+    /// Starts the temporary objects of an assembly of `key`, under the prefix
+    /// of the namespace whose prefix contains `key` (for a content object,
+    /// the family root).
     fn new(key: &str) -> Result<Self> {
         let namespace_id = parse_object_key(key)
-            .and_then(|parsed| NamespaceId::parse(parsed.owner_namespace_id()).ok())
+            .and_then(|parsed| NamespaceId::parse(parsed.prefix_namespace_id()).ok())
             .ok_or_else(|| ObjectStoreError::InvalidKey {
                 object_key: key.to_owned(),
                 message: "an assembled object must belong to a namespace".to_owned(),

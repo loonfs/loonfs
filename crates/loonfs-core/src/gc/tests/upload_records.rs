@@ -30,7 +30,10 @@ async fn commit_upload<S: ObjectStore>(
                 None,
                 FilesystemOperation::PutFile {
                     path: loonfs_types::AbsolutePath::parse(path).expect("path"),
-                    content: loonfs_types::FileContent::Ref(content_ref),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref,
+                        source_namespace_id: None,
+                    },
                     behavior: loonfs_types::DestinationBehavior::Replace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -136,7 +139,7 @@ async fn a_pass_that_stops_between_the_two_deletes_leaves_an_outcome_the_next_pa
         .await
         .expect("complete");
     commit_upload(&store, &namespace_id, "/committed.txt", completed.prepared).await;
-    let content_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
+    let content_key = content_blob(&namespace_id, &content_ref.content_id);
     let past_grace = now_after_newest_object(
         &store,
         &namespace_id,
@@ -194,7 +197,7 @@ async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_r
         .await
         .expect("bootstrap");
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
-    let content_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
+    let content_key = content_blob(&namespace_id, &content_ref.content_id);
     let aborted_at_ms = 3_000;
     let past_abort_grace = aborted_at_ms + GRACE_MS + 1;
 
@@ -262,6 +265,7 @@ async fn an_outcome_without_its_session_record_is_deleted_only_once_older_than_t
     let session = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
     let session_key = crate::test_support::write_upload_records(
         &store,
+        &namespace_id,
         &session,
         Some(UploadOutcome::Aborted {
             aborted_at_ms: 1_000,
@@ -313,7 +317,7 @@ async fn an_abort_stalled_across_a_pass_that_deleted_a_completed_session_keeps_i
         .await
         .expect("bootstrap");
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
-    let content_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
+    let content_key = content_blob(&namespace_id, &content_ref.content_id);
 
     let (aborted, ()) = tokio::join!(abort(&store, &namespace_id, &upload_id, 2_000), async {
         store.wait_until_blocked().await;
