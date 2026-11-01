@@ -19,8 +19,8 @@ mod store_probe;
 mod uploads;
 
 pub use commits::{
-    Commit, CommitPrecondition, CommitRequest, DirectoryBinding, FilesystemChange,
-    ListChangesResponse,
+    Commit, CommitPrecondition, CommitRequest, DiffEntry, DiffEntryKind, DiffResponse,
+    DirectoryBinding, FilesystemChange, ListChangesResponse,
 };
 pub use downloads::{
     CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,

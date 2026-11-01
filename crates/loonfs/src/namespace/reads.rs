@@ -1,5 +1,5 @@
-//! Path-addressed reads on a [`Namespace`] handle in any mode, and the read
-//! views and change feed that every read family uses.
+//! Path-addressed reads on a [`Namespace`] handle in any mode, the read
+//! views and change feed that every read family uses, and the diff.
 
 use crate::downloads::DirectDownloadTarget;
 use crate::execution_budget::BudgetPermit;
@@ -11,8 +11,8 @@ use crate::pinned_read::PinnedRead;
 use crate::read_view::{ReadSource, ReadView};
 use crate::trace::{self, operation_span};
 use crate::{
-    ChangeSeq, Consistency, ContentRef, CoreError, DownloadOptions, Error, FileBytes,
-    FileContentStream, ListChangesOptions, ListChangesResponse, ListOptions,
+    ChangeSeq, Consistency, ContentRef, CoreError, DiffOptions, DiffResponse, DownloadOptions,
+    Error, FileBytes, FileContentStream, ListChangesOptions, ListChangesResponse, ListOptions,
     ListPathEntriesResponse, ListTrashOptions, Namespace, PathEntry, PinId, ReadAt,
     ReadFileOptions, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, StatOptions,
 };
@@ -518,6 +518,48 @@ impl<M: crate::Mode> Namespace<M> {
                     |view, permit| async move { view.changes_page(after_seq, limit, permit).await },
                 )
                 .await
+            },
+        )
+        .await
+    }
+
+    /// Returns the first page of the diff of the whole namespace from
+    /// `from_seq` to the head that the page reads.
+    pub async fn diff(&self, from_seq: ChangeSeq) -> Result<DiffResponse> {
+        self.diff_with_options(from_seq, &DiffOptions::default())
+            .await
+    }
+
+    /// Returns one page of the diff from `from_seq`, as `options` asks
+    /// ([API section 6.12](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#612-get-diff)).
+    ///
+    /// The page reports each inode under `options.path` whose visible state
+    /// at the diff's end differs from its state at `from_seq`. To read the
+    /// next page, pass the returned `to_seq` and `next_after_seq` as
+    /// `options.to_seq` and `options.after_seq`. A `from_seq` below the
+    /// retention floor of the head that a page reads returns
+    /// `rebootstrap_required`. A `to_seq` above that head returns
+    /// `invalid_request`, so a caller that gets this error from an eventual
+    /// page reads the page again with [`Consistency::Strong`].
+    pub async fn diff_with_options(
+        &self,
+        from_seq: ChangeSeq,
+        options: &DiffOptions,
+    ) -> Result<DiffResponse> {
+        trace::in_operation(
+            operation_span!(self.core, "diff", self.namespace_id),
+            async {
+                let _permit = self.core.read_permit().await;
+                let page = self
+                    .core
+                    .read(
+                        &self.namespace_id,
+                        options.consistency,
+                        |pinned| async move { pinned.diff_page(from_seq, options).await },
+                    )
+                    .await?;
+                self.core.instruments().diff_page(&page);
+                Ok(page.response)
             },
         )
         .await

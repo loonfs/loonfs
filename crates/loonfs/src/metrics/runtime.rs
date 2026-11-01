@@ -2,9 +2,11 @@
 
 use super::labels::{LabeledCounters, MetricLabel};
 use super::object_store::ObjectStoreInstruments;
-use super::{MetricsRecorder, NoopMetricsRecorder, ObjectStoreMetricsRecorder};
+use super::{CounterHandle, MetricsRecorder, NoopMetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::maintenance::metrics::{CompactionInstruments, GcInstruments};
 use crate::publisher::metrics::PublisherInstruments;
+use loonfs_core::DiffPage;
+use loonfs_types::u64_from_usize;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -48,6 +50,10 @@ pub(crate) struct RuntimeInstruments {
     pub(crate) publisher: PublisherInstruments,
     pub(crate) gc: GcInstruments,
     read_head_sources: LabeledCounters<ReadHeadSource>,
+    diff_commits_scanned: Arc<dyn CounterHandle>,
+    diff_touches_examined: Arc<dyn CounterHandle>,
+    diff_entries_emitted: Arc<dyn CounterHandle>,
+    diff_path_resolutions: Arc<dyn CounterHandle>,
 }
 
 impl RuntimeInstruments {
@@ -68,6 +74,26 @@ impl RuntimeInstruments {
                 "source",
                 &[],
             ),
+            diff_commits_scanned: recorder.register_counter(
+                "loonfs.diff.commits_scanned",
+                "Commits that diff pages read",
+                &[],
+            ),
+            diff_touches_examined: recorder.register_counter(
+                "loonfs.diff.touches_examined",
+                "Inodes that the commits of diff pages touched, once for each commit",
+                &[],
+            ),
+            diff_entries_emitted: recorder.register_counter(
+                "loonfs.diff.entries_emitted",
+                "Entries that diff pages returned",
+                &[],
+            ),
+            diff_path_resolutions: recorder.register_counter(
+                "loonfs.diff.path_resolutions",
+                "Paths that diff pages resolved",
+                &[],
+            ),
             object_store: Arc::new(ObjectStoreInstruments::new(recorder)),
         })
     }
@@ -75,6 +101,15 @@ impl RuntimeInstruments {
     /// Records where one read took the head it started from.
     pub(crate) fn read_head(&self, source: ReadHeadSource) {
         self.read_head_sources.get(source).increment(1);
+    }
+
+    /// Records the work of one diff page.
+    pub(crate) fn diff_page(&self, page: &DiffPage) {
+        self.diff_commits_scanned.increment(page.commits_scanned);
+        self.diff_touches_examined.increment(page.touches_examined);
+        self.diff_entries_emitted
+            .increment(u64_from_usize(page.response.entries.len()));
+        self.diff_path_resolutions.increment(page.path_resolutions);
     }
 
     /// An object-store recorder that bridges samples into these

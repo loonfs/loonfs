@@ -247,6 +247,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "list_diff",
+        SdkName {
+            group: &["diff"],
+            method: "list",
+            request: Some("ListDiffRequest"),
+        },
+    ),
+    (
         "list_file_revisions",
         SdkName {
             group: &["files"],

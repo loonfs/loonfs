@@ -183,6 +183,7 @@ impl Fixture {
                 false,
             ),
             LiveRead::get(format!("{namespace}/changes?after_seq=0"), true),
+            LiveRead::get(format!("{namespace}/diff?from_seq=0"), false),
             LiveRead::get(
                 format!("{namespace}/inodes/ino_00000000000000000000000000?include_attributes=false"),
                 true,

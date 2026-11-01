@@ -1,6 +1,7 @@
 //! HTTP router and handler contracts.
 
 mod attribution;
+mod diff;
 mod expired_reads;
 mod handler_panics;
 mod hosted_content_ref_access;
@@ -416,6 +417,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         expected_access_revision_no: Some(loonfs_types::AccessRevisionNo(1)),
         actual_access_revision_no: Some(loonfs_types::AccessRevisionNo(2)),
         after_seq: Some(ChangeSeq::from(2)),
+        from_seq: Some(ChangeSeq::from(2)),
         retention_floor_seq: Some(ChangeSeq::from(3)),
         expected_deletion_seq: Some(ChangeSeq::from(4)),
         actual_deletion_seq: Some(ChangeSeq::from(5)),

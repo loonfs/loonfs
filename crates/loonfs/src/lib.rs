@@ -111,8 +111,9 @@ pub use loonfs_types::{
     FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
-    Commit, CompleteUploadBody, CreateUploadBody, FilesystemChange, ListChangesResponse,
-    ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
+    Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
+    FilesystemChange, ListChangesResponse, ObjectTransferAccess, UploadContentClaim, UploadMode,
+    UploadSession, UploadSessionStatus,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
@@ -230,12 +231,12 @@ pub use namespace::Namespace;
 pub use options::{
     AccessState, AdvanceRetentionFloorOptions, AppendFileByInodeOptions, AppendFileOptions,
     AttributeChanges, CommitOptions, Consistency, CopyOptions, CreateDirectoryOptions,
-    CreateSnapshotOptions, DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions,
-    DownloadOptions, ForkNamespaceOptions, ListChangesOptions, ListFileRevisionsOptions,
-    ListOptions, ListTrashOptions, MaintainMetadataOptions, MoveOptions, PutFileOptions, ReadAt,
-    ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadRange, StatOptions,
-    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
-    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    CreateSnapshotOptions, DeleteByInodeOptions, DeleteOptions, DiffOptions,
+    DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
+    ListFileRevisionsOptions, ListOptions, ListTrashOptions, MaintainMetadataOptions, MoveOptions,
+    PutFileOptions, ReadAt, ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadRange,
+    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
+    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 pub use pagers::{
     ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
@@ -325,6 +326,7 @@ impl Error {
         match self {
             Self::InvalidRequest { param, .. } => Some((*param).to_owned()),
             Self::Core(CoreError::InvalidCursor(_)) => Some("cursor".to_owned()),
+            Self::Core(CoreError::InvalidDiffRange { param, .. }) => Some((*param).to_owned()),
             Self::Core(CoreError::ResumeOffsetOutOfRange { .. }) => Some("start_offset".to_owned()),
             Self::Core(CoreError::InvalidSnapshotRequest(_)) => Some("/name".to_owned()),
             Self::Core(CoreError::RootGrantsWithoutAdministrator) => {

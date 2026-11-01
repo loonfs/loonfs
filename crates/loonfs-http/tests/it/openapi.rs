@@ -367,6 +367,7 @@ fn openapi_documents_current_server_paths() {
             "post",
         ),
         ("/v0/namespaces/{namespace_id}/changes", "get"),
+        ("/v0/namespaces/{namespace_id}/diff", "get"),
         (
             "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
             "get",
@@ -466,6 +467,20 @@ fn openapi_documents_current_server_paths() {
             "after_seq",
             "limit",
             "snapshot_id",
+            "consistency",
+            "max_staleness_ms",
+        ],
+    );
+    assert_query_params(
+        paths,
+        "/v0/namespaces/{namespace_id}/diff",
+        "get",
+        &[
+            "from_seq",
+            "to_seq",
+            "path",
+            "after_seq",
+            "limit",
             "consistency",
             "max_staleness_ms",
         ],
@@ -950,6 +965,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         ),
         ("/v0/namespaces/{namespace_id}/snapshots", "get"),
         ("/v0/namespaces/{namespace_id}/changes", "get"),
+        ("/v0/namespaces/{namespace_id}/diff", "get"),
         ("/v0/namespaces/{namespace_id}/grep", "get"),
     ] {
         let parameter = query_parameter(paths, path, method, "limit");
@@ -988,6 +1004,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         "/v0/namespaces/{namespace_id}/filesystem/trash",
         "/v0/namespaces/{namespace_id}/filesystem/revisions",
         "/v0/namespaces/{namespace_id}/changes",
+        "/v0/namespaces/{namespace_id}/diff",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",

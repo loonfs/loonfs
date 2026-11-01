@@ -1231,6 +1231,109 @@
         ],
         "type": "string"
       },
+      "DiffEntry": {
+        "description": "One inode whose visible state at the end of a diff differs from its state at the start.\n\n`kind` says how the state differs, and which other fields are present depends on it. Each\nrevision field reports the value at `to_seq`.",
+        "properties": {
+          "access_revision_no": {
+            "$ref": "#/components/schemas/AccessRevisionNo",
+            "description": "The inode's access revision at `to_seq`, on a `changed` or `moved` entry whose access\nrevision differs between the two sequences."
+          },
+          "attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributesRevisionNo",
+            "description": "The inode's attribute revision at `to_seq`, on a `changed` or `moved` entry whose\nattribute revision differs between the two sequences."
+          },
+          "binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
+            "description": "The opaque ID of the inode's binding at `to_seq`. It's absent for `deleted` and for the\nnamespace root."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "The inode whose state differs."
+          },
+          "inode_kind": {
+            "$ref": "#/components/schemas/InodeKind",
+            "description": "Whether the inode is a file or a directory. A newer server can return another kind."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DiffEntryKind",
+            "description": "How the inode's state at `to_seq` differs from its state at `from_seq`."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "The inode's path at `to_seq`. It's absent for `deleted`."
+          },
+          "previous_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "The inode's path at `from_seq`. It's present for `moved` and `deleted`."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "The file's revision at `to_seq`. A `created` or `undeleted` file has it, and a `changed` or\n`moved` file has it when its revision differs between the two sequences."
+          }
+        },
+        "required": [
+          "inode_id",
+          "inode_kind",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "DiffEntryKind": {
+        "description": "How an inode's visible state at the end of a diff differs from its state at the start.\n\nA newer server can return a kind that isn't listed here. Clients should skip an entry whose\nkind they don't recognize.",
+        "enum": [
+          "created",
+          "undeleted",
+          "deleted",
+          "moved",
+          "changed"
+        ],
+        "type": "string"
+      },
+      "DiffResponse": {
+        "description": "One page of a diff: the inodes whose visible state at `to_seq` differs from their state at\n`from_seq`.\n\nA page reads the commits after `after_seq` in sequence order, and reports each inode at the\nlast commit in the range that changed it, so an inode appears on one page only.",
+        "properties": {
+          "after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The sequence that this page's scan starts after. It's the request's `after_seq`, or\n`from_seq` when the request leaves `after_seq` out."
+          },
+          "entries": {
+            "description": "The inodes whose state differs, in the order of the commits that last changed them. A page\nends at a bound on the commits and on the inodes that it examines, so it can have no\nentries and still have a `next_after_seq`, when every inode it examined has a later touch.",
+            "items": {
+              "$ref": "#/components/schemas/DiffEntry"
+            },
+            "type": "array"
+          },
+          "from_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The sequence that the diff starts after. Each entry compares an inode's state at this\nsequence with its state at `to_seq`."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that was read."
+          },
+          "next_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The `after_seq` of the next page, when commits remain before `to_seq`. It's absent on the\npage that reaches `to_seq`."
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The namespace's retention floor when this page was read."
+          },
+          "to_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The sequence that the diff ends at, inclusive. When the request leaves out `to_seq`, it's\nthe head that the page read, and the next page's request passes it back."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "from_seq",
+          "to_seq",
+          "after_seq",
+          "retention_floor_seq",
+          "entries"
+        ],
+        "type": "object"
+      },
       "DirectoryBinding": {
         "description": "A directory entry's parent and name.",
         "properties": {
@@ -1379,6 +1482,10 @@
             "$ref": "#/components/schemas/WriterEpoch",
             "description": "The epoch of the failed writer session at the time another writer displaced it."
           },
+          "from_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The `from_seq` value from the diff request."
+          },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
             "description": "The inode that the failed precondition or operation targeted."
@@ -1401,7 +1508,7 @@
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The namespace's retention floor. A change feed request can set `after_seq` to this sequence\nor any later one, and the feed returns the changes committed after it."
+            "description": "The namespace's retention floor. A change feed request can set `after_seq` to this sequence\nor any later one, and the feed returns the changes committed after it. A diff request can\nset `from_seq` to this sequence or any later one."
           },
           "size_bytes": {
             "description": "For `range_not_satisfiable`, the size in bytes of the file that the range was requested\nfrom.",
@@ -6053,6 +6160,168 @@
         "x-fern-sdk-method-name": "create",
         "x-loonfs-actor": "required",
         "x-loonfs-retry": "replayable"
+      }
+    },
+    "/v0/namespaces/{namespace_id}/diff": {
+      "get": {
+        "description": "Returns a page of the inodes whose visible state at `to_seq` differs from their state at `from_seq`, read from the commits between the two sequences.",
+        "operationId": "list_diff",
+        "parameters": [
+          {
+            "description": "The namespace ID.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The sequence that the diff starts after. Each entry compares an inode's state at this\nsequence with its state at `to_seq`. It can't be below the namespace's retention floor.",
+            "in": "query",
+            "name": "from_seq",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ChangeSeq"
+            }
+          },
+          {
+            "description": "The sequence that the diff ends at, inclusive. The default is the head that the request\nreads. A later page passes the `to_seq` that the first page returned.",
+            "in": "query",
+            "name": "to_seq",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ChangeSeq"
+            }
+          },
+          {
+            "description": "The absolute path of the directory whose subtree the diff reports. The default is the root.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The `next_after_seq` that the previous page returned. The default is `from_seq`.",
+            "in": "query",
+            "name": "after_seq",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ChangeSeq"
+            }
+          },
+          {
+            "description": "The maximum number of commits that the page reads.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "format": "int32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ReadConsistency"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1155000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiffResponse"
+                }
+              }
+            },
+            "description": "A page of the diff"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid sequence, path, limit, or consistency, a `to_seq` above the head that the request reads, or an `after_seq` outside `from_seq` through `to_seq`"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`from_seq` is below the retention floor, so the namespace no longer has the history after it. Rebuild state from a fresh listing or snapshot, and diff from that state's head."
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "List the differences between two sequences",
+        "tags": [
+          "filesystem"
+        ],
+        "x-fern-request-name": "ListDiffRequest",
+        "x-fern-sdk-group-name": [
+          "diff"
+        ],
+        "x-fern-sdk-method-name": "list",
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/content": {

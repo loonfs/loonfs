@@ -63,11 +63,20 @@ pub(crate) fn hiding_tombstone_from_records(
     records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
     visible_seq: ChangeSeq,
 ) -> Option<SubtreeTombstoneRecord> {
+    newest_tombstone_from_records(records, visible_seq)
+        .filter(|tombstone| tombstone.action.hides_subtree())
+}
+
+/// Returns the newest of `records` at or below `visible_seq`, a `set` or a
+/// `revoke`, which is the event that [`hiding_tombstone_from_records`] reads.
+pub(crate) fn newest_tombstone_from_records(
+    records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
+    visible_seq: ChangeSeq,
+) -> Option<SubtreeTombstoneRecord> {
     records
         .into_iter()
         .filter(|tombstone| tombstone.committed_seq <= visible_seq)
         .max_by_key(|tombstone| tombstone.position())
-        .filter(|tombstone| tombstone.action.hides_subtree())
 }
 
 /// Converts a tombstone event into its derived `ActiveDeletions` row. A `set`

@@ -6,6 +6,7 @@
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
 use crate::commit::engine::NamespaceCommitEngine;
 use crate::commit::publish_view::WriterPosition;
+use crate::diff::DiffPage;
 use crate::error::{CoreError, Result};
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::ReadBasis;
@@ -24,7 +25,7 @@ use loonfs_types::options::{AccessState, ListOptions, StatOptions};
 use loonfs_types::EffectiveLimit;
 use loonfs_types::ListChangesResponse;
 use loonfs_types::{
-    ChangeSeq, CommitId, ContentRef, FileRevision, FileRevisionsPageCursor, InodeId,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, FileRevision, FileRevisionsPageCursor, InodeId,
     ListPageCursor, NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, RevisionNo,
     Subject, TrashEntry, TrashPageCursor, WriterId, ROOT_INODE_ID,
 };
@@ -614,6 +615,25 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<ListChangesResponse> {
         let view = self.load_read_view(context).await?;
         crate::changes::list_changes_after(&view, after_seq, limit).await
+    }
+
+    /// Reads one page of the diff from `from_seq` to `to_seq` under `path`,
+    /// starting after `after_seq`
+    /// ([API section 6.12](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#612-get-diff)).
+    ///
+    /// `to_seq` defaults to the head of `context`, and `after_seq` to
+    /// `from_seq`. The page reads at most `limit` commits.
+    pub async fn diff_page(
+        &self,
+        from_seq: ChangeSeq,
+        to_seq: Option<ChangeSeq>,
+        after_seq: Option<ChangeSeq>,
+        limit: EffectiveLimit,
+        path: &AbsolutePath,
+        context: &RuntimeReadContext,
+    ) -> Result<DiffPage> {
+        let view = self.load_read_view(context).await?;
+        crate::diff::diff_page(&view, from_seq, to_seq, after_seq, limit, path).await
     }
 
     async fn load_read_view<'a>(

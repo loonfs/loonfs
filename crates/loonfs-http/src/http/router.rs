@@ -7,7 +7,7 @@ use super::handlers_downloads::{
     create_download, create_download_by_inode, create_revision_download_by_inode,
 };
 use super::handlers_filesystem::{
-    create_commit, get_file_content, get_path_entry, list_changes, list_file_revisions,
+    create_commit, get_file_content, get_path_entry, list_changes, list_diff, list_file_revisions,
     list_path_entries, list_trash,
 };
 use super::handlers_inodes::{
@@ -157,6 +157,7 @@ routes! {
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort" => { POST abort_upload },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}" => { GET get_upload },
     "/v0/namespaces/{namespace_id}/changes" => { GET list_changes },
+    "/v0/namespaces/{namespace_id}/diff" => { GET list_diff },
 }
 
 routes! {

@@ -85,6 +85,7 @@ mod changes;
 mod compaction;
 mod control_object;
 mod control_update;
+mod diff;
 mod engine;
 mod error;
 mod gc;
@@ -200,6 +201,7 @@ pub use compaction::{
     CompactionUnitOutcome, MetadataCompactionCancellation, MetadataCompactionPolicy,
     SegmentBlockLoader, SegmentRowIterator,
 };
+pub use diff::DiffPage;
 pub use engine::RuntimeReadContext;
 pub use engine::{
     NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, RootAccess, Writable,

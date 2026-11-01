@@ -331,6 +331,20 @@ where
     AbsolutePath::parse_without_request_limits(&value).map_err(serde::de::Error::custom)
 }
 
+/// Decodes an optional response path that a server derived from stored names, as
+/// [`deserialize_derived_path`] decodes a present one.
+pub(crate) fn deserialize_optional_derived_path<'de, D>(
+    deserializer: D,
+) -> Result<Option<AbsolutePath>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| AbsolutePath::parse_without_request_limits(&value))
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
 fn normalized_path(components: &[PathComponent]) -> String {
     if components.is_empty() {
         "/".to_owned()

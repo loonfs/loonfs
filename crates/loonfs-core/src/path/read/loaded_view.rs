@@ -211,6 +211,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
         MetadataView::from_loaded_head(&self.head, &self.segments, &self.wal_tail)
     }
+
+    /// Returns the view of this basis at `visible_seq`, a retained sequence
+    /// at or below the head.
+    pub(crate) fn metadata_view_at(&self, visible_seq: ChangeSeq) -> MetadataView<'_, '_, S> {
+        assert!(
+            visible_seq <= self.head.seq,
+            "a view of a loaded basis should be at or below the basis's head"
+        );
+        MetadataView::over_loaded_basis(&self.segments, &self.wal_tail, visible_seq)
+    }
 }
 
 #[cfg(test)]

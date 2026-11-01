@@ -70,6 +70,7 @@ pub(crate) const COMPLETE_UPLOAD: Operation = Operation::retry(Method::POST);
 pub(crate) const GET_UPLOAD: Operation = Operation::retry(Method::GET);
 pub(crate) const ABORT_UPLOAD: Operation = Operation::retry(Method::POST);
 pub(crate) const LIST_CHANGES: Operation = Operation::retry(Method::GET);
+pub(crate) const LIST_DIFF: Operation = Operation::retry(Method::GET);
 pub(crate) const CREATE_SNAPSHOT: Operation = Operation::once(Method::POST);
 pub(crate) const LIST_SNAPSHOTS: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_SNAPSHOT: Operation = Operation::retry(Method::GET);
@@ -126,6 +127,7 @@ mod tests {
         ("get_upload", GET_UPLOAD),
         ("abort_upload", ABORT_UPLOAD),
         ("list_changes", LIST_CHANGES),
+        ("list_diff", LIST_DIFF),
         ("create_snapshot", CREATE_SNAPSHOT),
         ("list_snapshots", LIST_SNAPSHOTS),
         ("get_snapshot", GET_SNAPSHOT),

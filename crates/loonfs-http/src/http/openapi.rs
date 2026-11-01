@@ -63,6 +63,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         crate::http::handlers_uploads::abort_upload,
         crate::http::handlers_uploads::get_upload,
         crate::http::handlers_filesystem::list_changes,
+        crate::http::handlers_filesystem::list_diff,
         crate::http::handlers_snapshots::list_checkpoints,
         crate::http::handlers_snapshots::get_checkpoint,
         crate::http::handlers_maintenance::run_maintenance,

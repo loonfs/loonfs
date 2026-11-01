@@ -5,8 +5,8 @@ use crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
     AttributesRevisionNo, ChangeSeq, CommitId, CommitPrecondition, DeleteDirectoryBehavior,
-    DestinationBehavior, DestinationPrecondition, DisplayName, InodeId, NamespaceAccess, PinId,
-    RevisionNo,
+    DestinationBehavior, DestinationPrecondition, DisplayName, EffectiveLimit, InodeId,
+    NamespaceAccess, PinId, RevisionNo,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -285,6 +285,41 @@ pub struct ListChangesOptions {
     /// live head at the runtime's default consistency. A snapshot's feed ends
     /// at the sequence that the snapshot captured.
     pub at: ReadAt,
+}
+
+/// Options for reading one page of a diff.
+///
+/// A diff reports the inodes whose visible state at its end differs from
+/// their state at its start, and pages through the commits between the two
+/// ([API section 6.12](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#612-get-diff)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffOptions {
+    /// The directory whose subtree the diff reports, by default the root.
+    pub path: AbsolutePath,
+    /// The sequence that the diff ends at, inclusive, or `None` for the head
+    /// that the page reads. A later page passes the `to_seq` that the first
+    /// page returned.
+    pub to_seq: Option<ChangeSeq>,
+    /// The `next_after_seq` that the previous page returned, or `None` to
+    /// start at the diff's start.
+    pub after_seq: Option<ChangeSeq>,
+    /// The most commits the page reads, by default [`EffectiveLimit::DEFAULT`].
+    pub limit: EffectiveLimit,
+    /// How recently the page confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
+}
+
+impl Default for DiffOptions {
+    fn default() -> Self {
+        Self {
+            path: AbsolutePath::root(),
+            to_seq: None,
+            after_seq: None,
+            limit: EffectiveLimit::DEFAULT,
+            consistency: None,
+        }
+    }
 }
 
 /// Options for listing a file's revisions by path or by inode.
