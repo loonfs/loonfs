@@ -260,6 +260,7 @@ mod tests {
             pattern
                 .replace("{namespace_id}", "ns-1")
                 .replace("{owner_namespace_id}", "ns-1")
+                .replace("{family_root_id}", "ns-1")
                 .replace("{source_namespace_id}", "ns-1")
                 .replace("{wal_no:020}", &format!("{:020}", 42))
                 .replace("{suffix}", "0123456789abcdef")
