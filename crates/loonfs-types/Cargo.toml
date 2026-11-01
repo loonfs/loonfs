@@ -16,8 +16,8 @@ ciborium.workspace = true
 # Durable-format checksums: the algorithm choice is a frozen format constant
 # (docs/design/metadata-block-storage.md).
 crc-fast.workspace = true
-# Content ids are 128 fully random bits, drawn straight from the system
-# generator (see `ids::ContentId`).
+# The default entropy source for generated IDs reads the system generator
+# (see `entropy::OsEntropy`).
 getrandom.workspace = true
 hmac.workspace = true
 # Parses config URLs into `Uri` for the shared config field checks.

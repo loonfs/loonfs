@@ -93,10 +93,10 @@ pub(crate) fn random_u64() -> u64 {
     u64::from_be_bytes(random_bytes::<8>())
 }
 
-/// Draws `N` fresh random bytes.
+/// Draws `N` fresh random bytes from the installed entropy source.
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0_u8; N];
-    getrandom::fill(&mut bytes).expect("the system random generator should be available");
+    crate::installed_entropy().fill(&mut bytes);
     bytes
 }
 
