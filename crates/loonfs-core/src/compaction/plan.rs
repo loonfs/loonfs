@@ -13,9 +13,14 @@ use loonfs_types::format::manifest::{
     MetadataRowFamily, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
 };
 use loonfs_types::{ChangeSeq, MetadataCompactionId, RunNo};
+use std::num::NonZeroUsize;
 
+/// The size ratio within which a run joins a merge window.
+///
 /// A run joins a size tier when its stored bytes are at most this many times
-/// the smallest run already in the tier.
+/// the smallest run already in the tier. At the delta run limit, a run older
+/// than the window's two newest runs joins the window when its stored bytes
+/// are at most this many times the total of the runs already in the window.
 const COMPACTION_SIZE_RATIO: u64 = 4;
 
 /// The immutable plan of one compaction unit.
@@ -282,8 +287,8 @@ fn select_merge_window(
             tiered_window(&stored_bytes, min_runs, max_runs).or_else(|| {
                 capped_window(
                     candidates,
-                    run_policy.max_delta_runs.get(),
-                    min_runs,
+                    &stored_bytes,
+                    run_policy.max_delta_runs,
                     max_runs,
                 )
             })
@@ -339,20 +344,40 @@ fn tiered_window(
     })
 }
 
-/// Returns the group's newest `min_runs` runs once it has `max_delta_runs`
-/// delta runs, so the runs a read consults stay bounded when no tier is ready.
+/// Returns the window a group merges once the group has `max_delta_runs`
+/// delta runs and no size tier is ready, so the number of runs a read checks
+/// stays bounded.
+///
+/// The window starts with the two newest runs, because merging one run
+/// wouldn't reduce the group's run count. It grows toward older runs while
+/// the next older run's stored bytes are at most [`COMPACTION_SIZE_RATIO`]
+/// times the total stored bytes of the runs already in it, up to `max_runs`.
+/// `stored_bytes` lists the runs in merge order, oldest first.
 fn capped_window(
     candidates: &[&MetadataRunManifest],
-    max_delta_runs: usize,
-    min_runs: usize,
+    stored_bytes: &[u64],
+    max_delta_runs: NonZeroUsize,
     max_runs: usize,
 ) -> Option<std::ops::Range<usize>> {
     let delta_runs = candidates
         .iter()
         .filter(|run| run.tier == RunTier::Delta)
         .count();
-    (delta_runs >= max_delta_runs)
-        .then(|| candidates.len().saturating_sub(min_runs.min(max_runs))..candidates.len())
+    if delta_runs < max_delta_runs.get() {
+        return None;
+    }
+    let end = stored_bytes.len();
+    let mut start = end - 1;
+    let mut window_bytes = stored_bytes[start];
+    while start > 0
+        && end - start < max_runs
+        && (end - start == 1
+            || stored_bytes[start - 1] <= window_bytes.saturating_mul(COMPACTION_SIZE_RATIO))
+    {
+        start -= 1;
+        window_bytes = window_bytes.saturating_add(stored_bytes[start]);
+    }
+    Some(start..end)
 }
 
 /// Checks that a window merges at least two runs, or promotes the group's
@@ -601,11 +626,57 @@ mod planning_tests {
             .map(|power| 5_u64.pow(power))
             .collect::<Vec<_>>();
         assert_eq!(tiered(&sizes[1..]), None, "one delta run below the limit");
+        // The window starts with the two newest runs, 1 and 5 MiB, and the
+        // next older run is more than four times their total.
         let runs = sizes.len() as u64;
-        assert_eq!(
-            tiered(&sizes),
-            Some(runs - min_compaction_runs() as u64..runs)
-        );
+        assert_eq!(tiered(&sizes), Some(runs - 2..runs));
+    }
+
+    /// The window the planner merges for a group at the delta run limit, with
+    /// a tier minimum above the group's run count so that no size tier is due.
+    fn capped(sizes_mib: &[u64]) -> Option<Range<u64>> {
+        let policy = MetadataRunPolicy {
+            max_delta_runs: NonZeroUsize::new(sizes_mib.len() - 1)
+                .expect("the group should have a delta run"),
+            min_compaction_runs: NonZeroUsize::new(sizes_mib.len() + 1)
+                .expect("a run count plus one is nonzero"),
+            ..MetadataRunPolicy::default()
+        };
+        planned(
+            &manifest(sizes_mib),
+            policy,
+            MetadataCompactionPolicy::SizeTiered,
+        )
+    }
+
+    #[test]
+    fn a_capped_window_takes_the_two_newest_runs_and_each_older_run_within_the_ratio() {
+        for (sizes, expected) in [
+            // An earlier output more than four times the small runs above it
+            // stays out of their merge.
+            (vec![50_000, 12_000, 8, 8, 8], 2..5),
+            // The two newest runs merge whatever their sizes, so the output
+            // joins one small run.
+            (vec![50_000, 12_000, 8], 1..3),
+            // After the two newest runs, the window keeps growing while the
+            // next older run is within four times their total: 40 is at most
+            // four times 31.
+            (vec![50_000, 40, 30, 1], 1..4),
+            // Each delta run below the two newest is at most four times the
+            // total of the runs above it (16, 24, 48, and 144), and the base
+            // is more than four times 444.
+            (vec![50_000, 300, 96, 24, 8, 8, 8], 1..7),
+            // 600 is more than four times 144, so the window stops above it.
+            (vec![50_000, 600, 96, 24, 8, 8, 8], 2..7),
+        ] {
+            assert_eq!(capped(&sizes), Some(expected), "{sizes:?}");
+        }
+        // The window keeps its newest runs when more are within the ratio
+        // than one unit merges.
+        let fan_in = MAX_COMPACTION_INPUT_RUNS as u64;
+        let mut sizes = vec![50_000];
+        sizes.extend([1; 10]);
+        assert_eq!(capped(&sizes), Some(11 - fan_in..11));
     }
 
     #[test]

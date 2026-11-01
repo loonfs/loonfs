@@ -38,8 +38,8 @@ pub struct MetadataRunManifest {
 /// keep while it works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataRunPolicy {
-    /// Delta runs at which a family group merges its newest
-    /// `min_compaction_runs` runs, even when no size tier is ready.
+    /// Delta runs at which a family group merges its newest runs, even when
+    /// no size tier is ready.
     pub max_delta_runs: NonZeroUsize,
     /// Runs of similar size that a family group needs before they merge.
     /// A minimum of one acts as two.
