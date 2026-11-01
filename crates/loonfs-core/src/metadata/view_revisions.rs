@@ -31,7 +31,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> Result<Option<RevisionRecord>> {
         Ok(newest(
             self.row_latest_revision_by_inode(inode_id),
-            manifest_index::latest_revision_by_inode(self.manifest_segments(), inode_id).await?,
+            manifest_index::latest_revision_by_inode(
+                self.manifest_segments(),
+                inode_id,
+                self.visible_seq(),
+            )
+            .await?,
             revision_order_key,
         ))
     }
@@ -66,12 +71,24 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> Result<Option<RevisionRecord>> {
         Ok(newest(
             self.row_revision_by_inode_no(inode_id, revision_no),
-            manifest_index::revision_by_inode_no(self.manifest_segments(), inode_id, revision_no)
-                .await?,
+            manifest_index::revision_by_inode_no(
+                self.manifest_segments(),
+                inode_id,
+                revision_no,
+                self.visible_seq(),
+            )
+            .await?,
             revision_order_key,
         ))
     }
 
+    /// Returns up to `limit` of the inode's revisions after `start_after`,
+    /// newest first.
+    ///
+    /// The lookup serves a view at or above its manifest's head. Below the
+    /// head, a page can come back short, because the lookup reads `limit`
+    /// manifest rows and then drops the rows above the view's sequence, so a
+    /// caller that treats a short page as the end misses older revisions.
     pub(crate) async fn revisions_by_inode_page_desc(
         &self,
         inode_id: InodeId,
@@ -98,13 +115,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// The newest attribute revision record for `inode_id` at the visible
     /// sequence, or `None` when the inode has never had attributes written.
     ///
-    /// Both legs filter by `visible_seq`. The revision lookup this is modeled
-    /// on filters only its row-state leg, because a file revision row is never
-    /// rewritten and a revision read at the head is the same result at any
-    /// sequence at or above it. Attributes are not history: each record
-    /// replaces the one before it, so a checkpoint-basis or fork-basis read
-    /// that let a newer manifest row through would return a map that
-    /// sequence never saw.
+    /// Both legs filter by `visible_seq`. Each attribute record replaces the
+    /// one before it, so a checkpoint-basis or fork-basis read that let a
+    /// newer manifest row through would return a map that sequence never saw.
     pub(crate) async fn latest_attributes_revision(
         &self,
         inode_id: InodeId,

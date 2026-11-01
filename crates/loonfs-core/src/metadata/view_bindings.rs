@@ -173,8 +173,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         rows
     }
 
-    /// One page of the namespace's deletions in `range` that no undelete has
-    /// cancelled, oldest deletion first.
+    /// Returns one page of the namespace's deletions in `range` that no
+    /// undelete has cancelled, oldest deletion first.
     ///
     /// Manifest rows merge with the rows the WAL tail derives, so a deletion
     /// committed seconds ago lists like a fresh file appears in `ls`. Both
@@ -182,6 +182,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// row it removes, so one ascending walk determines the page: a marker hides
     /// the position whose key it repeats, and every other listed row is an
     /// entry. Reads stop as soon as `limit` entries are in hand.
+    ///
+    /// The listing serves a view at or above its manifest's head.
+    /// `active_deletions` is a query index, not history, and compaction
+    /// removes a deletion's row together with the row its undelete adds, so
+    /// filtering these rows can't return the deletions of a view below the
+    /// head.
     pub(super) async fn active_deletions_page(
         &self,
         range: &ActiveDeletionRange,
