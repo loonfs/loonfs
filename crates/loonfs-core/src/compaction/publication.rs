@@ -1,8 +1,8 @@
-//! Publishes the run that one metadata compaction unit merged in place of
+//! Publishes the run that one metadata compaction unit wrote in place of
 //! the runs it replaces, fenced by the compactor epoch.
 
-use super::group_merge::MetadataMergeReport;
-use super::plan::{group_run_descriptors, MergePlacement, MetadataCompactionSpec};
+use super::group_compaction::GroupCompactionReport;
+use super::plan::{group_run_descriptors, CompactionPlacement, MetadataCompactionSpec};
 use super::step::{CompactionUnitOutcome, MetadataCompactionCancellation};
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
@@ -50,7 +50,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// The publication starts from `basis`, the manifest that the unit planned
     /// from, or loads the current manifest when `basis` is `None`. Each attempt
     /// checks the current manifest that `update_manifest` found.
-    /// That manifest must still contain the segments the unit merged, and the
+    /// That manifest must still contain the segments the unit compacted, and the
     /// replacement keeps every run published meanwhile. A lost manifest put is
     /// retried over the manifest that won, while changes to the unit's input
     /// abandon the output.
@@ -62,7 +62,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         basis: Option<PublicationBasis>,
         spec: &MetadataCompactionSpec,
         input_keys: &BTreeSet<String>,
-        result: MetadataMergeReport,
+        result: GroupCompactionReport,
         cancellation: &MetadataCompactionCancellation,
         publication: &CompactionPublication,
     ) -> Result<CompactionUnitOutcome> {
@@ -186,7 +186,7 @@ pub(crate) fn input_segment_keys(
 
 pub(super) struct ReplacementOutput {
     pub(super) segments: Vec<MetadataSegmentRef>,
-    pub(super) placement: MergePlacement,
+    pub(super) placement: CompactionPlacement,
 }
 
 /// The surviving and new runs determine the base sequence and next run number.

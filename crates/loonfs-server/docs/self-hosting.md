@@ -105,11 +105,11 @@ The budgets of the manifest cache (`metadata_cache.max_manifest_bytes`) and the 
 | Grep cache | 10% | `grep.max_cache_bytes` (added to the segment cache's share when grep isn't served) |
 | Read working memory | 20% | `max_read_working_bytes` |
 | Admitted publication bytes | 10% | `max_admitted_bytes` |
-| Merge input | 10% | `max_merge_input_bytes`, divided by `max_concurrent_compactions` |
+| Compaction input | 10% | `max_compaction_input_bytes`, divided by `max_concurrent_compactions` |
 
-You can still set each pool's setting to override its share. The sum check uses the final values, including one merge input allowance for each concurrent compaction. At startup, the server logs one line for each term, with its final value and whether it was derived or set. Without sizing, the pools you didn't set are logged as defaults.
+You can still set each pool's setting to override its share. The sum check uses the final values, including one compaction input allowance for each concurrent compaction. At startup, the server logs one line for each term, with its final value and whether it was derived or set. Without sizing, the pools you didn't set are logged as defaults.
 
-Sizing doesn't change the counts, which keep their defaults: 8 publications, 2 folds, 2 compactions, 32 content writes, 64 reads, 256 requests, 1,024 connections, 8 uploads, and 16 downloads. Count settings you set explicitly still apply. The formula uses the final connection, transfer, fold, compaction, and content write counts, and it divides merge input by the final compaction count.
+Sizing doesn't change the counts, which keep their defaults: 8 publications, 2 folds, 2 compactions, 32 content writes, 64 reads, 256 requests, 1,024 connections, 8 uploads, and 16 downloads. Count settings you set explicitly still apply. The formula uses the final connection, transfer, fold, compaction, and content write counts, and it divides compaction input by the final compaction count.
 
 Why is the headroom 200 MiB plus a quarter of the pools? In the lab, the server's peak memory on Linux with the three glibc settings below was 10% to 32% above the same workload's memory on macOS, and a quiet phase stayed about 200 MiB above it. With glibc's defaults, the peaks were up to about three times the macOS figures (769 MiB against 256 MiB for one workload), which is more than the headroom covers. So for a Linux deployment, set these environment variables (the published image already sets them):
 
@@ -366,7 +366,7 @@ These optional settings limit indexing work, and each one must be positive:
 
 [Resource sizing](#resource-sizing) describes how these limits affect memory.
 
-Segment sizes, merge thresholds, and reorganization step sizes use the engine's defaults, as they do for metadata compaction. The only input limits the config accepts are `max_files_per_step` and `max_content_bytes_per_step`.
+Segment sizes, reorganization thresholds, and reorganization step sizes use the engine's defaults, as they do for metadata compaction. The only input limits the config accepts are `max_files_per_step` and `max_content_bytes_per_step`.
 
 ## Resource sizing
 
@@ -402,7 +402,7 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
 | Read working memory | `max_read_working_bytes` | Derived: 20%. 256 MiB without a memory limit | Blocks retained across read, publication, fold, and pin-fold memos | Shared |
-| Merge input | `max_merge_input_bytes` | Derived: 10% divided by the compaction count. 64 MiB without a memory limit | Decoded blocks that one compaction keeps in memory while it merges | Per operation |
+| Compaction input | `max_compaction_input_bytes` | Derived: 10% divided by the compaction count. 64 MiB without a memory limit | Decoded blocks that one compaction keeps in memory while it runs | Per operation |
 | Segment output | None | 32 MiB | Encoded segments that one fold, compaction, or maintenance step keeps in memory while it writes them | Per operation |
 | Content writes | `max_concurrent_content_writes` | 32 writes | Content object writes running at once, for the content that folds, validation, and direct downloads write and for staged uploads. Each keeps at most 16 MiB in memory, or 72 MiB on R2 | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including the folds that maintenance requests, namespace deletes, and snapshot and fork creation start | Concurrency |
@@ -414,15 +414,15 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 
 All memos share one read working memory pool. When the pool is full, a memo evicts its own entries or doesn't retain new blocks, and reads don't wait or fail because of memory. The pool counts decoded data, index and filter sections, stored read-ahead bytes, keys, reference counts, and memo containers. Setting it to zero disables retention. A block that a caller already has stays valid after it's evicted.
 
-A fold keeps its segment output in memory and takes its memo from the shared pool. A merge keeps its merge input and its segment output in memory, which comes to up to 96 MiB per concurrent compaction without sizing or overrides. A sweep visit that folds the WAL tail and then merges takes a fold permit for the fold, and then a compaction permit for the merge. So the fold and compaction limits bound that memory, not `max_concurrent_maintenance`.
+A fold keeps its segment output in memory and takes its memo from the shared pool. A compaction keeps its compaction input and its segment output in memory, which comes to up to 96 MiB per concurrent compaction without sizing or overrides. A sweep visit that folds the WAL tail and then compacts takes a fold permit for the fold, and then a compaction permit for the compaction. So the fold and compaction limits bound that memory, not `max_concurrent_maintenance`.
 
-A compaction keeps at most `max_merge_input_bytes` of decoded input in memory at once, whatever the size of its window, so lowering the setting makes merges read in smaller waves.
+A compaction keeps at most `max_compaction_input_bytes` of decoded input in memory at once, whatever the size of its window, so lowering the setting makes compactions read in smaller waves.
 
 The segment output budget has no setting, and a segment larger than the budget is written on its own.
 
 When a snapshot or a fork has to fold the WAL tail first, it runs that fold with the shared read working memory pool. Creating a snapshot or a fork waits for a fold permit, even when the tail is already folded. A fork of a snapshot doesn't fold, and it doesn't take a fold permit.
 
-Maintenance requests sent to the API don't count against `max_concurrent_maintenance`, but their folds and merges take the same fold and compaction permits as every other fold and merge.
+Maintenance requests sent to the API don't count against `max_concurrent_maintenance`, but their folds and compactions take the same fold and compaction permits as every other fold and compaction.
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied transfer, and both default to 256 MiB. They don't reserve any memory.
 
@@ -452,13 +452,13 @@ The total leaves out:
 - page results,
 - decoded blocks that callers still use after a memo evicts them,
 - the WAL tails that running operations keep outside the WAL tail cache, and
-- maintenance work other than folds and merges.
+- maintenance work other than folds and compactions.
 
 Shared cache entries and memo entries are charged separately, even when they refer to the same allocation. HTTP requests and runtime reads have their own concurrency limits, but page results and other temporary allocations are still outside the budgets in this total.
 
 When the server serves grep queries, grep uses `grep.max_cache_bytes` for its block cache. With a memory limit, this setting is derived by default, and without one, it's 256 MiB. A query reads up to 32 candidate files of at most 8 MiB each at once, so one query can use up to 256 MiB. Queries have no concurrency limit of their own, but HTTP queries share the request cap.
 
-Index building runs in daily sweep visits and in session ticks. A build step reads at most `max_content_bytes_per_step` of file content (64 MiB by default), and a reorganize step merges at most 64 MiB of decoded index blocks. A step that finds work waits for one of the `[grep].max_concurrent_steps` permits before it reads either kind of data, and it keeps the permit until it publishes. So by default, indexing has at most two steps of content in memory at once (up to 128 MiB), whatever `max_concurrent_maintenance` is. A step that finds the index up to date doesn't take a permit, so idle visits still run in parallel. To lower that ceiling, lower `[grep].max_concurrent_steps`.
+Index building runs in daily sweep visits and in session ticks. A build step reads at most `max_content_bytes_per_step` of file content (64 MiB by default), and a reorganize step keeps at most 64 MiB of decoded index blocks in memory. A step that finds work waits for one of the `[grep].max_concurrent_steps` permits before it reads either kind of data, and it keeps the permit until it publishes. So by default, indexing has at most two steps of content in memory at once (up to 128 MiB), whatever `max_concurrent_maintenance` is. A step that finds the index up to date doesn't take a permit, so idle visits still run in parallel. To lower that ceiling, lower `[grep].max_concurrent_steps`.
 
 The `loonfs_grep_steps_running` gauge reports the steps that have a permit, and the `loonfs_grep_steps_waiting` gauge reports the steps that are waiting for one. If `loonfs_grep_steps_waiting` stays above zero, indexing steps are waiting at the cap.
 

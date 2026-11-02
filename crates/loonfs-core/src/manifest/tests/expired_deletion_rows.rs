@@ -14,7 +14,7 @@ use loonfs_types::{
     InodeKind, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
     ROOT_INODE_ID,
 };
-use plan::MergePlacement;
+use plan::CompactionPlacement;
 use std::assert_matches;
 
 const PRINCIPAL_SCOPE: &str = "org_demo";
@@ -771,7 +771,7 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
     );
 }
 
-/// The runs a delta-only window of `group` merges: every run of the group
+/// The runs a delta-only window of `group` compacts: every run of the group
 /// after its oldest.
 fn delta_window(
     manifest: &NamespaceManifestEnvelope,
@@ -857,7 +857,7 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
                 .flat_map(|run| plan::group_run_descriptors(run, group))
                 .map(|descriptor| descriptor.row_count)
                 .sum(),
-            MergePlacement::Delta {
+            CompactionPlacement::Delta {
                 output_seq: window.iter().map(|run| run.run_seq).max().expect("runs"),
             },
             floor_seq,
@@ -897,8 +897,8 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
     }
 }
 
-/// The rows of the segments a merge wrote.
-async fn merged_rows<S: ObjectStore + ?Sized>(
+/// The rows of the segments a compaction wrote.
+async fn compacted_rows<S: ObjectStore + ?Sized>(
     store: &S,
     output_segments: &[MetadataSegmentRef],
 ) -> Vec<MetadataRow> {
@@ -987,10 +987,10 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
             MetadataCompactionPolicy::CompactImmediately,
         )
         .expect("plan the group");
-        assert_matches!(spec.placement(), MergePlacement::Base { .. });
+        assert_matches!(spec.placement(), CompactionPlacement::Base { .. });
         // The low bits of an inode ID are random, so the test seeds this
         // variant's filter with a run number whose filter has no false
-        // positive for the hidden revision, and the merge then removes the
+        // positive for the hidden revision, and the compaction then removes the
         // revision in every run.
         let mut seeded = false;
         for offset in 0..64 {
@@ -1012,7 +1012,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
         }
         assert!(seeded, "{inode_rows:?}: a seed with no false positive");
         store.reset();
-        let merged = run_metadata_compaction(
+        let compacted = run_metadata_compaction(
             &basis,
             &crate::cache::MetadataSegmentCache::unshared(0),
             &namespace_id,
@@ -1021,7 +1021,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
             &MetadataCompactionCancellation::default(),
         )
         .await
-        .expect("merge")
+        .expect("compact")
         .expect("not cancelled");
         let walked = segment_keys(&runs, ApiMetadataRowFamily::DirentryBinds);
         let walk_reads = store
@@ -1029,7 +1029,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
             .iter()
             .filter(|(key, _)| walked.contains(key))
             .count();
-        let hidden_rows = merged_rows(&store, &merged.output_segments)
+        let hidden_rows = compacted_rows(&store, &compacted.output_segments)
             .await
             .iter()
             .filter(|row| matches!(row, MetadataRow::FileRevision(record) if record.inode_id == a))
@@ -1090,7 +1090,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         MetadataCompactionPolicy::CompactImmediately,
     )
     .expect("plan the inodes group");
-    assert_matches!(spec.placement(), MergePlacement::Base { .. });
+    assert_matches!(spec.placement(), CompactionPlacement::Base { .. });
     compact_with_seed(&store, &namespace_id, &spec, seed).await;
     let inodes = family_rows(&store, &namespace_id, ApiMetadataRowFamily::Inodes).await;
     assert!(
@@ -1129,7 +1129,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         MetadataFamilyGroup::Inodes,
         vec![base.run_no],
         inodes.len() as u64,
-        MergePlacement::Base {
+        CompactionPlacement::Base {
             output_seq: payload.head_seq,
         },
         payload.retention_floor_seq,
@@ -1164,7 +1164,7 @@ async fn kept_inode_filter_and_walk_reads(
             MetadataFamilyGroup::Revisions,
             vec![RunNo(0)],
             0,
-            MergePlacement::Base {
+            CompactionPlacement::Base {
                 output_seq: current.payload().head_seq,
             },
             ChangeSeq(0),
@@ -1197,7 +1197,11 @@ pub(super) async fn compact_group<S: ObjectStore + ?Sized>(
         MetadataCompactionPolicy::CompactImmediately,
     )
     .expect("plan the group");
-    assert_matches!(spec.placement(), MergePlacement::Base { .. }, "{group:?}");
+    assert_matches!(
+        spec.placement(),
+        CompactionPlacement::Base { .. },
+        "{group:?}"
+    );
     let outcome = run_planned_compaction(
         store,
         namespace_id,

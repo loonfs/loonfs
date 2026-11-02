@@ -91,7 +91,7 @@ impl MetadataRowFamily {
     }
 }
 
-/// Metadata families merged together as one consistency unit.
+/// Metadata families compacted together as one consistency unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataFamilyGroup {
@@ -145,7 +145,7 @@ impl MetadataFamilyGroup {
         }
     }
 
-    /// Returns the families this group merges together.
+    /// Returns the families this group compacts together.
     pub const fn families(self) -> &'static [MetadataRowFamily] {
         match self {
             Self::Bindings => &[

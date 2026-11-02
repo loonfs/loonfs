@@ -227,7 +227,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     /// - Each run covers its own range of commit sequences, and `scan_runs`
     ///   lists the runs newest first, so every row of a run is newer than
     ///   every row of the runs after it. A fold writes the commits after the
-    ///   manifest's folded WAL object into one new run. A compaction merges
+    ///   manifest's folded WAL object into one new run. A compaction rewrites
     ///   a contiguous window of a family group's runs into one run at the
     ///   window's position, and the group's base run is older than every
     ///   delta run, whatever its sequence stamp. (Run numbers don't follow

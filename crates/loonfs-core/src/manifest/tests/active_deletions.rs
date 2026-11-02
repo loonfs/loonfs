@@ -1,4 +1,4 @@
-//! The derived active-deletions family: its reducer, the merge that collapses
+//! The derived active-deletions family: its reducer, the compaction that collapses
 //! cancelled deletions, and the bounded trash listing it backs.
 //!
 //! The family is materialized by checkpoint publication, so it lives with the
@@ -210,11 +210,11 @@ fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
     );
 }
 
-/// Checks that a base merge drops cancelled pairs and the listed row of a
+/// Checks that a base compaction drops cancelled pairs and the listed row of a
 /// deletion at or below the acknowledged floor, and keeps every listed row
 /// above the acknowledged floor, however far the retention floor advanced.
 #[test]
-fn the_merge_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest() {
+fn the_compaction_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest() {
     let state = state_from_tombstones(vec![
         tombstone_set(InodeId(7), 5, "notes.txt", InodeKind::File),
         tombstone_revoke(InodeId(7), 9, 5),
@@ -226,13 +226,13 @@ fn the_merge_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest() {
         ApiMetadataRowFamily::ActiveDeletions,
         manifest_rows_for_family(&state, ApiMetadataRowFamily::ActiveDeletions),
     )]);
-    merge_rows_with_retention(
+    compact_rows_with_retention(
         MetadataFamilyGroup::ActiveDeletions,
         &mut rows_by_family,
         ChangeSeq(10_000),
         ChangeSeq(10),
     )
-    .expect("merge active deletions");
+    .expect("compact active deletions");
 
     let kept = rows_by_family
         .remove(&ApiMetadataRowFamily::ActiveDeletions)
@@ -595,7 +595,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
         }
     }
 
-    // Merge everything, then compare once more: the cancelled pairs and the
+    // Compact everything, then compare once more: the cancelled pairs and the
     // expired deletions are gone from the family and the answer is
     // unchanged.
     acknowledge_floor(&store, &namespace_id, &context).await;
@@ -999,7 +999,7 @@ async fn a_trash_cursor_resumes_above_a_floor_that_passed_it() {
 #[tokio::test]
 async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
     /// One page's reads over a namespace with `deletions` recoverable
-    /// deletions, measured after the family is merged into its base.
+    /// deletions, measured after the family is compacted into its base.
     async fn page_reads(deletions: u32) -> usize {
         let temp = tempdir().expect("tempdir");
         let store = RecordingStore::metadata_segments(

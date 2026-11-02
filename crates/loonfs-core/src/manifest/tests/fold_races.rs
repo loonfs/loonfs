@@ -21,7 +21,7 @@ use loonfs_types::{CompactorEpoch, ContentId, DeleteDirectoryBehavior, WalNo, Wr
 #[derive(Clone)]
 enum Rival {
     CompactorClaim,
-    Merge,
+    Compaction,
     RetentionAdvance,
     Fold(Box<WriterPosition>),
 }
@@ -40,8 +40,8 @@ impl Rival {
                 .await
                 .expect("claim the compactor");
             }
-            Self::Merge => {
-                let mut merges = 0;
+            Self::Compaction => {
+                let mut compactions = 0;
                 loop {
                     match crate::test_support::NamespaceFixture::new(
                         store,
@@ -57,14 +57,14 @@ impl Rival {
                         &crate::compaction::MetadataCompactionCancellation::default(),
                     )
                     .await
-                    .expect("merge")
+                    .expect("compact")
                     {
-                        CompactionUnitOutcome::Published { .. } => merges += 1,
+                        CompactionUnitOutcome::Published { .. } => compactions += 1,
                         CompactionUnitOutcome::NotNeeded => break,
-                        other => panic!("expected a merge, got {other:?}"),
+                        other => panic!("expected a compaction, got {other:?}"),
                     }
                 }
-                assert!(merges > 0, "the merge rival should publish");
+                assert!(compactions > 0, "the compaction rival should publish");
             }
             Self::RetentionAdvance => {
                 crate::test_support::NamespaceFixture::new(
@@ -287,7 +287,11 @@ fn request_counts(store: &RecordingStore<LocalFsStore>) -> StoreCounts {
 
 #[tokio::test]
 async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
-    for rival in [Rival::Merge, Rival::CompactorClaim, Rival::RetentionAdvance] {
+    for rival in [
+        Rival::Compaction,
+        Rival::CompactorClaim,
+        Rival::RetentionAdvance,
+    ] {
         let mut writer = Writer::open().await;
         writer
             .commit(
@@ -302,7 +306,7 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
         writer.fold().await;
         writer.commit("second", Vec::new(), &["/b"]).await;
         writer.fold().await;
-        // The deletion's root inode is in the runs a merge rewrites.
+        // The deletion's root inode is in the runs a compaction rewrites.
         writer
             .commit(
                 "third",

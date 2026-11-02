@@ -46,8 +46,8 @@ struct RuntimeCoreInner {
     store: SharedObjectStore,
     config: RuntimeConfig,
     execution_budget: ExecutionBudget,
-    /// Layout and input limits for metadata compactions, whose merge input
-    /// size comes from the execution budget.
+    /// Layout and input limits for metadata compactions, whose compaction
+    /// input size comes from the execution budget.
     run_policy: MetadataRunPolicy,
     /// The object-store kind label of tracing, or `None` when the caller
     /// didn't identify the backend.

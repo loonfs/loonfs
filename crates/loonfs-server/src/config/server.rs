@@ -55,7 +55,7 @@ pub struct ServerConfig {
     pub max_concurrent_folds: Option<NonZeroUsize>,
     /// Maximum metadata compaction units this server runs at once, whether
     /// writer sessions, the maintenance sweep, or maintenance requests start
-    /// them. A merge never takes a fold permit. Defaults to the runtime's
+    /// them. A compaction never takes a fold permit. Defaults to the runtime's
     /// [`DEFAULT_MAX_CONCURRENT_COMPACTIONS`](loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS),
     /// 2.
     pub max_concurrent_compactions: Option<NonZeroUsize>,
@@ -163,7 +163,7 @@ pub struct ServerConfig {
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: NonZeroUsize,
     /// How many namespaces the maintenance sweep visits at once. Folds and
-    /// merges also wait for the fold and compaction permits. Defaults to 8.
+    /// compactions also wait for the fold and compaction permits. Defaults to 8.
     #[serde(default = "default_max_concurrent_maintenance")]
     pub max_concurrent_maintenance: NonZeroUsize,
     /// Milliseconds between ticks of held sessions. Defaults to 5000.
@@ -192,10 +192,13 @@ pub struct ServerConfig {
     /// closes. A later write opens a new session. Defaults to 30 minutes.
     #[serde(default = "default_idle_session_close_after_ms")]
     pub idle_session_close_after_ms: u64,
-    /// Decoded metadata bytes one maintenance step may merge. A step merges
-    /// inline only the runs that fit; a larger window runs as a streaming
-    /// compaction that keeps at most this much at once. Derived when sized.
-    pub max_merge_input_bytes: Option<usize>,
+    /// Decoded metadata bytes one compaction keeps in memory at once,
+    /// whatever the size of its window. Derived when sized.
+    ///
+    /// `max_merge_input_bytes`, this setting's name through 0.5, is accepted
+    /// as an alias in 0.6 and removed in 0.7.
+    #[serde(alias = "max_merge_input_bytes")]
+    pub max_compaction_input_bytes: Option<usize>,
     /// Minimum interval between checks for a successor to a cached manifest,
     /// in milliseconds. Zero checks on every read. Unset keeps the runtime
     /// default of 1000. At most 1155000, the revalidation bound.
@@ -398,7 +401,7 @@ impl ServerConfig {
     }
 
     /// Builds the execution budget of the server's one runtime from its read,
-    /// fold, compaction, content write, and merge input limits and its
+    /// fold, compaction, content write, and compaction input limits and its
     /// admission totals, reporting to `recorder`.
     pub(crate) fn execution_budget(
         &self,
@@ -409,7 +412,7 @@ impl ServerConfig {
             NonZeroUsize::new(value).expect("validated budget limits should be nonzero")
         };
         let mut builder = ExecutionBudget::builder()
-            .max_merge_input_bytes(positive(memory.merge_input.bytes))
+            .max_compaction_input_bytes(positive(memory.compaction_input.bytes))
             .max_read_working_bytes(memory.read_working.bytes)
             .max_admitted_bytes(positive(memory.admitted.bytes))
             .metrics_recorder(recorder);

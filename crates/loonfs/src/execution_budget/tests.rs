@@ -26,7 +26,7 @@ const TWO: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
 
 /// A writable runtime over a local store of its own. While the store is
 /// armed, every WAL object and metadata segment write parks, so a
-/// publication, a fold, or a merge that starts holds its permit until the
+/// publication, a fold, or a compaction that starts holds its permit until the
 /// store is released.
 struct GatedRuntime {
     _root: TempDir,
@@ -80,7 +80,7 @@ impl GatedRuntime {
             .expect("open namespace")
     }
 
-    /// Creates `name` with two delta runs, so a merge is due, and one file in
+    /// Creates `name` with two delta runs, so a compaction is due, and one file in
     /// its WAL tail, so a fold is due.
     async fn namespace_with_work(&self, name: &str) -> NamespaceId {
         let namespace_id = namespace_id(name);
@@ -121,14 +121,14 @@ impl GatedRuntime {
         })
     }
 
-    fn start_merge(&self, namespace_id: &NamespaceId) -> JoinHandle<()> {
-        let maintenance = self.runtime.maintenance(writer_id("budget-merges"));
+    fn start_compaction(&self, namespace_id: &NamespaceId) -> JoinHandle<()> {
+        let maintenance = self.runtime.maintenance(writer_id("budget-compactions"));
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             maintenance
                 .compact_metadata(&namespace_id, &crate::MaintenanceCancellation::new())
                 .await
-                .expect("merge the delta runs");
+                .expect("compact the delta runs");
         })
     }
 }
@@ -175,7 +175,7 @@ async fn wait_for_stats(budget: &ExecutionBudget, expected: ExecutionBudgetStats
 
 /// Waits until the budget matches `expected` in everything but the admitted
 /// bytes, which depend on request encodings, and the read working bytes,
-/// which a running merge reserves for its input blocks after it takes its
+/// which a running compaction reserves for its input blocks after it takes its
 /// permit and keeps while its write is parked. Callers that finish their
 /// work check that both return to zero with [`wait_for_stats`].
 async fn wait_for_counts(budget: &ExecutionBudget, expected: ExecutionBudgetStats) {
@@ -199,7 +199,7 @@ async fn finish(work: Vec<JoinHandle<()>>) {
 }
 
 /// Samples the budget until the returned flag is set, and returns the most
-/// running publications, folds, and merges it saw.
+/// running publications, folds, and compactions it saw.
 fn watch_peak_running(
     budget: &ExecutionBudget,
 ) -> (Arc<AtomicBool>, JoinHandle<(usize, usize, usize)>) {
@@ -292,7 +292,7 @@ async fn runtimes_sharing_a_budget_never_exceed_its_limits() {
     let mut work = Vec::new();
     for (gated, namespace_id) in &namespaces {
         work.push(gated.start_fold(namespace_id));
-        work.push(gated.start_merge(namespace_id));
+        work.push(gated.start_compaction(namespace_id));
     }
     for namespace in &publishing {
         work.push(start_directory(namespace));
@@ -326,7 +326,7 @@ async fn runtimes_sharing_a_budget_never_exceed_its_limits() {
     assert!(peak_folds <= 2, "{peak_folds} folds ran at once");
     assert!(
         peak_compactions <= 2,
-        "{peak_compactions} merges ran at once"
+        "{peak_compactions} compactions ran at once"
     );
     wait_for_stats(&budget, ExecutionBudgetStats::default()).await;
     for gated in &runtimes {
@@ -474,7 +474,7 @@ async fn a_runtime_without_a_budget_reports_the_default_limits_to_its_recorder()
     let mut work = Vec::new();
     for namespace_id in &namespaces {
         work.push(gated.start_fold(namespace_id));
-        work.push(gated.start_merge(namespace_id));
+        work.push(gated.start_compaction(namespace_id));
     }
     let expected = ExecutionBudgetStats {
         folds_running: crate::DEFAULT_MAX_CONCURRENT_FOLDS.get(),

@@ -35,7 +35,7 @@ const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1
 /// Work in flight that one or more runtimes share.
 ///
 /// It covers admitted publication requests, running reads and publications, WAL
-/// folds, metadata merges, the decoded input one merge may keep, content
+/// folds, metadata compactions, the decoded input one compaction may keep, content
 /// writes, and retained read working memory.
 ///
 /// Each [`LoonFs`](crate::LoonFs) built with the budget charges the
@@ -63,7 +63,7 @@ struct ExecutionBudgetInner {
     publications: PermitPool,
     folds: PermitPool,
     compactions: PermitPool,
-    max_merge_input_bytes: NonZeroUsize,
+    max_compaction_input_bytes: NonZeroUsize,
     content_writes: Arc<PermitPool>,
 }
 
@@ -94,7 +94,7 @@ impl ExecutionBudget {
             max_concurrent_publications: DEFAULT_MAX_CONCURRENT_PUBLICATIONS,
             max_concurrent_folds: DEFAULT_MAX_CONCURRENT_FOLDS,
             max_concurrent_compactions: DEFAULT_MAX_CONCURRENT_COMPACTIONS,
-            max_merge_input_bytes:
+            max_compaction_input_bytes:
                 loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
             max_concurrent_content_writes: DEFAULT_MAX_CONCURRENT_CONTENT_WRITES,
             metrics_recorder: None,
@@ -188,9 +188,9 @@ impl ExecutionBudget {
         self.inner.compactions.acquire().await
     }
 
-    /// The decoded metadata bytes one merge may keep.
-    pub(crate) fn max_merge_input_bytes(&self) -> NonZeroUsize {
-        self.inner.max_merge_input_bytes
+    /// The decoded metadata bytes one compaction may keep.
+    pub(crate) fn max_compaction_input_bytes(&self) -> NonZeroUsize {
+        self.inner.max_compaction_input_bytes
     }
 }
 
@@ -204,7 +204,7 @@ pub struct ExecutionBudgetBuilder {
     max_concurrent_publications: NonZeroUsize,
     max_concurrent_folds: NonZeroUsize,
     max_concurrent_compactions: NonZeroUsize,
-    max_merge_input_bytes: NonZeroUsize,
+    max_compaction_input_bytes: NonZeroUsize,
     max_concurrent_content_writes: NonZeroUsize,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
@@ -271,7 +271,7 @@ impl ExecutionBudgetBuilder {
 
     /// Sets the maximum number of metadata compaction units run at once,
     /// whether sessions or [`Maintenance`](crate::Maintenance) calls start
-    /// them. A merge never
+    /// them. A compaction never
     /// has a fold permit. Defaults to
     /// [`DEFAULT_MAX_CONCURRENT_COMPACTIONS`].
     pub fn max_concurrent_compactions(mut self, limit: NonZeroUsize) -> Self {
@@ -279,11 +279,19 @@ impl ExecutionBudgetBuilder {
         self
     }
 
-    /// Sets the decoded metadata bytes one merge keeps in memory at once,
+    /// Sets the decoded metadata bytes one compaction keeps in memory at once,
     /// whatever the size of its window. Defaults to 64 MiB.
-    pub fn max_merge_input_bytes(mut self, max_merge_input_bytes: NonZeroUsize) -> Self {
-        self.max_merge_input_bytes = max_merge_input_bytes;
+    pub fn max_compaction_input_bytes(mut self, max_compaction_input_bytes: NonZeroUsize) -> Self {
+        self.max_compaction_input_bytes = max_compaction_input_bytes;
         self
+    }
+
+    /// Sets the decoded metadata bytes one compaction keeps in memory at
+    /// once. This is the 0.5 name of [`Self::max_compaction_input_bytes`],
+    /// and 0.7 removes it.
+    #[deprecated(since = "0.6.0", note = "use `max_compaction_input_bytes`")]
+    pub fn max_merge_input_bytes(self, max_merge_input_bytes: NonZeroUsize) -> Self {
+        self.max_compaction_input_bytes(max_merge_input_bytes)
     }
 
     /// Sets the maximum number of content object writes run at once. Folds,
@@ -335,7 +343,7 @@ impl ExecutionBudgetBuilder {
                 publications: PermitPool::new(self.max_concurrent_publications, Some(publications)),
                 folds: PermitPool::new(self.max_concurrent_folds, Some(folds)),
                 compactions: PermitPool::new(self.max_concurrent_compactions, Some(compactions)),
-                max_merge_input_bytes: self.max_merge_input_bytes,
+                max_compaction_input_bytes: self.max_compaction_input_bytes,
                 content_writes: Arc::new(PermitPool::new(
                     self.max_concurrent_content_writes,
                     Some(content_writes),
@@ -368,9 +376,9 @@ pub struct ExecutionBudgetStats {
     pub folds_running: usize,
     /// Folds, and operations that may fold first, waiting for a fold permit.
     pub folds_waiting: usize,
-    /// Metadata merges that have a compaction permit.
+    /// Metadata compactions that have a compaction permit.
     pub compactions_running: usize,
-    /// Metadata merges waiting for a compaction permit.
+    /// Metadata compactions waiting for a compaction permit.
     pub compactions_waiting: usize,
     /// Content object writes that have a content write permit.
     pub content_writes_running: usize,

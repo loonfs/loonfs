@@ -206,7 +206,7 @@ The process that moves committed records from the WAL tail into new metadata seg
 
 ### Compaction
 
-The process that merges a namespace's metadata runs into fewer runs, and drops rows that are no longer needed, without changing any retained view. Each compaction merges one family group's window of at most eight runs without keeping every row in memory, and publishes once at the end. See [Retention and compaction](format.md#10-retention-and-compaction).
+The process that rewrites a namespace's metadata runs into fewer runs, and drops rows that are no longer needed, without changing any retained view. Each compaction rewrites one family group's window of at most eight runs without keeping every row in memory, and publishes once at the end. See [Retention and compaction](format.md#10-retention-and-compaction).
 
 ### Retention floor
 

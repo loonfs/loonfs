@@ -136,13 +136,13 @@ fn base_segment_of_family(
         .filter(|run| run.tier == RunTier::Base)
         .flat_map(|run| &run.segments)
         .find(|descriptor| descriptor.family == family)
-        .expect("a merged base segment of this family")
+        .expect("a compacted base segment of this family")
         .clone()
 }
 
-/// A namespace with one merged base run and one delta run above it, which is
+/// A namespace with one compacted base run and one delta run above it, which is
 /// the smallest shape a second base-tier run can be added to.
-async fn seed_merged_base_with_a_delta_run(store: &LocalFsStore, namespace_id: &NamespaceId) {
+async fn seed_compacted_base_with_a_delta_run(store: &LocalFsStore, namespace_id: &NamespaceId) {
     let context = test_context();
     bootstrap_namespace(store, namespace_id, &context)
         .await
@@ -242,7 +242,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
             .await
             .expect("create checkpoint");
     }
-    // Checkpoints only append; dropping happens when compaction merges
+    // Checkpoints only append; dropping happens when compaction rewrites
     // the runs against the advanced floor.
     let compacted_manifest_no = drain_compaction(
         &store,
@@ -402,7 +402,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
         vec![bind(1, 0), unbind(2), bind(2, 1)],
     );
 
-    merge_rows_with_retention(
+    compact_rows_with_retention(
         MetadataFamilyGroup::Bindings,
         &mut rows,
         ChangeSeq(1),
@@ -468,7 +468,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         vec![bind(0), unbind.clone(), bind(2)],
     );
 
-    merge_rows_with_retention(
+    compact_rows_with_retention(
         MetadataFamilyGroup::Bindings,
         &mut rows,
         ChangeSeq(1),
@@ -903,7 +903,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
             .await
             .expect("write file");
     }
-    // Merge the delta runs so every inode row lands in one base segment.
+    // Compact the delta runs so every inode row lands in one base segment.
     let manifest_no = checkpoint_then_compact(
         &store,
         &namespace_id,
@@ -938,7 +938,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         .count();
     assert_eq!(
         base_inode_segments, 1,
-        "the merged base should hold one inode segment"
+        "the compacted base should hold one inode segment"
     );
     let mut payload = manifest.payload().clone();
     let descriptor = payload
@@ -1126,7 +1126,7 @@ async fn a_manifest_whose_group_base_fragmented_does_not_load() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_merged_base_with_a_delta_run(&store, &namespace_id).await;
+    seed_compacted_base_with_a_delta_run(&store, &namespace_id).await;
 
     let manifest = current_manifest(&store, &namespace_id).await;
     let group = group_containing(ApiMetadataRowFamily::Inodes);
@@ -1168,7 +1168,7 @@ async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_merged_base_with_a_delta_run(&store, &namespace_id).await;
+    seed_compacted_base_with_a_delta_run(&store, &namespace_id).await;
 
     let manifest = current_manifest(&store, &namespace_id).await;
     let existing = base_segment_of_family(&manifest, ApiMetadataRowFamily::Inodes);

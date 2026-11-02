@@ -33,7 +33,7 @@ use tempfile::tempdir;
 /// Files in the listed directory; the page reads the first half.
 const FILES: usize = 2000;
 const PAGE: usize = 1000;
-/// Committed and folded batches the compaction merges into one run.
+/// Committed and folded batches the compaction rewrites into one run.
 const BATCHES: usize = 8;
 /// About eleven compacted segments per family for `FILES` rows.
 const ROWS_PER_SEGMENT: usize = 200;

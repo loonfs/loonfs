@@ -133,7 +133,7 @@ pub(crate) mod sealed {
 
 impl<M> LoonFs<M> {
     /// Returns the execution budget this runtime's reads, publications, folds, and
-    /// merges draw from, which other runtimes may share.
+    /// compactions draw from, which other runtimes may share.
     pub fn execution_budget(&self) -> &ExecutionBudget {
         self.core.execution_budget()
     }
@@ -282,7 +282,7 @@ impl LoonFs<Writable> {
     /// publication service, so fold decisions see the inline bytes of the
     /// sessions this runtime keeps. It also shares the runtime's compactor
     /// claim, so it never fences this runtime's sessions or another value
-    /// from this runtime, and its folds and merges take their permits from
+    /// from this runtime, and its folds and compactions take their permits from
     /// the runtime's [`ExecutionBudget`].
     /// Operations that mutate durable control state record `writer_id`. A
     /// process that only maintains builds a writable runtime and never opens

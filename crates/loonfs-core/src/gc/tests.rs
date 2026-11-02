@@ -1291,9 +1291,9 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
     .await
     .expect("move the floor past the deletion");
     // Each new file's WAL object records the advanced floor, and each pass
-    // folds it and merges every group that the file gave a delta run. The
-    // first pass removes the hidden revision, but its layout merge can run
-    // before its revisions merge, so the second pass drops the chain.
+    // folds it and compacts every group that the file gave a delta run. The
+    // first pass removes the hidden revision, but its layout compaction can run
+    // before its revisions compaction, so the second pass drops the chain.
     for path in ["/later-1", "/later-2"] {
         put_file_content(&store, &namespace_id, path, b"later").await;
         compact_below_the_floor(&store, &namespace_id).await;
@@ -1878,9 +1878,9 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         .expect("list manifests");
     assert_eq!(manifests_left.len(), 1, "only the current manifest stays");
 
-    // Compaction merges the delta runs into fresh base segments; the
+    // Compaction rewrites the delta runs into fresh base segments; the
     // superseded run segments then age out on the next pass.
-    let merge_policy = crate::segment::MetadataRunPolicy {
+    let run_policy = crate::segment::MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
@@ -1891,7 +1891,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
                 &namespace_id,
                 &crate::test_support::writer_at("test-writer", 0),
             );
-            fixture.namespace.run_policy = merge_policy;
+            fixture.namespace.run_policy = run_policy;
             fixture
         }
         .engine()
@@ -1916,13 +1916,13 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         )
         .await,
     );
-    let after_merge = crate::test_support::namespace_store(&store, &namespace_id)
+    let after_compaction = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(None, &options(), &aged.clock())
         .await
         .expect("gc pass after compaction");
     assert!(
-        after_merge.deleted.metadata_segments > 0,
-        "merged-away run segments become collectable"
+        after_compaction.deleted.metadata_segments > 0,
+        "compacted-away run segments become collectable"
     );
 
     stat_root(&store, &namespace_id).await;

@@ -120,8 +120,8 @@ impl CompactionInstruments {
         &self.outcome_seconds[outcome.index()]
     }
 
-    /// Reports one finished compaction unit and any merge it completed. A
-    /// unit that found nothing to merge, or a window too large for its call,
+    /// Reports one finished compaction unit and any window it compacted. A
+    /// unit that found nothing to compact, or a window too large for its call,
     /// reports nothing.
     pub(crate) fn finished(&self, outcome: &crate::Result<CompactionUnitOutcome>, elapsed_ms: u64) {
         let (outcome, totals) = match outcome {

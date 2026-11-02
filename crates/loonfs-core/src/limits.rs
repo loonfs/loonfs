@@ -19,7 +19,7 @@ use loonfs_objectstore::{
 use std::num::NonZeroU64;
 
 /// Maximum run fan-in for either compaction execution path. Larger groups are
-/// merged in several publications, keeping decoded input blocks independent of
+/// compacted in several publications, keeping decoded input blocks independent of
 /// history size.
 pub(crate) const MAX_COMPACTION_INPUT_RUNS: usize = 8;
 
@@ -276,7 +276,7 @@ const _: () = assert!(
 /// A compaction unit writes its output under `segments/` as it goes and
 /// publishes at the end, so its earliest segment is unreferenced for the whole
 /// run. One day is the bound on a run; the difference between this age and the
-/// grace window below is how long a unit may keep merging before it abandons
+/// grace window below is how long a unit may keep compacting before it abandons
 /// its output.
 pub const UNREFERENCED_SEGMENT_GRACE_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 

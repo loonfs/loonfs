@@ -113,7 +113,7 @@ impl From<&GrepIndexStatus> for loonfs_types::GrepIndexStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepReorganizeState {
-    /// Segments this reorganize merges, chosen when it starts and kept until
+    /// Segments this reorganize rewrites, chosen when it starts and kept until
     /// the manifest that completes it is published.
     pub input_segment_ids: Vec<IndexSegmentId>,
     /// Outputs written by completed reorganize steps and retained until publication.

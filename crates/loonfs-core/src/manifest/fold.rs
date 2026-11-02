@@ -275,7 +275,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let head_seq = projection.head.seq;
         let tail_state = projection.tail_state.merged_rows();
         // A WAL fold keeps existing runs and writes the WAL delta as one new delta
-        // run. Compaction merges delta runs into the base separately.
+        // run. Compaction rewrites delta runs into the base separately.
         //
         let (runs, next_run_no) = if projection
             .manifest_segments

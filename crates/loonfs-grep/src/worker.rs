@@ -32,8 +32,8 @@ pub(crate) const GREP_BACKFILL_CHECKPOINT_TTL_MS: NonZeroU64 =
 
 const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
 /// Content bytes one backfill step ingests before it checkpoints its cursor.
-/// This budgets ingestion, not LSM merging — it happens to share a value
-/// with the metadata reorganization input limit, and must stay independent
+/// This budgets ingestion, not index reorganization — it happens to share a value
+/// with the metadata compaction input limit, and must stay independent
 /// so a compaction policy change cannot silently change backfill behavior.
 const GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP: NonZeroU64 =
     NonZeroU64::new(64 * 1024 * 1024).unwrap();
@@ -58,7 +58,7 @@ pub struct GramIndexBuildPolicy {
     pub max_delta_runs: NonZeroUsize,
     /// Mid-level runs that trigger a reorganization into a fresh base run.
     pub max_mid_runs: NonZeroUsize,
-    /// Rows one reorganize step merges before publishing and yielding.
+    /// Rows one reorganize step rewrites before publishing and yielding.
     pub max_decoded_input_rows_per_step: NonZeroUsize,
 }
 

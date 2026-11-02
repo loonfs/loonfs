@@ -7,7 +7,7 @@
 //! that cache the same way for each kind of segment traffic:
 //!
 //! - Reads and folds read segments through the cache.
-//! - A compaction reads its input segments without the cache. The merge reads
+//! - A compaction reads its input segments without the cache. The compaction reads
 //!   each input block once, and the manifest it publishes no longer lists the
 //!   input segments, so caching their blocks would evict blocks that reads of
 //!   the current manifest still use.

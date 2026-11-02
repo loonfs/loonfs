@@ -62,7 +62,7 @@ impl PublishedManifest {
 /// whether the manifest lists runs. Replay adds the root directory above a
 /// manifest that lists no runs. So the WAL tail projected above `basis` is
 /// also the tail above `manifest`. (A compaction needs runs to
-/// merge, and it keeps every live row, including the root directory's.)
+/// compact, and it keeps every live row, including the root directory's.)
 pub(crate) fn same_head(
     basis: &MetadataBasis,
     head: &NamespaceReadState,

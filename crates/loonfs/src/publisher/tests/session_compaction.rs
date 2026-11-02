@@ -98,8 +98,8 @@ async fn session_one_fold_short<S: ObjectStore + ?Sized>(
     panic!("every write should leave one more run");
 }
 
-/// A budget whose merges run one at a time.
-fn one_merge_at_a_time() -> ExecutionBudget {
+/// A budget whose compactions run one at a time.
+fn one_compaction_at_a_time() -> ExecutionBudget {
     ExecutionBudget::builder()
         .max_concurrent_compactions(NonZeroUsize::MIN)
         .build()
@@ -482,7 +482,7 @@ async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
 }
 
 #[tokio::test]
-async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
+async fn a_runtime_runs_no_more_compactions_at_once_than_its_compaction_limit() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(segment_write_watch(temp_dir.path()));
     let writer = crate::LoonFs::builder_with_store(store.clone())
@@ -491,19 +491,20 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
             inline_content: fold_every_write(),
             ..crate::RuntimeConfig::default()
         })
-        .execution_budget(one_merge_at_a_time())
+        .execution_budget(one_compaction_at_a_time())
         .build()
         .await
         .expect("build writer");
     let mut sessions = Vec::new();
     for index in 0..4 {
         sessions.push(
-            session_one_fold_short(&writer, store.inner(), &format!("merge-bound-{index}")).await,
+            session_one_fold_short(&writer, store.inner(), &format!("compaction-bound-{index}"))
+                .await,
         );
     }
 
     // Every session's next fold makes compaction due while the one permit is
-    // held, so all of them are ready to merge when it is released.
+    // held, so all of them are ready to compact when it is released.
     let permit = writer.execution_budget().compaction_permit().await;
     let actor = loonfs_test_support::test_actor();
     futures::future::try_join_all(
@@ -526,7 +527,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     assert_eq!(
         store.peak_namespaces(),
         1,
-        "one merge at a time, across every session"
+        "one compaction at a time, across every session"
     );
     for namespace in &sessions {
         let manifest = current_manifest(store.inner(), namespace.id()).await;
@@ -541,7 +542,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
 }
 
 #[tokio::test]
-async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
+async fn closing_a_session_does_not_wait_for_another_sessions_compaction() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -554,28 +555,28 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
             inline_content: fold_every_write(),
             ..crate::RuntimeConfig::default()
         })
-        .execution_budget(one_merge_at_a_time())
+        .execution_budget(one_compaction_at_a_time())
         .build()
         .await
         .expect("build writer");
-    let merging = session_one_fold_short(&writer, store.inner(), "merging").await;
+    let compacting = session_one_fold_short(&writer, store.inner(), "compacting").await;
     let closing = session_one_fold_short(&writer, store.inner(), "closing").await;
     let actor = loonfs_test_support::test_actor();
 
-    // The other session's merge takes the only permit and parks at its first
+    // The other session's compaction takes the only permit and parks at its first
     // segment write.
     let permit = writer.execution_budget().compaction_permit().await;
-    merging
+    compacting
         .put_file("/file-due", b"body", &actor)
         .await
         .expect("put the file whose fold makes compaction due");
-    merging.wait_for_fold().await.expect("the fold settles");
+    compacting.wait_for_fold().await.expect("the fold settles");
     store.block_next();
     drop(permit);
     bounded(Duration::from_secs(10), store.wait_until_blocked())
         .await
-        .expect("the other merge parks holding the permit");
-    let parked_manifest_no = current_manifest(store.inner(), merging.id())
+        .expect("the other compaction parks holding the permit");
+    let parked_manifest_no = current_manifest(store.inner(), compacting.id())
         .await
         .manifest()
         .manifest_no;
@@ -588,22 +589,22 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
     closing.wait_for_fold().await.expect("the fold settles");
     let report = bounded(Duration::from_secs(10), closing.clone().close())
         .await
-        .expect("close does not wait for the other session's merge")
+        .expect("close does not wait for the other session's compaction")
         .expect("close the session");
     assert!(report.drained_commits.is_some());
     assert_eq!(
-        current_manifest(store.inner(), merging.id())
+        current_manifest(store.inner(), compacting.id())
             .await
             .manifest()
             .manifest_no,
         parked_manifest_no,
-        "the other merge was still parked when close returned"
+        "the other compaction was still parked when close returned"
     );
 
     store.release();
-    writer.drain().await.expect("the other merge finishes");
+    writer.drain().await.expect("the other compaction finishes");
     assert!(
-        delta_runs(&current_manifest(store.inner(), merging.id()).await)
+        delta_runs(&current_manifest(store.inner(), compacting.id()).await)
             < DEFAULT_MIN_COMPACTION_RUNS.get()
     );
     assert_eq!(

@@ -47,7 +47,7 @@ pub const SSD_INDEX_ENTRY_BYTES: usize = 168;
 ///
 /// Metadata rows compress well, so a block's stored size is much smaller
 /// than its decoded size. In a namespace of 20,000 files whose row families
-/// compaction had merged into one base run each, the mean stored block was
+/// compaction had rewritten into one base run each, the mean stored block was
 /// 4.1 KiB: the data blocks of inode and revision rows were about 1.7 KiB
 /// each, and each segment's filter was about 13 KiB.
 pub const ASSUMED_STORED_BLOCK_BYTES: usize = 4 * 1024;

@@ -1,4 +1,4 @@
-//! The attribute family: its row keys, the merge that drops superseded
+//! The attribute family: its row keys, the compaction that drops superseded
 //! revisions, and the sequence-correct lookup over published segments.
 
 use super::*;
@@ -88,7 +88,7 @@ fn attribute_rows_sort_newest_first_per_inode() {
 }
 
 #[test]
-fn the_merge_keeps_every_revision_above_the_floor_and_the_newest_at_it() {
+fn the_compaction_keeps_every_revision_above_the_floor_and_the_newest_at_it() {
     let state = state_from_attributes(vec![
         attributes_record(InodeId(7), 1, 3, &[("owner", "ada")]),
         attributes_record(InodeId(7), 2, 5, &[("owner", "grace")]),
@@ -97,13 +97,13 @@ fn the_merge_keeps_every_revision_above_the_floor_and_the_newest_at_it() {
     ]);
     let mut rows_by_family = attribute_rows(&state);
 
-    merge_rows_with_retention(
+    compact_rows_with_retention(
         MetadataFamilyGroup::Attributes,
         &mut rows_by_family,
         ChangeSeq(6),
         ChangeSeq(0),
     )
-    .expect("merge attributes");
+    .expect("compact attributes");
 
     assert_eq!(
         kept_revisions(&rows_by_family),
@@ -114,7 +114,7 @@ fn the_merge_keeps_every_revision_above_the_floor_and_the_newest_at_it() {
 }
 
 #[test]
-fn the_merge_keeps_a_latest_empty_revision() {
+fn the_compaction_keeps_a_latest_empty_revision() {
     let state = state_from_attributes(vec![
         attributes_record(InodeId(7), 1, 3, &[("owner", "ada")]),
         AttributesRevisionRecord {
@@ -130,13 +130,13 @@ fn the_merge_keeps_a_latest_empty_revision() {
     ]);
     let mut rows_by_family = attribute_rows(&state);
 
-    merge_rows_with_retention(
+    compact_rows_with_retention(
         MetadataFamilyGroup::Attributes,
         &mut rows_by_family,
         ChangeSeq(9),
         ChangeSeq(0),
     )
-    .expect("merge attributes");
+    .expect("compact attributes");
 
     let kept = rows_by_family
         .remove(&ApiMetadataRowFamily::Attributes)

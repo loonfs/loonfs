@@ -31,7 +31,7 @@ pub use loonfs_types::options::{
 pub struct MaintainMetadataOptions {
     /// Fold the visible WAL tail once it reaches this many WAL objects.
     pub max_wal_tail_objects: NonZeroU64,
-    /// Whether run sizes must justify the rewrite before maintenance merges them.
+    /// Whether run sizes must justify the rewrite before maintenance compacts them.
     pub compaction_policy: MetadataCompactionPolicy,
 }
 

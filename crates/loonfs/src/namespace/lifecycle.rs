@@ -56,7 +56,7 @@ impl Namespace<Writable> {
     ///
     /// The compaction stops at once while it waits for a compaction permit
     /// or runs a `metadata` pass, and at its next block while it runs a unit
-    /// of any size, so close never waits for another session's merge. From the moment this is called, commits and deletes through
+    /// of any size, so close never waits for another session's compaction. From the moment this is called, commits and deletes through
     /// every clone of this handle fail with `writer_session_closed`, and so
     /// does [`LoonFs::open_namespace`] for this namespace until the drain
     /// finishes. After this returns, the next open starts a new session,

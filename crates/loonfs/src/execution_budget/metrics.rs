@@ -77,11 +77,11 @@ impl ExecutionBudgetInstruments {
                 recorder,
                 (
                     "loonfs.execution_budget.compactions_running",
-                    "Metadata merges holding a compaction permit",
+                    "Metadata compactions holding a compaction permit",
                 ),
                 (
                     "loonfs.execution_budget.compactions_waiting",
-                    "Metadata merges waiting for a compaction permit",
+                    "Metadata compactions waiting for a compaction permit",
                 ),
             ),
             content_writes: PermitPoolGauges::register(

@@ -119,7 +119,7 @@ async fn an_undelete_against_an_older_floor_keeps_its_rows_through_every_compact
         .expect("build the maintainer");
     let maintenance = maintainer.maintenance(loonfs_test_support::ids::writer_id("maintainer"));
     // Two folds leave a delta run above the first, so a compaction has a
-    // window to merge.
+    // window to compact.
     create_directories(&namespace).await;
     maintenance
         .fold_wal(&namespace_id)

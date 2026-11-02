@@ -109,7 +109,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 }
 
 /// Checks newly built test segments for the same non-overlap invariant that
-/// manifest loading enforces. Production merges stream through
+/// manifest loading enforces. Production compactions stream through
 /// [`MetadataSegmentWriter`].
 #[cfg(test)]
 pub(crate) fn debug_assert_manifest_segments_do_not_overlap(
@@ -198,7 +198,7 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
     }
 
     /// Awaits `work` while polling pending puts, so puts progress while the
-    /// merge waits for input reads. A failed put fails the call.
+    /// compaction waits for input reads. A failed put fails the call.
     pub(crate) async fn run<T>(&mut self, work: impl Future<Output = Result<T>>) -> Result<T> {
         tokio::pin!(work);
         loop {

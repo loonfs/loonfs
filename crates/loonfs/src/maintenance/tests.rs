@@ -5,7 +5,7 @@
 //! pass, with delta runs still arriving above its base. The shipped row budget
 //! only reaches that state at a scale no test can write, so the budget is
 //! narrowed through [`Maintenance::starve_compaction_row_budget`]. Everything
-//! else (planning, admission, the merge, the finalization) is the shipped
+//! else (planning, admission, the rewrite, the finalization) is the shipped
 //! path.
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
@@ -181,11 +181,11 @@ async fn write_and_fold(
 /// with retention-eligible churn inside it, and then leaves delta runs piling
 /// up above that base.
 ///
-/// The order matters. The churn is merged into the base while the retention
+/// The order matters. The churn is compacted into the base while the retention
 /// floor is still at the bottom, so nothing drops on the way in and the rows a
 /// rebuild may drop are in the base when the rebuild reads it. The floor is
 /// advanced past that churn next, and the delta runs come last, because they
-/// are what makes a delta-only merge available at the moment the tests ask for
+/// are what makes a delta-only compaction available at the moment the tests ask for
 /// a compaction.
 async fn namespace_with_a_frozen_base(
     writer: &LoonFs<Writable>,
@@ -226,7 +226,7 @@ async fn namespace_with_a_frozen_base(
         .await
         .expect("fold the tail");
 
-    // Merge everything into one base run per group, under the shipped budgets
+    // Compact everything into one base run per group, under the shipped budgets
     // and with the floor still at the bottom, so the churn lands in the base.
     for _ in 0..64 {
         let response = maintenance
@@ -235,7 +235,7 @@ async fn namespace_with_a_frozen_base(
                 &metadata_options(MetadataCompactionPolicy::CompactImmediately),
             )
             .await
-            .expect("merge a unit");
+            .expect("compact a unit");
         if response.compaction == MetadataCompactionOutcome::NotNeeded {
             break;
         }
@@ -254,7 +254,7 @@ async fn namespace_with_a_frozen_base(
         .expect("advance the retention floor past the churn");
 }
 
-/// Keeps writing while the group's base is frozen, so a delta-only merge is
+/// Keeps writing while the group's base is frozen, so a delta-only compaction is
 /// always available above it. Each write is folded with no compaction unit,
 /// so each leaves one more delta run behind.
 async fn sustained_writes(
@@ -278,7 +278,7 @@ async fn sustained_writes(
 ///
 /// One short of that base starves the group's bottom-anchored window — no
 /// window starting at the bottom makes progress — while still admitting the
-/// far smaller delta runs above it, so a delta-only merge stays available.
+/// far smaller delta runs above it, so a delta-only compaction stays available.
 async fn budget_that_starves_the_bindings_base<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -437,7 +437,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     assert_matches!(
         outcome.compaction,
         MetadataCompactionOutcome::Published { .. },
-        "the explicit call must merge the whole window rather than a delta window, got \
+        "the explicit call must compact the whole window rather than a delta window, got \
          {outcome:?}"
     );
 
@@ -522,7 +522,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
 }
 
 #[tokio::test]
-async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once() {
+async fn explicit_compaction_rewrites_twenty_deltas_and_reads_the_large_base_once() {
     use crate::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
     use crate::{AttributeChanges, CommitId};
     use loonfs_objectstore::keys::metadata_segment;
@@ -983,7 +983,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create the namespace");
-    // One unit merges at most eight runs of one family group, and each
+    // One unit compacts at most eight runs of one family group, and each
     // folded write adds a run to several groups, so 32 folded writes need at
     // least four units in each of those groups.
     for index in 0..4 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() {
@@ -1539,7 +1539,7 @@ async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
             other => panic!("expected a published unit, found {other:?}"),
         }
     }
-    assert!(units > 0, "the second fold leaves runs to merge");
+    assert!(units > 0, "the second fold leaves runs to compact");
     let manifest = current_manifest_payload(store.as_ref(), &namespace_id).await;
     assert!(manifest.runs.iter().all(|run| run.tier == RunTier::Base));
     let gets = read_gets_by_key_class("/docs/second.txt").await;

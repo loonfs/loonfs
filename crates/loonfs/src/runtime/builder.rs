@@ -126,17 +126,17 @@ impl<M> LoonFsBuilder<M> {
         self
     }
 
-    /// Runs this runtime's reads, publications, folds, and merges under
+    /// Runs this runtime's reads, publications, folds, and compactions under
     /// `execution_budget`, which other runtimes may share.
     ///
     /// Read memos share its read working memory pool.
     /// Every publication request this runtime admits counts against the
     /// budget's admitted totals until its work settles. Public reads wait for
     /// a read permit before loading anything. Publication batches,
-    /// session folds and merges, [`LoonFs::maintenance`] work, namespace
+    /// session folds and compactions, [`LoonFs::maintenance`] work, namespace
     /// deletions, and the creation of checkpoints, snapshots, and forks of
-    /// the current head take their permits from it, and every merge keeps at
-    /// most its merge input size. The per-namespace admission limits stay
+    /// the current head take their permits from it, and every compaction keeps
+    /// at most its compaction input size. The per-namespace admission limits stay
     /// with this runtime. The budget
     /// reports its metrics to its own recorder. Without this setting, the
     /// runtime creates a private budget with the default limits that reports
@@ -284,7 +284,7 @@ impl CoreConfig {
             .build()
         });
         let run_policy = MetadataRunPolicy {
-            max_decoded_input_bytes_per_step: execution_budget.max_merge_input_bytes(),
+            max_decoded_input_bytes_per_step: execution_budget.max_compaction_input_bytes(),
             ..MetadataRunPolicy::default()
         };
         // Bind the cache to the store the caller supplied, not to the metrics

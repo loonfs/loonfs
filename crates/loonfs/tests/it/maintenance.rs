@@ -413,7 +413,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         .expect("namespace manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
     // A WAL fold only appends: the base marker stays where the first
-    // published manifest put it until compaction merges the delta runs.
+    // published manifest put it until compaction rewrites the delta runs.
     assert_eq!(manifest.payload().base_seq(), ChangeSeq(1));
     let delta_files = manifest
         .payload()
