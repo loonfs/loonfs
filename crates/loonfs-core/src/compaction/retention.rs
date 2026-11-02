@@ -19,7 +19,10 @@ pub(crate) enum RetentionRule {
     /// then the newest.
     FirstPerGroup,
     /// A commit row, its receipt, or its land index row is judged by its own
-    /// commit sequence against the floor.
+    /// commit sequence against the floor. The writer refuses a land whose
+    /// fork point is below the floor, and every land from a fork has a
+    /// sequence above the fork point, so this rule keeps every land index row
+    /// that a land's range check can read.
     CommitHistory,
     /// Every revision above the floor, plus the newest at or below it, per
     /// inode.

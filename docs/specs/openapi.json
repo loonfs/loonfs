@@ -1489,6 +1489,10 @@
             "$ref": "#/components/schemas/WriterEpoch",
             "description": "The epoch of the failed writer session at the time another writer displaced it."
           },
+          "fork_point_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork point of the fork whose commits a land applies, which is the sequence of this\nnamespace that the fork was made at."
+          },
           "from_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "The `from_seq` value from the diff request."

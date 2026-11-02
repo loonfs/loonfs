@@ -221,6 +221,17 @@ pub enum CoreError {
         from_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
+    /// A land's fork point is below the retention floor, so a base
+    /// compaction might have removed the fork's previous land from the land
+    /// index. The error has the change feed's code, and its details include
+    /// `fork_point_seq` in place of the change feed's `after_seq`.
+    #[error(
+        "fork point `{fork_point_seq}` is older than retention floor `{retention_floor_seq}`, so the fork can't land"
+    )]
+    LandRebootstrapRequired {
+        fork_point_seq: ChangeSeq,
+        retention_floor_seq: ChangeSeq,
+    },
     /// A diff's `from_seq`, `to_seq`, or `after_seq` is out of order with the
     /// others or with the head. `param` identifies the parameter.
     #[error("invalid diff `{param}`: {message}")]
@@ -498,9 +509,9 @@ impl CoreError {
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
-            CoreError::RebootstrapRequired { .. } | CoreError::DiffRebootstrapRequired { .. } => {
-                ErrorCode::RebootstrapRequired
-            }
+            CoreError::RebootstrapRequired { .. }
+            | CoreError::DiffRebootstrapRequired { .. }
+            | CoreError::LandRebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
@@ -602,6 +613,7 @@ impl CoreError {
             | CoreError::InvalidDiffRange { .. }
             | CoreError::RebootstrapRequired { .. }
             | CoreError::DiffRebootstrapRequired { .. }
+            | CoreError::LandRebootstrapRequired { .. }
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
             | CoreError::OutcomeUnknown { .. }
@@ -674,6 +686,14 @@ impl CoreError {
                 retention_floor_seq,
             } => Some(ErrorDetails {
                 from_seq: Some(*from_seq),
+                retention_floor_seq: Some(*retention_floor_seq),
+                ..ErrorDetails::default()
+            }),
+            CoreError::LandRebootstrapRequired {
+                fork_point_seq,
+                retention_floor_seq,
+            } => Some(ErrorDetails {
+                fork_point_seq: Some(*fork_point_seq),
                 retention_floor_seq: Some(*retention_floor_seq),
                 ..ErrorDetails::default()
             }),

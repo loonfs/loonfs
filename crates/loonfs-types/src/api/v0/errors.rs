@@ -151,6 +151,11 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub from_seq: Option<ChangeSeq>,
+    /// The fork point of the fork whose commits a land applies, which is the sequence of this
+    /// namespace that the fork was made at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub fork_point_seq: Option<ChangeSeq>,
     /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
     /// or any later one, and the feed returns the changes committed after it. A diff request can
     /// set `from_seq` to this sequence or any later one.

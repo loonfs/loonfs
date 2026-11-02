@@ -1,12 +1,18 @@
 //! Land commits: the land record in the WAL, the change feed, and the
-//! commit rows, a land's retry identity, and the range rule that makes each
-//! land continue the previous land from its fork.
+//! commit rows, a land's retry identity, the range rule that makes each
+//! land continue the previous land from its fork, and the refusal of a land
+//! whose fork point is below the retention floor.
 
 use super::*;
 use crate::changes::list_changes_after;
+use crate::compaction::{
+    CompactionAdmission, CompactionUnitOutcome, MetadataCompactionCancellation,
+    MetadataCompactionPolicy,
+};
+use crate::manifest::RetentionTarget;
 use crate::test_support::NamespaceFixture;
 use loonfs_types::format::wal::LandRecord;
-use loonfs_types::{EffectiveLimit, Land};
+use loonfs_types::{CompactorEpoch, EffectiveLimit, Land};
 
 /// The sequence of `main` that the tests' fork was made at.
 const FORK_POINT: ChangeSeq = ChangeSeq(3);
@@ -287,4 +293,116 @@ async fn lands_in_one_batch_continue_each_other() {
     assert_range_conflict(again.expect_err("the same range again"), 7, 3);
     let next = results.next().expect("third").expect("the next land");
     assert_eq!(next.committed_seq.0, first.committed_seq.0 + 1);
+}
+
+/// Folds the WAL, advances the retention floor to `target`, compacts every
+/// family group, and returns the new floor.
+async fn advance_floor_and_compact(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    target: RetentionTarget,
+) -> ChangeSeq {
+    crate::test_support::namespace_store(store, namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
+    let maintainer = NamespaceFixture::new(
+        store,
+        namespace_id,
+        &crate::test_support::writer_at(
+            "maintainer",
+            crate::test_support::grace_elapsed_after(1_000),
+        ),
+    );
+    let advanced = maintainer
+        .engine()
+        .advance_retention_floor(target)
+        .await
+        .expect("advance the floor");
+    let mut compacted = false;
+    for _ in 0..32 {
+        let outcome = maintainer
+            .engine()
+            .compact_metadata_unit(
+                None,
+                MetadataCompactionPolicy::CompactImmediately,
+                CompactionAdmission::AnySize,
+                CompactorEpoch(0),
+                &MetadataCompactionCancellation::default(),
+            )
+            .await
+            .expect("compact a family group");
+        if matches!(outcome, CompactionUnitOutcome::NotNeeded) {
+            compacted = true;
+            break;
+        }
+    }
+    assert!(compacted, "a small namespace should finish compacting");
+    advanced.response.retention_floor_seq
+}
+
+/// Checks that a land is admitted while the retention floor is at its fork
+/// point, and refused with `rebootstrap_required` once the floor is above
+/// the fork point. By then a compaction has removed the fork's land index
+/// rows, so without the refusal the writer would expect the next land to
+/// start at the fork point, and it would admit a land that applies the
+/// fork's landed commits again.
+#[tokio::test]
+async fn a_land_whose_fork_point_is_below_the_retention_floor_is_refused() {
+    let (_directory, store, namespace_id, writer) = setup().await;
+    let mut head = ChangeSeq(0);
+    while head < FORK_POINT {
+        let name = format!("before-{}", head.0);
+        let candidate = CommitCandidate::new(create_dir_request(&name, &name));
+        head = publish(&store, &namespace_id, &writer, candidate)
+            .await
+            .expect("an ordinary commit")
+            .committed_seq;
+    }
+    let first = land_candidate("first", "first", land(3, 7));
+    publish(&store, &namespace_id, &writer, first)
+        .await
+        .expect("the first land");
+    let floor =
+        advance_floor_and_compact(&store, &namespace_id, RetentionTarget::Seq(FORK_POINT)).await;
+    assert_eq!(floor, FORK_POINT);
+    let repeat = land_candidate("repeat", "repeat", land(7, 9));
+    publish(&store, &namespace_id, &writer, repeat)
+        .await
+        .expect("a land whose fork point is at the floor");
+
+    let after = CommitCandidate::new(create_dir_request("after", "after"));
+    publish(&store, &namespace_id, &writer, after)
+        .await
+        .expect("an ordinary commit after the lands");
+    let floor = advance_floor_and_compact(&store, &namespace_id, RetentionTarget::Head).await;
+    let index = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_metadata_view()
+        .await
+        .expect("read view")
+        .metadata_view()
+        .newest_land(&fork())
+        .await
+        .expect("land lookup");
+    assert_eq!(index, None, "the compaction removes the fork's land rows");
+
+    for after_seq in [FORK_POINT.0, 9] {
+        let error = publish(
+            &store,
+            &namespace_id,
+            &writer,
+            land_candidate("third", "third", land(after_seq, 12)),
+        )
+        .await
+        .expect_err("a land whose fork point is below the floor");
+        assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+        let details = error.details().expect("details");
+        assert_eq!(details.fork_point_seq, Some(FORK_POINT));
+        assert_eq!(details.retention_floor_seq, Some(floor));
+        assert_matches!(
+            error,
+            CoreError::LandRebootstrapRequired { fork_point_seq, retention_floor_seq }
+                if fork_point_seq == FORK_POINT && retention_floor_seq == floor
+        );
+    }
 }

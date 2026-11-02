@@ -418,6 +418,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         actual_access_revision_no: Some(loonfs_types::AccessRevisionNo(2)),
         after_seq: Some(ChangeSeq::from(2)),
         from_seq: Some(ChangeSeq::from(2)),
+        fork_point_seq: Some(ChangeSeq::from(2)),
         retention_floor_seq: Some(ChangeSeq::from(3)),
         expected_deletion_seq: Some(ChangeSeq::from(4)),
         actual_deletion_seq: Some(ChangeSeq::from(5)),
