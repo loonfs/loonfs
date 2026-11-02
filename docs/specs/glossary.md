@@ -128,6 +128,10 @@ The bytes stored under one content ID. A chain grows when a file is appended to,
 
 The namespace whose commit started a chain, recorded in the chain's [layout](#layout). Only the creator's commits extend the chain in place. When another member of the [fork family](#fork-family) appends to the chain, LoonFS starts a new chain that lists the first chain's extents as [shared base extents](#extent). See [Operations and WAL deltas](format.md#66-operations-and-wal-deltas).
 
+### Content value
+
+The bytes that a [content reference](#content-reference) refers to, identified by the reference's content ID and size. Two references with the same content ID and size refer to the same bytes in every member of a [fork family](#fork-family), so a copy or a restore of a revision refers to the same content value as the revision. Each prefix of a [chain](#chain) that a reference refers to is one content value. For example, if revisions 2 and 3 of a log file refer to the first 200 and the first 210 bytes of chain A, they refer to two content values. The `content_revisions` family lists the revisions in a namespace that refer to each content value. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Metadata rows and row keys](format.md#a6-metadata-rows-and-row-keys).
+
 ### Extent
 
 A byte range of one content object that stores part of a chain. Content objects are immutable, so the bytes appended to a chain are written to new content objects, and a chain's bytes usually end up spread across several objects. Each extent records which content object it's in, the offset in that object, and the length.

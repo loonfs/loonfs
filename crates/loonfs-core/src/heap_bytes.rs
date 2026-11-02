@@ -12,10 +12,10 @@ use loonfs_types::format::control::{ForkBasis, ManifestRef, PinOwner, PinPayload
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord, InodeRecord,
-    MergeIndexRecord, MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess,
-    NamespaceManifestEnvelope, NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord,
-    TombstoneRowAction,
+    CommitReceiptRecord, ContentLayoutRecord, ContentRevisionRecord, DeletedBinding,
+    DirentryBindingRecord, InodeRecord, MergeIndexRecord, MetadataRow, MetadataRunRef,
+    MetadataSegmentRef, NamespaceAccess, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{
@@ -289,6 +289,7 @@ impl HeapBytes for MetadataRow {
             MetadataRow::Inode(record) => record.heap_bytes(),
             MetadataRow::DirentryBinding(record) => record.heap_bytes(),
             MetadataRow::FileRevision(record) => record.heap_bytes(),
+            MetadataRow::ContentRevision(record) => record.heap_bytes(),
             MetadataRow::Tombstone(record) => record.heap_bytes(),
             MetadataRow::ActiveDeletion(record) => record.heap_bytes(),
             MetadataRow::CommitReceipt(record) => record.heap_bytes(),
@@ -323,6 +324,12 @@ impl HeapBytes for DirentryBindingRecord {
 impl HeapBytes for RevisionRecord {
     fn heap_bytes(&self) -> usize {
         self.commit_id.heap_bytes() + self.committed_by.heap_bytes() + self.content_ref.heap_bytes()
+    }
+}
+
+impl HeapBytes for ContentRevisionRecord {
+    fn heap_bytes(&self) -> usize {
+        self.content_id.heap_bytes()
     }
 }
 

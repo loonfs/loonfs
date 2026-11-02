@@ -1,5 +1,5 @@
-//! [`MetadataView`] lookups of file revisions,
-//! attributes and access revisions, and content layouts.
+//! [`MetadataView`] lookups of file revisions, the revisions that refer to
+//! a content value, attributes and access revisions, and content layouts.
 
 use super::manifest_index;
 use crate::error::{CoreError, Result};
@@ -9,10 +9,14 @@ use crate::metadata::{
     AccessRevisionRecord, AttributesRevisionRecord, ContentLayoutRecord, RevisionRecord,
 };
 use loonfs_objectstore::ObjectStore;
+#[cfg(test)]
+use loonfs_types::format::manifest::{lookup_keys, ContentRevisionRecord};
 use loonfs_types::{
     AccessRevisionNo, Attributes, AttributesProjection, AttributesRevisionNo, ChangeSeq, InodeId,
     InodeKind, NamespaceId, RevisionNo,
 };
+#[cfg(test)]
+use std::cmp::Reverse;
 
 /// A chain's head in one view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +126,66 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
         revisions.truncate(limit);
         Ok(revisions)
+    }
+
+    /// Returns up to `limit` of a content value's `content_revisions` rows
+    /// after `start_after`, in key order: by inode, and newest revision
+    /// first within each inode.
+    ///
+    /// A base compaction can keep a row after the revision's own row is
+    /// removed ([row retention during a base
+    /// compaction](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)),
+    /// so a caller that needs the revision reads it with
+    /// [`Self::revision_at_head`].
+    #[cfg(test)]
+    pub(crate) async fn content_revisions_page(
+        &self,
+        content_id: &loonfs_types::ContentId,
+        size_bytes: u64,
+        start_after: Option<(InodeId, RevisionNo)>,
+        limit: usize,
+    ) -> Result<Vec<ContentRevisionRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let lower_bound = match start_after {
+            Some((inode_id, revision_no)) => {
+                lookup_keys::after_row_key(&lookup_keys::content_revision_row_key(
+                    content_id,
+                    size_bytes,
+                    inode_id,
+                    revision_no,
+                ))
+            }
+            None => lookup_keys::content_revision_prefix(content_id, size_bytes),
+        };
+        let mut rows = manifest_index::content_revisions_page(
+            self.manifest_segments(),
+            content_id,
+            size_bytes,
+            lower_bound,
+            self.visible_seq(),
+            limit,
+        )
+        .await?;
+        rows.extend(
+            self.row_states()
+                .flat_map(|state| state.revisions())
+                .filter(|revision| {
+                    revision.content_ref.content_id == *content_id
+                        && revision.content_ref.size_bytes == size_bytes
+                        && revision.committed_seq <= self.visible_seq()
+                })
+                .map(ContentRevisionRecord::from_revision)
+                .filter(|row| {
+                    start_after.is_none_or(|(inode_id, revision_no)| {
+                        content_revision_order_key(row) > (inode_id, Reverse(revision_no))
+                    })
+                }),
+        );
+        rows.sort_by_key(content_revision_order_key);
+        rows.truncate(limit);
+        Ok(rows)
     }
 
     /// The newest attribute revision record for `inode_id` at the visible
@@ -314,6 +378,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
         revisions
     }
+}
+
+/// Orders content revision rows as their keys do within one content value:
+/// by inode, and newest revision first within each inode.
+#[cfg(test)]
+fn content_revision_order_key(record: &ContentRevisionRecord) -> (InodeId, Reverse<RevisionNo>) {
+    (record.inode_id, Reverse(record.revision_no))
 }
 
 fn attributes_order_key(

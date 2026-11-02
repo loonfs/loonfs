@@ -3,7 +3,9 @@
 
 use crate::metadata::{active_deletion_from_tombstone, MetadataState};
 use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_types::format::manifest::{ContentLayoutRecord, MergeIndexRecord};
+use loonfs_types::format::manifest::{
+    ContentLayoutRecord, ContentRevisionRecord, MergeIndexRecord,
+};
 use loonfs_types::{ChangeSeq, ContentId};
 use std::collections::HashMap;
 
@@ -46,6 +48,12 @@ pub(crate) fn manifest_rows_for_family(
             .iter()
             .cloned()
             .map(MetadataRow::FileRevision)
+            .collect::<Vec<_>>(),
+        MetadataRowFamily::ContentRevisions => metadata_state
+            .revisions()
+            .iter()
+            .map(ContentRevisionRecord::from_revision)
+            .map(MetadataRow::ContentRevision)
             .collect::<Vec<_>>(),
         MetadataRowFamily::Tombstones => metadata_state
             .subtree_tombstones()
@@ -133,6 +141,7 @@ pub(crate) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         MetadataRow::Inode(record) => record.committed_seq,
         MetadataRow::DirentryBinding(record) => record.committed_seq,
         MetadataRow::FileRevision(record) => record.committed_seq,
+        MetadataRow::ContentRevision(record) => record.committed_seq,
         MetadataRow::Tombstone(record) => record.committed_seq,
         // A removal marker belongs to the run of the undelete that produced
         // it, not to the run of the deletion whose key it repeats.
@@ -155,6 +164,7 @@ pub(crate) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::Inode(_) => "inode",
         MetadataRow::DirentryBinding(_) => "direntry_binding",
         MetadataRow::FileRevision(_) => "file_revision",
+        MetadataRow::ContentRevision(_) => "content_revision",
         MetadataRow::Tombstone(_) => "tombstone",
         MetadataRow::ActiveDeletion(_) => "active_deletion",
         MetadataRow::CommitReceipt(_) => "commit_receipt",

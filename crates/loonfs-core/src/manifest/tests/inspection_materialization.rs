@@ -258,6 +258,10 @@ pub(crate) fn append_rows_to_metadata(
             MetadataRowFamily::Merges => {
                 row_decode::merge_index_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
+            // Derived from the revision rows, the same way.
+            MetadataRowFamily::ContentRevisions => {
+                row_decode::content_revision_from_manifest_row(row.clone()).map_err(mismatch)?;
+            }
             MetadataRowFamily::ContentLayouts => metadata_state.push_content_layout(
                 row_decode::content_layout_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),

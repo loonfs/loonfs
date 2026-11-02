@@ -10,6 +10,8 @@ use crate::metadata::{
     ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
+#[cfg(test)]
+use loonfs_types::format::manifest::ContentRevisionRecord;
 use loonfs_types::format::manifest::{MergeIndexRecord, MetadataRow};
 use loonfs_types::format::wal::WalCommitPayload;
 
@@ -42,6 +44,16 @@ pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRec
     match row {
         MetadataRow::FileRevision(record) => Ok(record),
         other => Err(foreign_row("file_revision", &other)),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn content_revision_from_manifest_row(
+    row: MetadataRow,
+) -> Result<ContentRevisionRecord> {
+    match row {
+        MetadataRow::ContentRevision(record) => Ok(record),
+        other => Err(foreign_row("content_revision", &other)),
     }
 }
 

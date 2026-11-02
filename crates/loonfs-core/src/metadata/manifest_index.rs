@@ -1,6 +1,8 @@
 //! Seq-scoped metadata lookups served from manifest segments via verified
 //! scans.
 
+#[cfg(test)]
+use super::row_decode::content_revision_from_manifest_row;
 use super::row_decode::{
     access_revision_from_manifest_row, active_deletion_from_manifest_row,
     attributes_revision_from_manifest_row, commit_from_manifest_row,
@@ -16,6 +18,8 @@ use crate::metadata::{
 use crate::segment::{Readahead, VerifiedMetadataSegments};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
+#[cfg(test)]
+use loonfs_types::format::manifest::ContentRevisionRecord;
 use loonfs_types::format::manifest::{MergeIndexRecord, MetadataRow, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
@@ -429,6 +433,57 @@ async fn first_content_layout<S: ObjectStore + ?Sized>(
         .next()
         .map(|(_, row)| super::row_decode::content_layout_from_manifest_row(row))
         .transpose()
+}
+
+/// Returns up to `limit` of the rows at or below `visible_seq` that index
+/// the revisions of one content value, from `lower_bound`, in key order.
+///
+/// A page can contain rows above the read's sequence, which the lookup
+/// drops, so it reads the next page until it has `limit` rows or reaches
+/// the end of the value's prefix. A read that sees every row of the manifest
+/// drops none and reads one page. A read below a run's sequence reads one
+/// more page for every `limit` rows above the read.
+#[cfg(test)]
+pub(super) async fn content_revisions_page<S: ObjectStore + ?Sized>(
+    segments: &VerifiedMetadataSegments<'_, S>,
+    content_id: &loonfs_types::ContentId,
+    size_bytes: u64,
+    mut lower_bound: String,
+    visible_seq: ChangeSeq,
+    limit: usize,
+) -> Result<Vec<ContentRevisionRecord>> {
+    let upper_bound = string_prefix_upper_bound(&lookup_keys::content_revision_prefix(
+        content_id, size_bytes,
+    ));
+    let filter_probe = lookup_keys::content_revision_probe(content_id, size_bytes);
+    let mut rows = Vec::new();
+    while rows.len() < limit {
+        let page = segments
+            .scan_range_page_with_keys_for_lookup(
+                MetadataRowFamily::ContentRevisions,
+                &lower_bound,
+                upper_bound.as_deref(),
+                limit,
+                &filter_probe,
+            )
+            .await?;
+        let page_len = page.len();
+        let Some((last_row_key, _)) = page.last() else {
+            break;
+        };
+        lower_bound = lookup_keys::after_row_key(last_row_key);
+        for (_, row) in page {
+            let record = content_revision_from_manifest_row(row)?;
+            if record.committed_seq <= visible_seq {
+                rows.push(record);
+            }
+        }
+        if page_len < limit {
+            break;
+        }
+    }
+    rows.truncate(limit);
+    Ok(rows)
 }
 
 /// Returns the newest receipt of `commit_id` at or below `visible_seq`.

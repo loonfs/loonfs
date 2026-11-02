@@ -53,11 +53,15 @@ pub enum MetadataRowFamily {
     /// newest first within each fork, derived from the commits' merge
     /// records.
     Merges,
+    /// Indexes file revisions by the content value that each one refers to,
+    /// and then by inode, newest first within each inode, derived from the
+    /// revision rows.
+    ContentRevisions,
 }
 
 impl MetadataRowFamily {
     /// Every row family in serialized declaration order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Inodes,
         Self::DirentryBinds,
         Self::DirentryChildBinds,
@@ -70,6 +74,7 @@ impl MetadataRowFamily {
         Self::Attributes,
         Self::Access,
         Self::Merges,
+        Self::ContentRevisions,
     ];
 
     /// Returns the snake-case name used in durable keys and serialized values.
@@ -87,6 +92,7 @@ impl MetadataRowFamily {
             Self::Attributes => "attributes",
             Self::Access => "access",
             Self::Merges => "merges",
+            Self::ContentRevisions => "content_revisions",
         }
     }
 }
@@ -114,11 +120,13 @@ pub enum MetadataFamilyGroup {
     Attributes,
     /// Access rows.
     Access,
+    /// Indexes file revisions by the content value that each one refers to.
+    ContentRevisions,
 }
 
 impl MetadataFamilyGroup {
     /// Every family group in serialized declaration order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Bindings,
         Self::Revisions,
         Self::Inodes,
@@ -128,6 +136,7 @@ impl MetadataFamilyGroup {
         Self::ContentLayouts,
         Self::Attributes,
         Self::Access,
+        Self::ContentRevisions,
     ];
 
     /// Returns the snake-case name used in durable keys and serialized values.
@@ -142,6 +151,7 @@ impl MetadataFamilyGroup {
             Self::ContentLayouts => "content_layouts",
             Self::Attributes => "attributes",
             Self::Access => "access",
+            Self::ContentRevisions => "content_revisions",
         }
     }
 
@@ -164,6 +174,7 @@ impl MetadataFamilyGroup {
             Self::ContentLayouts => &[MetadataRowFamily::ContentLayouts],
             Self::Attributes => &[MetadataRowFamily::Attributes],
             Self::Access => &[MetadataRowFamily::Access],
+            Self::ContentRevisions => &[MetadataRowFamily::ContentRevisions],
         }
     }
 }
@@ -180,6 +191,13 @@ pub enum MetadataRow {
     DirentryBinding(DirentryBindingRecord),
     /// Publishes one immutable content revision for a file inode.
     FileRevision(RevisionRecord),
+    /// Derived row that indexes one file revision by the content value it
+    /// refers to.
+    ///
+    /// Materialization writes one for each file revision, so a lookup finds
+    /// the revisions that refer to a content value without reading every
+    /// file's revisions.
+    ContentRevision(ContentRevisionRecord),
     /// Changes whether one root inode has an active subtree tombstone.
     Tombstone(SubtreeTombstoneRecord),
     /// Derived row used to list recoverable deletions.
@@ -365,6 +383,38 @@ pub struct RevisionRecord {
     pub delta_index: u32,
     /// Immutable bytes published by the revision.
     pub content_ref: ContentRef,
+}
+
+/// Indexes one file revision by the content value it refers to, which is
+/// its content reference's content ID and size.
+///
+/// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentRevisionRecord {
+    /// The content ID of the revision's content reference.
+    pub content_id: ContentId,
+    /// The size of the revision's content reference.
+    pub size_bytes: u64,
+    /// File inode whose history contains the revision.
+    pub inode_id: InodeId,
+    /// The revision's number within its file's history.
+    pub revision_no: RevisionNo,
+    /// Namespace sequence that published the revision.
+    pub committed_seq: ChangeSeq,
+}
+
+impl ContentRevisionRecord {
+    /// Derives the content revision row of `revision`.
+    pub fn from_revision(revision: &RevisionRecord) -> Self {
+        Self {
+            content_id: revision.content_ref.content_id.clone(),
+            size_bytes: revision.content_ref.size_bytes,
+            inode_id: revision.inode_id,
+            revision_no: revision.revision_no,
+            committed_seq: revision.committed_seq,
+        }
+    }
 }
 
 /// One event that changes whether a root inode has an active subtree tombstone.

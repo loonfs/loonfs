@@ -7,6 +7,7 @@ mod basis_publications;
 mod bounded_pages;
 mod cache;
 mod cas_recovery;
+mod content_revisions;
 mod directory_bindings;
 mod expired_deletion_rows;
 mod expired_subtrees;

@@ -24,6 +24,7 @@ impl MetadataRowFamily {
             Self::Attributes => lookup_keys::ATTRIBUTE_ROW_PREFIX,
             Self::Access => lookup_keys::ACCESS_ROW_PREFIX,
             Self::Merges => lookup_keys::MERGE_ROW_PREFIX,
+            Self::ContentRevisions => lookup_keys::CONTENT_REVISION_ROW_PREFIX,
         }
     }
 }
@@ -59,6 +60,7 @@ impl MetadataRow {
             Self::Inode(_) => MetadataRowFamily::Inodes,
             Self::DirentryBinding(_) => MetadataRowFamily::DirentryBinds,
             Self::FileRevision(_) => MetadataRowFamily::Revisions,
+            Self::ContentRevision(_) => MetadataRowFamily::ContentRevisions,
             Self::Tombstone(_) => MetadataRowFamily::Tombstones,
             Self::ActiveDeletion(_) => MetadataRowFamily::ActiveDeletions,
             Self::CommitReceipt(_) => MetadataRowFamily::CommitReceipts,
@@ -102,7 +104,8 @@ impl MetadataRow {
                 | MetadataRowFamily::ContentLayouts
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access
-                | MetadataRowFamily::Merges => None,
+                | MetadataRowFamily::Merges
+                | MetadataRowFamily::ContentRevisions => None,
             }
             .expect("a binding row should use a binding family"),
             Self::FileRevision(record) => lookup_keys::revision_row_key(
@@ -110,6 +113,12 @@ impl MetadataRow {
                 record.revision_no,
                 record.committed_seq,
                 record.delta_index,
+            ),
+            Self::ContentRevision(record) => lookup_keys::content_revision_row_key(
+                &record.content_id,
+                record.size_bytes,
+                record.inode_id,
+                record.revision_no,
             ),
             Self::Tombstone(record) => lookup_keys::tombstone_row_key(
                 record.root_inode_id,
@@ -169,10 +178,14 @@ impl MetadataRow {
                 | MetadataRowFamily::ContentLayouts
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access
-                | MetadataRowFamily::Merges => None,
+                | MetadataRowFamily::Merges
+                | MetadataRowFamily::ContentRevisions => None,
             }
             .expect("a binding row should use a binding family"),
             Self::FileRevision(record) => lookup_keys::revision_probe(record.inode_id),
+            Self::ContentRevision(record) => {
+                lookup_keys::content_revision_probe(&record.content_id, record.size_bytes)
+            }
             Self::Tombstone(record) => lookup_keys::tombstone_probe(record.root_inode_id),
             Self::ActiveDeletion(record) => {
                 lookup_keys::active_deletion_probe(record.deletion_seq, record.root_inode_id)
@@ -236,6 +249,7 @@ pub mod lookup_keys {
     pub(super) const ATTRIBUTE_ROW_PREFIX: &str = "attribute-";
     pub(super) const ACCESS_ROW_PREFIX: &str = "access-";
     pub(super) const MERGE_ROW_PREFIX: &str = "merge-";
+    pub(super) const CONTENT_REVISION_ROW_PREFIX: &str = "content-revision-";
 
     /// Builds the exclusive lower bound after `row_key`.
     pub fn after_row_key(row_key: &str) -> String {
@@ -505,6 +519,37 @@ pub mod lookup_keys {
         )
     }
 
+    /// Builds the Bloom filter probe for the revisions that refer to one
+    /// content value.
+    pub fn content_revision_probe(content_id: &ContentId, size_bytes: u64) -> String {
+        format!(
+            "{CONTENT_REVISION_ROW_PREFIX}{}-{size_bytes:020}",
+            content_id.body()
+        )
+    }
+
+    /// Builds the prefix for the revisions that refer to one content value,
+    /// by inode and then newest first.
+    pub fn content_revision_prefix(content_id: &ContentId, size_bytes: u64) -> String {
+        format!("{}-", content_revision_probe(content_id, size_bytes))
+    }
+
+    /// Builds a content revision row key, which sorts one inode's revisions
+    /// newest first.
+    pub fn content_revision_row_key(
+        content_id: &ContentId,
+        size_bytes: u64,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> String {
+        format!(
+            "{}{}-{:020}",
+            content_revision_prefix(content_id, size_bytes),
+            inode_id.body(),
+            u64::MAX - revision_no.0
+        )
+    }
+
     /// Builds the Bloom filter probe for an inode's revisions.
     pub fn revision_probe(inode_id: InodeId) -> String {
         format!("{REVISION_ROW_PREFIX}{}", inode_id.body())
@@ -597,9 +642,9 @@ mod tests {
     use super::lookup_keys;
     use crate::metadata_rows::{
         AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction,
-        AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord, DeletedBinding,
-        DirentryBindingRecord, DirentryBindingState, InodeRecord, MergeIndexRecord, MetadataRow,
-        MetadataRowFamily, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+        AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord, ContentRevisionRecord,
+        DeletedBinding, DirentryBindingRecord, DirentryBindingState, InodeRecord, MergeIndexRecord,
+        MetadataRow, MetadataRowFamily, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
     };
     use crate::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId};
 
@@ -939,6 +984,49 @@ mod tests {
         );
     }
 
+    fn content_revision_row(size_bytes: u64, inode_id: u128, revision_no: u64) -> MetadataRow {
+        MetadataRow::ContentRevision(ContentRevisionRecord {
+            content_id: crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
+                .expect("content id"),
+            size_bytes,
+            inode_id: InodeId(inode_id),
+            revision_no: crate::RevisionNo(revision_no),
+            committed_seq: ChangeSeq(12),
+        })
+    }
+
+    /// Checks that the revisions of one content value share a prefix and a
+    /// filter key, sort by inode and then newest first, and never sort among
+    /// the revisions of the same content ID at another size.
+    #[test]
+    fn content_revision_rows_sort_each_values_revisions_by_inode_newest_first() {
+        let mut keys = [(5, 42, 1), (12, 9, 3), (5, 9, 2), (5, 42, 7), (5, 9, 10)].map(
+            |(size_bytes, inode_id, revision_no)| {
+                let row = content_revision_row(size_bytes, inode_id, revision_no);
+                (row.row_key(), size_bytes, inode_id, revision_no)
+            },
+        );
+        keys.sort();
+        assert_eq!(
+            keys.map(|(_, size_bytes, inode_id, revision_no)| (size_bytes, inode_id, revision_no)),
+            [(5, 9, 10), (5, 9, 2), (5, 42, 7), (5, 42, 1), (12, 9, 3)]
+        );
+        let content_id =
+            crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id");
+        let row = content_revision_row(5, 42, 7);
+        assert_eq!(
+            row.row_key(),
+            "content-revision-014d2pf2dbsqqg28t5cy4tqkff-00000000000000000005-0000000000000000000000001a-18446744073709551608"
+        );
+        assert!(row
+            .row_key()
+            .starts_with(&lookup_keys::content_revision_prefix(&content_id, 5)));
+        assert_eq!(
+            row.filter_key_for_family(MetadataRowFamily::ContentRevisions),
+            lookup_keys::content_revision_probe(&content_id, 5)
+        );
+    }
+
     #[test]
     fn row_key_prefixes_match_the_row_keys_they_front() {
         let bind = MetadataRow::DirentryBinding(binding_record("report.txt", "report.txt"));
@@ -957,7 +1045,7 @@ mod tests {
                 crate::ChecksumAlgorithm::Crc64nvme,
             ),
         });
-        let rows: [(MetadataRowFamily, MetadataRow); 10] = [
+        let rows: [(MetadataRowFamily, MetadataRow); 11] = [
             (
                 MetadataRowFamily::Inodes,
                 MetadataRow::Inode(InodeRecord {
@@ -1040,6 +1128,10 @@ mod tests {
             (
                 MetadataRowFamily::Merges,
                 MetadataRow::Merge(merge_row("demo-fork", 12)),
+            ),
+            (
+                MetadataRowFamily::ContentRevisions,
+                content_revision_row(5, 42, 7),
             ),
         ];
 

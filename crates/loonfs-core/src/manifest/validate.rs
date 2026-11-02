@@ -285,7 +285,8 @@ fn validate_run_index_parity(
                 | MetadataRowFamily::ContentLayouts
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access
-                | MetadataRowFamily::Merges => {}
+                | MetadataRowFamily::Merges
+                | MetadataRowFamily::ContentRevisions => {}
             }
         }
         if direntry_bind_rows < direntry_child_bind_rows {

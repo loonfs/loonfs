@@ -4,8 +4,9 @@
 //! writes bounded output segments. It buffers only input blocks, retention
 //! state, one segment builder per family, and a bounded wave of encoded outputs.
 //! Only base compactions may remove rows below the retention floor, and only base
-//! compactions remove the rows of inodes that an expired deletion hides. Every
-//! compaction drops superseded layout rows.
+//! compactions remove the rows of inodes that an expired deletion hides or the
+//! rows that no revision in the basis matches. Every compaction drops
+//! superseded layout rows.
 
 use super::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use super::merge_iterator::{
@@ -27,8 +28,10 @@ use crate::segment::index_block_load::{segment_object_bytes, SegmentWriter};
 use crate::segment::runs::{MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
 use crate::segment::scan::VerifiedMetadataSegments;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
-use loonfs_types::{ChangeSeq, NamespaceId, RunNo};
+use loonfs_types::format::manifest::{
+    MetadataRow, MetadataRowFamily, MetadataSegmentRef, RevisionRecord,
+};
+use loonfs_types::{ChangeSeq, InodeId, NamespaceId, RevisionNo, RunNo};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -101,7 +104,7 @@ struct GroupCompaction<'a, S: ObjectStore + ?Sized> {
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
     output_run_no: RunNo,
-    chain_filter: ChainFilter,
+    revision_filter: RevisionFilter,
     kept_inodes: KeptInodeFilter,
     result: GroupCompactionReport,
     canonical_digest: RowDigest,
@@ -114,12 +117,55 @@ struct GroupCompaction<'a, S: ObjectStore + ?Sized> {
     progress: ProgressReporter,
 }
 
-/// Whether a layout compaction drops the layout rows of chains no revision names.
-enum ChainFilter {
-    /// The compaction isn't a layout compaction that may drop rows below the floor.
+/// Whether a base compaction drops the rows that no revision in its basis
+/// matches: the layout rows of chains that no revision refers to, and the
+/// content revision rows of revisions that the basis no longer has.
+enum RevisionFilter {
+    /// The compaction isn't a base compaction of `content_layouts` or
+    /// `content_revisions`.
     NotNeeded,
-    /// The content IDs the revisions name, which a kept layout row matches.
+    /// The basis's revisions, keyed by their content IDs for a layout
+    /// compaction, or by [`revision_filter_key`] for a content revision
+    /// compaction, which a kept row matches.
     Loaded(BloomFilter),
+}
+
+impl RevisionFilter {
+    /// Whether the compaction keeps `row` and judges it under its family's
+    /// retention rule, rather than dropping it because no revision in the
+    /// basis matches it.
+    fn keeps(&self, row: &MetadataRow) -> bool {
+        let Self::Loaded(filter) = self else {
+            return true;
+        };
+        match row {
+            MetadataRow::ContentLayout(layout) => {
+                filter.may_contain(layout.content_id.as_str().as_bytes())
+            }
+            MetadataRow::ContentRevision(record) => {
+                filter.may_contain(&revision_filter_key(record.inode_id, record.revision_no))
+            }
+            MetadataRow::Inode(_)
+            | MetadataRow::DirentryBinding(_)
+            | MetadataRow::FileRevision(_)
+            | MetadataRow::Tombstone(_)
+            | MetadataRow::ActiveDeletion(_)
+            | MetadataRow::CommitReceipt(_)
+            | MetadataRow::Commit(_)
+            | MetadataRow::Merge(_)
+            | MetadataRow::AttributesRevision(_)
+            | MetadataRow::AccessRevision(_) => true,
+        }
+    }
+}
+
+/// Keys a revision by its inode and revision number, which is how a content
+/// revision row identifies the revision it indexes.
+fn revision_filter_key(inode_id: InodeId, revision_no: RevisionNo) -> [u8; 24] {
+    let mut key = [0; 24];
+    key[..16].copy_from_slice(&inode_id.to_be_bytes());
+    key[16..].copy_from_slice(&revision_no.0.to_be_bytes());
+    key
 }
 
 struct CompactionControl<'a> {
@@ -169,7 +215,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
             basis_runs: &basis.scan_runs,
             output_run_no: basis.manifest().payload().next_run_no,
             acknowledged_floor_seq: basis.manifest().payload().acknowledged_floor_seq,
-            chain_filter: ChainFilter::NotNeeded,
+            revision_filter: RevisionFilter::NotNeeded,
             kept_inodes,
             output_cache,
             namespace_id,
@@ -194,7 +240,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
         mut self,
         control: &CompactionControl<'_>,
     ) -> Result<std::result::Result<GroupCompactionReport, CompactionUnitOutcome>> {
-        if let Some(stop) = self.load_chain_filter(control).await? {
+        if let Some(stop) = self.load_revision_filter(control).await? {
             return Ok(Err(stop));
         }
         let mut puts =
@@ -214,15 +260,32 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
         Ok(Ok(self.result))
     }
 
-    async fn load_chain_filter(
+    async fn load_revision_filter(
         &mut self,
         control: &CompactionControl<'_>,
     ) -> Result<Option<CompactionUnitOutcome>> {
-        if self.group != MetadataFamilyGroup::ContentLayouts
-            || !self.placement.may_drop_rows_below_the_retention_floor()
-        {
+        if !self.placement.may_drop_rows_below_the_retention_floor() {
             return Ok(None);
         }
+        let insert: fn(&mut BloomFilter, &RevisionRecord) -> Option<()> = match self.group {
+            MetadataFamilyGroup::ContentLayouts => |filter, revision| {
+                filter.insert(revision.content_ref.content_id.as_str().as_bytes())
+            },
+            MetadataFamilyGroup::ContentRevisions => |filter, revision| {
+                filter.insert(&revision_filter_key(
+                    revision.inode_id,
+                    revision.revision_no,
+                ))
+            },
+            MetadataFamilyGroup::Bindings
+            | MetadataFamilyGroup::Revisions
+            | MetadataFamilyGroup::Inodes
+            | MetadataFamilyGroup::Tombstones
+            | MetadataFamilyGroup::ActiveDeletions
+            | MetadataFamilyGroup::Commits
+            | MetadataFamilyGroup::Attributes
+            | MetadataFamilyGroup::Access => return Ok(None),
+        };
         let expected_ids = self
             .basis_runs
             .iter()
@@ -258,10 +321,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
                     // The filter is sized for the basis's revision rows, so a
                     // refused insert means the segments contain more revision
                     // rows than their descriptors declare.
-                    if filter
-                        .insert(row.content_ref.content_id.as_str().as_bytes())
-                        .is_none()
-                    {
+                    if insert(&mut filter, &row).is_none() {
                         return Err(CoreError::NamespaceCorrupt(format!(
                             "revision segments of {} hold more rows than their descriptors declare",
                             self.namespace_id
@@ -270,7 +330,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
                 }
             }
         }
-        self.chain_filter = ChainFilter::Loaded(filter);
+        self.revision_filter = RevisionFilter::Loaded(filter);
         Ok(None)
     }
 
@@ -389,12 +449,8 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
             let row = iterators[next].take_head();
             self.result.rows_read += 1;
             self.report_progress();
-            if let (ChainFilter::Loaded(filter), MetadataRow::ContentLayout(layout)) =
-                (&self.chain_filter, &row)
-            {
-                if !filter.may_contain(layout.content_id.as_str().as_bytes()) {
-                    continue;
-                }
+            if !self.revision_filter.keeps(&row) {
+                continue;
             }
             if !self.kept_inodes.keeps(&row) {
                 continue;
@@ -561,7 +617,8 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
         | MetadataFamilyGroup::Commits
         | MetadataFamilyGroup::ContentLayouts
         | MetadataFamilyGroup::Attributes
-        | MetadataFamilyGroup::Access => None,
+        | MetadataFamilyGroup::Access
+        | MetadataFamilyGroup::ContentRevisions => None,
     }
 }
 

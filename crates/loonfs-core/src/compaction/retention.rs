@@ -383,6 +383,8 @@ const LAYOUT_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     rule: RetentionRule::FirstPerGroup,
 }];
 const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Inodes])];
+const CONTENT_REVISION_CLUSTERS: [RetentionCluster; 1] =
+    [row_cluster(&[MetadataRowFamily::ContentRevisions])];
 const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Tombstones])];
 const COMMIT_CLUSTERS: [RetentionCluster; 3] = [
     RetentionCluster {
@@ -433,6 +435,7 @@ pub(crate) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
         MetadataFamilyGroup::ContentLayouts => &LAYOUT_CLUSTERS,
         MetadataFamilyGroup::Attributes => &ATTRIBUTE_CLUSTERS,
         MetadataFamilyGroup::Access => &ACCESS_CLUSTERS,
+        MetadataFamilyGroup::ContentRevisions => &CONTENT_REVISION_CLUSTERS,
     }
 }
 

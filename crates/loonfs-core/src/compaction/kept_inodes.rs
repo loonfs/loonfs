@@ -69,7 +69,8 @@ impl KeptInodeFilter {
             | MetadataRow::CommitReceipt(_)
             | MetadataRow::Commit(_)
             | MetadataRow::Merge(_)
-            | MetadataRow::ContentLayout(_) => return true,
+            | MetadataRow::ContentLayout(_)
+            | MetadataRow::ContentRevision(_) => return true,
         };
         filter.may_contain(&filter_key(inode_id))
     }
@@ -90,7 +91,8 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
         MetadataFamilyGroup::Tombstones
         | MetadataFamilyGroup::ActiveDeletions
         | MetadataFamilyGroup::Commits
-        | MetadataFamilyGroup::ContentLayouts => false,
+        | MetadataFamilyGroup::ContentLayouts
+        | MetadataFamilyGroup::ContentRevisions => false,
     }
 }
 

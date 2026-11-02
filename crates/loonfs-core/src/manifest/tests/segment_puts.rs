@@ -153,7 +153,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                 assert!(count == 0 || count > STORE_WRITES_IN_FLIGHT);
             }
         } else {
-            assert_eq!(expected.len(), 7);
+            assert_eq!(expected.len(), 8);
         }
         store.inner().inner().reset();
         store.block_next();

@@ -1383,6 +1383,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"attributes\"",
             "\"access\"",
             "\"merges\"",
+            "\"content_revisions\"",
         ],
         "family tags are durable bytes in every manifest descriptor"
     );
@@ -2214,6 +2215,23 @@ fn sample_merge_index_rows() -> [MetadataRow; 3] {
     })
 }
 
+/// Content revision rows in row-key order: one content value's revisions in
+/// two files, newest first within each file, then a longer value of the
+/// same chain.
+fn sample_content_revision_rows() -> [MetadataRow; 4] {
+    [(5, 2, 4, 9), (5, 2, 1, 3), (5, 7, 2, 6), (12, 2, 5, 11)].map(
+        |(size_bytes, inode_id, revision_no, committed_seq)| {
+            MetadataRow::ContentRevision(loonfs_types::format::manifest::ContentRevisionRecord {
+                content_id: content_id("con_014d2pf2dbsqqg28t5cy4tqkff"),
+                size_bytes,
+                inode_id: InodeId(inode_id),
+                revision_no: RevisionNo(revision_no),
+                committed_seq: ChangeSeq(committed_seq),
+            })
+        },
+    )
+}
+
 fn sample_inode_rows() -> [MetadataRow; 2] {
     [
         MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
@@ -2612,6 +2630,26 @@ fn sst_block_data_merge_index_golden_decodes_to_sample_rows() {
         let mut encoded = row_cbor(row);
         with_future_field(&mut encoded);
         let refusal = assert_row_is_corrupt(&encoded, "a merge index row is strict");
+        assert!(refusal.contains("field_from_the_future"), "{refusal}");
+    }
+}
+
+#[test]
+fn sst_block_data_content_revision_rows_match_golden_bytes() {
+    assert_rows_match_single_block_golden(
+        "sst_block_data_content_revisions.v1.bin",
+        &sample_content_revision_rows(),
+    );
+}
+
+#[test]
+fn sst_block_data_content_revision_golden_decodes_to_sample_rows() {
+    let block = decode_golden_data_block("sst_block_data_content_revisions.v1.bin");
+    assert_eq!(block.rows, sample_content_revision_rows());
+    for row in &block.rows {
+        let mut encoded = row_cbor(row);
+        with_future_field(&mut encoded);
+        let refusal = assert_row_is_corrupt(&encoded, "a content revision row is strict");
         assert!(refusal.contains("field_from_the_future"), "{refusal}");
     }
 }

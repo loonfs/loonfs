@@ -297,6 +297,7 @@ fn row_inodes(row: &MetadataRow) -> Vec<InodeId> {
     match row {
         MetadataRow::Inode(record) => vec![record.inode_id],
         MetadataRow::FileRevision(record) => vec![record.inode_id],
+        MetadataRow::ContentRevision(record) => vec![record.inode_id],
         MetadataRow::AttributesRevision(record) => vec![record.inode_id],
         MetadataRow::AccessRevision(record) => vec![record.inode_id],
         MetadataRow::DirentryBinding(record) => {
