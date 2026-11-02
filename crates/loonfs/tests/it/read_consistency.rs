@@ -215,6 +215,7 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
                 ChangeSeq(0),
                 &ListChangesOptions {
                     at: ReadAt::Live(consistency),
+                    ..ListChangesOptions::default()
                 },
             )
             .next()

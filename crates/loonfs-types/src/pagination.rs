@@ -258,9 +258,31 @@ impl PagedResponse for crate::GrepResponse {
     }
 }
 
+/// Where a page of the change feed starts: after the commit at `after_seq`,
+/// or, when `event_index` is above 0, inside that commit, at that event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeFeedPosition {
+    /// The sequence that the page starts after, or the commit that it
+    /// resumes.
+    pub after_seq: ChangeSeq,
+    /// The index of the first event that the page returns from the commit at
+    /// `after_seq`, or 0 to start after that commit.
+    pub event_index: u32,
+}
+
+impl ChangeFeedPosition {
+    /// The position after the commit at `after_seq`.
+    pub fn after(after_seq: ChangeSeq) -> Self {
+        Self {
+            after_seq,
+            event_index: 0,
+        }
+    }
+}
+
 impl PagedResponse for crate::ListChangesResponse {
     type Item = crate::Commit;
-    type Cursor = ChangeSeq;
+    type Cursor = ChangeFeedPosition;
 
     fn items_mut(&mut self) -> &mut Vec<Self::Item> {
         &mut self.changes
@@ -271,12 +293,16 @@ impl PagedResponse for crate::ListChangesResponse {
     }
 
     fn next_cursor(&self) -> Option<Self::Cursor> {
-        self.next_after_seq
+        self.next_after_seq.map(|after_seq| ChangeFeedPosition {
+            after_seq,
+            event_index: self.next_event_index.unwrap_or(0),
+        })
     }
 
     fn absorb(&mut self, mut later: Self) {
         self.head_seq = later.head_seq;
         self.next_after_seq = later.next_after_seq;
+        self.next_event_index = later.next_event_index;
         self.changes.append(&mut later.changes);
     }
 }

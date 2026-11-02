@@ -11,7 +11,8 @@ use crate::{
     Result, RevisionNo, SharedObjectStore, StatOptions,
 };
 use loonfs_core::{DiffPage, NamespaceReaderEngine, RuntimeReadContext};
-use loonfs_types::{AbsolutePath, EffectiveLimit, ListPageCursor, PageRequest};
+use loonfs_types::options::CommitSplitting;
+use loonfs_types::{AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest};
 
 /// A reader engine and the read context it reads at.
 pub(crate) struct PinnedRead {
@@ -30,16 +31,17 @@ impl PinnedRead {
         self.context.read_basis.head.seq
     }
 
-    /// Reads one page of the change feed. The feed's position is `after_seq`,
+    /// Reads one page of the change feed. The feed's position is `position`,
     /// and it has no cursor parameter.
     pub(crate) async fn changes_page(
         &self,
-        after_seq: ChangeSeq,
+        position: ChangeFeedPosition,
         limit: EffectiveLimit,
+        splitting: CommitSplitting,
     ) -> Result<ListChangesResponse> {
         self.engine.ensure_administrator(&self.context).await?;
         self.engine
-            .list_changes_after(after_seq, limit, &self.context)
+            .list_changes_after(position, limit, splitting, &self.context)
             .await
             .map_err(|error| match error {
                 CoreError::InvalidCursor(message) => Error::InvalidRequest {
@@ -60,14 +62,7 @@ impl PinnedRead {
         self.engine.ensure_administrator(&self.context).await?;
         Ok(self
             .engine
-            .diff_page(
-                from_seq,
-                options.to_seq,
-                options.after_seq,
-                options.limit,
-                &options.path,
-                &self.context,
-            )
+            .diff_page(from_seq, options, &self.context)
             .await?)
     }
 

@@ -16,7 +16,10 @@ use crate::{
     ListPathEntriesResponse, ListTrashOptions, Namespace, PathEntry, PinId, ReadAt,
     ReadFileOptions, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, StatOptions,
 };
-use loonfs_types::{AbsolutePath, EffectiveLimit, ListPageCursor, PageRequest, TrashPageCursor};
+use loonfs_types::options::CommitSplitting;
+use loonfs_types::{
+    AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest, TrashPageCursor,
+};
 use std::future::Future;
 
 #[cfg(test)]
@@ -491,11 +494,25 @@ impl<M: crate::Mode> Namespace<M> {
         after_seq: ChangeSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
+        let start = ChangeFeedPosition {
+            after_seq,
+            event_index: options.event_index,
+        };
         loonfs_types::Pager::with_state(
-            (self.read_only(), after_seq, options.at.clone()),
-            |(reader, after_seq, at), request: PageRequest<ChangeSeq>| async move {
+            (
+                self.read_only(),
+                start,
+                options.at.clone(),
+                options.commit_splitting,
+            ),
+            |(reader, start, at, splitting), request: PageRequest<ChangeFeedPosition>| async move {
                 reader
-                    .changes_page(request.cursor.unwrap_or(after_seq), request.limit, &at)
+                    .changes_page(
+                        request.cursor.unwrap_or(start),
+                        request.limit,
+                        &at,
+                        splitting,
+                    )
                     .await
             },
         )
@@ -503,9 +520,10 @@ impl<M: crate::Mode> Namespace<M> {
 
     async fn changes_page(
         &self,
-        after_seq: ChangeSeq,
+        position: ChangeFeedPosition,
         limit: EffectiveLimit,
         at: &ReadAt,
+        splitting: CommitSplitting,
     ) -> Result<ListChangesResponse> {
         trace::in_operation(
             operation_span!(self.core, "list_changes", self.namespace_id),
@@ -514,8 +532,10 @@ impl<M: crate::Mode> Namespace<M> {
                 self.read_at(
                     at,
                     &permit,
-                    |pinned| async move { pinned.changes_page(after_seq, limit).await },
-                    |view, permit| async move { view.changes_page(after_seq, limit, permit).await },
+                    |pinned| async move { pinned.changes_page(position, limit, splitting).await },
+                    |view, permit| async move {
+                        view.changes_page(position, limit, splitting, permit).await
+                    },
                 )
                 .await
             },

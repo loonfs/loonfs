@@ -225,11 +225,19 @@ pub struct ListChangesResponse {
     /// The namespace head sequence that this page was read at.
     pub head_seq: ChangeSeq,
     /// The cursor for the next page, when another page remains. It's absent on the page that
-    /// reaches `head_seq`.
+    /// reaches `head_seq`. When the page ends inside a commit, it's that commit's sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_after_seq: Option<ChangeSeq>,
-    /// The logical commits after `after_seq`, in ascending namespace sequence order.
+    /// The index of the first event of the commit at `next_after_seq` that the page didn't
+    /// return, when the request set `split_commits` and the page ended inside that commit. The
+    /// next request passes it as `event_index`. It's absent when the page ended at a commit
+    /// boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub next_event_index: Option<u32>,
+    /// The logical commits after `after_seq`, in ascending namespace sequence order. A commit that
+    /// the page returns in part lists only the page's events.
     pub changes: Vec<Commit>,
 }
 
@@ -253,10 +261,17 @@ pub struct DiffResponse {
     /// `from_seq` when the request leaves `after_seq` out.
     pub after_seq: ChangeSeq,
     /// The `after_seq` of the next page, when commits remain before `to_seq`. It's absent on the
-    /// page that reaches `to_seq`.
+    /// page that reaches `to_seq`. When the page ends inside a commit, it's that commit's
+    /// sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_after_seq: Option<ChangeSeq>,
+    /// The index of the first event of the commit at `next_after_seq` that the page didn't read,
+    /// when the request set `split_commits` and the page ended inside that commit. The next
+    /// request passes it as `event_index`. It's absent when the page ended at a commit boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub next_event_index: Option<u32>,
     /// The namespace's retention floor when this page was read.
     pub retention_floor_seq: ChangeSeq,
     /// The inodes whose state differs, in the order of the commits that last changed them. A page

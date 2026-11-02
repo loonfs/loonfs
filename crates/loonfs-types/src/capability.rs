@@ -17,6 +17,9 @@ pub const API_GROUP_QUERY_V0: &str = "query/v0";
 
 /// Gates inline bytes on commit operations.
 pub const FEATURE_COMMIT_INLINE_CONTENT: &str = "filesystem.commits.inline_content";
+/// Gates the change feed and diff pages that end inside a commit, which a
+/// client asks for with `split_commits`.
+pub const FEATURE_CHANGES_SPLIT_COMMITS: &str = "filesystem.changes.split_commits";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "filesystem.uploads.direct_put";
 /// Starting presigned `direct_multipart` upload sessions.

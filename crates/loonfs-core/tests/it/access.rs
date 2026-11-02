@@ -1374,7 +1374,12 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
             .await
             .expect("feed authorized");
         assert!(!engine
-            .list_changes_after(ChangeSeq(0), read_page::<()>(100).limit, &context)
+            .list_changes_after(
+                loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+                read_page::<()>(100).limit,
+                loonfs_types::options::CommitSplitting::Whole,
+                &context
+            )
             .await
             .expect("feed")
             .changes

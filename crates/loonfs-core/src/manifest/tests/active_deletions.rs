@@ -1246,8 +1246,9 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
         store.reset();
         let page = engine
             .list_changes_after(
-                ChangeSeq(1),
+                loonfs_types::ChangeFeedPosition::after(ChangeSeq(1)),
                 EffectiveLimit::new(NonZeroU32::new(4).expect("nonzero")),
+                loonfs_types::options::CommitSplitting::Whole,
                 &read_context,
             )
             .await
@@ -1311,7 +1312,12 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
     let limit = EffectiveLimit::new(NonZeroU32::new(4).expect("nonzero"));
 
     let first = engine
-        .list_changes_after(ChangeSeq(3), limit, &read_context)
+        .list_changes_after(
+            loonfs_types::ChangeFeedPosition::after(ChangeSeq(3)),
+            limit,
+            loonfs_types::options::CommitSplitting::Whole,
+            &read_context,
+        )
         .await
         .expect("list first page");
     assert_eq!(
@@ -1325,7 +1331,12 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
     assert_eq!(first.next_after_seq, Some(ChangeSeq(7)));
 
     let second = engine
-        .list_changes_after(ChangeSeq(7), limit, &read_context)
+        .list_changes_after(
+            loonfs_types::ChangeFeedPosition::after(ChangeSeq(7)),
+            limit,
+            loonfs_types::options::CommitSplitting::Whole,
+            &read_context,
+        )
         .await
         .expect("list second page");
     assert_eq!(
@@ -1473,8 +1484,9 @@ async fn an_expiry_commits_nothing_and_the_change_feed_reports_no_event() {
     assert_eq!(view.head().seq, expired.keep_seq);
     let page = list_changes_after(
         &view,
-        expired.deletion_seq,
+        loonfs_types::ChangeFeedPosition::after(expired.deletion_seq),
         EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
+        loonfs_types::options::CommitSplitting::Whole,
     )
     .await
     .expect("list changes");

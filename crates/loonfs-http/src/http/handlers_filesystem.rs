@@ -19,6 +19,7 @@ use loonfs::{
     AbsolutePath, ChangeSeq, DiffOptions, ErrorCode, ListChangesOptions, ListFileRevisionsOptions,
     ListOptions, ListTrashOptions, PinId, ReadConsistency, ReadFileStreamOptions, StatOptions,
 };
+use loonfs_types::options::CommitSplitting;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
@@ -194,9 +195,19 @@ pub(super) struct ContentQuery {
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct ChangesQuery {
-    /// The sequence after which to return committed changes.
+    /// The sequence after which to return committed changes. With `event_index`, the commit at
+    /// this sequence that the page resumes.
     #[cfg_attr(feature = "openapi", param(required = true))]
     after_seq: Option<ChangeSeq>,
+    /// Whether a page can end inside a commit that alone exceeds the page's budget. The default is
+    /// `false`, which returns every commit whole.
+    #[cfg_attr(feature = "openapi", param(default = false))]
+    split_commits: Option<bool>,
+    /// The `next_event_index` that the previous page returned, which resumes the commit at
+    /// `after_seq` at that event. It requires `split_commits=true`. The default is 0, which starts
+    /// after the commit at `after_seq`.
+    #[cfg_attr(feature = "openapi", param(default = 0))]
+    event_index: Option<u32>,
     /// The maximum page size.
     #[cfg_attr(
         feature = "openapi",
@@ -233,6 +244,14 @@ pub(super) struct DiffQuery {
     path: Option<String>,
     /// The `next_after_seq` that the previous page returned. The default is `from_seq`.
     after_seq: Option<ChangeSeq>,
+    /// Whether a page can end inside a commit that alone touches more inodes than one page
+    /// examines. The default is `false`, which reads every commit whole.
+    #[cfg_attr(feature = "openapi", param(default = false))]
+    split_commits: Option<bool>,
+    /// The `next_event_index` that the previous page returned, which resumes the commit at
+    /// `after_seq` at that event. It requires `split_commits=true`. The default is 0.
+    #[cfg_attr(feature = "openapi", param(default = 0))]
+    event_index: Option<u32>,
     /// The maximum number of commits that the page reads.
     #[cfg_attr(
         feature = "openapi",
@@ -670,6 +689,8 @@ pub(super) async fn list_changes(
     let limit = effective_page_limit(query.limit)?;
     let options = ListChangesOptions {
         at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        commit_splitting: commit_splitting(query.split_commits),
+        event_index: query.event_index.unwrap_or(0),
     };
     let response = runtime
         .namespace(&namespace_id)
@@ -724,7 +745,9 @@ pub(super) async fn list_diff(
         path,
         to_seq: query.to_seq,
         after_seq: query.after_seq,
+        event_index: query.event_index.unwrap_or(0),
         limit: effective_page_limit(query.limit)?,
+        commit_splitting: commit_splitting(query.split_commits),
         consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
     };
     let response = runtime
@@ -733,6 +756,15 @@ pub(super) async fn list_diff(
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
+}
+
+/// Maps the `split_commits` query parameter of the change feed and the diff.
+fn commit_splitting(split_commits: Option<bool>) -> CommitSplitting {
+    if split_commits.unwrap_or(false) {
+        CommitSplitting::AtPageBudget
+    } else {
+        CommitSplitting::Whole
+    }
 }
 
 pub(super) fn reject_snapshot_with_revision(

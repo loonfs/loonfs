@@ -88,8 +88,10 @@ pub const CHANGE_FEED_PAGE_BYTES: usize = 4 * 1024 * 1024;
 /// keeps what a page reads about each of those inodes until the page ends, so
 /// without this bound, a page of 1,000 commits of up to
 /// [`MAX_COMMIT_OPERATIONS`] operations each could keep millions. A page ends
-/// after the commit that reaches the bound, so a commit is never split across
-/// pages.
+/// after the commit that reaches the bound, so the page returns that commit
+/// whole. A request that sets `split_commits` reads a commit that alone
+/// touches more inodes than the bound on pages of its own, each ending at the
+/// event that reaches the bound.
 pub const DIFF_PAGE_TOUCHES: usize = 16_384;
 
 /// Bounds the admission work for one commit.

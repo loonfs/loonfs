@@ -327,6 +327,7 @@ impl Error {
             Self::InvalidRequest { param, .. } => Some((*param).to_owned()),
             Self::Core(CoreError::InvalidCursor(_)) => Some("cursor".to_owned()),
             Self::Core(CoreError::InvalidDiffRange { param, .. }) => Some((*param).to_owned()),
+            Self::Core(CoreError::InvalidEventIndex(_)) => Some("event_index".to_owned()),
             Self::Core(CoreError::ResumeOffsetOutOfRange { .. }) => Some("start_offset".to_owned()),
             Self::Core(CoreError::InvalidSnapshotRequest(_)) => Some("/name".to_owned()),
             Self::Core(CoreError::RootGrantsWithoutAdministrator) => {

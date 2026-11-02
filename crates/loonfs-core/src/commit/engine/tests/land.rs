@@ -85,10 +85,15 @@ async fn feed(store: &LocalFsStore, namespace_id: &NamespaceId) -> Vec<Commit> {
         .load_current_metadata_view()
         .await
         .expect("read view");
-    list_changes_after(&view, ChangeSeq(0), EffectiveLimit::MAX)
-        .await
-        .expect("change feed")
-        .changes
+    list_changes_after(
+        &view,
+        loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+        EffectiveLimit::MAX,
+        loonfs_types::options::CommitSplitting::Whole,
+    )
+    .await
+    .expect("change feed")
+    .changes
 }
 
 /// Checks that the land record reaches the commit response, the change feed

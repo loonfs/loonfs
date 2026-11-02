@@ -1312,7 +1312,13 @@
           },
           "next_after_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The `after_seq` of the next page, when commits remain before `to_seq`. It's absent on the\npage that reaches `to_seq`."
+            "description": "The `after_seq` of the next page, when commits remain before `to_seq`. It's absent on the\npage that reaches `to_seq`. When the page ends inside a commit, it's that commit's\nsequence."
+          },
+          "next_event_index": {
+            "description": "The index of the first event of the commit at `next_after_seq` that the page didn't read,\nwhen the request set `split_commits` and the page ended inside that commit. The next\nrequest passes it as `event_index`. It's absent when the page ended at a commit boundary.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -3089,7 +3095,7 @@
             "description": "The exclusive cursor that this page starts after. It's the cursor that the caller supplied,\nor the endpoint's initial position."
           },
           "changes": {
-            "description": "The logical commits after `after_seq`, in ascending namespace sequence order.",
+            "description": "The logical commits after `after_seq`, in ascending namespace sequence order. A commit that\nthe page returns in part lists only the page's events.",
             "items": {
               "$ref": "#/components/schemas/Commit"
             },
@@ -3105,7 +3111,13 @@
           },
           "next_after_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The cursor for the next page, when another page remains. It's absent on the page that\nreaches `head_seq`."
+            "description": "The cursor for the next page, when another page remains. It's absent on the page that\nreaches `head_seq`. When the page ends inside a commit, it's that commit's sequence."
+          },
+          "next_event_index": {
+            "description": "The index of the first event of the commit at `next_after_seq` that the page didn't\nreturn, when the request set `split_commits` and the page ended inside that commit. The\nnext request passes it as `event_index`. It's absent when the page ended at a commit\nboundary.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -5966,12 +5978,34 @@
             }
           },
           {
-            "description": "The sequence after which to return committed changes.",
+            "description": "The sequence after which to return committed changes. With `event_index`, the commit at\nthis sequence that the page resumes.",
             "in": "query",
             "name": "after_seq",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/ChangeSeq"
+            }
+          },
+          {
+            "description": "Whether a page can end inside a commit that alone exceeds the page's budget. The default is\n`false`, which returns every commit whole.",
+            "in": "query",
+            "name": "split_commits",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "The `next_event_index` that the previous page returned, which resumes the commit at\n`after_seq` at that event. It requires `split_commits=true`. The default is 0, which starts\nafter the commit at `after_seq`.",
+            "in": "query",
+            "name": "event_index",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
             }
           },
           {
@@ -6265,6 +6299,28 @@
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/ChangeSeq"
+            }
+          },
+          {
+            "description": "Whether a page can end inside a commit that alone touches more inodes than one page\nexamines. The default is `false`, which reads every commit whole.",
+            "in": "query",
+            "name": "split_commits",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "The `next_event_index` that the previous page returned, which resumes the commit at\n`after_seq` at that event. It requires `split_commits=true`. The default is 0.",
+            "in": "query",
+            "name": "event_index",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
             }
           },
           {

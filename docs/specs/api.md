@@ -55,6 +55,7 @@ The example below is the reference deployment's document, with the server's defa
   "api_groups": ["filesystem/v0", "maintenance/v0", "query/v0"],
   "features": {
     "maintenance.grep.index": true,
+    "filesystem.changes.split_commits": true,
     "filesystem.commits.inline_content": true,
     "query.grep": true
   },
@@ -126,13 +127,14 @@ This section defines every feature key and the operations it gates. The registry
 | Feature key | Gates | Notes |
 | --- | --- | --- |
 | `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes, and the grep collection in a `gc` run. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes. Its `gc` runs return the core collector's result without an `extensions.grep` report. |
+| `filesystem.changes.split_commits` | The `split_commits` and `event_index` query parameters of `GET /v0/namespaces/{ns}/changes` and `GET /v0/namespaces/{ns}/diff`, and the `next_event_index` field of their responses. | A page with `split_commits=true` can end inside a commit that alone exceeds the page budget, and the next request resumes the commit at an event (see [`GET /changes`](#611-get-changes)). Without the parameter, both routes return each commit whole. |
 | `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | A deployment advertises this key when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, a client uploads the content before committing. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider MUST report a durable whole-object checksum after the write. A deployment advertises the key only on an endpoint that the live conformance suite has run against. The key is independent of `filesystem.uploads.direct_multipart`, so a provider can offer this feature and no multipart API at all. Raw object keys and caller-managed object-store writes aren't part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability for each part. This feature needs an S3-style multipart API in addition to the signing that the other keys need, so a deployment whose provider has no multipart API leaves out this key and can still advertise the others. |
 | `filesystem.downloads.direct_get` | Requesting path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write also advertises this key, because a deployment that lets a client create an object larger than `download.service_proxied.max_content_bytes` has to be able to return that object. Raw object keys aren't part of this feature. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | A data-dependent capability (see [Data-dependent features](#23-data-dependent-features)). A grep request also requires a materialized, active grep manifest, and a namespace without one returns `not_supported` whatever this key's value is. |
 
-`maintenance.grep.index` is the only feature key in `maintenance/v0`, and inline commit content and the three direct transfers are the only features in `filesystem/v0`. Every other operation in those two API groups is required, including creating, forking, and deleting namespaces and the snapshot routes.
+`maintenance.grep.index` is the only feature key in `maintenance/v0`, and splitting commits across pages, inline commit content, and the three direct transfers are the only features in `filesystem/v0`. Every other operation in those two API groups is required, including creating, forking, and deleting namespaces and the snapshot routes.
 
 Listing namespaces isn't supported in v0, so callers MUST address namespaces by ID.
 
@@ -2419,11 +2421,73 @@ In a `moved` event, the source fields describe the removed binding, and the dest
 
 `directory_created`, `file_created`, `moved`, and `undeleted` include the `binding_version` they created, and it matches later reads of the same binding. Other events don't create bindings, and they omit the field.
 
-The commit `limit` is an upper bound, and a page can contain fewer commits when their events are large. The reference implementation budgets 4 MiB of event heap per page, including vector capacity and owned event data. A commit is never split across pages, and a single commit larger than the budget is returned on a page by itself.
+The commit `limit` is an upper bound, and a page can contain fewer commits when their events are large. The reference implementation budgets 4 MiB of event heap per page (the "page budget"), including vector capacity and owned event data. Without `split_commits=true` (see below), a page doesn't split a commit, and a single commit larger than the budget is returned whole on a page by itself.
 
 If either bound ends the page before the namespace head, the response includes `next_after_seq`, set to the last returned change's `committed_seq`. The client resumes with `after_seq={next_after_seq}`. Clients MUST follow `next_after_seq`, instead of counting commits, to decide whether another page remains.
 
 `after_seq` can equal the current namespace head, which returns an empty page. An `after_seq` above the head that the request reads returns `invalid_request`. The lowest `after_seq` the feed accepts is `retention_floor_seq`, and a lower `after_seq` returns `rebootstrap_required`. The client then rebuilds its state from a fresh listing or snapshot, and follows the feed from that state's head.
+
+A client that needs every page to stay within the page budget sets the query parameter `split_commits=true`, which defaults to `false`, on a deployment that advertises `filesystem.changes.split_commits`. A page then splits a commit when the commit alone exceeds the page budget: it returns as many of the commit's events as fit the budget (at least one), and it ends there. A commit that fits the budget isn't split, so for commits under the budget the pages are the same as without the parameter. `limit` counts a commit returned in part as one commit.
+
+An event's "event index" is its position in its commit's `events`, counting from 0. A page that ends inside a commit sets `next_after_seq` to that commit's `committed_seq`, and `next_event_index` to the index of the first event that it didn't return. A page that ends at a commit boundary leaves out `next_event_index`. The client passes both values back, as `after_seq` and as the query parameter `event_index`, which defaults to 0. With `event_index` 0, the page starts after `after_seq`, as it does without the parameter. With a positive `event_index`, the page starts with the commit at `after_seq`, from the event at that index, and continues with the later commits.
+
+Every page that returns part of a commit repeats the commit's other fields, and its `events` contains only the events on that page, so a client rebuilds the commit's events by joining them in page order. An `event_index` without `split_commits=true`, or at or past the end of the commit's events, returns `invalid_request` with `param` set to `event_index`. A positive `event_index` reads the commit at `after_seq`, so an `after_seq` equal to `retention_floor_seq` with a positive `event_index` returns `rebootstrap_required`, as a lower `after_seq` does.
+
+For example, suppose the commit at sequence 419 is a land of 30,000 file creations, more than one page's budget. `GET /changes?after_seq=418&split_commits=true` returns a page with part of the commit's events, and the response includes `"next_after_seq": 419` and a `next_event_index` such as `13107` (the value depends on the size of the events). The client requests `GET /changes?after_seq=419&event_index=13107&split_commits=true` next, and it keeps following both values until a page leaves out `next_event_index`. A page that returns the end of the commit continues with the later commits. If the page before it ended at the commit's last event, the request with `event_index=29999` returns that event and then commit 420:
+
+```json
+{
+  "namespace_id": "demo",
+  "after_seq": 419,
+  "head_seq": 420,
+  "changes": [
+    {
+      "namespace_id": "demo",
+      "committed_seq": 419,
+      "commit_id": "c_0b7e4d2a9f1c4e8b8a6d3f5c2e1b9a70",
+      "committed_by": "usr_8f3c",
+      "committed_at_ms": 1752624000000,
+      "message": "import the archive",
+      "land": {
+        "source_namespace_id": "demo-import",
+        "source_after_seq": 400,
+        "source_through_seq": 412
+      },
+      "events": [
+        {
+          "kind": "file_created",
+          "inode_id": "ino_000000r0000013kje0d47gc8kw",
+          "parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
+          "display_name": "part-29999.csv",
+          "binding_version": "opaque-token",
+          "revision_no": 1,
+          "content_ref": {
+            "kind": "blob_v1",
+            "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
+            "size_bytes": 20591,
+            "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
+          }
+        }
+      ]
+    },
+    {
+      "namespace_id": "demo",
+      "committed_seq": 420,
+      "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+      "committed_by": "usr_8f3c",
+      "committed_at_ms": 1752624060000,
+      "events": [
+        {
+          "kind": "attributes_changed",
+          "inode_id": "ino_000000r000000tn10r0b9wf3yy",
+          "attributes_revision_no": 2,
+          "attributes": { "owner": "imports" }
+        }
+      ]
+    }
+  ]
+}
+```
 
 Why does an append's event include `append_offset`, when a consumer could compare content IDs? An append keeps the content ID only when it extends the [chain's](glossary.md#chain) full current length. Otherwise it starts a new content ID (for example, in a fork or after a restore). A consumer that compared content IDs would treat that append as a replacement and read the whole file again.
 
@@ -2441,10 +2505,12 @@ The route takes these query parameters:
 | `to_seq` | The sequence that the diff ends at, inclusive. The default is the head that the first page reads. |
 | `path` | The absolute path of the directory whose subtree the diff reports. The default is the root. |
 | `after_seq` | The `next_after_seq` that the previous page returned. The default is `from_seq`. |
+| `split_commits` | Whether a page can end inside a commit that touches more inodes than one page examines, as on the change feed. The default is `false`. |
+| `event_index` | The `next_event_index` that the previous page returned, which resumes the commit at `after_seq` from that event. The default is 0. It requires `split_commits=true`. |
 | `limit` | The maximum number of commits that the page reads, with the same default and maximum as the change feed's `limit`. |
 | `consistency`, `max_staleness_ms` | How recently the page confirms the head, as on the read routes (see [Read consistency](#read-consistency)). |
 
-The sequences MUST be in order: the retention floor, `from_seq`, `after_seq`, `to_seq`, and the head that the request reads, each at or above the one before. A `from_seq` below the retention floor returns `rebootstrap_required`, whose details include `from_seq` and `retention_floor_seq`. A `to_seq` above the head that the request reads returns `invalid_request`, and a client that gets this error from an `eventual` request retries it as `strong`, as a change feed poller does. A `from_seq` after `to_seq`, or an `after_seq` outside `from_seq` through `to_seq`, also returns `invalid_request`, and `param` identifies the parameter. A `from_seq` equal to `to_seq` returns an empty page.
+The sequences MUST be in order: the retention floor, `from_seq`, `after_seq`, `to_seq`, and the head that the request reads, each at or above the one before. A `from_seq` below the retention floor returns `rebootstrap_required`, whose details include `from_seq` and `retention_floor_seq`. A `to_seq` above the head that the request reads returns `invalid_request`, and a client that gets this error from an `eventual` request retries it as `strong`, as a change feed poller does. A `from_seq` after `to_seq`, or an `after_seq` outside `from_seq` through `to_seq`, also returns `invalid_request`, and `param` identifies the parameter. A positive `event_index` resumes the commit at `after_seq`, so it returns `invalid_request` when `after_seq` equals `from_seq`, as it does without `split_commits=true` or at or past the end of the commit's events. A `from_seq` equal to `to_seq` returns an empty page.
 
 In an ACL namespace, the diff requires an administrator when the request includes subject headers. Without subject headers, the request reads as the token holder, as the change feed does.
 
@@ -2505,7 +2571,9 @@ An entry is under `path` when its path at `from_seq` or its path at `to_seq` is 
 
 Entries describe the states at the two sequences, not the commits between them, and no fixed order of applying them is correct in every case. For example, a file moved into a directory that was created in the same range, or two entries that swap paths, can't be applied one at a time in a fixed order. A client that keeps a copy of the namespace reconciles its copy by inode ID.
 
-A page reads the commits after `after_seq` in sequence order, at most `limit` of them, within the change feed's byte budget, and it never splits a commit across pages. It reports each inode at the last commit in the range that touched the inode, so an inode is an entry on one page only, and a page can have no entries and still have a next page. A page can also have more entries than `limit`, because one commit can touch many inodes. A page also ends after the commit that brings the inodes it has examined to a bound (16,384 in the reference implementation, counting an inode once for each commit that touched it), and the next page starts with the commit after it. While commits remain before `to_seq`, the response includes `next_after_seq`. The client's next request repeats `from_seq`, passes the returned `to_seq`, and sets `after_seq` to `next_after_seq`, so every page compares the same two sequences, and the server keeps no state between pages. Each page checks `from_seq` against the retention floor of the head that it reads before it reads anything else, so a retention advance between two pages fails the later page with `rebootstrap_required`.
+A page reads the commits after `after_seq` in sequence order, at most `limit` of them, within the change feed's byte budget. Without `split_commits=true`, it doesn't split a commit across pages. It reports each inode at the last commit in the range that touched the inode, so an inode is an entry on one page (except under `split_commits=true`, described below), and a page can have no entries and still have a next page. A page can also have more entries than `limit`, because one commit can touch many inodes. A page also ends after the commit that brings the inodes it has examined to a bound (16,384 in the reference implementation, counting an inode once for each commit that touched it), and the next page starts with the commit after it. While commits remain before `to_seq`, the response includes `next_after_seq`. The client's next request repeats `from_seq`, passes the returned `to_seq`, and sets `after_seq` to `next_after_seq`, so every page compares the same two sequences, and the server keeps no state between pages. Each page checks `from_seq` against the retention floor of the head that it reads before it reads anything else, so a retention advance between two pages fails the later page with `rebootstrap_required`.
+
+With `split_commits=true`, a commit that touches more inodes than the bound starts a page of its own, and the page reads the commit's events in order until the inodes it has examined reach the bound. The page then ends inside the commit, and it reports `next_after_seq` and `next_event_index` with the same meaning as on the change feed. The client passes them back as `after_seq` and `event_index`, with the same `from_seq` and `to_seq`. A commit that touches no more inodes than the bound isn't split. This changes one rule of the route, and only under the parameter: an inode that the events of a split commit touch on two pages is an entry on both pages. Both entries compare the same two sequences, so they're equal, and a client that reconciles its copy by inode ID and keeps the later entry gets the same result as from the unsplit diff.
 
 A fork's diff against its source is this route on the fork, with `from_seq` set to the fork's `fork_basis.source_head_seq` (see [`POST /forks`](#613-post-forks)). It compares the fork's head with the source state that the fork captured, not with the source's current head.
 
@@ -2513,7 +2581,7 @@ To find out whether anything under a directory changed since a sequence, a clien
 
 The diff reads every commit in its range once, and resolves the state and path of each inode it reports at both sequences. So its cost grows with the number of commits between the two sequences and with the number of entries it reports, not with the size of the subtree. A fork's diff against its source, or a poll from a recent sequence, reads few commits. A diff over a long range of a namespace with many commits reads many, so a client that diffs often keeps its `from_seq` recent.
 
-Why does a page report each inode at the last commit that touched it? Every page can tell whether a commit is an inode's last touch in the range from the inode's own rows at `to_seq`. So each inode is reported once, with no state on the server and no duplicates for the client to remove.
+Why does a page report each inode at the last commit that touched it? Every page can tell whether a commit is an inode's last touch in the range from the inode's own rows at `to_seq`. So each inode is reported once, with no state on the server and no duplicates for the client to remove (unless the client sets `split_commits=true`).
 
 Why doesn't the diff list the descendants of a moved or deleted directory? Listing them would make the cost of a diff grow with the size of the subtree. A client that needs the descendants already has them in its copy, or lists the directory.
 

@@ -957,8 +957,9 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .expect("load feed view");
     let changes = list_changes_after(
         &view,
-        ChangeSeq(1),
+        loonfs_types::ChangeFeedPosition::after(ChangeSeq(1)),
         EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
+        loonfs_types::options::CommitSplitting::Whole,
     )
     .await
     .expect("change feed reloads the stale head");

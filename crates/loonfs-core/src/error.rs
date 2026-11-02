@@ -214,6 +214,11 @@ pub enum CoreError {
     InvalidUploadContent(String),
     #[error("invalid cursor: {0}")]
     InvalidCursor(String),
+    /// A change feed or diff request's `event_index` doesn't name an event
+    /// of the commit that the page resumes, or the request doesn't let a
+    /// page split a commit.
+    #[error("invalid `event_index`: {0}")]
+    InvalidEventIndex(String),
     #[error(
         "change feed cursor `{after_seq}` is older than retention floor `{retention_floor_seq}`"
     )]
@@ -471,6 +476,7 @@ impl CoreError {
             | CoreError::InvalidGcOptions(_)
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
+            | CoreError::InvalidEventIndex(_)
             | CoreError::InvalidDiffRange { .. }
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
@@ -620,6 +626,7 @@ impl CoreError {
             | CoreError::UploadContentConflict { .. }
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
+            | CoreError::InvalidEventIndex(_)
             | CoreError::InvalidDiffRange { .. }
             | CoreError::RebootstrapRequired { .. }
             | CoreError::DiffRebootstrapRequired { .. }
