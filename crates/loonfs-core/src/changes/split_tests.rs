@@ -208,15 +208,19 @@ async fn a_commit_splits_the_same_way_before_and_after_a_fold() {
 #[tokio::test]
 async fn an_event_index_past_the_end_or_without_split_commits_is_refused() {
     let feed = Feed::new().await;
-    let large = feed.commits[1].committed_seq;
-    for (event_index, splitting) in [
-        (1, CommitSplitting::Whole),
-        (LARGE, CommitSplitting::AtPageBudget),
-        (LARGE + 5, CommitSplitting::AtPageBudget),
+    let [small, large] = [0, 1].map(|index| feed.commits[index].committed_seq);
+    let past_large = u32::try_from(LARGE).expect("index");
+    // An index far past a commit's last event is refused as soon as the
+    // commit's events run out, without stepping through every index.
+    for (after_seq, event_index, splitting) in [
+        (large, 1, CommitSplitting::Whole),
+        (large, past_large, CommitSplitting::AtPageBudget),
+        (large, past_large + 5, CommitSplitting::AtPageBudget),
+        (small, u32::MAX, CommitSplitting::AtPageBudget),
     ] {
         let position = ChangeFeedPosition {
-            after_seq: large,
-            event_index: u32::try_from(event_index).expect("index"),
+            after_seq,
+            event_index,
         };
         let error = feed
             .page(position, splitting, feed.budget())

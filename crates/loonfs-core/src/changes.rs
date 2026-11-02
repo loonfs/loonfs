@@ -371,14 +371,19 @@ pub(crate) fn events_from_wal_deltas_within(
     first_event_index: u32,
     max_heap_bytes: Option<usize>,
 ) -> Result<CommitEvents> {
+    let no_event = || {
+        CoreError::InvalidEventIndex(format!(
+            "commit `{committed_seq}` has no event at index {first_event_index}"
+        ))
+    };
     let mut groups = loonfs_types::format::wal::semantic_operation_groups(deltas).peekable();
+    // The index comes from a request, so the skip stops at the commit's last
+    // group instead of running to an index as large as `u32::MAX`.
     for _ in 0..first_event_index {
-        groups.next();
+        groups.next().ok_or_else(no_event)?;
     }
     if first_event_index > 0 && groups.peek().is_none() {
-        return Err(CoreError::InvalidEventIndex(format!(
-            "commit `{committed_seq}` has no event at index {first_event_index}"
-        )));
+        return Err(no_event());
     }
     let mut events = Vec::new();
     let mut heap_bytes = 0_usize;
