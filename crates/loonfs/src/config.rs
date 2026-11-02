@@ -46,7 +46,9 @@ pub const DEFAULT_IDLE_FOLD_AFTER_MS: NonZeroU64 = NonZeroU64::new(15 * 60 * 1_0
 pub struct PublicationPolicy {
     /// Maximum admitted requests for one namespace. Defaults to 1,024.
     pub max_requests_per_namespace: NonZeroUsize,
-    /// Approximate retained request bytes for one namespace. Defaults to 8 MiB.
+    /// Approximate retained request bytes for one namespace. A land isn't
+    /// held to it, because the execution budget's `max_admitted_bytes` total
+    /// bounds a land. Defaults to 8 MiB.
     pub max_estimated_bytes_per_namespace: NonZeroUsize,
     /// How long a new commit at the write stop waits in the queue for the
     /// session's fold, measured from when it entered the queue, before it

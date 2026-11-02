@@ -42,7 +42,8 @@ const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1
 /// publication requests it admits to the budget's totals, and takes its
 /// read, publication, fold, compaction, and content write permits from it, so the limits bound the
 /// work of every runtime that shares it. Publication admission never waits: a request
-/// past an admitted total fails at once with `commit_queue_full`. Permit
+/// past an admitted total fails at once with `commit_queue_full`, except a land larger
+/// than the whole byte total, which fails with `land_too_large`. Permit
 /// waits are first come, first served, whichever runtime they belong to. No
 /// runtime has a reserved share, so an idle runtime reserves nothing. A
 /// host that wants to isolate runtimes from each other gives them separate
@@ -147,6 +148,12 @@ impl ExecutionBudget {
     /// caller has unlocked every lock.
     pub(crate) fn refund_admission(&self, estimated_bytes: usize) -> AdmissionChange {
         self.inner.admission.refund(estimated_bytes)
+    }
+
+    /// Returns the limit on the total estimated bytes of the publication
+    /// requests that every runtime sharing the budget has admitted.
+    pub(crate) fn max_admitted_bytes(&self) -> usize {
+        self.inner.admission.max_bytes.get()
     }
 
     /// Reports a charge or a refund to the metrics recorder. The recorder is

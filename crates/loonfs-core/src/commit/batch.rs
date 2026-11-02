@@ -96,6 +96,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if candidates.is_empty() {
         return PublishBatchReport::unchanged(Vec::new());
     }
+    // The publisher puts a land in a batch of its own, so the WAL object's
+    // size bound applies to the land alone, and no other commit shares a
+    // WAL object that the land's size could refuse.
+    assert!(
+        candidates.len() == 1 || !candidates.iter().any(CommitCandidate::is_land),
+        "a land should be published in a batch of its own"
+    );
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let namespace_id = &view.head().namespace_id;
     let admission_now_ms = clock.batch.observed_at_ms(&clock.attempt);
@@ -149,10 +156,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             {
                 slots.push(settle_admission(
                     BatchOutcomeSlot::Settled {
-                        outcome: Err(CoreError::CommitTooLarge {
-                            estimated_bytes,
-                            max_bytes,
-                        }),
+                        outcome: Err(candidate.too_large_error(estimated_bytes, max_bytes)),
                         depends_on_batch: !accepted_payloads.is_empty(),
                     },
                     !accepted_payloads.is_empty(),

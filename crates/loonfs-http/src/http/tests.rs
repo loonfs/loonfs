@@ -146,6 +146,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "maintain_only",
     "manifest_no",
     "manifest_revalidation_interval_ms",
+    "max_admitted_bytes",
     "max_connections",
     "max_in_flight_requests",
     "max_staleness_ms",

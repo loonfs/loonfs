@@ -2,7 +2,7 @@
 //! order, each seeing the rows earlier candidates would persist.
 
 use super::planned_pieces::{CommitPieces, PlannedPieces};
-use super::planner::OperationPlanningSession;
+use super::planner::{CreatedInodeIds, OperationPlanningSession};
 use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, LandIntent};
@@ -14,7 +14,7 @@ use crate::storage::tail_content::{cut_layout, materialize_content_layout, Conte
 use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{next_public_ordinal, ChangeSeq, ContentRef};
+use loonfs_types::{next_public_ordinal, ChangeSeq, ContentRef, InodeId};
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
@@ -172,6 +172,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         let mut appended: Vec<AppendedContent> = Vec::new();
         let mut pieces = CommitPieces::new(self);
         let mut next_create_no = NonZeroU32::MIN;
+        let proofs = candidate.proofs_by_reference();
         for value in candidate.inline_content() {
             pieces.insert_piece(
                 value.content_ref(),
@@ -184,16 +185,41 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             );
         }
         for (index, operation) in request.operations.iter().enumerate() {
-            let compiled = OperationPlanningSession {
+            let created_inode_ids = match candidate.land() {
+                Some(land) => {
+                    let assigned = land.created_inode_ids.get(&index).copied();
+                    if let Some(inode_id) = assigned {
+                        ensure_landed_inode_is_new(&validation.view(), inode_id)
+                            .await
+                            .map_err(|error| error.at_operation(index))?;
+                    }
+                    CreatedInodeIds::Land(assigned)
+                }
+                None => CreatedInodeIds::Generated {
+                    next_create_no: &mut next_create_no,
+                },
+            };
+            let mut operation_session = OperationPlanningSession {
                 view: self.planning_view(authorizer, validation.view()),
                 pieces: &pieces,
                 content_writes: self.content_writes,
                 committed_seq,
-                next_create_no: &mut next_create_no,
+                created_inode_ids,
+            };
+            let compiled = operation_session
+                .plan(operation)
+                .await
+                .map_err(|error| error.at_operation(index))?;
+            if let CreatedInodeIds::Land(Some(inode_id)) = operation_session.created_inode_ids {
+                // Only a bug in the land's planner assigns an ID to an
+                // operation that creates no inode. A panic would return
+                // `commit_outcome_unknown` and panic again on every retry, so
+                // the land fails with an error that the caller doesn't retry.
+                return Err(CoreError::InvalidCommitRequest(format!(
+                    "a land assigned inode `{inode_id}` to an operation that creates no inode"
+                ))
+                .at_operation(index));
             }
-            .plan(operation)
-            .await
-            .map_err(|error| error.at_operation(index))?;
             if let Some(value) = &compiled.appended {
                 for piece in &value.pieces {
                     pieces.insert_piece(&value.content_ref, piece, committed_seq);
@@ -208,7 +234,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                     {
                         return value.layout.clone();
                     }
-                    candidate.revision_layout(content_ref, &head.namespace_id)
+                    proofs
+                        .get(content_ref)
+                        .and_then(|proof| proof.revision_layout(&head.namespace_id))
                 })
                 .await
                 .map_err(|error| error.at_operation(index))?;
@@ -341,6 +369,27 @@ async fn ensure_land_is_admissible<S: ObjectStore + ?Sized>(
             expected_after_seq,
             actual_after_seq: land.record.source_after_seq,
         });
+    }
+    Ok(())
+}
+
+/// Requires an inode that a land creates under the fork's ID to be absent
+/// from `view`, which includes the land's earlier operations, so an ID
+/// assigned to two creates fails at the second.
+///
+/// An inode row is immutable and unique, so a second row for the same ID
+/// would corrupt the namespace. The ID is present only if the land's planner
+/// has a bug: it mistook an inode that this namespace already has (for
+/// example, one that an earlier land created) for a new one, or it assigned
+/// one ID to two creates.
+async fn ensure_landed_inode_is_new<S: ObjectStore + ?Sized>(
+    view: &MetadataView<'_, '_, S>,
+    inode_id: InodeId,
+) -> Result<()> {
+    if view.inode_at_seq(inode_id).await?.is_some() {
+        return Err(CoreError::InvalidCommitRequest(format!(
+            "a land creates inode `{inode_id}`, which already exists"
+        )));
     }
     Ok(())
 }

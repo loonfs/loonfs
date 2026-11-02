@@ -259,6 +259,12 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                     source_through_seq: ChangeSeq(MAX_PUBLIC_INTEGER),
                 },
                 ChangeSeq(MAX_PUBLIC_INTEGER - 1),
+                (0..operation_count)
+                    .map(|index| {
+                        let id = InodeId::generate(ChangeSeq(1), std::num::NonZeroU32::MIN);
+                        (index, id)
+                    })
+                    .collect(),
             )
         } else if kind == "inline" {
             let candidate =

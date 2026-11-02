@@ -11,8 +11,9 @@ use crate::compaction::{
 };
 use crate::manifest::RetentionTarget;
 use crate::test_support::NamespaceFixture;
-use loonfs_types::format::wal::LandRecord;
-use loonfs_types::{CompactorEpoch, EffectiveLimit, Land};
+use loonfs_types::format::wal::{LandRecord, MAX_WAL_OBJECT_BYTES};
+use loonfs_types::{CompactorEpoch, EffectiveLimit, InodeId, Land};
+use std::collections::BTreeMap;
 
 /// The sequence of `main` that the tests' fork was made at.
 const FORK_POINT: ChangeSeq = ChangeSeq(3);
@@ -38,9 +39,19 @@ fn reported(land: &LandRecord) -> Land {
     }
 }
 
-/// A land of `land` under `commit_id` that creates `/{name}`.
+/// An ID that an inode created in the fork has.
+fn fork_inode_id() -> InodeId {
+    InodeId::generate(ChangeSeq(FORK_POINT.0 + 1), std::num::NonZeroU32::MIN)
+}
+
+/// A land of `land` under `commit_id` that creates `/{name}` under an inode
+/// ID from the fork.
 fn land_candidate(commit_id: &str, name: &str, land: LandRecord) -> CommitCandidate {
-    CommitCandidate::new(create_dir_request(commit_id, name)).with_land(land, FORK_POINT)
+    CommitCandidate::new(create_dir_request(commit_id, name)).with_land(
+        land,
+        FORK_POINT,
+        BTreeMap::from([(0, fork_inode_id())]),
+    )
 }
 
 async fn setup() -> (tempfile::TempDir, LocalFsStore, NamespaceId, WriterAt) {
@@ -274,25 +285,355 @@ async fn a_repeat_land_continues_the_previous_land_exactly() {
     assert_eq!(replayed, first);
 }
 
-/// Checks that each land in one batch is validated against the batch's
-/// earlier lands, so a second submission of a range in the same batch is
-/// refused, and a land that continues it is admitted.
+fn intent(commit_id: &str, operations: Vec<FilesystemOperation>) -> CommitIntent {
+    CommitIntent {
+        commit_id: CommitId::parse(commit_id).expect("commit id"),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        operations,
+        preconditions: Vec::new(),
+    }
+}
+
+/// Checks that a land isn't held to the operation count that limits a
+/// request body, and that its creates make inodes under the fork's IDs.
 #[tokio::test]
-async fn lands_in_one_batch_continue_each_other() {
+async fn a_land_of_ten_thousand_creates_is_admitted_where_an_explicit_commit_is_refused() {
     let (_directory, store, namespace_id, writer) = setup().await;
-    let mut results = NamespaceFixture::new(&store, &namespace_id, &writer)
-        .publish_candidates(vec![
-            land_candidate("first", "first", land(3, 7)),
-            land_candidate("again", "again", land(3, 7)),
-            land_candidate("next", "next", land(7, 9)),
-        ])
+    let creates = intent(
+        "many",
+        (0..10_000)
+            .map(|index| FilesystemOperation::CreateDirectoryByInode {
+                parent_inode_id: loonfs_types::ROOT_INODE_ID,
+                display_name: loonfs_types::DisplayName::parse(format!("directory-{index}"))
+                    .expect("display name"),
+            })
+            .collect(),
+    );
+    let error = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        CommitCandidate::new(creates.clone()),
+    )
+    .await
+    .expect_err("an explicit commit over the operation limit");
+    assert_matches!(
+        error,
+        CoreError::InvalidCommitRequest(message) if message.contains("10000 operations")
+    );
+
+    let fork_ids: BTreeMap<usize, InodeId> =
+        (0..10_000).map(|index| (index, fork_inode_id())).collect();
+    let landed = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        CommitCandidate::new(creates).with_land(land(3, 7), FORK_POINT, fork_ids.clone()),
+    )
+    .await
+    .expect("a land of the same creates");
+    let created: Vec<InodeId> = landed
+        .events
+        .iter()
+        .map(|event| match event {
+            loonfs_types::FilesystemChange::DirectoryCreated { inode_id, .. } => *inode_id,
+            other => panic!("expected a directory creation, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(created, fork_ids.into_values().collect::<Vec<_>>());
+}
+
+/// Checks that a land whose planned record doesn't fit in one WAL object
+/// fails with `land_too_large`, which has the 413 kind, and writes no WAL
+/// object.
+#[tokio::test]
+async fn a_land_over_the_wal_object_bound_fails_with_land_too_large_and_writes_nothing() {
+    let (_directory, store, namespace_id, writer) = setup().await;
+    // One engine publishes both commits, so the land's publication acquires
+    // no writer epoch and writes no fence.
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer.writer_id.clone(),
+    );
+    let directory = engine
+        .publish_batch(vec![create_dir("directory", "directory")], &writer.clock())
         .await
-        .into_iter();
-    let first = results.next().expect("first").expect("the first land");
-    let again = results.next().expect("second");
-    assert_range_conflict(again.expect_err("the same range again"), 7, 3);
-    let next = results.next().expect("third").expect("the next land");
-    assert_eq!(next.committed_seq.0, first.committed_seq.0 + 1);
+        .results
+        .pop()
+        .expect("one result")
+        .expect("create a directory");
+    let loonfs_types::FilesystemChange::DirectoryCreated { inode_id, .. } = directory.events[0]
+    else {
+        panic!("expected a directory creation");
+    };
+    let updates = |count: usize| {
+        let operations = (0..count)
+            .map(|index| FilesystemOperation::UpdateAttributesByInode {
+                inode_id,
+                set: BTreeMap::from([(
+                    loonfs_types::AttributeKey::parse("index").expect("key"),
+                    loonfs_types::AttributeValue::parse(index.to_string()).expect("value"),
+                )]),
+                remove: Vec::new(),
+                expected_attributes_revision_no: None,
+            })
+            .collect();
+        CommitCandidate::new(intent("too-large", operations)).with_land(
+            land(3, 7),
+            FORK_POINT,
+            BTreeMap::new(),
+        )
+    };
+    let per_update =
+        updates(2).wal_record_bytes_upper_bound() - updates(1).wal_record_bytes_upper_bound();
+    let count = MAX_WAL_OBJECT_BYTES / per_update + 1;
+    let before = wal_object_count(&store, &namespace_id).await;
+
+    let error = engine
+        .publish_batch(vec![updates(count)], &writer.clock())
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect_err("a land over the bound");
+    assert_matches!(
+        error,
+        CoreError::LandTooLarge { estimated_bytes, max_bytes }
+            if estimated_bytes > max_bytes && max_bytes == MAX_WAL_OBJECT_BYTES
+    );
+    assert_eq!(error.code(), ErrorCode::LandTooLarge);
+    assert_eq!(
+        error.code().kind(),
+        loonfs_types::ErrorKind::ContentTooLarge
+    );
+    assert_eq!(wal_object_count(&store, &namespace_id).await, before);
+}
+
+/// Checks that a land refers only to content that the fork already wrote:
+/// inline content and appended bytes are refused.
+#[tokio::test]
+async fn a_land_with_inline_content_or_an_append_is_refused() {
+    let (_directory, store, namespace_id, writer) = setup().await;
+    let inline = InlineContent::new(
+        ContentId::generate(),
+        bytes::Bytes::from_static(b"inline"),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
+    );
+    let put = intent(
+        "inline",
+        vec![FilesystemOperation::CreateFileByInode {
+            parent_inode_id: loonfs_types::ROOT_INODE_ID,
+            display_name: loonfs_types::DisplayName::parse("inline.txt").expect("name"),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: inline.content_ref().clone(),
+                source_namespace_id: None,
+            },
+        }],
+    );
+    let append = intent(
+        "append",
+        vec![FilesystemOperation::AppendFile {
+            path: loonfs_types::AbsolutePath::parse("/log").expect("path"),
+            inline_content: b"appended".to_vec(),
+            expected_inode_id: None,
+            expected_revision_no: None,
+        }],
+    );
+    for candidate in [
+        CommitCandidate::with_inline_content(put, Vec::new(), vec![inline]).with_land(
+            land(3, 7),
+            FORK_POINT,
+            BTreeMap::from([(0, fork_inode_id())]),
+        ),
+        CommitCandidate::new(append).with_land(land(3, 7), FORK_POINT, BTreeMap::new()),
+    ] {
+        let error = publish(&store, &namespace_id, &writer, candidate)
+            .await
+            .expect_err("a land with bytes of its own");
+        assert_matches!(
+            error,
+            CoreError::InvalidCommitRequest(message)
+                if message == "a land includes no inline content or appended bytes"
+        );
+    }
+}
+
+/// A file that a fork created, landed into the namespace it was forked
+/// from.
+struct LandedFile {
+    store: RecordingStore<LocalFsStore>,
+    main: NamespaceId,
+    fork: NamespaceId,
+    inode_id: InodeId,
+    bytes: Vec<u8>,
+}
+
+/// Forks `main`, writes a 1 MiB file in the fork, folds the fork, and lands
+/// the file into `main` the way the land planner does: a create under the
+/// fork's inode ID, with the reference and layout that the fork's rows
+/// record. The store records content requests, and its counters are reset
+/// just before the land.
+async fn land_a_forks_file() -> (tempfile::TempDir, LandedFile) {
+    let directory = tempdir().expect("tempdir");
+    let [main, fork] = ["main", "main-fork"].map(|name| NamespaceId::parse(name).expect("ns"));
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::content_prefix(&main)),
+    );
+    let writer = context("writer");
+    let main_fixture = NamespaceFixture::new(&store, &main, &writer);
+    main_fixture.create().await.expect("create main");
+    main_fixture
+        .engine()
+        .fork_namespace(&fork, &loonfs_test_support::test_actor(), None)
+        .await
+        .expect("fork");
+    let fork_point_seq = crate::test_support::namespace_store(&store, &fork)
+        .load_current_manifest()
+        .await
+        .expect("the fork's manifest")
+        .payload()
+        .fork_basis
+        .as_ref()
+        .expect("a fork basis")
+        .manifest
+        .head_seq;
+    let bytes = vec![7_u8; 1 << 20];
+    let written = NamespaceFixture::new(&store, &fork, &writer)
+        .put_file(
+            "/big.bin",
+            &bytes,
+            loonfs_types::DestinationBehavior::NoReplace,
+            None,
+        )
+        .await
+        .expect("write the fork's file");
+    let loonfs_types::FilesystemChange::FileCreated {
+        inode_id,
+        content_ref,
+        ..
+    } = written.events[0].clone()
+    else {
+        panic!("expected a file creation");
+    };
+    crate::test_support::namespace_store(&store, &fork)
+        .fold_wal()
+        .await
+        .expect("fold the fork");
+    let layout = crate::test_support::namespace_store(&store, &fork)
+        .load_current_metadata_view()
+        .await
+        .expect("the fork's view")
+        .metadata_view()
+        .content_layout(&content_ref.content_id)
+        .await
+        .expect("layout lookup")
+        .expect("the fork's layout row")
+        .layout;
+
+    let create = intent(
+        "land-big",
+        vec![FilesystemOperation::CreateFileByInode {
+            parent_inode_id: loonfs_types::ROOT_INODE_ID,
+            display_name: loonfs_types::DisplayName::parse("big.bin").expect("name"),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: content_ref.clone(),
+                source_namespace_id: None,
+            },
+        }],
+    );
+    let proof = PreparedContent::for_family_member(main.clone(), content_ref, layout, u64::MAX);
+    let candidate = CommitCandidate::prepared(create, vec![proof]).with_land(
+        LandRecord {
+            source_namespace_id: fork.clone(),
+            source_after_seq: fork_point_seq,
+            source_through_seq: written.committed_seq,
+        },
+        fork_point_seq,
+        BTreeMap::from([(0, inode_id)]),
+    );
+    store.reset();
+    main_fixture
+        .publish_candidates(vec![candidate])
+        .await
+        .pop()
+        .expect("one result")
+        .expect("land the file");
+    let landed = LandedFile {
+        store,
+        main,
+        fork,
+        inode_id,
+        bytes,
+    };
+    (directory, landed)
+}
+
+async fn stat<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> loonfs_types::PathEntry {
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_metadata_view()
+        .await
+        .expect("view")
+        .stat_inode(
+            inode_id,
+            loonfs_types::options::AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("stat by inode ID")
+}
+
+/// Checks that a land admits a fork's file from the reference and layout
+/// that the fork's rows record, without reading the file's bytes. The test
+/// store caches no content, so a read of the bytes would reach the store, as
+/// the read after the land does.
+#[tokio::test]
+async fn a_land_of_a_forks_file_reads_none_of_its_bytes() {
+    let (_directory, landed) = land_a_forks_file().await;
+    assert_eq!(landed.store.count(OperationSelector::Any), 0);
+
+    let read = crate::test_support::namespace_store(&landed.store, &landed.main)
+        .load_current_metadata_view()
+        .await
+        .expect("view")
+        .read_file_bytes_by_inode(
+            landed.inode_id,
+            None,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("read the landed file");
+    assert_eq!(read.bytes, landed.bytes);
+    assert!(landed.store.count(OperationSelector::Read) > 0);
+}
+
+/// Checks that a land creates a fork's inode under the fork's ID, so a stat
+/// by that ID finds the same file in both namespaces.
+#[tokio::test]
+async fn a_land_creates_the_forks_inode_under_the_forks_id() {
+    let (_directory, landed) = land_a_forks_file().await;
+    let in_main = stat(&landed.store, &landed.main, landed.inode_id).await;
+    let in_fork = stat(&landed.store, &landed.fork, landed.inode_id).await;
+    assert_eq!(
+        (&in_main.inode_id, &in_main.path),
+        (&in_fork.inode_id, &in_fork.path)
+    );
+    let file = |entry: &loonfs_types::PathEntry| match &entry.kind {
+        loonfs_types::PathEntryKind::File {
+            revision_no,
+            size_bytes,
+            content_ref,
+            ..
+        } => (*revision_no, *size_bytes, content_ref.clone()),
+        other => panic!("expected a file, got {other:?}"),
+    };
+    assert_eq!(file(&in_main), file(&in_fork));
 }
 
 /// Folds the WAL, advances the retention floor to `target`, compacts every
@@ -405,4 +746,131 @@ async fn a_land_whose_fork_point_is_below_the_retention_floor_is_refused() {
                 if fork_point_seq == FORK_POINT && retention_floor_seq == floor
         );
     }
+}
+
+/// The inode that a commit's first event created.
+fn created_inode(commit: &Commit) -> InodeId {
+    match &commit.events[0] {
+        loonfs_types::FilesystemChange::DirectoryCreated { inode_id, .. } => *inode_id,
+        other => panic!("expected a directory creation, got {other:?}"),
+    }
+}
+
+/// Checks that a land failed at `operation_index` with `InvalidCommitRequest`
+/// and `message`.
+fn assert_refused_land(error: CoreError, operation_index: u32, message: &str) {
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert_matches!(
+        error,
+        CoreError::FailedOperation { operation_index: index, error }
+            if index == operation_index
+                && matches!(&*error, CoreError::InvalidCommitRequest(actual) if actual == message)
+    );
+}
+
+/// Checks that a land can't create an inode under an ID that the namespace
+/// already has, whether an ordinary commit or an earlier land created it, or
+/// under one ID twice, and that a refused land publishes nothing.
+#[tokio::test]
+async fn a_land_refuses_an_inode_id_that_already_exists() {
+    let (_directory, store, namespace_id, writer) = setup().await;
+    let ordinary = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        create_dir("ordinary", "ordinary"),
+    )
+    .await
+    .expect("an ordinary commit");
+    let landed = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        land_candidate("first", "first", land(3, 7)),
+    )
+    .await
+    .expect("the first land");
+    let repeated = fork_inode_id();
+    let creates = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| FilesystemOperation::CreateDirectoryByInode {
+                parent_inode_id: loonfs_types::ROOT_INODE_ID,
+                display_name: loonfs_types::DisplayName::parse(*name).expect("display name"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let cases = [
+        (vec![(0, created_inode(&ordinary))], 0),
+        (vec![(0, created_inode(&landed))], 0),
+        (vec![(0, repeated), (1, repeated)], 1),
+    ];
+    for (assigned, refused_index) in cases {
+        let inode_id = assigned[refused_index].1;
+        let candidate = CommitCandidate::new(intent("again", creates(&["one", "two"]))).with_land(
+            land(7, 9),
+            FORK_POINT,
+            assigned.into_iter().collect(),
+        );
+        let error = publish(&store, &namespace_id, &writer, candidate)
+            .await
+            .expect_err("a land of an inode ID that exists");
+        assert_refused_land(
+            error,
+            u32::try_from(refused_index).expect("index"),
+            &format!("a land creates inode `{inode_id}`, which already exists"),
+        );
+    }
+    assert_eq!(feed(&store, &namespace_id).await, [ordinary, landed]);
+}
+
+/// Checks that a land whose inode IDs don't match its creates fails instead
+/// of panicking the publisher: a create without an ID, and an ID for an
+/// operation that creates no inode.
+#[tokio::test]
+async fn a_land_whose_inode_ids_dont_match_its_creates_is_refused() {
+    let (_directory, store, namespace_id, writer) = setup().await;
+    let directory = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        create_dir("directory", "directory"),
+    )
+    .await
+    .expect("an ordinary commit");
+    let update = FilesystemOperation::UpdateAttributesByInode {
+        inode_id: created_inode(&directory),
+        set: BTreeMap::from([(
+            loonfs_types::AttributeKey::parse("key").expect("key"),
+            loonfs_types::AttributeValue::parse("value").expect("value"),
+        )]),
+        remove: Vec::new(),
+        expected_attributes_revision_no: None,
+    };
+    let assigned = fork_inode_id();
+    let cases = [
+        (
+            CommitCandidate::new(create_dir_request("unassigned", "unassigned")).with_land(
+                land(3, 7),
+                FORK_POINT,
+                BTreeMap::new(),
+            ),
+            "a land operation creates an inode but has no assigned inode ID".to_owned(),
+        ),
+        (
+            CommitCandidate::new(intent("misassigned", vec![update])).with_land(
+                land(3, 7),
+                FORK_POINT,
+                BTreeMap::from([(0, assigned)]),
+            ),
+            format!("a land assigned inode `{assigned}` to an operation that creates no inode"),
+        ),
+    ];
+    for (candidate, message) in cases {
+        let error = publish(&store, &namespace_id, &writer, candidate)
+            .await
+            .expect_err("a land whose IDs don't match its creates");
+        assert_refused_land(error, 0, &message);
+    }
+    assert_eq!(feed(&store, &namespace_id).await, [directory]);
 }
