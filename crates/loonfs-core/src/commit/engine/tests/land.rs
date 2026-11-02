@@ -747,3 +747,130 @@ async fn a_land_whose_fork_point_is_below_the_retention_floor_is_refused() {
         );
     }
 }
+
+/// The inode that a commit's first event created.
+fn created_inode(commit: &Commit) -> InodeId {
+    match &commit.events[0] {
+        loonfs_types::FilesystemChange::DirectoryCreated { inode_id, .. } => *inode_id,
+        other => panic!("expected a directory creation, got {other:?}"),
+    }
+}
+
+/// Checks that a land failed at `operation_index` with `InvalidCommitRequest`
+/// and `message`.
+fn assert_refused_land(error: CoreError, operation_index: u32, message: &str) {
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert_matches!(
+        error,
+        CoreError::FailedOperation { operation_index: index, error }
+            if index == operation_index
+                && matches!(&*error, CoreError::InvalidCommitRequest(actual) if actual == message)
+    );
+}
+
+/// Checks that a land can't create an inode under an ID that the namespace
+/// already has, whether an ordinary commit or an earlier land created it, or
+/// under one ID twice, and that a refused land publishes nothing.
+#[tokio::test]
+async fn a_land_refuses_an_inode_id_that_already_exists() {
+    let (_directory, store, namespace_id, writer) = setup().await;
+    let ordinary = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        create_dir("ordinary", "ordinary"),
+    )
+    .await
+    .expect("an ordinary commit");
+    let landed = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        land_candidate("first", "first", land(3, 7)),
+    )
+    .await
+    .expect("the first land");
+    let repeated = fork_inode_id();
+    let creates = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| FilesystemOperation::CreateDirectoryByInode {
+                parent_inode_id: loonfs_types::ROOT_INODE_ID,
+                display_name: loonfs_types::DisplayName::parse(*name).expect("display name"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let cases = [
+        (vec![(0, created_inode(&ordinary))], 0),
+        (vec![(0, created_inode(&landed))], 0),
+        (vec![(0, repeated), (1, repeated)], 1),
+    ];
+    for (assigned, refused_index) in cases {
+        let inode_id = assigned[refused_index].1;
+        let candidate = CommitCandidate::new(intent("again", creates(&["one", "two"]))).with_land(
+            land(7, 9),
+            FORK_POINT,
+            assigned.into_iter().collect(),
+        );
+        let error = publish(&store, &namespace_id, &writer, candidate)
+            .await
+            .expect_err("a land of an inode ID that exists");
+        assert_refused_land(
+            error,
+            u32::try_from(refused_index).expect("index"),
+            &format!("a land creates inode `{inode_id}`, which already exists"),
+        );
+    }
+    assert_eq!(feed(&store, &namespace_id).await, [ordinary, landed]);
+}
+
+/// Checks that a land whose inode IDs don't match its creates fails instead
+/// of panicking the publisher: a create without an ID, and an ID for an
+/// operation that creates no inode.
+#[tokio::test]
+async fn a_land_whose_inode_ids_dont_match_its_creates_is_refused() {
+    let (_directory, store, namespace_id, writer) = setup().await;
+    let directory = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        create_dir("directory", "directory"),
+    )
+    .await
+    .expect("an ordinary commit");
+    let update = FilesystemOperation::UpdateAttributesByInode {
+        inode_id: created_inode(&directory),
+        set: BTreeMap::from([(
+            loonfs_types::AttributeKey::parse("key").expect("key"),
+            loonfs_types::AttributeValue::parse("value").expect("value"),
+        )]),
+        remove: Vec::new(),
+        expected_attributes_revision_no: None,
+    };
+    let assigned = fork_inode_id();
+    let cases = [
+        (
+            CommitCandidate::new(create_dir_request("unassigned", "unassigned")).with_land(
+                land(3, 7),
+                FORK_POINT,
+                BTreeMap::new(),
+            ),
+            "a land operation creates an inode but has no assigned inode ID".to_owned(),
+        ),
+        (
+            CommitCandidate::new(intent("misassigned", vec![update])).with_land(
+                land(3, 7),
+                FORK_POINT,
+                BTreeMap::from([(0, assigned)]),
+            ),
+            format!("a land assigned inode `{assigned}` to an operation that creates no inode"),
+        ),
+    ];
+    for (candidate, message) in cases {
+        let error = publish(&store, &namespace_id, &writer, candidate)
+            .await
+            .expect_err("a land whose IDs don't match its creates");
+        assert_refused_land(error, 0, &message);
+    }
+    assert_eq!(feed(&store, &namespace_id).await, [directory]);
+}

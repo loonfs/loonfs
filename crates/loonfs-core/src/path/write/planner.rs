@@ -86,18 +86,26 @@ pub(super) enum CreatedInodeIds<'p> {
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     /// Returns the ID of the next inode that the commit creates.
-    pub(super) fn next_inode_id(&mut self) -> InodeId {
+    ///
+    /// A land whose operation creates an inode without an assigned ID, or
+    /// more than one inode, fails with `InvalidCommitRequest`. Only a bug in
+    /// the land's planner causes that. A panic would return
+    /// `commit_outcome_unknown` and panic again on every retry, so the land
+    /// fails with an error that the caller doesn't retry.
+    pub(super) fn next_inode_id(&mut self) -> Result<InodeId> {
         match &mut self.created_inode_ids {
             CreatedInodeIds::Generated { next_create_no } => {
                 let create_no = **next_create_no;
                 **next_create_no = create_no.checked_add(1).expect(
                     "a commit should create fewer inodes than its 32-bit delta positions allow",
                 );
-                InodeId::generate(self.committed_seq, create_no)
+                Ok(InodeId::generate(self.committed_seq, create_no))
             }
-            CreatedInodeIds::Land(assigned) => assigned
-                .take()
-                .expect("a land should assign the fork's ID to each inode that it creates"),
+            CreatedInodeIds::Land(assigned) => assigned.take().ok_or_else(|| {
+                CoreError::InvalidCommitRequest(
+                    "a land operation creates an inode but has no assigned inode ID".to_owned(),
+                )
+            }),
         }
     }
 

@@ -2455,7 +2455,7 @@ A direct multipart upload is also subject to the provider's transfer limits. The
 
 Attribute limits count the original UTF-8 strings, before JSON escaping or CBOR encoding. Path limits apply to canonical request paths.
 
-A [land](glossary.md#land) isn't held to the API's request limits on the number of operations, preconditions, content tokens, and content references, because LoonFS plans a land itself instead of reading it from a request body. `MAX_WAL_OBJECT_BYTES` bounds a land instead: LoonFS checks the land's planned WAL record against it, as it does for every commit, and a land that exceeds it fails with `land_too_large`.
+A [land](glossary.md#land) isn't held to the API's request limits on the number of operations, preconditions, content tokens, and content references, because LoonFS plans a land itself instead of reading it from a request body. `MAX_WAL_OBJECT_BYTES` bounds a land instead: LoonFS checks the land's planned WAL record against it, as it does for every commit, and a land that exceeds it fails with `land_too_large`. The reference server's limit on the total estimated bytes of the commit requests it has admitted (`max_admitted_bytes`) bounds a land too, as the `land_too_large` row in the API's [Standard error contract](api.md#3-standard-error-contract) describes.
 
 ### C.4 Reference-implementation sizing and admission defaults
 

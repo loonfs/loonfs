@@ -78,9 +78,10 @@ pub enum CoreError {
         estimated_bytes: usize,
         max_bytes: usize,
     },
-    /// A land's planned WAL record doesn't fit in one WAL object. The caller
+    /// A land's estimated bytes exceed the WAL object's size or the
+    /// publisher's admitted-bytes total, so no retry can admit it. The caller
     /// lands the fork's commits in smaller ranges.
-    #[error("land is too large for one WAL object: estimated {estimated_bytes} bytes exceeds the limit of {max_bytes} bytes")]
+    #[error("land is too large: estimated {estimated_bytes} bytes exceeds the limit of {max_bytes} bytes")]
     LandTooLarge {
         estimated_bytes: usize,
         max_bytes: usize,

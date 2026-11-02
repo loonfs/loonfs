@@ -1,6 +1,7 @@
-//! Lands in the publisher's queue: each land is published in a WAL object of
-//! its own, and a land queued behind another land from the same fork is
-//! checked against the state that includes the first.
+//! Lands in the publisher's queue: a land's admission, each land is
+//! published in a WAL object of its own, and a land queued behind another
+//! land from the same fork is checked against the state that includes the
+//! first.
 
 use super::*;
 use loonfs_test_support::stores::RecordedOperation;
@@ -112,4 +113,59 @@ async fn a_land_is_published_alone_in_its_wal_object() {
         ]
     );
     publisher.wait_for_worker().await;
+}
+
+/// Checks that the publisher admits and publishes a land above its
+/// namespace's byte allowance, which refuses an ordinary commit of about the
+/// same weight with `commit_queue_full`, and that a land above the whole
+/// host total fails with `land_too_large`.
+#[tokio::test]
+async fn a_land_is_held_to_the_host_total_and_not_the_namespace_allowance() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("main").expect("namespace");
+    let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let runtime = test_runtime(store);
+    create_namespace(&runtime, &namespace_id).await;
+    let admission_bytes = |candidate: CommitCandidate| {
+        PreparedCandidate::new(candidate)
+            .expect("prepare")
+            .estimated_retained_bytes
+            + 512
+            + namespace_id.as_str().len()
+    };
+    let land_bytes = admission_bytes(land("land", "landed"));
+    let publisher_with_total = |max_admitted_bytes: usize| {
+        let mut core = TestCore::unpaced();
+        core.config.publication.max_estimated_bytes_per_namespace =
+            NonZeroUsize::new(land_bytes - 1).expect("allowance");
+        core.execution_budget = ExecutionBudget::builder()
+            .max_admitted_bytes(NonZeroUsize::new(max_admitted_bytes).expect("total"))
+            .build();
+        standalone_publisher_with(&namespace_id, &runtime, core)
+    };
+
+    let publisher = publisher_with_total(land_bytes);
+    assert_matches!(
+        try_admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request("ordinary", "ordinary")
+        ),
+        Err(CoreError::CommitQueueFull)
+    );
+    let landed = recv_commit(
+        try_admit_candidate(&publisher, &namespace_id, land("land", "landed"))
+            .expect("admit a land above the namespace allowance"),
+        "land",
+    )
+    .await;
+    assert!(landed.land.is_some());
+    publisher.wait_for_worker().await;
+
+    let smaller = publisher_with_total(land_bytes - 1);
+    assert_matches!(
+        try_admit_candidate(&smaller, &namespace_id, land("land", "landed")),
+        Err(CoreError::LandTooLarge { estimated_bytes, max_bytes })
+            if estimated_bytes == land_bytes && max_bytes == land_bytes - 1
+    );
 }
