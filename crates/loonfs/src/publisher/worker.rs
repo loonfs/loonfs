@@ -560,9 +560,9 @@ pub(super) fn elapsed_ms_from(start: u64, end: u64) -> u64 {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "the publication pacing and the write-stop wait decide when a request publishes or \
-              returns, not whether a publication is valid"
+    reason = "the publication pacing, the write-stop wait, and a merge's fold budget decide when \
+              a request publishes or returns, not whether a publication is valid"
 )]
-pub(super) async fn sleep_ms(delay_ms: u64) {
+pub(crate) async fn sleep_ms(delay_ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 }

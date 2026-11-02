@@ -61,9 +61,9 @@ pub use loonfs_types::options::{
     Consistency, CopyOptions, CreateDirectoryOptions, CreateNamespaceOptions,
     CreateSnapshotOptions, DeleteByInodeOptions, DeleteNamespaceOptions, DeleteOptions,
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, GcOptions,
-    ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions, MoveOptions,
-    PutFileOptions, ReadAt, ReadFileOptions, ReadRange, StatOptions, UndeleteDestination,
-    UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions, MergeForkOptions,
+    MoveOptions, PutFileOptions, ReadAt, ReadFileOptions, ReadRange, StatOptions,
+    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
     UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 

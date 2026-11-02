@@ -303,6 +303,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "merge_fork",
+        SdkName {
+            group: &["namespaces"],
+            method: "merge",
+            request: None,
+        },
+    ),
+    (
         "probe_store",
         SdkName {
             group: &["maintenance", "store"],

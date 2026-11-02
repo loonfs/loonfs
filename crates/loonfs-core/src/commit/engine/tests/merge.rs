@@ -12,7 +12,7 @@ use crate::compaction::{
 use crate::manifest::RetentionTarget;
 use crate::test_support::NamespaceFixture;
 use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES};
-use loonfs_types::{CompactorEpoch, EffectiveLimit, InodeId, Merge};
+use loonfs_types::{AbsolutePath, CompactorEpoch, DisplayName, EffectiveLimit, InodeId, Merge};
 use std::collections::BTreeMap;
 
 /// The sequence of `main` that the tests' fork was made at.
@@ -301,6 +301,40 @@ fn intent(commit_id: &str, operations: Vec<FilesystemOperation>) -> CommitIntent
     }
 }
 
+/// Checks that a merge with no operations commits its record, which the
+/// merge index and the change feed report, while an ordinary commit with no
+/// operations is still refused.
+#[tokio::test]
+async fn a_merge_with_no_operations_commits_its_record() {
+    let (_directory, store, namespace_id, writer) = setup().await;
+    let error = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        CommitCandidate::new(intent("empty", Vec::new())),
+    )
+    .await
+    .expect_err("an ordinary commit with no operations");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+    let record = merge(3, 7);
+    let merged = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        CommitCandidate::new(intent("empty-merge", Vec::new())).with_merge(
+            record.clone(),
+            FORK_POINT,
+            BTreeMap::new(),
+        ),
+    )
+    .await
+    .expect("a merge with no operations");
+    assert!(merged.events.is_empty());
+    assert_eq!(merged.merge, Some(reported(&record)));
+    assert_eq!(feed(&store, &namespace_id).await, [merged]);
+}
+
 /// Checks that a merge isn't held to the operation count that limits a
 /// request body, and that its creates make inodes under the fork's IDs.
 #[tokio::test]
@@ -405,8 +439,12 @@ async fn a_merge_over_the_wal_object_bound_fails_with_merge_too_large_and_writes
         .expect_err("a merge over the bound");
     assert_matches!(
         error,
-        CoreError::MergeTooLarge { estimated_bytes, max_bytes }
-            if estimated_bytes > max_bytes && max_bytes == MAX_WAL_OBJECT_BYTES
+        CoreError::MergeTooLarge {
+            bound: crate::error::MergeBound::WalObject,
+            estimated_bytes,
+            max_bytes,
+            split_at_seq: None,
+        } if estimated_bytes > max_bytes && max_bytes == MAX_WAL_OBJECT_BYTES
     );
     assert_eq!(error.code(), ErrorCode::MergeTooLarge);
     assert_eq!(
@@ -747,8 +785,10 @@ async fn a_merge_whose_fork_point_is_below_the_retention_floor_is_refused() {
         assert_eq!(details.retention_floor_seq, Some(floor));
         assert_matches!(
             error,
-            CoreError::MergeRebootstrapRequired { fork_point_seq, retention_floor_seq }
-                if fork_point_seq == FORK_POINT && retention_floor_seq == floor
+            CoreError::MergeRebootstrapRequired {
+                below: crate::error::MergeHistory::ForkPoint { fork_point_seq },
+                retention_floor_seq,
+            } if fork_point_seq == FORK_POINT && retention_floor_seq == floor
         );
     }
 }
@@ -878,4 +918,188 @@ async fn a_merge_whose_inode_ids_dont_match_its_creates_is_refused() {
         assert_refused_merge(error, 0, &message);
     }
     assert_eq!(feed(&store, &namespace_id).await, [directory]);
+}
+
+/// A subject of the tests' ACL namespace with `principals`.
+fn acl_subject(principals: &[&str]) -> loonfs_types::Subject {
+    loonfs_types::Subject {
+        principal_scope: loonfs_types::PrincipalScope::parse("org_demo").expect("scope"),
+        subject_id: loonfs_types::SubjectId::parse("subject").expect("subject id"),
+        principals: loonfs_types::PrincipalSet::new(
+            principals
+                .iter()
+                .map(|id| loonfs_types::PrincipalId::parse(id).expect("principal id"))
+                .collect(),
+        )
+        .expect("principals"),
+    }
+}
+
+fn acl_grants(principal: &str, rights: &[loonfs_types::AccessRight]) -> loonfs_types::AccessGrants {
+    loonfs_types::AccessGrants::new(BTreeMap::from([(
+        loonfs_types::PrincipalId::parse(principal).expect("principal"),
+        loonfs_types::AccessRights::from_iter(rights.iter().copied()),
+    )]))
+    .expect("grants")
+}
+
+/// Checks that the subject's rights are checked against a merge's net
+/// change, and not against the temporary directory of a move that a
+/// temporary name splits in two. `prn_team` can create and remove entries in
+/// `/x` and `/y`, and has no right on `/t`. A swap of `/x/a` and `/y/b` whose
+/// first move goes through a temporary name in `/t` commits when the merge
+/// marks the two legs, and is refused when it doesn't. The swapped entries
+/// are directories, which need no content.
+#[tokio::test]
+async fn a_swap_through_a_temporary_name_needs_no_right_on_the_temporary_directory() {
+    use loonfs_types::AccessRight;
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("main").expect("namespace");
+    let writer = context("writer");
+    let fixture = NamespaceFixture::new(&store, &namespace_id, &writer);
+    fixture
+        .create_with_options(&crate::options::CreateNamespaceOptions {
+            access: loonfs_types::NamespaceAccess::Acl {
+                principal_scope: loonfs_types::PrincipalScope::parse("org_demo").expect("scope"),
+                root_grants: acl_grants("prn_root", &[AccessRight::Admin]),
+            },
+            ..Default::default()
+        })
+        .await
+        .expect("create");
+    let path = |path: &str| AbsolutePath::parse(path).expect("path");
+    let team = acl_grants("prn_team", &[AccessRight::Create, AccessRight::Remove]);
+    let mut operations: Vec<_> = ["/x", "/y", "/t"]
+        .map(|directory| FilesystemOperation::CreateDirectory {
+            path: path(directory),
+            parents: false,
+        })
+        .into();
+    for (directory, boundary, grants) in [
+        ("/x", false, team.clone()),
+        ("/y", false, team.clone()),
+        ("/t", true, acl_grants("prn_root", &[AccessRight::Read])),
+    ] {
+        operations.push(FilesystemOperation::UpdateAccess {
+            path: path(directory),
+            boundary,
+            grants,
+            expected_inode_id: None,
+            expected_access_revision_no: None,
+        });
+    }
+    let root = acl_subject(&["prn_root"]);
+    publish(
+        &store,
+        &namespace_id,
+        &writer,
+        CommitCandidate::new(intent("layout", operations).with_subject(root.clone())),
+    )
+    .await
+    .expect("the layout");
+    for file in ["/x/a", "/y/b"] {
+        publish(
+            &store,
+            &namespace_id,
+            &writer,
+            CommitCandidate::new(
+                intent(
+                    &format!("create-{}", &file[1..2]),
+                    vec![FilesystemOperation::CreateDirectory {
+                        path: path(file),
+                        parents: false,
+                    }],
+                )
+                .with_subject(root.clone()),
+            ),
+        )
+        .await
+        .expect("the entry");
+    }
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
+    let entry = |path: &'static str| {
+        let view = &view;
+        async move {
+            view.resolve_path(
+                path,
+                loonfs_types::options::AttributeInclusion::Omit,
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            )
+            .await
+            .expect("entry")
+        }
+    };
+    let (a, b, x, t) = (
+        entry("/x/a").await,
+        entry("/y/b").await,
+        entry("/x").await,
+        entry("/t").await,
+    );
+    let temporary = DisplayName::parse(a.inode_id.to_string()).expect("name");
+    let swap = |commit_id: &str| {
+        CommitCandidate::new(
+            intent(
+                commit_id,
+                vec![
+                    FilesystemOperation::MoveByInode {
+                        inode_id: a.inode_id,
+                        expected_binding_version: a.binding_version.clone().expect("version"),
+                        destination_parent_inode_id: t.inode_id,
+                        destination_display_name: temporary.clone(),
+                        precondition: Default::default(),
+                    },
+                    FilesystemOperation::MoveByInode {
+                        inode_id: b.inode_id,
+                        expected_binding_version: b.binding_version.clone().expect("version"),
+                        destination_parent_inode_id: x.inode_id,
+                        destination_display_name: DisplayName::parse("a").expect("name"),
+                        precondition: Default::default(),
+                    },
+                    FilesystemOperation::MovePath {
+                        source_path: path(&format!("/t/{temporary}")),
+                        destination_path: path("/y/b"),
+                        precondition: Default::default(),
+                    },
+                ],
+            )
+            .with_subject(acl_subject(&["prn_team"])),
+        )
+        .with_merge(merge(3, 7), FORK_POINT, BTreeMap::new())
+    };
+    let error = publish(&store, &namespace_id, &writer, swap("unmarked"))
+        .await
+        .expect_err("the temporary directory refuses an unmarked leg");
+    assert!(
+        matches!(
+            error.code(),
+            ErrorCode::Forbidden | ErrorCode::InodeNotFound | ErrorCode::PathNotFound
+        ),
+        "{error}"
+    );
+    let marked = swap("marked").with_temporary_moves(BTreeMap::from([
+        (0, crate::commit::engine::TemporaryMove::Away),
+        (
+            2,
+            crate::commit::engine::TemporaryMove::Back {
+                from_parent: x.inode_id,
+            },
+        ),
+    ]));
+    publish(&store, &namespace_id, &writer, marked)
+        .await
+        .expect("the swap commits");
+    let view = namespace.load_current_metadata_view().await.expect("view");
+    for (path, inode_id) in [("/x/a", b.inode_id), ("/y/b", a.inode_id)] {
+        let moved = view
+            .resolve_path(
+                path,
+                loonfs_types::options::AttributeInclusion::Omit,
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            )
+            .await
+            .expect("entry");
+        assert_eq!(moved.inode_id, inode_id, "{path}");
+    }
 }

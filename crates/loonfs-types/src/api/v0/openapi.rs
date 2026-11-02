@@ -37,9 +37,12 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.composite::<GrepIndex, GrepIndexStatus>("status", Some("unknown"));
     named.composite::<StoreProbeCheck, StoreProbeCheckOutcome>("outcome", Some("unknown"));
     named.plain::<DiffEntryKind>("unknown");
+    named.plain::<MergeBound>("unknown");
+    named.plain::<MergeConflictKind>("unknown");
     named.plain::<MetadataMaintenanceOutcome>("unknown");
     named.plain::<UploadMode>("unknown");
     named.object::<ErrorDetails>();
+    named.object::<MergeConflictVersion>();
     named.maximum::<CreateDownloadRequest>("max_staleness_ms", READ_REVALIDATION_BOUND_MS);
     named.maximum::<CreateDownloadByInodeRequest>("max_staleness_ms", READ_REVALIDATION_BOUND_MS);
     named.maximum::<CreateRevisionDownloadByInodeRequest>(

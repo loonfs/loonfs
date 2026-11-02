@@ -1,5 +1,6 @@
 //! The error response body for the v0 HTTP API.
 
+use super::merges::{MergeBound, MergeConflict};
 use crate::control::WriterBlock;
 use crate::ErrorCode;
 use crate::{
@@ -183,6 +184,23 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_after_seq: Option<ChangeSeq>,
+    /// The number of inodes whose change a refused merge can't apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub conflict_count: Option<u64>,
+    /// The first inode whose change a refused merge can't apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub conflict: Option<MergeConflict>,
+    /// The bound that a merge's size exceeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub merge_bound: Option<MergeBound>,
+    /// The fork sequence that a shorter merge can end at, for a merge that
+    /// exceeded a bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub split_at_seq: Option<ChangeSeq>,
     /// The head sequence that the request required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]

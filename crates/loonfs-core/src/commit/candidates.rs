@@ -9,7 +9,7 @@ use super::{CommitFingerprint, CommitPlan};
 use crate::authorize::Authorizer;
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
-use crate::metadata::CommitReceiptRecord;
+use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::path::write::{CommitIntent, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::inline_content::InlineContent;
@@ -171,25 +171,29 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
 ) -> Result<Option<CandidateAdmission>> {
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
         return Ok(Some(CandidateAdmission::independent(
-            commit_response_from_commit_receipt(view, &existing, semantic_identity).await,
+            commit_response_from_commit_receipt(
+                view.metadata_view(),
+                &view.head().namespace_id,
+                &existing,
+                semantic_identity,
+            )
+            .await,
         )));
     }
     Ok(dedup.admit(index, commit_id, semantic_identity))
 }
 
-/// Builds a replay response from the commit receipt and its retained commit row.
-async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
-    view: &PublishMetadataView<'_, S>,
+/// Builds a replay response from the commit receipt and its retained commit
+/// row in `namespace_id`'s `metadata`.
+pub(crate) async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
+    metadata: MetadataView<'_, '_, S>,
+    namespace_id: &NamespaceId,
     record: &CommitReceiptRecord,
     semantic_identity: &CommitFingerprint,
 ) -> Result<Commit> {
     // Commits and receipts share a family group and floor rule, so the commit
     // remains while its receipt does.
-    let commit = match view
-        .metadata_view()
-        .commit_at_seq(record.committed_seq)
-        .await
-    {
+    let commit = match metadata.commit_at_seq(record.committed_seq).await {
         Ok(Some(commit)) => commit,
         Ok(None) => {
             return Err(CoreError::NamespaceCorrupt(format!(
@@ -216,7 +220,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
             }),
         });
     }
-    crate::changes::committed_change_from_wal_record(&view.head().namespace_id, &commit)
+    crate::changes::committed_change_from_wal_record(namespace_id, &commit)
 }
 
 pub(crate) fn validate_inline_content_references<'a>(

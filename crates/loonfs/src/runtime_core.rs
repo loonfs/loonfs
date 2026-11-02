@@ -17,7 +17,7 @@ use loonfs_core::{
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{
     u64_from_usize, CapabilityDocument, MonotonicTimer, Subject, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS,
+    API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS, FEATURE_MERGES,
     LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
@@ -261,8 +261,11 @@ impl RuntimeCore {
                 API_GROUP_MAINTENANCE_V0.to_owned(),
             ],
             // The runtime pages the change feed and the diff, so it
-            // implements every way they page.
-            features: BTreeMap::from([(FEATURE_CHANGES_SPLIT_COMMITS.to_owned(), true)]),
+            // implements every way they page, and it merges forks.
+            features: BTreeMap::from([
+                (FEATURE_CHANGES_SPLIT_COMMITS.to_owned(), true),
+                (FEATURE_MERGES.to_owned(), true),
+            ]),
             limits: {
                 let mut limits = loonfs_types::pagination_capability_limits();
                 limits.insert(

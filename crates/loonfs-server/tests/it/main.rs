@@ -17,6 +17,7 @@ mod http_commits;
 mod http_inodes;
 mod http_limits;
 mod http_maintenance;
+mod http_merges;
 mod http_metrics;
 mod http_pagination;
 mod http_paths;

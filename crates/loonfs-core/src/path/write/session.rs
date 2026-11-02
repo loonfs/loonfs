@@ -7,7 +7,7 @@ use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, MergeIntent};
 use crate::commit::{AppendedContent, CommitFingerprint, CommitPlan, CommitValidationSession};
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, MergeHistory, Result};
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::tail_content::{cut_layout, materialize_content_layout, ContentWrites};
@@ -185,6 +185,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             );
         }
         for (index, operation) in request.operations.iter().enumerate() {
+            let temporary_move = candidate
+                .merge()
+                .and_then(|merge| merge.temporary_moves.get(&index).copied());
             let created_inode_ids = match candidate.merge() {
                 Some(merge) => {
                     let assigned = merge.created_inode_ids.get(&index).copied();
@@ -205,6 +208,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 content_writes: self.content_writes,
                 committed_seq,
                 created_inode_ids,
+                temporary_move,
             };
             let compiled = operation_session
                 .plan(operation)
@@ -354,7 +358,9 @@ async fn ensure_merge_is_admissible<S: ObjectStore + ?Sized>(
     let retention_floor_seq = view.retention_floor_seq();
     if merge.fork_point_seq < retention_floor_seq {
         return Err(CoreError::MergeRebootstrapRequired {
-            fork_point_seq: merge.fork_point_seq,
+            below: MergeHistory::ForkPoint {
+                fork_point_seq: merge.fork_point_seq,
+            },
             retention_floor_seq,
         });
     }

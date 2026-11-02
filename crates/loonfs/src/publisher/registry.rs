@@ -1,7 +1,7 @@
 //! The table of live writer sessions, and the changes that mutations outside
 //! the publisher make to a namespace.
 
-use super::admission::PublicationAdmission;
+use super::admission::{AdmissionPermit, PublicationAdmission};
 use super::{lock_state, FoldTrigger, NamespacePublisher, PublisherContext};
 use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
@@ -15,7 +15,7 @@ use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
 use loonfs_core::{Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
+use loonfs_types::{ChangeSeq, CommitId, ManifestNo, NamespaceId};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -122,6 +122,11 @@ pub(crate) struct NamespaceSession {
     pub(super) publisher: NamespacePublisher,
 }
 
+/// The merge slot that a merge keeps from before its plan until its commit
+/// settles, so the merge allowance covers the merge's planning and its
+/// publication.
+pub(crate) struct MergeSlot(Arc<AdmissionPermit>);
+
 impl Drop for NamespaceSession {
     fn drop(&mut self) {
         self.publisher.forget_if_ended();
@@ -137,6 +142,35 @@ impl NamespaceSession {
     /// the caller is cancelled.
     pub(crate) async fn submit_candidate(&self, candidate: CommitCandidate) -> Result<Commit> {
         self.publisher.submit_candidate(candidate).await
+    }
+
+    /// Refuses a merge that wouldn't fit one WAL object or the merge
+    /// allowance, with `merge_too_large`, and charges nothing.
+    pub(crate) fn validate_merge(&self, candidate: &CommitCandidate) -> Result<()> {
+        self.publisher.validate_merge(candidate)
+    }
+
+    /// Takes the merge slot for a merge under `commit_id`, before the merge
+    /// is planned. Another merge, into any namespace that shares the
+    /// execution budget, gets `commit_queue_full` until the slot is dropped.
+    pub(crate) fn acquire_merge_slot(&self, commit_id: &CommitId) -> Result<MergeSlot> {
+        Ok(MergeSlot(self.publisher.acquire_merge_slot(commit_id)?))
+    }
+
+    /// Submits a merge under `slot`. Admitted work continues if the caller is
+    /// cancelled.
+    pub(crate) async fn submit_merge(
+        &self,
+        candidate: CommitCandidate,
+        slot: &MergeSlot,
+    ) -> Result<Commit> {
+        self.publisher.submit_merge(candidate, &slot.0).await
+    }
+
+    /// Returns the merge allowance that admission checks a merge against,
+    /// which the merge planner checks as it plans.
+    pub(crate) fn merge_allowance(&self) -> loonfs_core::MergeAllowance {
+        self.publisher.merge_allowance()
     }
 
     /// Submits a namespace deletion, sequenced as a barrier: mutations

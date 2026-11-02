@@ -61,6 +61,15 @@ pub struct PublicationPolicy {
     /// reference server uses half of its `request_deadline_ms`.
     #[serde(skip)]
     pub write_stop_wait_budget_ms: u64,
+    /// The time from a merge's start after which the merge skips the fold
+    /// of the WAL tail through its commit, and the next maintenance pass
+    /// folds the tail. Defaults to 30,000 ms.
+    ///
+    /// It isn't a key of the serde form. A host sets it from its own request
+    /// deadline, so a merge returns before the request's deadline passes.
+    /// The reference server uses half of its `request_deadline_ms`.
+    #[serde(skip)]
+    pub merge_fold_budget_ms: u64,
 }
 
 impl Default for PublicationPolicy {
@@ -69,6 +78,7 @@ impl Default for PublicationPolicy {
             max_requests_per_namespace: const { NonZeroUsize::new(1024).unwrap() },
             max_estimated_bytes_per_namespace: const { NonZeroUsize::new(8 * 1024 * 1024).unwrap() },
             write_stop_wait_budget_ms: 30_000,
+            merge_fold_budget_ms: 30_000,
         }
     }
 }

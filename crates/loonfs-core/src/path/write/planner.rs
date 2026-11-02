@@ -11,6 +11,7 @@ use super::preconditions::{
 use super::publish_path_planning::{
     CompiledFilesystemOperation, Destination, PlanningView, Target,
 };
+use crate::commit::engine::TemporaryMove;
 use crate::commit::{CommitFingerprint, NewChild};
 use crate::error::{CoreError, Result};
 use crate::storage::tail_content::ContentWrites;
@@ -71,6 +72,9 @@ pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
     /// The sequence that the commit is assigned.
     pub(super) committed_seq: ChangeSeq,
     pub(super) created_inode_ids: CreatedInodeIds<'p>,
+    /// The leg of a merge's move through a temporary name that the operation
+    /// is, if it's one.
+    pub(super) temporary_move: Option<TemporaryMove>,
 }
 
 /// Where the IDs of the inodes that one operation creates come from.

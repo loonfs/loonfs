@@ -4,6 +4,7 @@ use crate::path::write::CommitIntent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::wal::{
     cbor_map_bytes, cbor_string_bytes, MergeRecord, WalCommitDelta, WalInlineContent,
+    MAX_WAL_OBJECT_BYTES,
 };
 use loonfs_types::{
     AbsolutePath, AccessRight, ActorId, CommitId, ContentRef, FilesystemOperation,
@@ -211,8 +212,31 @@ const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
         - 9
 }
 
+/// The smallest bound of an operation that a merge plans: a directory
+/// create, a revision, a delete, or an attribute or access update. (A move
+/// and a file create bound more than a delete and a directory create.)
+pub(crate) const MIN_MERGE_OPERATION_BYTES: usize = smaller(
+    smaller(
+        CREATE_INODE_BYTES + BIND_BYTES + NAMES_BYTES,
+        REVISION_BYTES,
+    ),
+    smaller(DELETE_BYTES, smaller(ATTRIBUTES_BYTES, ACCESS_BYTES)),
+);
+
+/// The most inodes that a merge can change and still fit one WAL object,
+/// because each inode in a merge's change needs at least one operation.
+pub(crate) const MAX_MERGED_INODES: usize = MAX_WAL_OBJECT_BYTES / MIN_MERGE_OPERATION_BYTES;
+
+const fn smaller(left: usize, right: usize) -> usize {
+    if left < right {
+        left
+    } else {
+        right
+    }
+}
+
 /// Bounds a commit record's fields other than its deltas and pieces.
-fn commit_fields_bytes(
+pub(crate) fn commit_fields_bytes(
     commit_id: &CommitId,
     actor_id: &ActorId,
     message: Option<&str>,
@@ -309,7 +333,9 @@ pub(crate) fn merge_wal_record_bytes(
 }
 
 /// Bounds one operation of a merge, with the layout of `layout_extents`
-/// extents that its revision delta records.
+/// extents that its revision delta records. The merge planner's running
+/// bound and [`merge_wal_record_bytes`] both add operations up with it, so
+/// the two agree.
 pub(crate) fn merge_operation_bytes(
     operation: &FilesystemOperation,
     layout_extents: Option<usize>,

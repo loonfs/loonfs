@@ -84,9 +84,10 @@ pub struct ServerConfig {
     /// Maximum publication batches running at once. Defaults to 8.
     pub max_concurrent_publications: Option<NonZeroUsize>,
     /// The per-namespace admission limits of the server's runtime. The
-    /// write-stop wait isn't a key of this table: the server sets it to half
-    /// of `request_deadline_ms`, so a commit that waits for the whole wait
-    /// returns `maintenance_required` before its request returns
+    /// write-stop wait and the merge's fold budget aren't keys of this table:
+    /// the server sets each to half of `request_deadline_ms`, so a commit that
+    /// waits for the whole wait returns `maintenance_required`, and a merge
+    /// returns without its fold, before the request returns
     /// `deadline_exceeded`.
     #[serde(default)]
     pub publication: loonfs::PublicationPolicy,
@@ -385,6 +386,7 @@ impl ServerConfig {
             min_publish_interval_ms: self.min_publish_interval_ms,
             publication: loonfs::PublicationPolicy {
                 write_stop_wait_budget_ms: self.request_deadline_ms / 2,
+                merge_fold_budget_ms: self.request_deadline_ms / 2,
                 ..self.publication.clone()
             },
             inline_content: self.inline_content.clone(),

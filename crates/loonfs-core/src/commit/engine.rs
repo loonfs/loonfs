@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 mod candidate;
 
 pub use self::candidate::{CommitCandidate, ContentPreparationError};
-pub(crate) use self::candidate::{ContentPreparation, MergeIntent};
+pub(crate) use self::candidate::{ContentPreparation, MergeIntent, TemporaryMove};
 
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {

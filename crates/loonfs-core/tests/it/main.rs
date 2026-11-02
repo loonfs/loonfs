@@ -16,6 +16,7 @@ mod fork_lifecycle;
 mod inode_mutations;
 mod layout_acceptance;
 mod manifest_statistics;
+mod merge_planning;
 mod namespace_listing;
 mod path_intents;
 mod tree_listing;

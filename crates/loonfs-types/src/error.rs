@@ -144,6 +144,7 @@ error_codes! {
     WouldCycle => "would_cycle",
     CommitIdReuseConflict => "commit_id_reuse_conflict",
     MergeRangeConflict => "merge_range_conflict",
+    MergeConflict => "merge_conflict",
     CommitOutcomeUnknown => "commit_outcome_unknown",
     OutcomeUnknown => "outcome_unknown",
     CommitQueueFull => "commit_queue_full",
@@ -236,6 +237,9 @@ impl ErrorCode {
             | ErrorCode::CommitIdReuseConflict
             // A merge doesn't continue the previous merge from its fork.
             | ErrorCode::MergeRangeConflict
+            // The fork changed an inode that the merged-into namespace
+            // changed too.
+            | ErrorCode::MergeConflict
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
             | ErrorCode::RebootstrapRequired => ErrorKind::Conflict,
@@ -286,6 +290,7 @@ impl ErrorCode {
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict
             | ErrorCode::MergeRangeConflict
+            | ErrorCode::MergeConflict
             | ErrorCode::CommitOutcomeUnknown
             | ErrorCode::OutcomeUnknown
             | ErrorCode::WriterSessionClosed
@@ -328,7 +333,8 @@ impl ErrorCode {
             | ErrorCode::BindingVersionMismatch
             | ErrorCode::NotDeleted
             | ErrorCode::WouldCycle
-            | ErrorCode::MergeRangeConflict => true,
+            | ErrorCode::MergeRangeConflict
+            | ErrorCode::MergeConflict => true,
             ErrorCode::InvalidRequest
             | ErrorCode::Unauthorized
             | ErrorCode::Forbidden

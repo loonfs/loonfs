@@ -1,12 +1,15 @@
-//! Namespace lifecycle: creating, reading, deleting, and forking namespaces.
+//! Namespace lifecycle: creating, reading, deleting, forking, and merging
+//! namespaces.
 
 use crate::operations::{self};
 use crate::transport::QueryBuilder;
 use crate::{Client, Result};
-use loonfs_types::options::{CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions};
+use loonfs_types::options::{
+    CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, MergeForkOptions,
+};
 use loonfs_types::{
-    headers, ActorId, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
-    ForkNamespaceRequest, NamespaceId, NamespaceMetadata,
+    headers, ActorId, Commit, CommitId, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
+    ForkNamespaceRequest, MergeForkRequest, NamespaceId, NamespaceMetadata,
 };
 
 impl Client {
@@ -128,6 +131,49 @@ impl Client {
                 .json(&ForkNamespaceRequest {
                     new_namespace_id: new_namespace_id.clone(),
                     snapshot_id: options.snapshot_id.clone(),
+                })?,
+        )
+        .await
+    }
+
+    /// Merges the fork `source_namespace_id`'s commits into `namespace_id` as
+    /// one commit, through the fork's head.
+    pub async fn merge_fork(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.merge_fork_with_options(
+            namespace_id,
+            source_namespace_id,
+            actor,
+            &MergeForkOptions::default(),
+        )
+        .await
+    }
+
+    /// Merges the fork `source_namespace_id`'s commits into `namespace_id` as
+    /// one commit, through `options.through_seq` or the fork's head, under
+    /// `options.commit_id` or a generated commit ID.
+    pub async fn merge_fork_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        actor: &ActorId,
+        options: &MergeForkOptions,
+    ) -> Result<Commit> {
+        let url = self.namespace_url(namespace_id, "/merges");
+        // The request's commit ID resolves an ambiguous resend through the
+        // merge's durable receipt.
+        self.send_json(
+            self.request(operations::MERGE_FORK, &url)
+                .header(headers::ACTOR, actor.as_str())
+                .json(&MergeForkRequest {
+                    source_namespace_id: source_namespace_id.clone(),
+                    through_seq: options.through_seq,
+                    commit_id: options.commit_id.clone().unwrap_or_else(CommitId::generate),
+                    message: options.message.clone(),
                 })?,
         )
         .await

@@ -17,7 +17,7 @@ use super::handlers_inodes::{
 use super::handlers_maintenance::run_maintenance;
 use super::handlers_namespace::{
     create_namespace, delete_namespace, fork_namespace, get_capabilities, get_namespace,
-    get_namespace_diagnostics,
+    get_namespace_diagnostics, merge_fork,
 };
 use super::handlers_query::{
     disable_grep_index, enable_grep_index, get_grep_index, grep, grep_index_not_maintained,
@@ -97,6 +97,7 @@ routes! {
     "/v0/namespaces" => { POST create_namespace },
     "/v0/namespaces/{namespace_id}" => { GET get_namespace, DELETE delete_namespace },
     "/v0/namespaces/{namespace_id}/forks" => { POST fork_namespace },
+    "/v0/namespaces/{namespace_id}/merges" => { POST merge_fork },
     "/v0/namespaces/{namespace_id}/snapshots" => { POST create_snapshot, GET list_snapshots },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend" => { POST extend_snapshot },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}" => {

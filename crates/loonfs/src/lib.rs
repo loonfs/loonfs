@@ -107,13 +107,14 @@ pub use loonfs_types::{
     NameKey, NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry,
     PathEntryKind, PinId, RetainedCandidates, RetainedReason, RevisionNo,
     SetRetentionWindowResponse, Snapshot, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MERGES,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
-    FilesystemChange, ListChangesResponse, ObjectTransferAccess, UploadContentClaim, UploadMode,
-    UploadSession, UploadSessionStatus,
+    FilesystemChange, ListChangesResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
+    MergeConflictVersion, ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession,
+    UploadSessionStatus,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
@@ -234,10 +235,11 @@ pub use options::{
     AttributeChanges, CommitOptions, Consistency, CopyOptions, CreateDirectoryOptions,
     CreateSnapshotOptions, DeleteByInodeOptions, DeleteOptions, DiffOptions,
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
-    ListFileRevisionsOptions, ListOptions, ListTrashOptions, MaintainMetadataOptions, MoveOptions,
-    PutFileOptions, ReadAt, ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadRange,
-    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
-    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    ListFileRevisionsOptions, ListOptions, ListTrashOptions, MaintainMetadataOptions,
+    MergeForkOptions, MoveOptions, PutFileOptions, ReadAt, ReadConsistency, ReadFileOptions,
+    ReadFileStreamOptions, ReadRange, StatOptions, UndeleteDestination, UndeleteOptions,
+    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    UpdateAttributesOptions,
 };
 pub use pagers::{
     ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
@@ -327,7 +329,9 @@ impl Error {
         match self {
             Self::InvalidRequest { param, .. } => Some((*param).to_owned()),
             Self::Core(CoreError::InvalidCursor(_)) => Some("cursor".to_owned()),
-            Self::Core(CoreError::InvalidDiffRange { param, .. }) => Some((*param).to_owned()),
+            Self::Core(
+                CoreError::InvalidDiffRange { param, .. } | CoreError::InvalidMerge { param, .. },
+            ) => Some((*param).to_owned()),
             Self::Core(CoreError::InvalidEventIndex(_)) => Some("event_index".to_owned()),
             Self::Core(CoreError::ResumeOffsetOutOfRange { .. }) => Some("start_offset".to_owned()),
             Self::Core(CoreError::InvalidSnapshotRequest(_)) => Some("/name".to_owned()),

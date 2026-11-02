@@ -57,6 +57,7 @@ The example below is the reference deployment's document, with the server's defa
     "maintenance.grep.index": true,
     "filesystem.changes.split_commits": true,
     "filesystem.commits.inline_content": true,
+    "filesystem.merges": true,
     "query.grep": true
   },
   "limits": {
@@ -129,12 +130,13 @@ This section defines every feature key and the operations it gates. The registry
 | `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes, and the grep collection in a `gc` run. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes. Its `gc` runs return the core collector's result without an `extensions.grep` report. |
 | `filesystem.changes.split_commits` | The `split_commits` and `event_index` query parameters of `GET /v0/namespaces/{ns}/changes` and `GET /v0/namespaces/{ns}/diff`, and the `next_event_index` field of their responses. | A page with `split_commits=true` can end inside a commit that alone exceeds the page budget, and the next request resumes the commit at an event (see [`GET /changes`](#611-get-changes)). Without the parameter, both routes return each commit whole. |
 | `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | A deployment advertises this key when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, a client uploads the content before committing. |
+| `filesystem.merges` | Merging a fork into a namespace (`POST /v0/namespaces/{ns}/merges`). | The server plans the fork's net change since its previous merge and commits it as one commit, or refuses it with `merge_conflict` (see [`POST /merges`](#614-post-merges)). |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider MUST report a durable whole-object checksum after the write. A deployment advertises the key only on an endpoint that the live conformance suite has run against. The key is independent of `filesystem.uploads.direct_multipart`, so a provider can offer this feature and no multipart API at all. Raw object keys and caller-managed object-store writes aren't part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability for each part. This feature needs an S3-style multipart API in addition to the signing that the other keys need, so a deployment whose provider has no multipart API leaves out this key and can still advertise the others. |
 | `filesystem.downloads.direct_get` | Requesting path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write also advertises this key, because a deployment that lets a client create an object larger than `download.service_proxied.max_content_bytes` has to be able to return that object. Raw object keys aren't part of this feature. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | A data-dependent capability (see [Data-dependent features](#23-data-dependent-features)). A grep request also requires a materialized, active grep manifest, and a namespace without one returns `not_supported` whatever this key's value is. |
 
-`maintenance.grep.index` is the only feature key in `maintenance/v0`, and splitting commits across pages, inline commit content, and the three direct transfers are the only features in `filesystem/v0`. Every other operation in those two API groups is required, including creating, forking, and deleting namespaces and the snapshot routes.
+`maintenance.grep.index` is the only feature key in `maintenance/v0`, and splitting commits across pages, inline commit content, merges, and the three direct transfers are the only features in `filesystem/v0`. Every other operation in those two API groups is required, including creating, forking, and deleting namespaces and the snapshot routes.
 
 Listing namespaces isn't supported in v0, so callers MUST address namespaces by ID.
 
@@ -201,7 +203,9 @@ The codes that populate it:
 | `stale_access` | `inode_id`, `expected_access_revision_no` (absent when the caller stated no expectation), and `actual_access_revision_no` (absent when the inode isn't visible), plus `precondition_index` for a failed request precondition. |
 | `binding_version_mismatch` | `inode_id`, `expected_binding_version` (the request's token as supplied), and `actual_binding_version` (the current binding's token, absent when the inode isn't visible), plus `precondition_index` for a failed request precondition. Clients MUST NOT parse or order the tokens. |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the server detected the conflict from a durable commit receipt. `committed_seq` is the sequence that `commit_id` was already committed at, and `committed_fingerprint` is the semantic identity of what was committed there (see [Commit identity and preconditions](#51-commit-identity-and-preconditions)). The sequence comes from the receipt, and the fingerprint comes from the retained commit row at that sequence, so both are present or neither is. Both are absent when nothing has been committed under the ID yet and two live requests are claiming it at once. |
-| `rebootstrap_required` | `retention_floor_seq`, plus the sequence that fell below it: `after_seq` for a change feed request, `from_seq` for a diff request, or `fork_point_seq` for a merge. |
+| `rebootstrap_required` | `retention_floor_seq`, plus the sequence that fell below it: `after_seq` for a change feed request, `from_seq` for a diff request, or for a merge, `fork_point_seq` when the fork point is below the floor of the namespace being merged into. When the start of a merge's range is below the fork's own floor, the details include `source_namespace_id` (the fork) and `actual_after_seq` (the range's start), and `retention_floor_seq` is the fork's floor. |
+| `merge_conflict` | `conflict_count`, the number of inodes whose change conflicts, and `conflict`, a conflict entry that describes the conflicting inode with the smallest ID (see [POST /merges](#614-post-merges)). It's the only object nested in the details. |
+| `merge_too_large` | `merge_bound`, the bound that the merge exceeded. The code's row in the registry below lists its values. For a range that touched too many inodes, `split_at_seq`, the last fork commit before the one that crossed the bound, when a shorter range ends there. |
 | `merge_range_conflict` | `source_namespace_id` identifies the fork, `expected_after_seq` is the fork sequence that the merge had to start after (where the fork's previous merge stopped, or the fork point for its first merge), and `actual_after_seq` is the sequence that the merge started after. |
 | `stale_head` | `expected_head_seq` and `actual_head_seq` for a caller-supplied head precondition, plus `precondition_index` for a failed request precondition. |
 | `forbidden` | `inode_id`. |
@@ -222,7 +226,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `unauthorized` | 401 | The credentials are missing or wrong. |
 | `forbidden` | 403 | The subject lacks authority that the operation needs: some but not all of the required rights on a checked inode, the authority that a move or access update requires, administrator rights on an administrator-only operation, or the namespace's principal scope. If the subject has no rights on a checked inode, the request returns `path_not_found` or `inode_not_found` instead (see [Authorization in ACL namespaces](#authorization-in-acl-namespaces)). |
 | `content_too_large` | 413 | A request or proxied response exceeds its size limit. Every JSON request body MUST fit within 2 MiB, except on the upload operations, which have their own limits. One append contains at most 256 KiB. Send smaller proxied uploads, or use `direct_put` when it's available. Multipart completions MUST fit within `upload.complete.max_request_body_bytes`. For large proxied reads, read the file in ranges, or request a download grant when `filesystem.downloads.direct_get` is available. |
-| `merge_too_large` | 413 | A [merge](glossary.md#merge) is larger than one of the two bounds that apply to a merge in place of the request limits: the size of one WAL object (512 MiB), or the server's merge allowance, which limits the estimated peak memory of publishing the one merge that the server admits at a time (`max_merge_bytes` in the reference server, 512 MiB by default). The server estimates that peak as three times the merge's planned WAL bytes. (This version has no route that commits a merge.) In either case, merge the fork's commits in smaller ranges: a merge of the commits after `P` through `T2` that's too large becomes a merge of the commits after `P` through `T1`, followed by a merge of the commits after `T1` through `T2`. Each piece is a complete merge of its range. A single fork commit whose changes exceed the size of one WAL object can't be split, and it can't be merged. One that exceeds only the merge allowance can be merged on a server with a higher allowance. In the reference implementation, the upper bound on a created file's WAL bytes, which LoonFS computes before planning, is about 4,850 bytes, so one WAL object fits about 110,000 file creates. The allowance is charged three times that bound for each created file, so the default allowance admits a merge of about 36,000 file creates. With the defaults, a fork commit that creates more inodes than that (for example, many deep paths whose parent directories the commit creates) has to be made as several smaller commits so that they can be merged, or the server needs a higher allowance. |
+| `merge_too_large` | 413 | A [merge](glossary.md#merge) is larger than one of the two bounds that apply to a merge in place of the request limits: the size of one WAL object (512 MiB), or the server's merge allowance, which limits the estimated peak memory of publishing the one merge that the server admits at a time (`max_merge_bytes` in the reference server, 512 MiB by default). The server estimates that peak as three times the merge's planned WAL bytes. A merge whose range touched more inodes than one WAL object could contain an operation for returns this code too, before the server reads those inodes. The details' `merge_bound` says which bound refused the merge: `wal_object`, `merge_allowance`, or `touched_inodes` for a range that touched too many inodes. Clients MUST tolerate other values. For `touched_inodes`, the details also include `split_at_seq`, the sequence of the last fork commit before the one that crossed the bound, unless that commit was the range's first. A merge through `split_at_seq` passes that bound. In either case, merge the fork's commits in smaller ranges: a merge of the commits after `P` through `T2` that's too large becomes a merge of the commits after `P` through `T1`, followed by a merge of the commits after `T1` through `T2`. Each piece is a complete merge of its range. A single fork commit whose changes exceed the size of one WAL object can't be split, and it can't be merged. One that exceeds only the merge allowance can be merged on a server with a higher allowance. In the reference implementation, the upper bound on a created file's WAL bytes, which LoonFS computes before planning, is about 4,850 bytes, so one WAL object fits about 110,000 file creates. The allowance is charged three times that bound for each created file, so the default allowance admits a merge of about 36,000 file creates. With the defaults, a fork commit that creates more inodes than that (for example, many deep paths whose parent directories the commit creates) has to be made as several smaller commits so that they can be merged, or the server needs a higher allowance. |
 | `range_not_satisfiable` | 416 | A ranged read's range starts at or past the end of the file. The error's details include the file's size, so the client can choose a range that the file can satisfy. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists, but it doesn't serve this HTTP method. |
@@ -247,15 +251,16 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `writer_fenced` | 409 | Another writer superseded this session. The session is dead, and this request fails. The host drops the session, and a later request opens a new session whose first publication takes the namespace back. Repeated fencing of one namespace means that two writers are receiving its traffic. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The commit ID was reused with different content. |
-| `merge_range_conflict` | 409 | A [merge](glossary.md#merge) doesn't continue the previous merge from its fork: its range starts before the previous merge's range ends (an overlap) or after it (a gap), or a fork's first merge doesn't start at the fork point. Read the fork's previous merge, and merge the fork's commits from where it stopped. Clients don't retry this code automatically. |
+| `merge_range_conflict` | 409 | A [merge](glossary.md#merge) doesn't continue the previous merge from its fork: its range starts before the previous merge's range ends (an overlap) or after it (a gap), or a fork's first merge doesn't start at the fork point. The merge route reads the fork's previous merge itself, so this means that two merges of one fork ran at once, and the second was planned before the first committed. Merge the fork again with a new commit ID. Clients don't retry this code automatically. |
+| `merge_conflict` | 409 | The fork's change conflicts with the namespace being merged into, under the conflict rule ([Validation](format.md#62-validation)). After the fork point, the namespace changed an inode that the fork changed, hid the inode, or created or moved another inode to the name that the fork's create or move needs. Nothing is committed. The details include `conflict_count` and `conflict`, the first conflict. Clients don't retry this code automatically. |
 | `upload_already_completed` | 409 | The upload session is already completed, so it can't select other content and can't be aborted. |
 | `upload_content_conflict` | 409 | Different bytes were already staged under this upload ID. Open a new session. (Staging the same bytes again succeeds.) |
 | `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index can't narrow the candidates. Rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
-| `rebootstrap_required` | 409 | The sequence that the request starts from is below the retention floor, so the namespace no longer has the history after it. The sequence is a change feed's `after_seq` or a diff's `from_seq`. Rebuild state from a fresh listing or snapshot. (This version has no route that commits a [merge](glossary.md#merge).) The writer refuses a merge with this code when the fork point (the sequence of this namespace that the fork was made at) is below the retention floor. Once the floor is above the fork point, a compaction might have removed the fork's previous merge from the [merge index](glossary.md#merge-index), and then the writer can't check that the new merge continues the previous one. A fork can be merged only while the floor is at or below its fork point, so the changes of a fork whose fork point is below the floor have to be merged through a new fork of the current head. |
+| `rebootstrap_required` | 409 | The sequence that the request starts from is below the retention floor, so the namespace no longer has the history after it. The sequence is a change feed's `after_seq` or a diff's `from_seq`. Rebuild state from a fresh listing or snapshot. A [merge](glossary.md#merge) returns this code when the fork point (the sequence of this namespace that the fork was made at) is below the retention floor. Once the floor is above the fork point, a compaction might have removed the fork's previous merge from the [merge index](glossary.md#merge-index), and then the writer can't check that the new merge continues the previous one. A merge also returns this code when the start of its range is below the fork's own retention floor, because the fork's change over the range can't be computed from history that the fork no longer keeps. The details say which floor. Such a fork can't be merged, so the caller makes a new fork of the current head and replays the changes it wants to keep through ordinary reads and writes. |
 | `not_supported` | 501 | The deployment doesn't implement the requested operation or feature. |
 | `commit_outcome_unknown` | 503 | The outcome of the publication wasn't observed, so the commit might or might not be visible. Retry with the same commit ID, or reconcile. |
 | `outcome_unknown` | 503 | The outcome of a write other than a commit wasn't observed, so the operation might or might not have taken effect. Read the resource before retrying. |
-| `commit_queue_full` | 503 | The namespace's write queue is full. Back off and retry. A merge also receives this code while the server has admitted another merge, into any namespace, because the server admits one merge at a time. A merge larger than the server's merge allowance receives `merge_too_large` instead. |
+| `commit_queue_full` | 503 | The namespace's write queue is full. Back off and retry. A merge also receives this code while another merge, into any namespace, has the server's merge slot, which a merge takes before it plans and keeps until its commit settles, because the server admits one merge at a time. A merge larger than the server's merge allowance receives `merge_too_large` instead. |
 | `writer_session_closed` | 503 | This node has no open writer session for the namespace. The request wasn't admitted. Retry on the node that the namespace is assigned to. |
 | `server_busy` | 503 | The server is at its configured concurrency limit for requests, proxied upload bodies, or proxied content reads. Back off and retry. |
 | `shutting_down` | 503 | The serving process stopped admitting requests because it's shutting down. Work that was admitted earlier still finishes. Retry against a live instance. |
@@ -544,7 +549,7 @@ Four request headers contain identity information. `Loonfs-Actor` is for attribu
 
 | Operations | `Loonfs-Actor` | Subject context |
 | --- | --- | --- |
-| `create_commit` | Required. Recorded as `committed_by`. | Required in an ACL namespace. |
+| `create_commit`, `merge_fork` | Required. Recorded as `committed_by`. | Required in an ACL namespace. |
 | `create_namespace` | Required. Recorded as `created_by`. | Not read. |
 | `fork_namespace` | Required. Recorded as `created_by`. | Optional. When it's present, an ACL source requires an administrator subject. When it's absent, the request acts as the token holder. |
 | `delete_namespace`, `create_snapshot`, `list_snapshots`, `get_snapshot`, `extend_snapshot`, `delete_snapshot`, `list_changes`, `list_diff` | Not required. | Optional, with the same administrator rule as `fork_namespace`. |
@@ -586,7 +591,7 @@ To retry a commit, a client resubmits the same request with the same `commit_id`
 
 A new `commit_id` means a new commit. After `commit_outcome_unknown`, a transport failure, or a process restart, the client retries with the original ID and request. There's no separate commit-status lookup.
 
-A merge's identity is its fork and range, not its operations, because LoonFS plans a merge's operations itself. A retry of a merge with the same `commit_id`, fork, and range returns the original commit, and a request that reuses the `commit_id` for a different range returns `commit_id_reuse_conflict`. A merge with a new `commit_id` has to continue the previous merge from its fork, and a merge of a range that's already been merged returns `merge_range_conflict`, so each of a fork's commits is merged at most once.
+A merge's identity is its fork and range, not its operations, because LoonFS plans a merge's operations itself. A retry of a merge with the same `commit_id`, fork, and range returns the original commit, and a request that reuses the `commit_id` for a different range returns `commit_id_reuse_conflict`. The merge route finds the range from the namespace's merge index, so before it reads the index, it looks up the receipt of the request's `commit_id` and returns the original merge if one was committed. Otherwise a retry after a successful merge would compute the next range, and its identity would differ from the original's. A merge with a new `commit_id` has to continue the previous merge from its fork, and a merge of a range that's already been merged returns `merge_range_conflict`, so each of a fork's commits is merged at most once.
 
 These retry rules apply while the [commit receipt](glossary.md#commit-receipt) is kept. Once the retention floor passes the commit and the metadata runs are rebuilt, the receipt is removed. The same ID can then be used for a new commit, so a late retry might apply the operation again. For example, a replacing put might append another revision with the same content. An application that retries beyond this window MUST check whether the original operation took effect.
 
@@ -750,6 +755,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and never moves the expiry earlier. |
 | Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin, and a missing ID succeeds) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header. |
+| Merge a fork | `merge_fork` | `replayable` | `POST /v0/namespaces/{ns}/merges`. Requires the `Loonfs-Actor` header. |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
@@ -760,7 +766,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable` (idempotent) |
 | Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/disable` (idempotent) |
-| Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#615-get-metrics).) |
+| Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#616-get-metrics).) |
 
 ### Maintenance runs
 
@@ -2646,7 +2652,110 @@ The response contains the new namespace's initial state. Its head sequence and r
 
 If the target ID is active, the server returns `namespace_exists` before it writes a source pin. If the target ID is deleted, the server returns `namespace_deleted` before it writes a source pin. If the fork pin can't be verified, the server returns `checkpoint_unavailable`, and no target namespace is installed.
 
-### 6.14 `GET /grep`
+### 6.14 `POST /merges`
+
+Merges a fork's commits into a namespace as one commit. A [merge](glossary.md#merge) applies the fork's "net change" over a range of its commits. For each inode that the fork's commits in the range touched, the net change is the difference between the inode's state at the end of the range and its state at the start. The range starts after the fork's previous merge into this namespace, or after the "fork point" for the fork's first merge, and it ends at `through_seq` or at the fork's head. The fork point is the sequence of this namespace that the fork was made at, so the first merge of a fork made at sequence 100 applies the fork's commits after 100. The server finds where the range starts, so the caller never supplies the start.
+
+Representative request:
+
+`Loonfs-Actor: usr_8f3c`
+
+```json
+{
+  "source_namespace_id": "demo-branch",
+  "commit_id": "c_merge_demo_branch_1",
+  "message": "Merge demo-branch"
+}
+```
+
+Representative response:
+
+```json
+{
+  "namespace_id": "demo",
+  "commit_id": "c_merge_demo_branch_1",
+  "committed_seq": 431,
+  "committed_by": "usr_8f3c",
+  "committed_at_ms": 1752625100000,
+  "message": "Merge demo-branch",
+  "merge": {
+    "source_namespace_id": "demo-branch",
+    "source_after_seq": 418,
+    "source_through_seq": 425
+  },
+  "events": [
+    {
+      "kind": "content_changed",
+      "inode_id": "ino_000000r0000013kje0d47gc8kw",
+      "revision_no": 9,
+      "content_ref": {
+        "kind": "blob_v1",
+        "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
+        "size_bytes": 20591,
+        "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
+      }
+    }
+  ]
+}
+```
+
+| Request field | Meaning |
+| --- | --- |
+| `source_namespace_id` | The fork. The manifest that the fork was made from has to belong to this namespace, so a fork of a fork merges into the fork it was made from. |
+| `through_seq` | Optional. The fork sequence that the merge applies the fork's commits through. It has to be above the range's start and at or below the fork's head, and it defaults to the head. |
+| `commit_id` | The merge's idempotency key. |
+| `message` | Optional. An annotation that's part of the merge's identity. |
+
+The response is the merge's commit, with its `merge` record, as for every route that commits. The events are the ones that the merge's operations produced, and an empty net change has no events. A large merge is one large WAL object, and reads replay the merge from this namespace's WAL tail until a [fold](glossary.md#fold) writes the tail into a manifest, so the server folds the tail through the merge before it responds. If the merge has already run for half of the request deadline (`request_deadline_ms` in the reference server), the server skips that fold, and the next maintenance pass folds the tail.
+
+To merge a fork, the server:
+
+1. Looks up the commit receipt of `commit_id`, and returns the original merge if one was committed, without folding or planning anything.
+2. Takes the merge slot, which one merge at a time keeps from its plan until its commit settles, and returns `commit_queue_full` if another merge has it.
+3. Checks that the fork was made from this namespace, and reads the fork point.
+4. Refuses a fork point below this namespace's retention floor with `rebootstrap_required`.
+5. Reads this namespace's [merge index](glossary.md#merge-index) for the fork's newest merge, which sets where the range starts, and refuses a start below the fork's own retention floor with `rebootstrap_required`.
+6. Folds the fork, so that each content reference in the merge's commit has a layout in the fork's manifest.
+7. Computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` if the range's commits touched more inodes than one WAL object could contain an operation for, or if the commit wouldn't fit one WAL object or the merge allowance.
+8. Classifies the change against this namespace's head under the conflict rule ([Validation](format.md#62-validation)), and returns `merge_conflict` if any inode conflicts.
+9. Commits the merge as the only commit in its WAL object. If the commit fails with `stale_head`, the server keeps the slot, goes back to step 1, and plans the same range again, up to three times, before it returns `stale_head`. Another merge of the fork that committed in between makes the later plan return `merge_range_conflict`.
+10. Folds this namespace's tail through the merge, unless the request has used half of its deadline.
+
+A refused merge commits nothing. The size check comes before the conflict check, so a conflict always refers to a range that fits one commit.
+
+The merge's commit applies the net change with inode-addressed operations, and each operation's precondition is this namespace's current value, such as the binding version of an inode that the merge moves. If this namespace changes between the plan and the commit, the commit fails with that precondition's error, as any commit does. Another writer can also add an item below a directory without changing a row that those preconditions cover. So when the merge deletes or moves a directory, the commit also expects this namespace's head to be the head that the plan read, and the commit fails with `stale_head` if the head moved. An inode that the merge creates keeps its ID from the fork, and each content reference comes from the fork's rows, so the merge reads no file bytes.
+
+The commit orders its changes so that each change runs after the changes that it depends on. A delete or a move that frees a name runs before the create or the move that takes the name. A directory's create runs before the creates and moves into the directory, and a move out of a directory runs before the directory's delete, and before a move that puts the directory below that item. When moves wait on each other in a cycle, such as two files that swap names, one of the inodes first moves to a temporary name, its inode ID, with a numeric suffix when an inode already has that name. The temporary name goes in the parent of a directory that the merge deletes, when the inode has to leave that directory, and otherwise in the directory that the inode moves to, or in its current directory. The change feed shows both of the inode's moves, the first to the temporary name, but no read sees the temporary name, because the commit applies at once. The revision, attribute, and access updates follow the binding changes. The recursive delete of a directory deletes the items below the directory, so the commit doesn't delete those items separately, unless the merge first moves one of their ancestors out. If no order works, the merge returns `invalid_request`. If the net change is empty, because the fork undid its changes within the range or adopted this namespace's version of everything it changed, the commit has the merge record and no operations, so the merge index still advances.
+
+The conflict rule compares each inode in the net change with this namespace's head. A row in this namespace is "the fork's own" when it was committed at or below the fork point, or by an earlier merge from this fork. The change to an inode conflicts when the row that the change would replace isn't the fork's own (`content`, `binding`, `attributes`, or `access`), when a deletion hides the inode or the parent of an inode that the fork created or moved (`visibility`), when another inode has the name that the fork's create or move needs (`name`), or when something below a directory that the fork deleted or moved changed after the fork point (`subtree`). A name is free when no inode has the name, or when the inode that has the name is one that the merge deletes or moves away.
+
+The `conflict` field of a `merge_conflict` error's details is a "conflict entry", an object that describes one conflicting inode, here the one with the smallest ID:
+
+| Field | Meaning |
+| --- | --- |
+| `inode_id` | The inode, which has the same ID in the fork and in this namespace. |
+| `kind` | Which check failed: `content`, `binding`, `attributes`, `access`, `visibility`, `name`, or `subtree`. Clients MUST tolerate other values. |
+| `base` | This namespace's version at the fork point, which the fork started from. It's absent for an inode that the fork created. |
+| `ours` | The fork's version at the end of the range. It's absent for an inode that the fork deleted. |
+| `theirs` | This namespace's current version. It's absent when this namespace deleted or hides the inode. For a `name` conflict, `theirs` is the inode that has the name. |
+
+Each version has the inode's `path` there, and for a file, its `revision_no` and `content_ref`. A client reads the base from this namespace by inode and revision number, because this namespace keeps that revision while the fork can merge.
+
+The merge is authorized against its net change, not against the order of its operations. In an ACL namespace, the request needs a subject context, and the subject needs the rights that it would need to make each inode's change directly, checked against this namespace's access rows. A move through a temporary name needs the remove right on the directory that the inode leaves and the create right on the directory that it enters, and no right on the temporary name's directory, because that binding doesn't survive the commit. The subject also needs `read` on each inode in the fork whose change the merge applies, so a subject can't merge a change that the subject can't read.
+
+Errors beyond those that any commit returns:
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `merge_conflict` | 409 | The fork's change conflicts with this namespace. The details include `conflict_count` and `conflict`. |
+| `merge_range_conflict` | 409 | Another merge of the fork committed after this request planned its range. |
+| `merge_too_large` | 413 | The range's commits touched more inodes than one WAL object could contain an operation for, or the commit wouldn't fit one WAL object or the merge allowance. The details' `merge_bound` says which bound refused the merge, and for too many touched inodes, `split_at_seq` is a `through_seq` that passes that bound. Merge a shorter range with `through_seq`. |
+| `rebootstrap_required` | 409 | The fork point is below this namespace's retention floor, or the range's start is below the fork's own floor. The details say which. |
+| `stale_head` | 409 | The merge deletes or moves a directory, and this namespace's head moved between the plan and the commit four times in a row. Retry the merge. |
+| `commit_queue_full` | 503 | Another merge, into any namespace, has the merge slot while the server plans or commits it, and the server admits one merge at a time. Retry later. |
+| `invalid_request` | 400 | The fork doesn't exist, was deleted, or wasn't made from this namespace (`param` is `/source_namespace_id`). Or `through_seq` isn't above the range's start and at or below the fork's head, or the planner couldn't order the merge's operations (`param` is `/through_seq`). |
+
+### 6.15 `GET /grep`
 
 Searches the content of the namespace's files for lines that match a pattern, and returns a page of matches.
 
@@ -2708,7 +2817,7 @@ The `path_prefix` value is a complete absolute path, not a partial prefix of a p
 
 If the namespace has no active grep index, the request returns `not_supported` with the `feature` field set to `query.grep`, the same key that the capability document uses to advertise grep (see [Data-dependent features](#23-data-dependent-features)).
 
-### 6.15 `GET /metrics`
+### 6.16 `GET /metrics`
 
 Returns metrics about what the process has been doing, in Prometheus text exposition format 0.0.4, with `Content-Type: text/plain; version=0.0.4`.
 

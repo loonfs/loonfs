@@ -92,6 +92,7 @@ mod gc;
 mod heap_bytes;
 mod in_flight;
 mod manifest;
+mod merge;
 mod namespace;
 mod object_cache;
 mod options;
@@ -207,14 +208,15 @@ pub use engine::{
     NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, RootAccess, Writable,
 };
 pub use error::{
-    classify_store_failure, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
-    MetadataViewError, Result, WriterFence,
+    classify_store_failure, CoreError, ErrorCode, ErrorKind, MergeBound, MergeHistory,
+    MetadataProjectionLoadError, MetadataViewError, Result, WriterFence,
 };
 pub use gc::{grace_age, GcOptions, GraceAge};
 pub use manifest::{
     next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail, ManifestLoadError,
     PublicationReport, PublishedManifest, RetentionTarget,
 };
+pub use merge::{MergeAllowance, MergePlan, MergeRequest};
 pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{

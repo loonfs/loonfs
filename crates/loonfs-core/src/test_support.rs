@@ -303,3 +303,18 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         NamespaceWriterEngine::writer(self.namespace.clone(), self.writer_id.clone())
     }
 }
+
+/// Makes `candidate` a merge of `record` from a fork made at
+/// `fork_point_seq`.
+///
+/// The candidate's create operations make the inodes that
+/// `created_inode_ids` lists by operation index. This is a hook for a test
+/// outside this crate that publishes a merge without the merge planner.
+pub fn merge_candidate(
+    candidate: crate::commit::engine::CommitCandidate,
+    record: loonfs_types::format::wal::MergeRecord,
+    fork_point_seq: loonfs_types::ChangeSeq,
+    created_inode_ids: std::collections::BTreeMap<usize, loonfs_types::InodeId>,
+) -> crate::commit::engine::CommitCandidate {
+    candidate.with_merge(record, fork_point_seq, created_inode_ids)
+}
