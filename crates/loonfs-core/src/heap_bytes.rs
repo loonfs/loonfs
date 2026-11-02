@@ -6,9 +6,9 @@
 //! tree node, and reference count the value owns. Allocator rounding and
 //! bookkeeping stay outside every budget.
 
-use crate::gc::CompletedUploadSession;
+use crate::gc::{CompletedUploadSession, MemberState};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_types::format::control::{ForkBasis, ManifestRef, WriterBlock};
+use loonfs_types::format::control::{ForkBasis, ManifestRef, PinOwner, PinPayload, WriterBlock};
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
@@ -184,6 +184,12 @@ impl HeapBytes for Checksum {
 impl HeapBytes for CompletedUploadSession {
     fn heap_bytes(&self) -> usize {
         self.content_id.heap_bytes()
+    }
+}
+
+impl HeapBytes for MemberState {
+    fn heap_bytes(&self) -> usize {
+        0
     }
 }
 
@@ -477,6 +483,20 @@ impl HeapBytes for NamespaceReadState {
 impl HeapBytes for ManifestRef {
     fn heap_bytes(&self) -> usize {
         self.owner_namespace_id.heap_bytes() + self.payload_checksum.heap_bytes()
+    }
+}
+
+impl HeapBytes for PinPayload {
+    fn heap_bytes(&self) -> usize {
+        self.namespace_id.heap_bytes()
+            + self.pin_id.heap_bytes()
+            + self.payload_checksum.heap_bytes()
+            + match &self.owner {
+                PinOwner::User { name, .. } => name.heap_bytes(),
+                PinOwner::Fork {
+                    target_namespace_id,
+                } => target_namespace_id.heap_bytes(),
+            }
     }
 }
 

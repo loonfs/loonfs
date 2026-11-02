@@ -1,8 +1,10 @@
 //! Content roots from the layout segments of rooted manifests, kept one ID
-//! shard at a time.
+//! shard at a time. On a family root, the rooted manifests include the layout
+//! views of every other member of its fork family.
 
 use super::charged_set::{Charge, ChargedSet};
-use super::live_set::LiveSet;
+use super::fork_family::FamilyWalkOutcome;
+use super::live_set::{LiveSet, RetirementStatus};
 use super::sweep::{ContentReference, Sweep};
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
@@ -54,10 +56,29 @@ impl<'a> ContentSweep<'a> {
     ) -> Result<Option<Self>> {
         let live = sweep.live;
         let namespace_id = &sweep.namespace.namespace_id;
-        if live.current_tombstone.is_some() {
+        let (family_members, family_members_read) = (live.family.members, live.family.members_read);
+        // A deleted fork sweeps no content until it's retired. A family root
+        // sweeps its family's content whether it's active or deleted, until
+        // its retirement lists and deletes the whole content prefix.
+        if live.current_tombstone.as_ref().is_some_and(|tombstone| {
+            !tombstone.is_family_root() || live.retirement_status() == RetirementStatus::Eligible
+        }) {
             tracing::info!(namespace_id = %namespace_id, shard_width = 0,
-                layout_segments = 0, "collecting namespace");
+                layout_segments = 0, family_members, family_members_read, "collecting namespace");
             return Ok(None);
+        }
+        match live.family.outcome {
+            FamilyWalkOutcome::Complete => {}
+            FamilyWalkOutcome::BudgetExceeded => {
+                tracing::info!(namespace_id = %namespace_id, family_members, family_members_read,
+                    "the fork family's roots weren't all read within the budget; skipped content sweep");
+                return Ok(None);
+            }
+            FamilyWalkOutcome::UnreadableMember => {
+                tracing::info!(namespace_id = %namespace_id, family_members, family_members_read,
+                    "a fork family member's roots couldn't be read; skipped content sweep");
+                return Ok(None);
+            }
         }
         let (segments, segments_charge) = distinct_layout_segments(live)?;
         let mut shard_width = 0;
@@ -71,6 +92,7 @@ impl<'a> ContentSweep<'a> {
         let expected_entries = live.content_layout_rows;
         if !BloomFilter::fits_at_full_size(expected_entries, max_bytes) {
             tracing::info!(namespace_id = %namespace_id, shard_width, layout_segments = 0, expected_entries,
+                family_members, family_members_read,
                 "shared base filter exceeded its byte limit; skipped content sweep");
             return Ok(None);
         }
@@ -79,7 +101,8 @@ impl<'a> ContentSweep<'a> {
         let mut shared =
             BloomFilter::with_max_bytes(expected_entries, sweep.clock.request_at_ms(), max_bytes);
         tracing::info!(namespace_id = %namespace_id, shard_width,
-            layout_segments = segments.len(), "collecting namespace");
+            layout_segments = segments.len(), family_members, family_members_read,
+            "collecting namespace");
         let scanned = scan_layout_extents(sweep, &segments, "", |row, extent| {
             if extent.content_id != row.content_id
                 && shared
@@ -93,6 +116,7 @@ impl<'a> ContentSweep<'a> {
         .await?;
         if scanned.is_break() {
             tracing::info!(namespace_id = %namespace_id, shard_width, layout_segments = segments.len(), expected_entries,
+                family_members, family_members_read,
                 "shared base filter exceeded its byte limit; skipped content sweep");
             return Ok(None);
         }
@@ -194,11 +218,11 @@ async fn scan_layout_extents<S: ObjectStore>(
         &prefix,
         upper_bound.as_deref(),
         |row| {
+            // A member's rows can refer to objects of any owner, and the key
+            // of an object outside the swept prefix matches no listed key.
             let row = content_layout_from_manifest_row(row)?;
             for extent in &row.layout.extents {
-                if extent.owner_namespace_id == sweep.namespace.namespace_id
-                    && visit(&row, extent)?.is_break()
-                {
+                if visit(&row, extent)?.is_break() {
                     return Ok(ControlFlow::Break(()));
                 }
             }

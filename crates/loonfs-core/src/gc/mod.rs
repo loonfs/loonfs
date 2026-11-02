@@ -5,6 +5,7 @@ mod collect;
 mod content;
 mod deletes;
 mod families;
+mod fork_family;
 mod live_set;
 mod options;
 mod pins;
@@ -15,6 +16,7 @@ mod sweep;
 mod tests;
 mod uploads;
 
+pub(crate) use fork_family::MemberState;
 pub use options::GcOptions;
 pub use pins::{grace_age, GraceAge};
 pub(crate) use session_cache::CompletedUploadSession;

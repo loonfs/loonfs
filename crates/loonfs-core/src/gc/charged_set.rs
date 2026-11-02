@@ -4,7 +4,7 @@ use crate::error::{CoreError, Result};
 use crate::heap_bytes::{hash_map_table_bytes, hash_set_table_bytes, HeapBytes};
 use crate::read_working_memory::ReadWorkingMemory;
 use loonfs_types::NamespaceId;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -64,6 +64,13 @@ impl Charge {
         self.pass.held_bytes.fetch_add(bytes, Ordering::Relaxed);
         Ok(())
     }
+
+    /// Grows the reservation to `bytes`, or fails the pass when the memory
+    /// can't fit the difference. A reservation never shrinks, so it keeps the
+    /// most bytes that its collection has needed.
+    fn grow_to(&mut self, bytes: usize) -> Result<()> {
+        self.add(bytes.saturating_sub(self.reserved_bytes))
+    }
 }
 
 impl Drop for Charge {
@@ -103,9 +110,8 @@ impl<T: Eq + std::hash::Hash + HeapBytes> ChargedSet<T> {
         }
         self.heap_bytes += value.heap_bytes();
         self.values.insert(value);
-        let bytes = hash_set_table_bytes(&self.values) + self.heap_bytes;
         self.charge
-            .add(bytes.saturating_sub(self.charge.reserved_bytes))
+            .grow_to(hash_set_table_bytes(&self.values) + self.heap_bytes)
     }
 }
 
@@ -126,7 +132,10 @@ impl<K: Eq + std::hash::Hash + HeapBytes, V: HeapBytes> ChargedMap<K, V> {
         }
     }
 
-    pub(super) fn get(&self, key: &K) -> Option<&V> {
+    pub(super) fn get<Q: Eq + std::hash::Hash + ?Sized>(&self, key: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+    {
         self.entries.get(key)
     }
 
@@ -138,8 +147,38 @@ impl<K: Eq + std::hash::Hash + HeapBytes, V: HeapBytes> ChargedMap<K, V> {
             Some(previous) => self.heap_bytes - previous.heap_bytes() + value_heap_bytes,
             None => self.heap_bytes + key_heap_bytes + value_heap_bytes,
         };
-        let bytes = hash_map_table_bytes(&self.entries) + self.heap_bytes;
         self.charge
-            .add(bytes.saturating_sub(self.charge.reserved_bytes))
+            .grow_to(hash_map_table_bytes(&self.entries) + self.heap_bytes)
+    }
+}
+
+/// A first-in, first-out queue charged for its slots and the heap bytes of
+/// the values it contains.
+pub(super) struct ChargedQueue<T> {
+    values: VecDeque<T>,
+    heap_bytes: usize,
+    charge: Charge,
+}
+
+impl<T: HeapBytes> ChargedQueue<T> {
+    pub(super) fn new(pass: &PassMemory) -> Self {
+        Self {
+            values: VecDeque::new(),
+            heap_bytes: 0,
+            charge: Charge::new(pass),
+        }
+    }
+
+    pub(super) fn push_back(&mut self, value: T) -> Result<()> {
+        self.heap_bytes += value.heap_bytes();
+        self.values.push_back(value);
+        self.charge
+            .grow_to(self.values.capacity() * std::mem::size_of::<T>() + self.heap_bytes)
+    }
+
+    pub(super) fn pop_front(&mut self) -> Option<T> {
+        let value = self.values.pop_front()?;
+        self.heap_bytes -= value.heap_bytes();
+        Some(value)
     }
 }

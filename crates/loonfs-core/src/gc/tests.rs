@@ -48,6 +48,7 @@ use tempfile::tempdir;
 
 mod concurrent_retirement;
 mod fork_chain;
+mod fork_families;
 mod listings;
 mod many_pins;
 mod retirement;
@@ -320,14 +321,13 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .await
         .expect("bootstrap");
     let mut content_keys = publish_owned_content(&store, &namespace_id, 2).await;
+    content_keys.sort();
     let unreferenced_key =
         loonfs_objectstore::keys::content_blob(&namespace_id, &loonfs_types::ContentId::generate());
     store
         .put_if_absent(&unreferenced_key, Bytes::from_static(b"unreferenced"))
         .await
         .expect("unreferenced object");
-    content_keys.push(unreferenced_key);
-    content_keys.sort();
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("user pin");
@@ -355,6 +355,13 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests > 0);
     assert_eq!(report.deleted_checkpoints_by_owner.user, 1);
+    // A deleted family root still sweeps the content that no view refers to.
+    assert_eq!(report.deleted.content_objects, 1);
+    assert!(store
+        .head(&unreferenced_key)
+        .await
+        .expect("unreferenced object")
+        .is_none());
     let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS);
     store.reset();
     let report = crate::test_support::namespace_store(&store, &namespace_id)
@@ -2212,7 +2219,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
 }
 
 #[tokio::test]
-async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_retains_the_record() {
+async fn an_unreadable_or_corrupt_fork_target_keeps_its_pin_and_the_pass_continues() {
     let temp_dir = tempdir().expect("tempdir");
     let source = NamespaceId::parse("source").expect("namespace id");
     let clone = NamespaceId::parse("clone").expect("namespace id");
@@ -2248,14 +2255,12 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
     replace_object(&store, &hint(&clone), Bytes::from_static(b"not json"))
         .await
         .expect("corrupt target manifest");
-    let before = namespace_keys(store.inner(), &source).await;
-    let error = crate::test_support::namespace_store(&store, &source)
+    let report = crate::test_support::namespace_store(&store, &source)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect_err("a corrupt target manifest must fail the source pass");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(error.to_string().contains(&hint(&clone)));
-    assert_eq!(namespace_keys(store.inner(), &source).await, before);
+        .expect("a corrupt target is retained conservatively");
+    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+    assert!(pin_exists(store.inner(), &source, &fork_record.pin_id).await);
 }
 
 #[tokio::test]
@@ -3216,16 +3221,24 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
 #[tokio::test]
 async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery() {
     let directory = tempdir().expect("directory");
+    let root = NamespaceId::parse("root").expect("root");
     let source = NamespaceId::parse("source").expect("source");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix("namespaces/target-"),
     );
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+    crate::test_support::NamespaceFixture::new(&store, &root, &setup)
         .create()
         .await
         .expect("bootstrap");
+    // A fork's pass reads no other member's roots, so only pin cleanup reads
+    // the targets.
+    crate::test_support::NamespaceFixture::new(&store, &root, &setup)
+        .engine()
+        .fork_namespace(&source, &loonfs_test_support::test_actor(), None)
+        .await
+        .expect("fork the source");
     let mut targets = Vec::new();
     for number in 0..6 {
         let target = NamespaceId::parse(format!("target-{number}")).expect("target");
