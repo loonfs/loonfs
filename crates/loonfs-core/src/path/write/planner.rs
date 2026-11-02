@@ -15,9 +15,10 @@ use crate::commit::{CommitFingerprint, NewChild};
 use crate::error::{CoreError, Result};
 use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::wal::LandRecord;
 use loonfs_types::{
     ChangeSeq, CommitFingerprintInput, ContentId, DestinationBehavior, FileContent,
-    InlineContentIdentity, InodeId, NamespaceId,
+    InlineContentIdentity, InodeId, LandFingerprintInput, NamespaceId,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -39,6 +40,23 @@ pub(crate) fn commit_fingerprint(
         operations: &request.operations,
         preconditions: &request.preconditions,
         inline_content_identities,
+    }
+    .fingerprint()
+}
+
+/// Computes the semantic fingerprint of a land, which covers the land record
+/// in place of the request's operations and preconditions.
+pub(crate) fn land_fingerprint(
+    namespace_id: &NamespaceId,
+    request: &CommitIntent,
+    land: &LandRecord,
+) -> CommitFingerprint {
+    LandFingerprintInput {
+        namespace_id,
+        actor_id: &request.actor_id,
+        subject_id: request.subject.as_ref().map(|subject| &subject.subject_id),
+        land,
+        message: request.message.as_deref(),
     }
     .fingerprint()
 }

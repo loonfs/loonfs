@@ -132,7 +132,7 @@ pub use clock::{
 };
 pub use commit_identity::{
     CommitFingerprint, CommitFingerprintInput, CommitFingerprintValidationError,
-    InlineContentIdentity,
+    InlineContentIdentity, LandFingerprintInput,
 };
 pub use content::{
     Checksum, ChecksumAlgorithm, ChecksumDigest, ChecksumHex, ChecksumHexValidationError,

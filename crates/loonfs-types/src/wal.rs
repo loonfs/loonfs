@@ -55,6 +55,19 @@ pub enum WalCodecError {
         /// Format rule violated by the layout.
         reason: &'static str,
     },
+    /// Reports a land record whose range is empty or inverted, or whose source
+    /// is the WAL object's own namespace.
+    #[error(
+        "invalid WAL land record in commit `{seq}` from namespace `{source_namespace_id}`: {reason}"
+    )]
+    InvalidWalLand {
+        /// Commit containing the rejected land record.
+        seq: ChangeSeq,
+        /// The fork that the rejected land record identifies.
+        source_namespace_id: NamespaceId,
+        /// Format rule violated by the land record.
+        reason: &'static str,
+    },
 }
 
 /// Version 1: a zstd-compressed CBOR envelope document that contains the payload as
@@ -369,6 +382,24 @@ pub struct WalInlineContent {
     pub bytes: Vec<u8>,
 }
 
+/// Identifies the fork and the range of the fork's commits that a land
+/// applied to the committing namespace.
+///
+/// The range follows the change feed's convention: the fork's commits above
+/// `source_after_seq`, through `source_through_seq`. See
+/// [WAL records](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LandRecord {
+    /// The fork whose commits the land applied.
+    pub source_namespace_id: NamespaceId,
+    /// The fork's commits above this sequence were applied. For a fork's
+    /// first land, this is the fork point.
+    pub source_after_seq: ChangeSeq,
+    /// The fork's commits at or below this sequence were applied.
+    pub source_through_seq: ChangeSeq,
+}
+
 /// Contains one accepted logical commit inside a WAL object.
 ///
 /// See [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
@@ -391,6 +422,10 @@ pub struct WalCommitPayload {
     /// Caller-supplied annotation, omitted when absent and excluded from filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The fork and the range of its commits that this commit applied, when
+    /// the commit is a land, and omitted for every other commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub land: Option<LandRecord>,
     /// Materialized mutations in their authoritative `delta_index` order.
     pub deltas: Vec<WalCommitDelta>,
     /// Content pieces governed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
@@ -444,6 +479,7 @@ pub(crate) fn encode_wal_payload_cbor(
     validate_wal_inline_content(payload)?;
     validate_wal_revision_layouts(payload)?;
     validate_wal_bind_revisions(payload)?;
+    validate_wal_lands(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
@@ -510,6 +546,7 @@ fn decode_wal_object_envelope_zstd_with_limit(
     validate_wal_inline_content(&payload)?;
     validate_wal_revision_layouts(&payload)?;
     validate_wal_bind_revisions(&payload)?;
+    validate_wal_lands(&payload)?;
 
     Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
@@ -691,6 +728,29 @@ fn validate_wal_bind_revisions(payload: &WalObjectPayload) -> Result<(), WalCode
     Ok(())
 }
 
+/// Requires every land record's range to contain at least one sequence, and
+/// its source to be another namespace.
+fn validate_wal_lands(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
+    for record in &payload.records {
+        let Some(land) = &record.land else {
+            continue;
+        };
+        let reason = if land.source_after_seq >= land.source_through_seq {
+            "`source_after_seq` must be below `source_through_seq`"
+        } else if land.source_namespace_id == payload.namespace_id {
+            "the source is the committing namespace"
+        } else {
+            continue;
+        };
+        return Err(WalCodecError::InvalidWalLand {
+            seq: record.committed_seq,
+            source_namespace_id: land.source_namespace_id.clone(),
+            reason,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -767,6 +827,7 @@ mod tests {
                     .expect("fingerprint"),
                     committed_at_ms: 0,
                     message: None,
+                    land: None,
                     deltas: vec![WalCommitDelta {
                         semantic_operation_index: 0,
                         delta: WalDelta::AppendFileRevision {
@@ -1128,6 +1189,52 @@ mod tests {
                 }
                 assert_matches!(decoded, Err(WalCodecError::InvalidWalRevisionLayout { .. }));
                 assert_matches!(encoded, Err(WalCodecError::InvalidWalRevisionLayout { .. }));
+            }
+        }
+    }
+
+    /// Checks that encoding and decoding refuse a land record whose range
+    /// contains no sequence, or whose source is the committing namespace.
+    #[test]
+    fn a_land_record_covers_at_least_one_commit_of_another_namespace() {
+        let land = |source: &str, after: u64, through: u64| LandRecord {
+            source_namespace_id: NamespaceId::parse(source).expect("namespace"),
+            source_after_seq: ChangeSeq(after),
+            source_through_seq: ChangeSeq(through),
+        };
+        let inverted = Some("`source_after_seq` must be below `source_through_seq`");
+        for (record, rejected) in [
+            (land("fork", 4, 9), None),
+            (land("fork", 4, 5), None),
+            (land("fork", 9, 4), inverted),
+            (land("fork", 4, 4), inverted),
+            (
+                land("bounded", 4, 9),
+                Some("the source is the committing namespace"),
+            ),
+        ] {
+            let mut payload = inline_wal_object(&[0]);
+            payload.records[0].land = Some(record.clone());
+            let decoded = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload));
+            let encoded = encode_wal_object_envelope_zstd(payload);
+            match rejected {
+                None => {
+                    assert!(decoded.is_ok(), "{record:?}: {decoded:?}");
+                    assert!(encoded.is_ok(), "{record:?}");
+                }
+                Some(expected) => {
+                    for error in [decoded.err(), encoded.err()] {
+                        assert_matches!(
+                            error,
+                            Some(WalCodecError::InvalidWalLand {
+                                seq: ChangeSeq(1),
+                                source_namespace_id,
+                                reason,
+                            }) if reason == expected
+                                && source_namespace_id == record.source_namespace_id
+                        );
+                    }
+                }
             }
         }
     }

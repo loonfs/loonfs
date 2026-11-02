@@ -11,6 +11,7 @@
 
 use crate::digest::is_sha256_hex;
 use crate::id_macros::{string_id, validation_error};
+use crate::wal::LandRecord;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, AttributesRevisionNo, ChangeSeq, CommitPrecondition, ContentId, ContentRef,
@@ -26,6 +27,9 @@ use thiserror::Error;
 
 /// Domain separator included in every mutation fingerprint input.
 const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v1";
+
+/// Domain separator included in every land fingerprint input.
+const LAND_FINGERPRINT_DOMAIN: &str = "loonfs.commit.land.v1";
 
 /// Format version and hash algorithm stored with each fingerprint.
 ///
@@ -716,6 +720,69 @@ impl CommitFingerprintInput<'_> {
     }
 }
 
+/// The inputs of one land's semantic fingerprint, which validates a reused
+/// commit ID.
+///
+/// The server plans a land's operations from the land's inputs, so the land
+/// record identifies the land, and the preimage includes no operations and no
+/// preconditions
+/// ([Land commits](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#b5-land-commits)).
+#[derive(Debug, Clone, Copy)]
+pub struct LandFingerprintInput<'a> {
+    /// The namespace that the land commits to.
+    pub namespace_id: &'a NamespaceId,
+    /// The actor responsible for the land.
+    pub actor_id: &'a ActorId,
+    /// The subject whose rights authorize the land, if any.
+    pub subject_id: Option<&'a SubjectId>,
+    /// The fork and the range of its commits that the land applies.
+    pub land: &'a LandRecord,
+    /// The land's commit message.
+    pub message: Option<&'a str>,
+}
+
+impl LandFingerprintInput<'_> {
+    /// Computes the semantic fingerprint of the land.
+    pub fn fingerprint(&self) -> CommitFingerprint {
+        fingerprint_bytes(&self.canonical_bytes())
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        /// The preimage in the member order Appendix B specifies.
+        #[derive(Serialize)]
+        struct CanonicalLand<'a> {
+            domain: &'static str,
+            namespace_id: &'a str,
+            actor_id: &'a str,
+            subject_id: Option<&'a str>,
+            land: CanonicalLandRange<'a>,
+            message: Option<&'a str>,
+        }
+
+        /// The land record's members, spelled apart from its durable encoding.
+        #[derive(Serialize)]
+        struct CanonicalLandRange<'a> {
+            source_namespace_id: &'a str,
+            source_after_seq: u64,
+            source_through_seq: u64,
+        }
+
+        serde_json::to_vec(&CanonicalLand {
+            domain: LAND_FINGERPRINT_DOMAIN,
+            namespace_id: self.namespace_id.as_str(),
+            actor_id: self.actor_id.as_str(),
+            subject_id: self.subject_id.map(SubjectId::as_str),
+            land: CanonicalLandRange {
+                source_namespace_id: self.land.source_namespace_id.as_str(),
+                source_after_seq: self.land.source_after_seq.0,
+                source_through_seq: self.land.source_through_seq.0,
+            },
+            message: self.message,
+        })
+        .expect("a fingerprint preimage of strings and integers should encode as JSON")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,6 +867,54 @@ mod tests {
             let json =
                 serde_json::to_string_pretty(&vectors).expect("serialize fingerprint vectors");
             std::fs::write(fixture_path, format!("{json}\n")).expect("write fingerprint vectors");
+        }
+    }
+
+    /// Pins the example bytes and digest of Appendix B's land section, and
+    /// checks that every member of the land record changes the digest.
+    #[test]
+    fn a_land_fingerprint_covers_the_land_record_and_matches_the_spec_example() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace");
+        let actor_id = ActorId::parse("usr_8f3c").expect("actor");
+        let land = LandRecord {
+            source_namespace_id: NamespaceId::parse("demo-fork").expect("namespace"),
+            source_after_seq: ChangeSeq(418),
+            source_through_seq: ChangeSeq(425),
+        };
+        let input = LandFingerprintInput {
+            namespace_id: &namespace_id,
+            actor_id: &actor_id,
+            subject_id: None,
+            land: &land,
+            message: None,
+        };
+        assert_eq!(
+            String::from_utf8(input.canonical_bytes()).expect("canonical UTF-8"),
+            r#"{"domain":"loonfs.commit.land.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"land":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}"#
+        );
+        let fingerprint = input.fingerprint();
+        assert_eq!(
+            fingerprint.as_str(),
+            "v1:sha256:eda60a5b52f0ee895214e1c51bdf6c7f741828bbaa37e22141499a77d4215451"
+        );
+        let other_source = LandRecord {
+            source_namespace_id: NamespaceId::parse("demo-other").expect("namespace"),
+            ..land.clone()
+        };
+        let other_after = LandRecord {
+            source_after_seq: ChangeSeq(419),
+            ..land.clone()
+        };
+        let other_through = LandRecord {
+            source_through_seq: ChangeSeq(426),
+            ..land.clone()
+        };
+        for changed in [other_source, other_after, other_through] {
+            let changed_input = LandFingerprintInput {
+                land: &changed,
+                ..input
+            };
+            assert_ne!(changed_input.fingerprint(), fingerprint, "{changed:?}");
         }
     }
 

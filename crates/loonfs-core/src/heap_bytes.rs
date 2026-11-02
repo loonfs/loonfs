@@ -17,7 +17,9 @@ use loonfs_types::format::manifest::{
     NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
-use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::format::wal::{
+    LandRecord, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
+};
 use loonfs_types::{
     AbsolutePath, AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion,
     ChangeSeq, Checksum, ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef,
@@ -377,8 +379,15 @@ impl HeapBytes for WalCommitPayload {
             + self.committed_by.heap_bytes()
             + self.semantic_commit_fingerprint.heap_bytes()
             + self.message.heap_bytes()
+            + self.land.heap_bytes()
             + self.deltas.heap_bytes()
             + self.inline_content.heap_bytes()
+    }
+}
+
+impl HeapBytes for LandRecord {
+    fn heap_bytes(&self) -> usize {
+        self.source_namespace_id.heap_bytes()
     }
 }
 
