@@ -32,6 +32,15 @@ pub(super) struct OpenBatch {
     pub(super) inline_content_bytes: usize,
 }
 
+impl OpenBatch {
+    /// Returns whether the batch is a land's, which no other commit joins.
+    fn is_land(&self) -> bool {
+        self.candidates
+            .iter()
+            .any(|candidate| candidate.candidate.is_land())
+    }
+}
+
 pub(super) struct PreparedCandidate {
     pub(super) candidate: CommitCandidate,
     pub(super) estimated_retained_bytes: usize,
@@ -220,6 +229,7 @@ impl NamespacePublisher {
         }
 
         let queued = queued_candidates(&state);
+        let is_land = candidate.candidate.is_land();
         let wal_record_bytes_upper_bound = candidate.wal_record_bytes_upper_bound;
         let inline_content_bytes = candidate.inline_content_bytes;
         let candidate = BatchCandidate {
@@ -234,13 +244,16 @@ impl NamespacePublisher {
             // Coalesce with the tail batch while its bound stays under the
             // WAL object limit. A delete at the tail, or a full batch, opens a
             // batch behind it; work behind a delete publishes only if that
-            // delete fails.
+            // delete fails. A land opens a batch of its own, and nothing joins
+            // a land's batch.
             Some(WorkItem::Batch(batch))
-                if batch
-                    .wal_record_bytes_upper_bound
-                    .saturating_add(wal_record_bytes_upper_bound)
-                    .saturating_add(WAL_OBJECT_OVERHEAD_BYTES)
-                    <= MAX_WAL_OBJECT_BYTES
+                if !is_land
+                    && !batch.is_land()
+                    && batch
+                        .wal_record_bytes_upper_bound
+                        .saturating_add(wal_record_bytes_upper_bound)
+                        .saturating_add(WAL_OBJECT_OVERHEAD_BYTES)
+                        <= MAX_WAL_OBJECT_BYTES
                     && batch
                         .inline_content_bytes
                         .saturating_add(inline_content_bytes)

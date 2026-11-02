@@ -12,9 +12,10 @@ use loonfs_types::format::wal::{
     LandRecord, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
 use loonfs_types::{
-    ChangeSeq, CommitId, ContentId, ContentRef, FileContent, InlineContentIdentity, NamespaceId,
+    ChangeSeq, CommitId, ContentId, ContentRef, FileContent, InlineContentIdentity, InodeId,
+    NamespaceId,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use thiserror::Error;
 
 /// One namespace mutation together with the result of preparing any content
@@ -30,8 +31,8 @@ pub struct CommitCandidate {
     inline_content_identities: BTreeMap<ContentId, InlineContentIdentity>,
 }
 
-/// A land's record and the fork point that the land's range is checked
-/// against.
+/// A land's record, the fork point that the land's range is checked
+/// against, and the IDs that the inodes it creates have in the fork.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LandIntent {
     /// The fork and the range of its commits that the land applies.
@@ -40,6 +41,10 @@ pub(crate) struct LandIntent {
     /// fork's manifest (`fork_basis.source_head_seq`). The fork's first land
     /// starts after it.
     pub(crate) fork_point_seq: ChangeSeq,
+    /// The fork's ID of the inode that each create operation makes, by the
+    /// operation's index. A land creates each inode under its ID in the
+    /// fork, so an inode has one ID in both namespaces.
+    pub(crate) created_inode_ids: BTreeMap<usize, InodeId>,
 }
 
 /// What a candidate commits, and whose authority it commits under.
@@ -153,13 +158,20 @@ impl CommitCandidate {
     }
 
     /// Makes the candidate a land of `record`, from a fork made at
-    /// `fork_point_seq`. A commit request has no land record, so a land
-    /// can't arrive from a request body.
-    #[cfg(test)]
-    pub(crate) fn with_land(mut self, record: LandRecord, fork_point_seq: ChangeSeq) -> Self {
+    /// `fork_point_seq`, whose create operations make the inodes that
+    /// `created_inode_ids` lists by operation index. A commit request has no
+    /// land record, so a land can't arrive from a request body.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_land(
+        mut self,
+        record: LandRecord,
+        fork_point_seq: ChangeSeq,
+        created_inode_ids: BTreeMap<usize, InodeId>,
+    ) -> Self {
         self.land = Some(LandIntent {
             record,
             fork_point_seq,
+            created_inode_ids,
         });
         self
     }
@@ -167,6 +179,29 @@ impl CommitCandidate {
     /// The land that the commit is, if it's one.
     pub(crate) fn land(&self) -> Option<&LandIntent> {
         self.land.as_ref()
+    }
+
+    /// Returns whether the commit is a land, which LoonFS publishes in a
+    /// WAL object of its own.
+    pub fn is_land(&self) -> bool {
+        self.land.is_some()
+    }
+
+    /// Returns the error for a commit whose estimated WAL bytes exceed the
+    /// WAL object's limit: `LandTooLarge` for a land, which its caller splits
+    /// by the fork's commit range, and `CommitTooLarge` for any other commit.
+    pub fn too_large_error(&self, estimated_bytes: usize, max_bytes: usize) -> CoreError {
+        if self.is_land() {
+            CoreError::LandTooLarge {
+                estimated_bytes,
+                max_bytes,
+            }
+        } else {
+            CoreError::CommitTooLarge {
+                estimated_bytes,
+                max_bytes,
+            }
+        }
     }
 
     /// Wraps a mutation request whose content preparation failed.
@@ -257,20 +292,20 @@ impl CommitCandidate {
         }
     }
 
-    /// Returns the layout that a revision of `content_ref` records in a commit
-    /// of `namespace_id`, from the proof that prepared the reference.
-    pub(crate) fn revision_layout(
-        &self,
-        content_ref: &ContentRef,
-        namespace_id: &NamespaceId,
-    ) -> Option<loonfs_types::ContentLayout> {
+    /// Indexes the proofs that prepared the candidate's references by
+    /// reference, the first proof of each, so that planning finds the layout
+    /// that a revision records without a scan of every proof. A land has a
+    /// proof for each file it creates, and a scan for each file would make
+    /// its planning quadratic.
+    pub(crate) fn proofs_by_reference(&self) -> HashMap<&ContentRef, &PreparedContent> {
         let ContentPreparation::Ready(proofs) = &self.content else {
-            return None;
+            return HashMap::new();
         };
-        proofs
-            .iter()
-            .find(|proof| proof.content_ref() == content_ref)
-            .and_then(|proof| proof.revision_layout(namespace_id))
+        let mut by_reference = HashMap::with_capacity(proofs.len());
+        for proof in proofs {
+            by_reference.entry(proof.content_ref()).or_insert(proof);
+        }
+        by_reference
     }
 
     /// Request bytes before planning adds any resident bytes a fresh chain copies.
@@ -512,9 +547,13 @@ impl CommitCandidate {
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
+        self.validate_request_has_operations()?;
+        if self.land.is_some() {
+            self.validate_message_limit()?;
+            return self.validate_land_content();
+        }
         // Apply limits to the complete request because the serialized publisher
         // processes every operation before releasing the write path.
-        self.validate_request_has_operations()?;
         let intent = self.intent();
         if intent.operations.len() > crate::limits::MAX_COMMIT_OPERATIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
@@ -530,15 +569,7 @@ impl CommitCandidate {
                 crate::limits::MAX_COMMIT_PRECONDITIONS
             )));
         }
-        if let Some(message) = &intent.message {
-            if message.len() > crate::limits::MAX_COMMIT_MESSAGE_BYTES {
-                return Err(CoreError::InvalidCommitRequest(format!(
-                    "mutation message is {} bytes; maximum is {}",
-                    message.len(),
-                    crate::limits::MAX_COMMIT_MESSAGE_BYTES
-                )));
-            }
-        }
+        self.validate_message_limit()?;
         self.validate_appended_content()?;
         for value in &self.inline_content {
             let size_bytes = value.bytes().len();
@@ -578,6 +609,38 @@ impl CommitCandidate {
                 "mutation references {distinct_content_refs} distinct external content refs; maximum is {}",
                 crate::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS
             )));
+        }
+        Ok(())
+    }
+
+    fn validate_message_limit(&self) -> Result<()> {
+        if let Some(message) = &self.intent().message {
+            if message.len() > crate::limits::MAX_COMMIT_MESSAGE_BYTES {
+                return Err(CoreError::InvalidCommitRequest(format!(
+                    "mutation message is {} bytes; maximum is {}",
+                    message.len(),
+                    crate::limits::MAX_COMMIT_MESSAGE_BYTES
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuses a land that includes inline content or appended bytes. A land
+    /// refers to content that the fork already wrote, and LoonFS planned it
+    /// itself, so the counts that limit a request body don't apply to it,
+    /// and the WAL object's size bounds it instead.
+    fn validate_land_content(&self) -> Result<()> {
+        if !self.inline_content.is_empty()
+            || self
+                .intent()
+                .operations
+                .iter()
+                .any(|operation| operation.appended_content().is_some())
+        {
+            return Err(CoreError::InvalidCommitRequest(
+                "a land includes no inline content or appended bytes".to_owned(),
+            ));
         }
         Ok(())
     }

@@ -86,10 +86,9 @@ impl PublicationAdmission {
             .wal_record_bytes_upper_bound
             .saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
         if document_bytes > MAX_WAL_OBJECT_BYTES {
-            return Err(CoreError::CommitTooLarge {
-                estimated_bytes: document_bytes,
-                max_bytes: MAX_WAL_OBJECT_BYTES,
-            });
+            return Err(candidate
+                .candidate
+                .too_large_error(document_bytes, MAX_WAL_OBJECT_BYTES));
         }
         Ok(())
     }

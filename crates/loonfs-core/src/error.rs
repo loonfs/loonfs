@@ -78,6 +78,13 @@ pub enum CoreError {
         estimated_bytes: usize,
         max_bytes: usize,
     },
+    /// A land's planned WAL record doesn't fit in one WAL object. The caller
+    /// lands the fork's commits in smaller ranges.
+    #[error("land is too large for one WAL object: estimated {estimated_bytes} bytes exceeds the limit of {max_bytes} bytes")]
+    LandTooLarge {
+        estimated_bytes: usize,
+        max_bytes: usize,
+    },
     #[error("an append carries {size_bytes} bytes; one append carries at most {max_bytes}")]
     AppendTooLarge { size_bytes: u64, max_bytes: u64 },
     /// The request contains more items than one batch may read. No items were
@@ -478,6 +485,7 @@ impl CoreError {
             CoreError::ContentTooLarge { .. }
             | CoreError::CommitTooLarge { .. }
             | CoreError::AppendTooLarge { .. } => ErrorCode::ContentTooLarge,
+            CoreError::LandTooLarge { .. } => ErrorCode::LandTooLarge,
             CoreError::NamespaceNotFound { .. } => ErrorCode::NamespaceNotFound,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
@@ -581,6 +589,7 @@ impl CoreError {
             | CoreError::RevisionNotFound { .. }
             | CoreError::ContentTooLarge { .. }
             | CoreError::CommitTooLarge { .. }
+            | CoreError::LandTooLarge { .. }
             | CoreError::AppendTooLarge { .. }
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }

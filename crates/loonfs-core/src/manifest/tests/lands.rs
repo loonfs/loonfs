@@ -54,7 +54,12 @@ async fn publish_land<S: ObjectStore>(
         source_through_seq: ChangeSeq(through_seq),
     };
     let intent = create_directory(&format!("land-{fork_name}-{through_seq}"));
-    let candidate = CommitCandidate::new(intent).with_land(land, ChangeSeq(fork_point_seq));
+    let fork_inode_id = InodeId::generate(ChangeSeq(through_seq), NonZeroU32::MIN);
+    let candidate = CommitCandidate::new(intent).with_land(
+        land,
+        ChangeSeq(fork_point_seq),
+        BTreeMap::from([(0, fork_inode_id)]),
+    );
     publish(store, namespace_id, candidate).await
 }
 

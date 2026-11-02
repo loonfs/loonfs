@@ -62,27 +62,43 @@ pub(crate) fn land_fingerprint(
 }
 
 /// The planning of one operation: the planning view, the commit's pieces,
-/// where content writes go, and the commit's sequence and next create number,
-/// from which new inode IDs are built.
+/// where content writes go, the commit's sequence, and where the IDs of the
+/// inodes it creates come from.
 pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
     pub(super) view: PlanningView<'p, S>,
     pub(super) pieces: &'p CommitPieces<'p, S>,
     pub(super) content_writes: ContentWrites<'p, S>,
     /// The sequence that the commit is assigned.
     pub(super) committed_seq: ChangeSeq,
-    /// The create number of the next inode that the commit creates, shared by
-    /// every operation in the commit.
-    pub(super) next_create_no: &'p mut NonZeroU32,
+    pub(super) created_inode_ids: CreatedInodeIds<'p>,
+}
+
+/// Where the IDs of the inodes that one operation creates come from.
+pub(super) enum CreatedInodeIds<'p> {
+    /// Each ID is built from the commit's sequence and the create number of
+    /// the next inode, which every operation in the commit shares.
+    Generated { next_create_no: &'p mut NonZeroU32 },
+    /// The ID that the inode has in the fork, for a land's operation, which
+    /// creates at most one inode. The operation takes the ID when it creates
+    /// the inode.
+    Land(Option<InodeId>),
 }
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
-    /// Generates the ID of the next inode that the commit creates.
+    /// Returns the ID of the next inode that the commit creates.
     pub(super) fn next_inode_id(&mut self) -> InodeId {
-        let create_no = *self.next_create_no;
-        *self.next_create_no = create_no
-            .checked_add(1)
-            .expect("a commit should create fewer inodes than its 32-bit delta positions allow");
-        InodeId::generate(self.committed_seq, create_no)
+        match &mut self.created_inode_ids {
+            CreatedInodeIds::Generated { next_create_no } => {
+                let create_no = **next_create_no;
+                **next_create_no = create_no.checked_add(1).expect(
+                    "a commit should create fewer inodes than its 32-bit delta positions allow",
+                );
+                InodeId::generate(self.committed_seq, create_no)
+            }
+            CreatedInodeIds::Land(assigned) => assigned
+                .take()
+                .expect("a land should assign the fork's ID to each inode that it creates"),
+        }
     }
 
     /// Plans `operation`, mapping its path or inode address onto the one

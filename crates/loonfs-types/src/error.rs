@@ -118,6 +118,7 @@ error_codes! {
     Forbidden => "forbidden",
     StoragePermissionDenied => "storage_permission_denied",
     ContentTooLarge => "content_too_large",
+    LandTooLarge => "land_too_large",
     RangeNotSatisfiable => "range_not_satisfiable",
     NotSupported => "not_supported",
     RouteNotFound => "route_not_found",
@@ -181,7 +182,9 @@ impl ErrorCode {
             // This is a deployment storage failure, not a caller
             // authorization failure.
             ErrorCode::StoragePermissionDenied => ErrorKind::StoragePermissionDenied,
-            ErrorCode::ContentTooLarge => ErrorKind::ContentTooLarge,
+            // A land that doesn't fit in one WAL object, which the caller
+            // splits by the fork's commit range.
+            ErrorCode::ContentTooLarge | ErrorCode::LandTooLarge => ErrorKind::ContentTooLarge,
             ErrorCode::RangeNotSatisfiable => ErrorKind::RangeNotSatisfiable,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
@@ -257,6 +260,7 @@ impl ErrorCode {
             | ErrorCode::Forbidden
             | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
+            | ErrorCode::LandTooLarge
             | ErrorCode::RangeNotSatisfiable
             | ErrorCode::NotSupported
             | ErrorCode::RouteNotFound
@@ -330,6 +334,7 @@ impl ErrorCode {
             | ErrorCode::Forbidden
             | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
+            | ErrorCode::LandTooLarge
             | ErrorCode::RangeNotSatisfiable
             | ErrorCode::NotSupported
             | ErrorCode::RouteNotFound

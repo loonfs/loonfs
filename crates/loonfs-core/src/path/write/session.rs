@@ -2,7 +2,7 @@
 //! order, each seeing the rows earlier candidates would persist.
 
 use super::planned_pieces::{CommitPieces, PlannedPieces};
-use super::planner::OperationPlanningSession;
+use super::planner::{CreatedInodeIds, OperationPlanningSession};
 use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, LandIntent};
@@ -172,6 +172,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         let mut appended: Vec<AppendedContent> = Vec::new();
         let mut pieces = CommitPieces::new(self);
         let mut next_create_no = NonZeroU32::MIN;
+        let proofs = candidate.proofs_by_reference();
         for value in candidate.inline_content() {
             pieces.insert_piece(
                 value.content_ref(),
@@ -184,16 +185,31 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             );
         }
         for (index, operation) in request.operations.iter().enumerate() {
-            let compiled = OperationPlanningSession {
+            let created_inode_ids = match candidate.land() {
+                Some(land) => CreatedInodeIds::Land(land.created_inode_ids.get(&index).copied()),
+                None => CreatedInodeIds::Generated {
+                    next_create_no: &mut next_create_no,
+                },
+            };
+            let mut operation_session = OperationPlanningSession {
                 view: self.planning_view(authorizer, validation.view()),
                 pieces: &pieces,
                 content_writes: self.content_writes,
                 committed_seq,
-                next_create_no: &mut next_create_no,
-            }
-            .plan(operation)
-            .await
-            .map_err(|error| error.at_operation(index))?;
+                created_inode_ids,
+            };
+            let compiled = operation_session
+                .plan(operation)
+                .await
+                .map_err(|error| error.at_operation(index))?;
+            assert!(
+                !matches!(
+                    operation_session.created_inode_ids,
+                    CreatedInodeIds::Land(Some(_))
+                ),
+                "a land should assign an inode ID only to an operation that creates an inode, \
+                 and operation {index} created none"
+            );
             if let Some(value) = &compiled.appended {
                 for piece in &value.pieces {
                     pieces.insert_piece(&value.content_ref, piece, committed_seq);
@@ -208,7 +224,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                     {
                         return value.layout.clone();
                     }
-                    candidate.revision_layout(content_ref, &head.namespace_id)
+                    proofs
+                        .get(content_ref)
+                        .and_then(|proof| proof.revision_layout(&head.namespace_id))
                 })
                 .await
                 .map_err(|error| error.at_operation(index))?;
