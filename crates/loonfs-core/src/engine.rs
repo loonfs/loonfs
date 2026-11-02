@@ -20,7 +20,7 @@ use crate::path::read::{
 use crate::storage::content::DurableContentValidationError;
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::content_location::ContentLocation;
-use crate::storage::content_stream::{FileContentStream, StreamRange};
+use crate::storage::content_stream::{verify_content_import, FileContentStream, StreamRange};
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::options::{AccessState, ListOptions, StatOptions};
@@ -505,7 +505,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .content_published(&content_ref.content_id)
             .await?
         {
-            view.resolve_content_location(content_ref).await
+            view.resolve_imported_content_location(content_ref).await
         } else {
             Ok(ContentLocation::whole(
                 &context.read_basis.head.family_root_id,
@@ -520,6 +520,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// another fork family, or when no revision or layout in this view refers
     /// to the chain (such as an upload that no commit refers to yet), and the
     /// caller copies the bytes instead.
+    ///
+    /// Before it prepares the reference, it reads the bytes through this view
+    /// and verifies their size and checksum against the reference, as a copy
+    /// does, so a reference that doesn't match its bytes fails with the
+    /// copy's error.
     ///
     /// The proof includes the chain's layout in this view, with the chain's
     /// creator, after writing the chain's pending pieces to content objects,
@@ -548,6 +553,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         {
             return Ok(None);
         }
+        let location = view.resolve_imported_content_location(content_ref).await?;
+        verify_content_import(&self.namespace.store, location, content_ref).await?;
         let layout = view
             .materialize_content_layout(content_ref, &self.namespace.content_writes)
             .await?;

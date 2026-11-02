@@ -4,10 +4,11 @@ use bytes::Bytes;
 use loonfs::{
     AppendFileOptions, CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore,
 };
+use loonfs_core::content::DurableContentValidationError;
 use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
-use loonfs_core::NamespaceEngine;
+use loonfs_core::{CoreError, NamespaceEngine};
 use loonfs_objectstore::keys::{content_blob, content_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreExtension};
@@ -15,10 +16,11 @@ use loonfs_test_support::stores::{
     KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
-    AbsolutePath, AccessGrants, AccessRight, CommitId, ContentId, ContentRef, DestinationBehavior,
-    NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo, Subject,
-    SubjectId, WriterId,
+    AbsolutePath, AccessGrants, AccessRight, Checksum, CommitId, ContentId, ContentRef,
+    DestinationBehavior, ErrorCode, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope,
+    PrincipalSet, RevisionNo, Subject, SubjectId, WriterId,
 };
+use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -587,4 +589,104 @@ async fn an_import_within_a_fork_family_writes_no_content_object() {
         .expect("other content")
         .iter()
         .any(|key| key.contains(copied_ref.content_id.as_str())));
+}
+
+#[tokio::test]
+async fn an_import_within_a_fork_family_verifies_the_reference_against_its_bytes() {
+    let directory = tempfile::tempdir().expect("directory");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::content_blob(),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let writer = LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
+        .build()
+        .await
+        .expect("writer");
+    let actor = loonfs_test_support::test_actor();
+    let source = NamespaceId::parse("source").expect("source");
+    let fork = NamespaceId::parse("fork").expect("fork");
+    let other = NamespaceId::parse("other").expect("other");
+    for namespace_id in [&source, &other] {
+        writer
+            .create_namespace(namespace_id, &actor)
+            .await
+            .expect("namespace");
+    }
+    writer
+        .open_namespace(&source)
+        .expect("open source")
+        .put_file("/file", b"family bytes", &actor)
+        .await
+        .expect("put");
+    writer
+        .fork_namespace(&source, &fork, &actor)
+        .await
+        .expect("fork");
+    let fork_writer = writer.open_namespace(&fork).expect("open fork");
+    let content_ref = fork_writer
+        .stat("/file")
+        .await
+        .expect("inherited entry")
+        .content_ref()
+        .expect("inherited reference")
+        .clone();
+
+    let algorithm = content_ref.checksum.algorithm();
+    let altered = [
+        ContentRef {
+            checksum: Checksum::compute(algorithm, b"family BYTES"),
+            ..content_ref.clone()
+        },
+        ContentRef {
+            size_bytes: content_ref.size_bytes - 1,
+            ..content_ref.clone()
+        },
+        ContentRef {
+            size_bytes: content_ref.size_bytes + 1,
+            ..content_ref.clone()
+        },
+    ];
+    // The import into `other` copies the bytes, and the import into the fork
+    // fails the same way without copying them.
+    let other_writer = writer.open_namespace(&other).expect("open other");
+    for altered in altered {
+        let mut errors = Vec::new();
+        for destination in [&fork_writer, &other_writer] {
+            let error = destination
+                .put_file_content_ref("/imported", altered.clone(), &source, &actor)
+                .await
+                .expect_err("an altered reference");
+            assert_matches!(
+                &error,
+                loonfs::Error::Core(CoreError::DurableContent(
+                    DurableContentValidationError::ContentChecksumMismatch { .. }
+                        | DurableContentValidationError::ContentLengthMismatch { .. }
+                )),
+                "{altered:?}"
+            );
+            let missing = destination
+                .stat("/imported")
+                .await
+                .expect_err("no revision of an altered reference");
+            assert_eq!(missing.code(), ErrorCode::PathNotFound);
+            errors.push(error.to_string());
+        }
+        assert_eq!(errors[0], errors[1]);
+    }
+    recording.reset();
+    fork_writer
+        .put_file_content_ref("/imported", content_ref.clone(), &source, &actor)
+        .await
+        .expect("import within the family");
+    assert_eq!(recording.count(OperationSelector::Put), 0);
+    assert_eq!(
+        fork_writer
+            .read_file("/imported")
+            .await
+            .expect("imported bytes")
+            .bytes,
+        b"family bytes"
+    );
 }

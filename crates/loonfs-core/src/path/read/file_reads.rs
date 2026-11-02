@@ -4,6 +4,7 @@
 use crate::authorize::{Absence, ReadAccess};
 use crate::error::{CoreError, Result};
 use crate::path::read::loaded_view::LoadedMetadataView;
+use crate::storage::content::{content_object_key_for_ref, DurableContentValidationError};
 use crate::storage::content_location::extent_object_key;
 use crate::storage::content_location::ContentLocation;
 use crate::storage::tail_content::{
@@ -165,6 +166,34 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             content_ref,
         )
         .await
+    }
+
+    /// Returns where this view finds the bytes of `content_ref`, a reference
+    /// that an import request supplies and that this view publishes.
+    ///
+    /// A reference longer than its chain in this view fails with the length
+    /// mismatch that a read of the bytes would return, before any read.
+    /// Without the check, the location would fail with a corruption error, as
+    /// if the namespace had lost bytes that its revisions or layout refer to.
+    pub(crate) async fn resolve_imported_content_location(
+        &self,
+        content_ref: &ContentRef,
+    ) -> Result<ContentLocation> {
+        if let Some(chain) = self
+            .metadata_view()
+            .content_head(&content_ref.content_id)
+            .await?
+        {
+            if content_ref.size_bytes > chain.size_bytes {
+                return Err(DurableContentValidationError::ContentLengthMismatch {
+                    object_key: content_object_key_for_ref(&self.head.family_root_id, content_ref),
+                    expected: content_ref.size_bytes,
+                    actual: chain.size_bytes,
+                }
+                .into());
+            }
+        }
+        self.resolve_content_location(content_ref).await
     }
 
     /// Returns the layout of `content_ref` in this view, with the chain's

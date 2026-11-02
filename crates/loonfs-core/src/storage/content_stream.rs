@@ -54,6 +54,29 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
         .boxed())
 }
 
+/// Verifies that the bytes at `location` match the size and checksum of
+/// `content_ref`, by reading them with the stream that an import copies them
+/// with, and discarding them.
+pub(crate) async fn verify_content_import<S: ObjectStore>(
+    store: S,
+    location: ContentLocation,
+    content_ref: &ContentRef,
+) -> std::result::Result<(), DurableContentValidationError> {
+    let mut source = FileContentStream::open_inner(
+        store,
+        location,
+        None,
+        content_ref.clone(),
+        CONTENT_READ_CHUNK_BYTES,
+        StreamRange::Whole { start_offset: 0 },
+    )
+    .await?;
+    // Each chunk moves the stream toward the end of the content, and the
+    // stream returns `None` only after it verifies the size and checksum.
+    while source.next_verified_chunk().await?.is_some() {}
+    Ok(())
+}
+
 /// The bytes of a file that a [`FileContentStream`] returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamRange {

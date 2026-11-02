@@ -123,13 +123,13 @@ impl Namespace<Writable> {
     /// which can be this namespace, for later publication.
     ///
     /// When the source is a member of this namespace's fork family and its
-    /// view refers to the content, preparation copies no bytes, and the
-    /// commit records the chain's layout from the source's view. Otherwise
-    /// preparation verifies the source bytes and stages them under a fresh
-    /// content ID in this namespace's fork family, and later publication
-    /// performs no content I/O. A subject must be an administrator of the
-    /// source namespace. See the API specification's content preparation
-    /// contract.
+    /// view refers to the content, preparation reads and verifies the source
+    /// bytes without copying them, and the commit records the chain's layout
+    /// from the source's view. Otherwise preparation verifies the source bytes
+    /// and stages them under a fresh content ID in this namespace's fork
+    /// family, and later publication performs no content I/O. A subject must
+    /// be an administrator of the source namespace. See the API
+    /// specification's content preparation contract.
     pub async fn prepare_content_ref(
         &self,
         content_ref: ContentRef,
@@ -166,24 +166,26 @@ impl Namespace<Writable> {
             .pinned_read(source_namespace_id, crate::Consistency::Strong)
             .await?;
         source.ensure_administrator(&context).await?;
-        if let Some(prepared) = source
-            .prepare_family_content_ref(&catalog, &content_ref, &context, prepared_at_ms)
-            .await?
-        {
-            return Ok(prepared);
-        }
-        let source_location = source
-            .resolve_content_location(&content_ref, &context)
-            .await?;
-        match engine
-            .import_content_ref(
-                &catalog,
-                self.core.subject().map(|subject| &subject.subject_id),
-                &content_ref,
-                source_location,
-            )
-            .await
-        {
+        let prepared = async {
+            if let Some(prepared) = source
+                .prepare_family_content_ref(&catalog, &content_ref, &context, prepared_at_ms)
+                .await?
+            {
+                return Ok(prepared);
+            }
+            let source_location = source
+                .resolve_content_location(&content_ref, &context)
+                .await?;
+            engine
+                .import_content_ref(
+                    &catalog,
+                    self.core.subject().map(|subject| &subject.subject_id),
+                    &content_ref,
+                    source_location,
+                )
+                .await
+        };
+        match prepared.await {
             Err(crate::CoreError::DurableContent(
                 loonfs_core::content::DurableContentValidationError::MissingContentObject {
                     ..
