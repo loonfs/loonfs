@@ -1409,6 +1409,10 @@
             "$ref": "#/components/schemas/AccessRevisionNo",
             "description": "The access revision that is actually current for the inode."
           },
+          "actual_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork sequence that the land started after."
+          },
           "actual_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "The attribute revision that is actually current for the inode."
@@ -1452,6 +1456,10 @@
           "expected_access_revision_no": {
             "$ref": "#/components/schemas/AccessRevisionNo",
             "description": "The access revision that the request expected to be current."
+          },
+          "expected_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork sequence that the land had to start after: the end of the previous land's range,\nor the fork point for the fork's first land."
           },
           "expected_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributesRevisionNo",
@@ -1514,6 +1522,10 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose land didn't continue the previous land from that fork."
           }
         },
         "type": "object"

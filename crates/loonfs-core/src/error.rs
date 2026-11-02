@@ -143,6 +143,16 @@ pub enum CoreError {
         /// fingerprint lets a retry verify that it represents the same request.
         committed: Option<CommittedReceipt>,
     },
+    /// A land doesn't start where the previous land from its fork stopped,
+    /// or, for the fork's first land, at the fork point.
+    #[error(
+        "land from `{source_namespace_id}` starts after `{actual_after_seq}`, but it has to continue from `{expected_after_seq}`"
+    )]
+    LandRangeConflict {
+        source_namespace_id: NamespaceId,
+        expected_after_seq: ChangeSeq,
+        actual_after_seq: ChangeSeq,
+    },
     #[error(transparent)]
     ContentPreparation(#[from] ContentPreparationError),
     #[error("commit queue is full; slow down and retry")]
@@ -467,6 +477,7 @@ impl CoreError {
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
             CoreError::BindingVersionMismatch { .. } => ErrorCode::BindingVersionMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
+            CoreError::LandRangeConflict { .. } => ErrorCode::LandRangeConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
@@ -572,6 +583,7 @@ impl CoreError {
             | CoreError::DestinationExists { .. }
             | CoreError::BindingVersionMismatch { .. }
             | CoreError::CommitIdReuseConflict { .. }
+            | CoreError::LandRangeConflict { .. }
             | CoreError::ContentPreparation(_)
             | CoreError::CommitQueueFull
             | CoreError::WriterSessionClosed { .. }
@@ -633,6 +645,16 @@ impl CoreError {
             } => Some(ErrorDetails {
                 commit_id: CommitId::parse(commit_id).ok(),
                 committed: committed.clone(),
+                ..ErrorDetails::default()
+            }),
+            CoreError::LandRangeConflict {
+                source_namespace_id,
+                expected_after_seq,
+                actual_after_seq,
+            } => Some(ErrorDetails {
+                source_namespace_id: Some(source_namespace_id.clone()),
+                expected_after_seq: Some(*expected_after_seq),
+                actual_after_seq: Some(*actual_after_seq),
                 ..ErrorDetails::default()
             }),
             CoreError::RangeNotSatisfiable { size_bytes, .. } => Some(ErrorDetails {

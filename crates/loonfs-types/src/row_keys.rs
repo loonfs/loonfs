@@ -23,6 +23,7 @@ impl MetadataRowFamily {
             Self::ContentLayouts => lookup_keys::CONTENT_LAYOUT_ROW_PREFIX,
             Self::Attributes => lookup_keys::ATTRIBUTE_ROW_PREFIX,
             Self::Access => lookup_keys::ACCESS_ROW_PREFIX,
+            Self::Lands => lookup_keys::LAND_ROW_PREFIX,
         }
     }
 }
@@ -62,6 +63,7 @@ impl MetadataRow {
             Self::ActiveDeletion(_) => MetadataRowFamily::ActiveDeletions,
             Self::CommitReceipt(_) => MetadataRowFamily::CommitReceipts,
             Self::Commit(_) => MetadataRowFamily::Commits,
+            Self::Land(_) => MetadataRowFamily::Lands,
             Self::ContentLayout(_) => MetadataRowFamily::ContentLayouts,
             Self::AttributesRevision(_) => MetadataRowFamily::Attributes,
             Self::AccessRevision(_) => MetadataRowFamily::Access,
@@ -99,7 +101,8 @@ impl MetadataRow {
                 | MetadataRowFamily::Commits
                 | MetadataRowFamily::ContentLayouts
                 | MetadataRowFamily::Attributes
-                | MetadataRowFamily::Access => None,
+                | MetadataRowFamily::Access
+                | MetadataRowFamily::Lands => None,
             }
             .expect("a binding row should use a binding family"),
             Self::FileRevision(record) => lookup_keys::revision_row_key(
@@ -122,6 +125,9 @@ impl MetadataRow {
                 lookup_keys::commit_receipt_row_key(&record.commit_id, record.committed_seq)
             }
             Self::Commit(record) => lookup_keys::commit_row_key(record.committed_seq),
+            Self::Land(record) => {
+                lookup_keys::land_row_key(&record.source_namespace_id, record.committed_seq)
+            }
             Self::ContentLayout(record) => lookup_keys::content_layout_row_key(
                 &record.content_id,
                 record.size_bytes,
@@ -162,7 +168,8 @@ impl MetadataRow {
                 | MetadataRowFamily::Commits
                 | MetadataRowFamily::ContentLayouts
                 | MetadataRowFamily::Attributes
-                | MetadataRowFamily::Access => None,
+                | MetadataRowFamily::Access
+                | MetadataRowFamily::Lands => None,
             }
             .expect("a binding row should use a binding family"),
             Self::FileRevision(record) => lookup_keys::revision_probe(record.inode_id),
@@ -172,6 +179,7 @@ impl MetadataRow {
             }
             Self::CommitReceipt(record) => lookup_keys::commit_receipt_probe(&record.commit_id),
             Self::Commit(_) => self.row_key_for_family(family),
+            Self::Land(record) => lookup_keys::land_probe(&record.source_namespace_id),
             Self::ContentLayout(record) => lookup_keys::content_layout_probe(&record.content_id),
             Self::AttributesRevision(record) => lookup_keys::attributes_probe(record.inode_id),
             Self::AccessRevision(record) => lookup_keys::access_probe(record.inode_id),
@@ -208,7 +216,7 @@ pub mod lookup_keys {
     use super::hex_encode_row_key_component;
     use crate::{
         AccessRevisionNo, AttributesRevisionNo, ChangeSeq, CommitId, ContentId, InodeId, NameKey,
-        RevisionNo,
+        NamespaceId, RevisionNo,
     };
 
     /// Prefix for inode row keys.
@@ -227,6 +235,7 @@ pub mod lookup_keys {
     pub(super) const COMMIT_RECEIPT_ROW_PREFIX: &str = "commit-receipt-";
     pub(super) const ATTRIBUTE_ROW_PREFIX: &str = "attribute-";
     pub(super) const ACCESS_ROW_PREFIX: &str = "access-";
+    pub(super) const LAND_ROW_PREFIX: &str = "land-";
 
     /// Builds the exclusive lower bound after `row_key`.
     pub fn after_row_key(row_key: &str) -> String {
@@ -471,6 +480,31 @@ pub mod lookup_keys {
         )
     }
 
+    /// Builds the Bloom filter probe for the lands of one fork.
+    pub fn land_probe(source_namespace_id: &NamespaceId) -> String {
+        format!(
+            "{LAND_ROW_PREFIX}{}",
+            hex_encode_row_key_component(source_namespace_id.as_str())
+        )
+    }
+
+    /// Builds the prefix for the newest-first lands of one fork.
+    pub fn land_prefix(source_namespace_id: &NamespaceId) -> String {
+        format!("{}-", land_probe(source_namespace_id))
+    }
+
+    /// Builds a newest-first land index row key.
+    pub(super) fn land_row_key(
+        source_namespace_id: &NamespaceId,
+        committed_seq: ChangeSeq,
+    ) -> String {
+        format!(
+            "{}{:020}",
+            land_prefix(source_namespace_id),
+            u64::MAX - committed_seq.0
+        )
+    }
+
     /// Builds the Bloom filter probe for an inode's revisions.
     pub fn revision_probe(inode_id: InodeId) -> String {
         format!("{REVISION_ROW_PREFIX}{}", inode_id.body())
@@ -564,8 +598,8 @@ mod tests {
     use crate::metadata_rows::{
         AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction,
         AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord, DeletedBinding,
-        DirentryBindingRecord, DirentryBindingState, InodeRecord, MetadataRow, MetadataRowFamily,
-        RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+        DirentryBindingRecord, DirentryBindingState, InodeRecord, LandIndexRecord, MetadataRow,
+        MetadataRowFamily, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
     };
     use crate::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId};
 
@@ -856,6 +890,55 @@ mod tests {
         );
     }
 
+    fn land_row(source: &str, committed_seq: u64) -> LandIndexRecord {
+        LandIndexRecord {
+            source_namespace_id: NamespaceId::parse(source).expect("namespace"),
+            committed_seq: ChangeSeq(committed_seq),
+            source_after_seq: ChangeSeq(3),
+            source_through_seq: ChangeSeq(8),
+        }
+    }
+
+    /// Checks that one fork's lands share a prefix and a filter key, sort
+    /// newest first, and never sort among another fork's lands, even when
+    /// one fork's ID begins with the other's.
+    #[test]
+    fn land_rows_sort_each_forks_lands_newest_first() {
+        let mut keys = [
+            ("demo", 9),
+            ("demo-fork", 4),
+            ("demo", 30),
+            ("demo-fork", 12),
+        ]
+        .map(|(source, committed_seq)| {
+            let row = MetadataRow::Land(land_row(source, committed_seq));
+            (row.row_key(), source, committed_seq)
+        });
+        keys.sort();
+        assert_eq!(
+            keys.map(|(_, source, committed_seq)| (source, committed_seq)),
+            [
+                ("demo", 30),
+                ("demo", 9),
+                ("demo-fork", 12),
+                ("demo-fork", 4)
+            ]
+        );
+        let source = NamespaceId::parse("demo-fork").expect("namespace");
+        let row = MetadataRow::Land(land_row("demo-fork", 12));
+        assert_eq!(
+            row.row_key(),
+            "land-64656d6f2d666f726b-18446744073709551603"
+        );
+        assert!(row
+            .row_key()
+            .starts_with(&lookup_keys::land_prefix(&source)));
+        assert_eq!(
+            row.filter_key_for_family(MetadataRowFamily::Lands),
+            lookup_keys::land_probe(&source)
+        );
+    }
+
     #[test]
     fn row_key_prefixes_match_the_row_keys_they_front() {
         let bind = MetadataRow::DirentryBinding(binding_record("report.txt", "report.txt"));
@@ -874,7 +957,7 @@ mod tests {
                 crate::ChecksumAlgorithm::Crc64nvme,
             ),
         });
-        let rows: [(MetadataRowFamily, MetadataRow); 9] = [
+        let rows: [(MetadataRowFamily, MetadataRow); 10] = [
             (
                 MetadataRowFamily::Inodes,
                 MetadataRow::Inode(InodeRecord {
@@ -953,6 +1036,10 @@ mod tests {
                     committed_at_ms: 12_000,
                     attributes: crate::Attributes::default(),
                 }),
+            ),
+            (
+                MetadataRowFamily::Lands,
+                MetadataRow::Land(land_row("demo-fork", 12)),
             ),
         ];
 

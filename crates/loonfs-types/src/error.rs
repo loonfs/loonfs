@@ -142,6 +142,7 @@ error_codes! {
     WriterFenced => "writer_fenced",
     WouldCycle => "would_cycle",
     CommitIdReuseConflict => "commit_id_reuse_conflict",
+    LandRangeConflict => "land_range_conflict",
     CommitOutcomeUnknown => "commit_outcome_unknown",
     OutcomeUnknown => "outcome_unknown",
     CommitQueueFull => "commit_queue_full",
@@ -230,6 +231,8 @@ impl ErrorCode {
             | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict
+            // A land doesn't continue the previous land from its fork.
+            | ErrorCode::LandRangeConflict
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
             | ErrorCode::RebootstrapRequired => ErrorKind::Conflict,
@@ -278,6 +281,7 @@ impl ErrorCode {
             | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict
+            | ErrorCode::LandRangeConflict
             | ErrorCode::CommitOutcomeUnknown
             | ErrorCode::OutcomeUnknown
             | ErrorCode::WriterSessionClosed
@@ -319,7 +323,8 @@ impl ErrorCode {
             | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingVersionMismatch
             | ErrorCode::NotDeleted
-            | ErrorCode::WouldCycle => true,
+            | ErrorCode::WouldCycle
+            | ErrorCode::LandRangeConflict => true,
             ErrorCode::InvalidRequest
             | ErrorCode::Unauthorized
             | ErrorCode::Forbidden

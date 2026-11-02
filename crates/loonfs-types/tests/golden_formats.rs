@@ -1381,6 +1381,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"content_layouts\"",
             "\"attributes\"",
             "\"access\"",
+            "\"lands\"",
         ],
         "family tags are durable bytes in every manifest descriptor"
     );
@@ -2194,6 +2195,24 @@ fn sample_land_commit_row() -> MetadataRow {
     MetadataRow::Commit(record)
 }
 
+/// Land index rows of two forks, in row-key order: one fork's two lands
+/// newest first, then the other fork's land.
+fn sample_land_index_rows() -> [MetadataRow; 3] {
+    [
+        ("demo-fork", 41, 30, 36),
+        ("demo-fork", 20, 12, 30),
+        ("demo-other", 33, 5, 9),
+    ]
+    .map(|(source, committed_seq, after_seq, through_seq)| {
+        MetadataRow::Land(loonfs_types::format::manifest::LandIndexRecord {
+            source_namespace_id: NamespaceId::parse(source).expect("valid namespace id"),
+            committed_seq: ChangeSeq(committed_seq),
+            source_after_seq: ChangeSeq(after_seq),
+            source_through_seq: ChangeSeq(through_seq),
+        })
+    })
+}
+
 fn sample_inode_rows() -> [MetadataRow; 2] {
     [
         MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
@@ -2574,6 +2593,23 @@ fn sst_block_data_land_commit_rows_match_golden_bytes() {
 fn sst_block_data_land_commit_golden_decodes_to_sample_row() {
     let block = decode_golden_data_block("sst_block_data_commits_land.v1.bin");
     assert_eq!(block.rows, [sample_land_commit_row()]);
+}
+
+#[test]
+fn sst_block_data_land_index_rows_match_golden_bytes() {
+    assert_rows_match_single_block_golden("sst_block_data_lands.v1.bin", &sample_land_index_rows());
+}
+
+#[test]
+fn sst_block_data_land_index_golden_decodes_to_sample_rows() {
+    let block = decode_golden_data_block("sst_block_data_lands.v1.bin");
+    assert_eq!(block.rows, sample_land_index_rows());
+    for row in &block.rows {
+        let mut encoded = row_cbor(row);
+        with_future_field(&mut encoded);
+        let refusal = assert_row_is_corrupt(&encoded, "a land index row is strict");
+        assert!(refusal.contains("field_from_the_future"), "{refusal}");
+    }
 }
 
 #[test]

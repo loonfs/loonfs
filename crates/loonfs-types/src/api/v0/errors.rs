@@ -165,6 +165,19 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_deletion_seq: Option<ChangeSeq>,
+    /// The fork whose land didn't continue the previous land from that fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub source_namespace_id: Option<NamespaceId>,
+    /// The fork sequence that the land had to start after: the end of the previous land's range,
+    /// or the fork point for the fork's first land.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub expected_after_seq: Option<ChangeSeq>,
+    /// The fork sequence that the land started after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub actual_after_seq: Option<ChangeSeq>,
     /// The head sequence that the request required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
