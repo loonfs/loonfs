@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     fn max_key_survives_a_last_row_that_closes_its_block() {
-        // Calibrate the target so the crossing lands on the final row.
+        // Calibrate the target so the crossing falls on the final row.
         // Building the same rows as one block reports how many entry bytes
         // they occupy: a block payload is the entries, then one `u32` per
         // restart point, then the restart count.

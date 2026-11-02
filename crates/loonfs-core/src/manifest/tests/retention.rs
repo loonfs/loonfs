@@ -1355,7 +1355,7 @@ async fn deleting_a_pin_never_reuses_its_id() {
     let second = second.expect("a concurrent create takes a fresh pin");
     assert_ne!(
         second.checkpoint_id, first.checkpoint_id,
-        "a new pin never lands on a deleted record's key"
+        "a new pin is never written at a deleted record's key"
     );
 
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
@@ -1773,7 +1773,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         .results
         .pop()
         .expect("one result")
-        .expect("the publish that lands exactly at the bound is still admitted");
+        .expect("the publish that reaches exactly the bound is still admitted");
     assert_eq!(wal_object_count(&store, &namespace_id).await, boundary + 1);
     store.reset();
 
@@ -2461,7 +2461,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         panic!("expected a published unit, got {:?}", first_report);
     };
 
-    // A checkpoint lands in between, adding a fresh delta run.
+    // A checkpoint is published in between, adding a fresh delta run.
     write_file_and_checkpoint(&store, &namespace_id, &context, 9).await;
 
     // A fresh sequence of steps reads the live manifest and finishes the
@@ -2944,7 +2944,7 @@ async fn a_compaction_above_the_base_keeps_the_rows_that_shadow_it() {
     )
     .await;
 
-    // One delta run cancels a binding the base holds, more delta runs land
+    // One delta run cancels a binding the base holds, more delta runs are written
     // above it until they make a tier, and the floor moves past the
     // cancellation.
     let deleted = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)

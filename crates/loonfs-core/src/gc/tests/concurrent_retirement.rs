@@ -102,7 +102,7 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
         crate::test_support::namespace_store(store.inner(), &target)
             .gc(None, &gc_options, &deadline.clock())
             .await
-            .expect_err("a delete landed but its acknowledgement was lost");
+            .expect_err("a delete succeeded but its acknowledgement was lost");
         assert!(!pin_exists(store.inner(), &source, &target_pin).await);
         store.inner().clear();
         let retried = crate::test_support::namespace_store(store.inner(), &target)

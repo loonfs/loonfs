@@ -14,7 +14,7 @@ use crate::wal::prepare_wal_object;
 use loonfs_test_support::ids::{attribute_key, attribute_text};
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 use loonfs_types::format::wal::{
-    LandRecord, WalDelta, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_BYTES,
+    MergeRecord, WalDelta, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_BYTES,
     MAX_WAL_OBJECT_INLINE_CONTENT_BYTES, WAL_OBJECT_OVERHEAD_BYTES,
 };
 use loonfs_types::ROOT_INODE_ID;
@@ -183,7 +183,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             },
         ],
     );
-    for kind in ["attributes", "copy", "land", "put", "inline", "append"] {
+    for kind in ["attributes", "copy", "merge", "put", "inline", "append"] {
         let inline = InlineContent::new(
             ContentId::generate(),
             bytes::Bytes::from(vec![
@@ -215,7 +215,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                         expected_inode_id: None,
                         expected_attributes_revision_no: None,
                     },
-                    "copy" | "land" => FilesystemOperation::CopyPath {
+                    "copy" | "merge" => FilesystemOperation::CopyPath {
                         source_path: AbsolutePath::parse("/source").expect("path"),
                         destination_path: AbsolutePath::parse(format!("/{index:0255}"))
                             .expect("path"),
@@ -250,9 +250,9 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         };
         let baseline = CommitCandidate::new(request.clone());
         let baseline_bound = baseline.wal_record_bytes_upper_bound();
-        let candidate = if kind == "land" {
-            baseline.with_land(
-                LandRecord {
+        let candidate = if kind == "merge" {
+            baseline.with_merge(
+                MergeRecord {
                     source_namespace_id: NamespaceId::parse("s".repeat(MAX_ID_BYTES))
                         .expect("namespace"),
                     source_after_seq: ChangeSeq(MAX_PUBLIC_INTEGER - 1),
@@ -308,8 +308,8 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             .expect("plan");
         let estimate = candidate.planned_wal_record_bytes(&plan.deltas, &plan.appended)
             + WAL_OBJECT_OVERHEAD_BYTES;
-        let without_land = plan.land.is_some().then(|| CommitPlan {
-            land: None,
+        let without_merge = plan.merge.is_some().then(|| CommitPlan {
+            merge: None,
             ..plan.clone()
         });
         let encoded = prepare_wal_object(
@@ -325,20 +325,20 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             "{kind}: {} > {estimate}",
             encoded.document_bytes()
         );
-        if let Some(without_land) = without_land {
-            let land_bytes = encoded.document_bytes()
+        if let Some(without_merge) = without_merge {
+            let merge_bytes = encoded.document_bytes()
                 - prepare_wal_object(
                     namespace_id.clone(),
                     head.writer_epoch,
                     &head,
                     head.basis_floor_seq,
-                    &[without_land],
+                    &[without_merge],
                 )
-                .expect("encode without the land record")
+                .expect("encode without the merge record")
                 .document_bytes();
             assert!(
-                candidate.wal_record_bytes_upper_bound() >= baseline_bound + land_bytes,
-                "{} < {baseline_bound} + {land_bytes}",
+                candidate.wal_record_bytes_upper_bound() >= baseline_bound + merge_bytes,
+                "{} < {baseline_bound} + {merge_bytes}",
                 candidate.wal_record_bytes_upper_bound()
             );
         }

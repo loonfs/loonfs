@@ -1,11 +1,11 @@
-//! The land index: one row for each land, written from the WAL tail and by
+//! The merge index: one row for each merge, written from the WAL tail and by
 //! a fold, read newest first for each fork, and compacted with the commits
 //! group.
 
 use super::expired_deletion_rows::{compact_group, family_rows};
 use super::*;
-use loonfs_types::format::manifest::LandIndexRecord;
-use loonfs_types::format::wal::LandRecord;
+use loonfs_types::format::manifest::MergeIndexRecord;
+use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::Commit;
 
 fn fork(name: &str) -> NamespaceId {
@@ -38,9 +38,9 @@ async fn publish<S: ObjectStore>(
         .expect("publish the commit")
 }
 
-/// Publishes a land of `fork_name`'s commits above `after_seq`, through
+/// Publishes a merge of `fork_name`'s commits above `after_seq`, through
 /// `through_seq`, from a fork made at `fork_point_seq`.
-async fn publish_land<S: ObjectStore>(
+async fn publish_merge<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
     fork_name: &str,
@@ -48,62 +48,62 @@ async fn publish_land<S: ObjectStore>(
     after_seq: u64,
     through_seq: u64,
 ) -> Commit {
-    let land = LandRecord {
+    let merge = MergeRecord {
         source_namespace_id: fork(fork_name),
         source_after_seq: ChangeSeq(after_seq),
         source_through_seq: ChangeSeq(through_seq),
     };
-    let intent = create_directory(&format!("land-{fork_name}-{through_seq}"));
+    let intent = create_directory(&format!("merge-{fork_name}-{through_seq}"));
     let fork_inode_id = InodeId::generate(ChangeSeq(through_seq), NonZeroU32::MIN);
-    let candidate = CommitCandidate::new(intent).with_land(
-        land,
+    let candidate = CommitCandidate::new(intent).with_merge(
+        merge,
         ChangeSeq(fork_point_seq),
         BTreeMap::from([(0, fork_inode_id)]),
     );
     publish(store, namespace_id, candidate).await
 }
 
-/// The land index row of a published land.
-fn indexed(commit: &Commit) -> LandIndexRecord {
-    let land = commit.land.as_ref().expect("a land");
-    LandIndexRecord {
-        source_namespace_id: land.source_namespace_id.clone(),
+/// The merge index row of a published merge.
+fn indexed(commit: &Commit) -> MergeIndexRecord {
+    let merge = commit.merge.as_ref().expect("a merge");
+    MergeIndexRecord {
+        source_namespace_id: merge.source_namespace_id.clone(),
         committed_seq: commit.committed_seq,
-        source_after_seq: land.source_after_seq,
-        source_through_seq: land.source_through_seq,
+        source_after_seq: merge.source_after_seq,
+        source_through_seq: merge.source_through_seq,
     }
 }
 
-async fn newest_land<S: ObjectStore + ?Sized>(
+async fn newest_merge<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     fork_name: &str,
-) -> Option<LandIndexRecord> {
+) -> Option<MergeIndexRecord> {
     crate::test_support::namespace_store(store, namespace_id)
         .load_current_metadata_view()
         .await
         .expect("read view")
         .metadata_view()
-        .newest_land(&fork(fork_name))
+        .newest_merge(&fork(fork_name))
         .await
-        .expect("land lookup")
+        .expect("merge lookup")
 }
 
-/// Checks that the projected tail and a fold both produce a land index row
-/// for each land, and that a scan of one fork's prefix returns that fork's
-/// lands newest first, and no other fork's.
+/// Checks that the projected tail and a fold both produce a merge index row
+/// for each merge, and that a scan of one fork's prefix returns that fork's
+/// merges newest first, and no other fork's.
 #[tokio::test]
-async fn lands_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork() {
+async fn merges_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("main").expect("namespace");
     bootstrap_namespace(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
-    let first = publish_land(&store, &namespace_id, "fork-a", 3, 3, 7).await;
-    let other = publish_land(&store, &namespace_id, "fork-b", 0, 0, 4).await;
-    let repeat = publish_land(&store, &namespace_id, "fork-a", 3, 7, 9).await;
-    let expected = [indexed(&repeat), indexed(&first), indexed(&other)].map(MetadataRow::Land);
+    let first = publish_merge(&store, &namespace_id, "fork-a", 3, 3, 7).await;
+    let other = publish_merge(&store, &namespace_id, "fork-b", 0, 0, 4).await;
+    let repeat = publish_merge(&store, &namespace_id, "fork-a", 3, 7, 9).await;
+    let expected = [indexed(&repeat), indexed(&first), indexed(&other)].map(MetadataRow::Merge);
 
     let tail_rows = crate::test_support::namespace_store(&store, &namespace_id)
         .load_manifest_projection(crate::test_support::observed_now())
@@ -112,20 +112,20 @@ async fn lands_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork()
         .tail_state
         .merged_rows();
     assert_eq!(
-        manifest_rows_for_family(&tail_rows, ApiMetadataRowFamily::Lands),
+        manifest_rows_for_family(&tail_rows, ApiMetadataRowFamily::Merges),
         expected
     );
     assert_eq!(
-        newest_land(&store, &namespace_id, "fork-a").await,
+        newest_merge(&store, &namespace_id, "fork-a").await,
         Some(indexed(&repeat))
     );
 
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
         .await
-        .expect("fold the lands");
+        .expect("fold the merges");
     assert_eq!(
-        family_rows(&store, &namespace_id, ApiMetadataRowFamily::Lands).await,
+        family_rows(&store, &namespace_id, ApiMetadataRowFamily::Merges).await,
         expected
     );
     let current = crate::test_support::namespace_store(&store, &namespace_id)
@@ -135,11 +135,11 @@ async fn lands_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork()
     let fork_a = super::super::metadata_basis_from_manifest(&store, None, &current)
         .segments
         .scan_prefix(
-            ApiMetadataRowFamily::Lands,
-            &lookup_keys::land_prefix(&fork("fork-a")),
+            ApiMetadataRowFamily::Merges,
+            &lookup_keys::merge_prefix(&fork("fork-a")),
         )
         .await
-        .expect("scan the fork's lands");
+        .expect("scan the fork's merges");
     assert_eq!(fork_a, expected[..2]);
     for (fork_name, newest) in [
         ("fork-a", Some(indexed(&repeat))),
@@ -147,18 +147,18 @@ async fn lands_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork()
         ("fork", None),
     ] {
         assert_eq!(
-            newest_land(&store, &namespace_id, fork_name).await,
+            newest_merge(&store, &namespace_id, fork_name).await,
             newest,
             "{fork_name}"
         );
     }
 }
 
-/// Checks that a base compaction of the commits group removes the land
-/// index row of a land below the retention floor, together with its commit
+/// Checks that a base compaction of the commits group removes the merge
+/// index row of a merge below the retention floor, together with its commit
 /// row and receipt, and keeps the rows at and above the floor.
 #[tokio::test]
-async fn land_rows_compact_with_the_commits_group_and_leave_no_row_below_the_floor() {
+async fn merge_rows_compact_with_the_commits_group_and_leave_no_row_below_the_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("main").expect("namespace");
@@ -166,7 +166,7 @@ async fn land_rows_compact_with_the_commits_group_and_leave_no_row_below_the_flo
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let first = publish_land(&store, &namespace_id, "fork-a", 3, 3, 7).await;
+    let first = publish_merge(&store, &namespace_id, "fork-a", 3, 3, 7).await;
     let floor = publish(
         &store,
         &namespace_id,
@@ -174,7 +174,7 @@ async fn land_rows_compact_with_the_commits_group_and_leave_no_row_below_the_flo
     )
     .await
     .committed_seq;
-    let repeat = publish_land(&store, &namespace_id, "fork-a", 3, 7, 9).await;
+    let repeat = publish_merge(&store, &namespace_id, "fork-a", 3, 7, 9).await;
     assert!(first.committed_seq < floor && floor < repeat.committed_seq);
     advance_floor_through(&store, &namespace_id, floor, &context).await;
     compact_group(
@@ -186,8 +186,8 @@ async fn land_rows_compact_with_the_commits_group_and_leave_no_row_below_the_flo
     .await;
 
     assert_eq!(
-        family_rows(&store, &namespace_id, ApiMetadataRowFamily::Lands).await,
-        [MetadataRow::Land(indexed(&repeat))]
+        family_rows(&store, &namespace_id, ApiMetadataRowFamily::Merges).await,
+        [MetadataRow::Merge(indexed(&repeat))]
     );
     for family in [
         ApiMetadataRowFamily::Commits,
@@ -205,7 +205,7 @@ async fn land_rows_compact_with_the_commits_group_and_leave_no_row_below_the_flo
         );
     }
     assert_eq!(
-        newest_land(&store, &namespace_id, "fork-a").await,
+        newest_merge(&store, &namespace_id, "fork-a").await,
         Some(indexed(&repeat))
     );
 }

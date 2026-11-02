@@ -792,7 +792,7 @@ fn metadata_apply_matches_model_for_undelete() {
                 1,
             ),
             // The revoke names the delete's own position — the third commit,
-            // second delta — which differs from where the revoke itself lands.
+            // second delta — which differs from where the revoke itself is committed.
             undelete(
                 0,
                 InodeId(3),

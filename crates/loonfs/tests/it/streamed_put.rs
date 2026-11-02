@@ -84,6 +84,6 @@ async fn a_streamed_put_holds_one_part_of_its_payload() {
     assert_eq!(
         namespace.read_file(PATH).await.expect("read file").bytes,
         payload,
-        "the file that landed is the payload that was streamed"
+        "the file that was written is the payload that was streamed"
     );
 }

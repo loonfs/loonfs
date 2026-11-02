@@ -375,7 +375,7 @@ async fn an_ack_lost_wal_put_commits_once_and_the_one_shot_publish_returns_the_c
         .expect("publish")
         .pop()
         .expect("one result")
-        .expect("the retry replays the landed commit from its receipt");
+        .expect("the retry replays the original commit from its receipt");
     assert_eq!(committed.committed_seq, ChangeSeq(1));
     assert!(store.injected_ack_loss());
     assert_eq!(data_wal_keys(&store).await.len(), 1);
@@ -406,7 +406,7 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
         .expect("publish")
         .pop()
         .expect("one result")
-        .expect("the first commit lands");
+        .expect("the first commit succeeds");
 
     // After the data put loses its answer, the retry cannot load its view.
     let answer_lost = std::sync::atomic::AtomicBool::new(false);
@@ -583,7 +583,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         retried[0].as_ref().expect_err("still missing").code(),
         ErrorCode::PathNotFound
     );
-    let committed = retried[1].as_ref().expect("create lands on retry");
+    let committed = retried[1].as_ref().expect("create commits on retry");
     assert_eq!(committed.committed_seq, ChangeSeq(1));
     assert_eq!(
         retried[2]
@@ -597,7 +597,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         ErrorCode::PathNotFound
     );
     assert_eq!(
-        retried[4].as_ref().expect("alias lands with its primary"),
+        retried[4].as_ref().expect("alias commits with its primary"),
         committed
     );
 }
@@ -753,7 +753,7 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
         )])
         .await
         .remove(0)
-        .expect("land original commit");
+        .expect("publish the original commit");
     let oversized_proofs = vec![prepared; loonfs_core::limits::MAX_COMMIT_CONTENT_TOKENS + 1];
 
     let replay = NamespaceFixture::new(&store, &namespace_id, &context)
@@ -1151,7 +1151,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
     .await
     .expect_err("conflicting retry");
     // The receipt decided this one, so the conflict names where the id
-    // landed and what landed there — the sequence a retry reads back, and
+    // was committed and what was committed there — the sequence a retry reads back, and
     // the identity it proves itself against.
     assert_matches!(
         conflict,
@@ -1496,8 +1496,8 @@ async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() 
                 )),
             ])
             .await;
-        let landed = results[0].as_ref().expect("first commit");
-        assert_eq!(landed.committed_seq, ChangeSeq(1));
+        let published = results[0].as_ref().expect("first commit");
+        assert_eq!(published.committed_seq, ChangeSeq(1));
         if second_expected == ChangeSeq(0) {
             let error = results[1]
                 .as_ref()
@@ -1521,7 +1521,7 @@ async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() 
         let replay = submit_commit(&store, &namespace_id, first.clone(), &context)
             .await
             .expect("receipt resolves despite stale precondition");
-        assert_eq!(&replay, landed);
+        assert_eq!(&replay, published);
         let changed = first.preconditions(vec![loonfs_types::CommitPrecondition::NamespaceHead {
             expected_head_seq: ChangeSeq(next_seq),
         }]);

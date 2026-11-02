@@ -60,7 +60,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
         };
         let (result, ()) = futures::join!(renew, expire);
         assert_eq!(
-            result.expect("the extension landed").expires_at_ms,
+            result.expect("the extension succeeded").expires_at_ms,
             Some(1_002)
         );
         let stored = crate::test_support::namespace_store(&inner, &namespace_id)

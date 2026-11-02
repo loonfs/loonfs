@@ -11,7 +11,7 @@ pub(crate) fn wal_payload_from_commit_plan(plan: &CommitPlan) -> WalCommitPayloa
         semantic_commit_fingerprint: plan.semantic_identity.clone(),
         committed_at_ms: plan.committed_at_ms,
         message: plan.message.clone(),
-        land: plan.land.clone(),
+        merge: plan.merge.clone(),
         inline_content: plan
             .inline_content
             .iter()

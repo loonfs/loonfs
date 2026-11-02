@@ -393,7 +393,7 @@ mod tests {
             semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
             committed_at_ms: 0,
             message: None,
-            land: None,
+            merge: None,
             deltas: vec![WalCommitDelta {
                 semantic_operation_index: 0,
                 delta: WalDelta::AppendFileRevision {

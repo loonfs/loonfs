@@ -77,7 +77,7 @@ async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
 
 #[tokio::test]
 async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
-    // A receipt replay does not land a put, so it also tests that discovery
+    // A receipt replay does not write a WAL object, so it also tests that discovery
     // itself refreshes the tip and basis observations.
     for replay_receipt in [false, true] {
         let (_directory, store, mut engine, context) = setup().await;

@@ -962,7 +962,7 @@ async fn publisher_contender_waits_for_active_request_receipt() {
     let conflict = conflict
         .await
         .expect("conflict task")
-        .expect_err("different request conflicts after the primary lands");
+        .expect_err("different request conflicts after the primary is committed");
     assert_eq!(active_response.committed_seq, ChangeSeq(1));
     assert_eq!(duplicate_response.committed_seq, ChangeSeq(1));
     assert_matches!(
@@ -1171,7 +1171,7 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
     let conflict = conflict
         .await
         .expect("conflict task")
-        .expect_err("different request conflicts after the primary lands");
+        .expect_err("different request conflicts after the primary is committed");
     assert_matches!(
         conflict,
         Error::Core(CoreError::CommitIdReuseConflict {
@@ -1347,7 +1347,7 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     .await;
     assert_eq!(warm.committed_seq, ChangeSeq(1));
 
-    // The commit lands but the CAS acknowledgement is lost. The publisher
+    // The commit is written but the CAS acknowledgement is lost. The publisher
     // retries with the same commit id and replays the durable receipt
     // instead of reporting `commit_outcome_unknown` to the waiter.
     store.fail_next(1);
@@ -1458,7 +1458,7 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
 
     store.release();
 
-    // Admitted-before work publishes; the delete lands after it.
+    // Admitted-before work publishes; the delete is published after it.
     assert_eq!(
         recv_commit(before_a, "before-a").await.committed_seq,
         ChangeSeq(1)
@@ -1729,7 +1729,7 @@ async fn pending_deletes_with_different_preconditions_settle_separately() {
     assert_eq!(stale_error.code(), ErrorCode::StaleHead);
     let deleted = settle_delete(unconditional, "unconditional delete")
         .await
-        .expect("the unconditional delete lands after the stale one fails");
+        .expect("the unconditional delete is published after the stale one fails");
     assert_eq!(deleted.head_seq, ChangeSeq(2));
 }
 
@@ -1778,10 +1778,10 @@ async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
 
     store.release();
     recv_commit(gate, "gate").await;
-    let landed = settle_delete(valid, "valid delete")
+    let deleted = settle_delete(valid, "valid delete")
         .await
-        .expect("the delete whose precondition holds lands");
-    assert_eq!(landed.head_seq, ChangeSeq(2));
+        .expect("the delete whose precondition holds is published");
+    assert_eq!(deleted.head_seq, ChangeSeq(2));
     let stale_error = settle_delete(stale, "stale delete")
         .await
         .expect_err("a precondition the tombstone outran");
@@ -2847,7 +2847,7 @@ async fn close_admission_refuses_without_creating_publishers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_delete_admitted_before_close_admission_lands_terminal() {
+async fn a_delete_admitted_before_close_admission_publishes_and_is_terminal() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
@@ -2891,7 +2891,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
     assert_eq!(response.committed_seq, ChangeSeq(1));
     let deleted = settle_delete(delete, "delete admitted before close_admission")
         .await
-        .expect("an admitted delete lands after admission closes");
+        .expect("an admitted delete is published after admission closes");
     assert_eq!(deleted.head_seq, ChangeSeq(1));
 
     assert!(matches!(
@@ -2903,7 +2903,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
         &namespace_id,
         create_directory_request("late", "late"),
     )
-    .expect_err("submission after the delete lands");
+    .expect_err("submission after the delete is published");
     assert_eq!(late.code(), ErrorCode::NamespaceDeleted);
     writer.drain().await.expect("drain settles the delete");
 }
@@ -3545,7 +3545,7 @@ mod fenced_session;
 mod head_positions;
 mod hint_raises;
 mod inline_writer;
-mod lands;
+mod merges;
 mod pin_folds;
 mod publication_clock;
 mod retention_expiry;

@@ -289,7 +289,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
                 .delete_namespace(Default::default(), writer, None, &fixture.context.clock())
                 .await
-                .expect("delete source before the fork pin lands");
+                .expect("delete source before the fork pin is written");
             gate.release();
         }
     );

@@ -306,7 +306,7 @@ fn row_inodes(row: &MetadataRow) -> Vec<InodeId> {
         MetadataRow::ActiveDeletion(record) => vec![record.root_inode_id],
         MetadataRow::CommitReceipt(_)
         | MetadataRow::Commit(_)
-        | MetadataRow::Land(_)
+        | MetadataRow::Merge(_)
         | MetadataRow::ContentLayout(_) => Vec::new(),
     }
 }

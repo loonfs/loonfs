@@ -33,11 +33,11 @@ pub(super) struct OpenBatch {
 }
 
 impl OpenBatch {
-    /// Returns whether the batch is a land's, which no other commit joins.
-    fn is_land(&self) -> bool {
+    /// Returns whether the batch is a merge's, which no other commit joins.
+    fn is_merge(&self) -> bool {
         self.candidates
             .iter()
-            .any(|candidate| candidate.candidate.is_land())
+            .any(|candidate| candidate.candidate.is_merge())
     }
 }
 
@@ -229,7 +229,7 @@ impl NamespacePublisher {
         }
 
         let queued = queued_candidates(&state);
-        let is_land = candidate.candidate.is_land();
+        let is_merge = candidate.candidate.is_merge();
         let wal_record_bytes_upper_bound = candidate.wal_record_bytes_upper_bound;
         let inline_content_bytes = candidate.inline_content_bytes;
         let candidate = BatchCandidate {
@@ -244,11 +244,11 @@ impl NamespacePublisher {
             // Coalesce with the tail batch while its bound stays under the
             // WAL object limit. A delete at the tail, or a full batch, opens a
             // batch behind it; work behind a delete publishes only if that
-            // delete fails. A land opens a batch of its own, and nothing joins
-            // a land's batch.
+            // delete fails. A merge opens a batch of its own, and nothing joins
+            // a merge's batch.
             Some(WorkItem::Batch(batch))
-                if !is_land
-                    && !batch.is_land()
+                if !is_merge
+                    && !batch.is_merge()
                     && batch
                         .wal_record_bytes_upper_bound
                         .saturating_add(wal_record_bytes_upper_bound)

@@ -795,7 +795,7 @@ async fn retry_policy_commit_id_filesystem_mutation_retries() {
         committed_by: loonfs_test_support::test_actor(),
         committed_at_ms: 1_752_624_000_000,
         message: None,
-        land: None,
+        merge: None,
         events: Vec::new(),
     };
     let transport = crate::scripted_transport::failure_then_success(

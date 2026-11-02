@@ -233,7 +233,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         .expect("open namespace");
 
     // Ground truth, collected through the ordinary read surface BEFORE the
-    // later writes land.
+    // later writes are committed.
     let at_checkpoint = listed_files(&fs.reader, &namespace_id).await;
     let checkpoint = fs
         .create_snapshot(&namespace_id)
@@ -361,7 +361,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
     assert_eq!(
         by_inode[&alpha_inode_id].revision_no,
         RevisionNo(1),
-        "the replacement landed after the checkpoint, so the pinned revision stays"
+        "the replacement was committed after the checkpoint, so the pinned revision stays"
     );
     assert_eq!(
         now[&alpha_inode_id].revision_no,
@@ -403,7 +403,7 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
         "paging one file at a time must produce the same sequence as one page"
     );
 
-    // Resuming from every cursor position lands exactly on the remaining
+    // Resuming from every cursor position starts exactly at the remaining
     // tail: no row is re-read, and none is skipped.
     for (index, file) in whole.iter().enumerate() {
         let resumed = namespace
@@ -962,7 +962,7 @@ async fn a_standalone_reader_serves_every_operation() {
             &state.file,
             CurrentFile::Visible { path, .. } if path.as_str() == "/docs/alpha-moved.txt"
         )),
-        "the standalone reader should see the move that landed after the checkpoint"
+        "the standalone reader should see the move that was committed after the checkpoint"
     );
 
     for file in &files {

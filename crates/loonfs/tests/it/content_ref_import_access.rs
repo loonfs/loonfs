@@ -408,7 +408,7 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         .await
         .expect("fork");
     let source_writer = writer.open_namespace(&source).expect("open namespace");
-    // The replacement lands after the fork, so only the source's final runs
+    // The replacement is committed after the fork, so only the source's final runs
     // carry it; the fork keeps the administrator it inherited.
     source_writer
         .with_subject(subject("administrator"))

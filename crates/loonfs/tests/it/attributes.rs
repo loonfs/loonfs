@@ -176,7 +176,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     }
     .fingerprint();
 
-    // The convenience call lands the commit; resubmitting the explicit
+    // The convenience call makes the commit; resubmitting the explicit
     // request under the same id replays it instead of committing twice.
     // Replay is decided on the fingerprint, so this passing is the parity
     // statement: the convenience compiled into the same commit.

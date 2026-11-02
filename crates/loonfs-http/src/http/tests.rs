@@ -1308,7 +1308,7 @@ async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
         .client
         .put_file_with_options(
             &target,
-            b"must not land",
+            b"must not be committed",
             &loonfs_test_support::test_actor(),
             &with_preconditions,
         )
@@ -1455,7 +1455,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
             },
         )
         .await
-        .expect("move lands in the recreated subtree");
+        .expect("the move into the recreated subtree is committed");
 
     harness.server.abort();
 }
@@ -1986,7 +1986,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     server.abort();
 }
 
-/// A payload with a distinct byte at every offset, so bytes landing in the
+/// A payload with a distinct byte at every offset, so bytes written in the
 /// wrong order or twice cannot go unnoticed.
 fn distinct_bytes(len: usize) -> Vec<u8> {
     (0..251_u8).cycle().take(len).collect()
@@ -2181,7 +2181,7 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
     .await
     .expect("join blocking task");
 
-    // A commit landing mid-listing does not retire the cursor: the resume
+    // A commit made mid-listing does not retire the cursor: the resume
     // continues after the last returned revision against the new head.
     write_file_bytes(
         &fs,

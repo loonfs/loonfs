@@ -848,7 +848,7 @@ async fn read_pressure_leaves_an_idle_writer_tail_and_its_next_publish_replays_n
         .expect("read the other namespace");
     assert!(cache.stats().wal_tails.cached_decoded_bytes > 0);
 
-    let landed = namespace
+    let committed = namespace
         .put_file(
             "/after-pressure.txt",
             b"after",
@@ -865,6 +865,6 @@ async fn read_pressure_leaves_an_idle_writer_tail_and_its_next_publish_replays_n
         .namespace(&namespace_id)
         .stat("/after-pressure.txt")
         .await
-        .expect("read the landed file");
-    assert_eq!(entry.head_seq, landed.committed_seq);
+        .expect("read the committed file");
+    assert_eq!(entry.head_seq, committed.committed_seq);
 }

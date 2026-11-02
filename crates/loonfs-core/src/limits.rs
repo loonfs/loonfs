@@ -267,7 +267,7 @@ const _: () = assert!(
     3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS,
     "3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS: \
      the final part, precondition, and completion requests a streamed write sends after its \
-     last caller byte must land before an aborted upload's record can be removed"
+     last caller byte must complete before an aborted upload's record can be removed"
 );
 
 /// Minimum provider age of a metadata segment no manifest lists before garbage

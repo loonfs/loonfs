@@ -184,7 +184,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     // Concurrent scans over one shared cache must not multiply fetches:
-    // single-flight covers blocks racing before the first insert lands, and
+    // single-flight covers blocks racing before the first insert completes, and
     // population covers everything after.
     let cache = super::MetadataSegmentCache::unshared(usize::MAX);
     // A solo pass over its own cold cache measures the true per-scan
@@ -472,7 +472,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .await
         .expect("bootstrap");
 
-    // "beta" lands in the base run; a second checkpoint puts "alpha" and
+    // "beta" is written to the base run; a second checkpoint puts "alpha" and
     // "gamma" in a delta run. The delta bind segment's key range then straddles
     // "beta", so min/max pruning cannot exclude it — only its bloom filter
     // can prove the name absent.
@@ -1068,7 +1068,7 @@ async fn a_cold_filter_load_fetches_the_index_in_the_same_read() {
 }
 
 /// One checkpointed direntry segment rebuilt with a one-byte block target,
-/// so every row lands in its own data block. A handful of test rows would
+/// so every row is written to its own data block. A handful of test rows would
 /// otherwise fit in one block, and the coalescing span path only says
 /// anything with several. Returns the segment's index, read with no caches,
 /// so a test can drive the span path without an index load filling the

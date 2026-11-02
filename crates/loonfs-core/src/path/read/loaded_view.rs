@@ -308,7 +308,7 @@ mod tests {
                 .into_iter()
                 .next()
                 .expect("one result")
-                .expect("commit lands");
+                .expect("commit succeeds");
         }
         (temp_dir, store, namespace_id)
     }

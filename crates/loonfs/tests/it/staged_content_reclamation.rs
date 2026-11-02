@@ -181,7 +181,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(
         report.deleted.content_objects, 0,
-        "metadata protects the bytes the moment the commit lands"
+        "metadata protects the bytes the moment the commit is made"
     );
     assert!(exists(&store, &published_key).await);
     assert_eq!(
@@ -376,7 +376,7 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
     namespace_writer
         .put_file(
             "/docs/lost.txt",
-            b"never lands",
+            b"never committed",
             &loonfs_test_support::test_actor(),
         )
         .await

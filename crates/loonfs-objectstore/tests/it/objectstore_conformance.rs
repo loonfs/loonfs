@@ -696,7 +696,7 @@ fn streamed_chunks(payload: &[u8], chunk_bytes: usize) -> loonfs_objectstore::By
 }
 
 /// A proxied write's shape against a real provider: a payload larger than
-/// the store's part size, delivered as a stream, must land byte-identical
+/// the store's part size, delivered as a stream, must be stored byte-identical
 /// and leave the prefix it borrowed empty afterwards.
 ///
 /// Three internal parts is the smallest payload with a middle part, which

@@ -37,16 +37,16 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .results
         .pop()
         .expect("result")
-        .expect_err("the landed write has an unknown outcome");
+        .expect_err("the successful write has an unknown outcome");
     assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
     assert_eq!(failed.attempts(), 1);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let landed = namespace
+    let view = namespace
         .load_current_metadata_view()
         .await
-        .expect("landed commit");
-    assert_eq!(landed.head().seq, ChangeSeq(1));
-    drop(landed);
+        .expect("committed view");
+    assert_eq!(view.head().seq, ChangeSeq(1));
+    drop(view);
 
     // Remove the physical evidence from WAL before the client retries. The
     // folded receipt and commit record must supply the original result.
@@ -54,7 +54,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         crate::test_support::namespace_store(&store, &namespace_id)
             .fold_wal()
             .await
-            .expect("fold landed commit")
+            .expect("fold the commit")
             .outcome,
         FoldWalOutcome::Published
     );

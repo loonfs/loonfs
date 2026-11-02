@@ -1,4 +1,4 @@
-//! A create that loses its race: another writer's object lands at the key
+//! A create that loses its race: another writer's object is written at the key
 //! just as this writer's first create of it arrives.
 
 use super::KeyPredicate;

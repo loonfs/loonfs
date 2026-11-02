@@ -511,7 +511,7 @@ fn append_adds_a_local_file_or_standard_input_to_the_end_of_a_file() {
 }
 
 #[test]
-fn concurrent_embedded_puts_land_or_report_the_fence() {
+fn concurrent_embedded_puts_commit_or_report_the_fence() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -527,8 +527,8 @@ fn concurrent_embedded_puts_land_or_report_the_fence() {
     // Four simultaneous processes: each is its own writer session, so they
     // fence each other on acquisition. Fencing is terminal — no silent
     // reacquisition — so the contract is honesty, not recovery: every
-    // process either lands its put or reports `writer_fenced`, the last
-    // acquirer always lands, and a fenced put commits nothing.
+    // process either commits its put or reports `writer_fenced`, the last
+    // acquirer always commits, and a fenced put commits nothing.
     let children: Vec<Child> = payloads
         .iter()
         .enumerate()
@@ -547,23 +547,23 @@ fn concurrent_embedded_puts_land_or_report_the_fence() {
                 .expect("spawn loonfs put")
         })
         .collect();
-    let mut landed = Vec::new();
+    let mut committed = Vec::new();
     for (index, child) in children.into_iter().enumerate() {
         let output = child.wait_with_output().expect("join loonfs put");
         if output.status.success() {
-            landed.push(index);
+            committed.push(index);
         } else {
             assert_eq!(json_error(&output)["code"], "writer_fenced");
         }
     }
     assert!(
-        !landed.is_empty(),
-        "the last writer to acquire faces no later fence and must land"
+        !committed.is_empty(),
+        "the last writer to acquire faces no later fence and must commit"
     );
 
     for index in 0..4 {
         let stat = harness.run(&["--json", "stat", &format!("/docs/file-{index}.txt")]);
-        if landed.contains(&index) {
+        if committed.contains(&index) {
             assert_success(&stat);
         } else {
             assert_failure(&stat);
@@ -877,7 +877,7 @@ fn an_interrupted_embedded_download_restarts_and_verifies_the_whole_file() {
     assert_eq!(
         fs::read(&destination).expect("read destination"),
         payload,
-        "a restarted download lands the whole verified file"
+        "a restarted download writes the whole verified file"
     );
 
     let resuming: Vec<Value> = events_of_kind(&get, "phase")
@@ -1070,13 +1070,13 @@ fn commit_messages_ride_the_feed_over_the_remote_transport() {
         payload.to_str().expect("utf-8 path"),
         "/doc.txt",
         "-m",
-        "landed over http",
+        "committed over http",
     ]));
     assert_success(&harness.run(&["mkdir", "/dir", "-m", "made over http"]));
 
     assert_eq!(
         feed_messages(&harness),
-        vec!["landed over http", "made over http"]
+        vec!["committed over http", "made over http"]
     );
 }
 
@@ -2186,7 +2186,7 @@ fn mkdir_parents_is_idempotent_over_an_existing_directory_in_both_modes() {
 }
 
 #[test]
-fn cp_and_mv_land_inside_an_existing_directory_in_both_modes() {
+fn cp_and_mv_place_the_source_inside_an_existing_directory_in_both_modes() {
     let harness = Harness::new();
     harness.add_embedded_profile("embedded");
     let remote_server =
@@ -2287,7 +2287,7 @@ fn cp_and_mv_land_inside_an_existing_directory_in_both_modes() {
         assert_success(&onto_file_forced);
         assert_eq!(json_data(&onto_file_forced)["to"], "demo:/docs/renamed.pdf");
 
-        // A directory tree lands inside an existing directory too.
+        // A directory tree is placed inside an existing directory too.
         assert_success(&harness.run(&["mkdir", "/archive", "--profile", profile]));
         let tree = harness.run(&[
             "--json",

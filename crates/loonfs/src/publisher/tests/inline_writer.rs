@@ -872,7 +872,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             InjectedError::PermissionDenied("content writes refused".to_owned()),
         ));
         // The hint raise after the first put's publication runs in the
-        // background, so its write would land in the counts below.
+        // background, so its write would appear in the counts below.
         let store = Arc::new(RecordingStore::new(
             failing.clone(),
             KeyPredicate::any().except_hints(),

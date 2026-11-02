@@ -5,7 +5,7 @@ use super::CommitFingerprint;
 use crate::storage::inline_content::InlineContent;
 
 use loonfs_types::format::manifest::DeltaPosition;
-use loonfs_types::format::wal::{LandRecord, WalCommitDelta, WalInlineContent};
+use loonfs_types::format::wal::{MergeRecord, WalCommitDelta, WalInlineContent};
 use loonfs_types::{
     ActorId, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId,
     WriterEpoch,
@@ -31,7 +31,7 @@ pub(crate) struct CommitPlan {
     pub(crate) actor_id: ActorId,
     pub(crate) writer_epoch: WriterEpoch,
     pub(crate) message: Option<String>,
-    pub(crate) land: Option<LandRecord>,
+    pub(crate) merge: Option<MergeRecord>,
     pub(crate) semantic_identity: CommitFingerprint,
     pub(crate) apply_after_seq: ChangeSeq,
     pub(crate) assigned_seq: ChangeSeq,

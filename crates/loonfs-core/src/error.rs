@@ -78,11 +78,11 @@ pub enum CoreError {
         estimated_bytes: usize,
         max_bytes: usize,
     },
-    /// A land's estimated bytes exceed the WAL object's size or the
+    /// A merge's estimated bytes exceed the WAL object's size or the
     /// publisher's admitted-bytes total, so no retry can admit it. The caller
-    /// lands the fork's commits in smaller ranges.
-    #[error("land is too large: estimated {estimated_bytes} bytes exceeds the limit of {max_bytes} bytes")]
-    LandTooLarge {
+    /// merges the fork's commits in smaller ranges.
+    #[error("merge is too large: estimated {estimated_bytes} bytes exceeds the limit of {max_bytes} bytes")]
+    MergeTooLarge {
         estimated_bytes: usize,
         max_bytes: usize,
     },
@@ -151,12 +151,12 @@ pub enum CoreError {
         /// fingerprint lets a retry verify that it represents the same request.
         committed: Option<CommittedReceipt>,
     },
-    /// A land doesn't start where the previous land from its fork stopped,
-    /// or, for the fork's first land, at the fork point.
+    /// A merge doesn't start where the previous merge from its fork stopped,
+    /// or, for the fork's first merge, at the fork point.
     #[error(
-        "land from `{source_namespace_id}` starts after `{actual_after_seq}`, but it has to continue from `{expected_after_seq}`"
+        "merge from `{source_namespace_id}` starts after `{actual_after_seq}`, but it has to continue from `{expected_after_seq}`"
     )]
-    LandRangeConflict {
+    MergeRangeConflict {
         source_namespace_id: NamespaceId,
         expected_after_seq: ChangeSeq,
         actual_after_seq: ChangeSeq,
@@ -234,14 +234,14 @@ pub enum CoreError {
         from_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
-    /// A land's fork point is below the retention floor, so a base
-    /// compaction might have removed the fork's previous land from the land
+    /// A merge's fork point is below the retention floor, so a base
+    /// compaction might have removed the fork's previous merge from the merge
     /// index. The error has the change feed's code, and its details include
     /// `fork_point_seq` in place of the change feed's `after_seq`.
     #[error(
-        "fork point `{fork_point_seq}` is older than retention floor `{retention_floor_seq}`, so the fork can't land"
+        "fork point `{fork_point_seq}` is older than retention floor `{retention_floor_seq}`, so the fork can't be merged"
     )]
-    LandRebootstrapRequired {
+    MergeRebootstrapRequired {
         fork_point_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
@@ -492,7 +492,7 @@ impl CoreError {
             CoreError::ContentTooLarge { .. }
             | CoreError::CommitTooLarge { .. }
             | CoreError::AppendTooLarge { .. } => ErrorCode::ContentTooLarge,
-            CoreError::LandTooLarge { .. } => ErrorCode::LandTooLarge,
+            CoreError::MergeTooLarge { .. } => ErrorCode::MergeTooLarge,
             CoreError::NamespaceNotFound { .. } => ErrorCode::NamespaceNotFound,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
@@ -503,7 +503,7 @@ impl CoreError {
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
             CoreError::BindingVersionMismatch { .. } => ErrorCode::BindingVersionMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
-            CoreError::LandRangeConflict { .. } => ErrorCode::LandRangeConflict,
+            CoreError::MergeRangeConflict { .. } => ErrorCode::MergeRangeConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
@@ -526,7 +526,7 @@ impl CoreError {
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
             CoreError::RebootstrapRequired { .. }
             | CoreError::DiffRebootstrapRequired { .. }
-            | CoreError::LandRebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
+            | CoreError::MergeRebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
@@ -596,7 +596,7 @@ impl CoreError {
             | CoreError::RevisionNotFound { .. }
             | CoreError::ContentTooLarge { .. }
             | CoreError::CommitTooLarge { .. }
-            | CoreError::LandTooLarge { .. }
+            | CoreError::MergeTooLarge { .. }
             | CoreError::AppendTooLarge { .. }
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
@@ -610,7 +610,7 @@ impl CoreError {
             | CoreError::DestinationExists { .. }
             | CoreError::BindingVersionMismatch { .. }
             | CoreError::CommitIdReuseConflict { .. }
-            | CoreError::LandRangeConflict { .. }
+            | CoreError::MergeRangeConflict { .. }
             | CoreError::ContentPreparation(_)
             | CoreError::CommitQueueFull
             | CoreError::WriterSessionClosed { .. }
@@ -630,7 +630,7 @@ impl CoreError {
             | CoreError::InvalidDiffRange { .. }
             | CoreError::RebootstrapRequired { .. }
             | CoreError::DiffRebootstrapRequired { .. }
-            | CoreError::LandRebootstrapRequired { .. }
+            | CoreError::MergeRebootstrapRequired { .. }
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
             | CoreError::OutcomeUnknown { .. }
@@ -676,7 +676,7 @@ impl CoreError {
                 committed: committed.clone(),
                 ..ErrorDetails::default()
             }),
-            CoreError::LandRangeConflict {
+            CoreError::MergeRangeConflict {
                 source_namespace_id,
                 expected_after_seq,
                 actual_after_seq,
@@ -706,7 +706,7 @@ impl CoreError {
                 retention_floor_seq: Some(*retention_floor_seq),
                 ..ErrorDetails::default()
             }),
-            CoreError::LandRebootstrapRequired {
+            CoreError::MergeRebootstrapRequired {
                 fork_point_seq,
                 retention_floor_seq,
             } => Some(ErrorDetails {
@@ -933,7 +933,7 @@ mod tests {
         assert_eq!(details.active_writer, None);
 
         // A conflict decided against a durable receipt names where the
-        // commit id landed and what landed there, which is what a retry
+        // commit id was committed and what was committed there, which is what a retry
         // reads back and proves itself against.
         let receipt = CommittedReceipt {
             committed_seq: ChangeSeq(9),
@@ -950,7 +950,7 @@ mod tests {
         );
         assert_eq!(details.committed, Some(receipt));
 
-        // A conflict between two live claims has no landed commit to name,
+        // A conflict between two live claims has no commit to name,
         // so it carries neither half of the receipt.
         let contended = CoreError::CommitIdReuseConflict {
             commit_id: "retry-key-1".to_owned(),

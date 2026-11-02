@@ -453,7 +453,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
             &options(&commit_id),
         )
         .await
-        .expect_err("one put is not the two-operation commit that landed");
+        .expect_err("one put is not the two-operation commit that was made");
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     let entry = runtime.stat(&namespace_id, PATH).await.expect("stat path");
@@ -574,7 +574,7 @@ async fn a_changed_message_under_a_used_commit_id_still_conflicts() {
     assert_eq!(
         feed_message(&runtime, &namespace_id, first.committed_seq).await,
         Some("import batch".to_owned()),
-        "the refused rerun did not rewrite the annotation that landed"
+        "the refused rerun did not rewrite the annotation that was committed"
     );
     let entry = runtime.stat(&namespace_id, PATH).await.expect("stat path");
     assert_eq!(
@@ -735,7 +735,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
 
     // Pin the head, then give up incremental replay below it. The commit's
     // receipt still binds the id, so a rerun still conflicts and the
-    // conflict still names where the commit landed — but the change feed no
+    // conflict still names the commit's sequence — but the change feed no
     // longer answers for that sequence.
     runtime
         .create_snapshot(&namespace_id)
@@ -815,7 +815,7 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
         .expect("a retry past the horizon is admitted as a new commit");
     assert!(
         retried.committed_seq > last_seq,
-        "the late retry landed as a new commit: first {:?}, retry {:?}",
+        "the late retry became a new commit: first {:?}, retry {:?}",
         first.committed_seq,
         retried.committed_seq
     );

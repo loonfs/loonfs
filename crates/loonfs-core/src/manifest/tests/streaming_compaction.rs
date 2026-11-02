@@ -1579,7 +1579,7 @@ async fn a_compaction_reads_its_window_once() {
 // -------------------------------------------------------------------------
 
 /// Cancels the job by setting a token once the store has served a given
-/// number of reads, so a cancellation lands in the middle of a compaction rather
+/// number of reads, so a cancellation happens in the middle of a compaction rather
 /// than at a boundary the test picked.
 #[derive(Debug)]
 struct CancelAfterReadsStore {
@@ -1606,7 +1606,7 @@ impl ObjectStore for CancelAfterReadsStore {
 }
 
 #[tokio::test]
-async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_would_have() {
+async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_ends_where_it_would_have() {
     let straight_dir = tempdir().expect("tempdir");
     let straight_store = LocalFsStore::new(straight_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2205,7 +2205,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                     if arrived_keys.is_empty() {
                         // A run arrives while the first job runs. It is
                         // outside that job's input, so the job never reads
-                        // it and the publication must land underneath it.
+                        // it and the publication must be written underneath it.
                         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
                             .write_file_bytes(
                                 "/arrived-mid-job.txt",
@@ -2351,8 +2351,8 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
 
     // The attempt dies partway through, which is what a cancellation and a
     // kill leave behind alike: output segments and nothing else. The
-    // cancellation lands after a number of reads rather than at a boundary
-    // the test picked, so several thresholds are tried until one lands after
+    // cancellation happens after a number of reads rather than at a boundary
+    // the test picked, so several thresholds are tried until one happens after
     // the job has written something.
     let mut orphans = BTreeSet::new();
     for reads_before_cancel in [8usize, 16, 24, 32] {
@@ -2369,7 +2369,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
         assert_eq!(
             outcome,
             CompactionUnitOutcome::Cancelled,
-            "the cancellation must land before the job finishes"
+            "the cancellation must happen before the job finishes"
         );
         assert_eq!(
             current_manifest_number(&store, &namespace_id).await,
@@ -2421,7 +2421,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
 /// replacement manifest object.
 ///
 /// That is the window the retry is for: the finalizer has reloaded the manifest
-/// and decided its swap, and a fold lands before its compare-and-swap does.
+/// and decided its swap, and a fold is published before the finalizer's compare-and-swap.
 #[derive(Debug)]
 struct FoldDuringFinalization {
     folder: LocalFsStore,
@@ -2448,7 +2448,7 @@ impl Interceptor for FoldDuringFinalization {
 }
 
 #[tokio::test]
-async fn a_fold_landing_during_finalization_is_retried_over() {
+async fn a_fold_published_during_finalization_is_retried_over() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();

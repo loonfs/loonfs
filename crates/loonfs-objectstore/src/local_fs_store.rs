@@ -998,7 +998,7 @@ mod tests {
         assert_eq!(keys, vec![key]);
     }
 
-    // A delete can land between `metadata_for_path`'s stat and its digest
+    // A delete can happen between `metadata_for_path`'s stat and its digest
     // read; no single filesystem state makes the stat succeed and the read
     // answer NotFound (both follow the same path resolution), so the race
     // window cannot be staged whole. Each arm of the read is pinned

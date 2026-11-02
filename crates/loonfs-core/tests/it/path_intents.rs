@@ -1142,7 +1142,7 @@ async fn move_path_respells_the_same_slot_without_a_conflict() {
             Some(&commit_id("respell")),
         )
         .await
-        .expect("case-only respelling lands");
+        .expect("case-only respelling commits");
 
     let after = resolve_path_latest(&store, &namespace_id("demo"), "/docs/report.pdf")
         .await
@@ -1215,7 +1215,7 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
             Some(&commit_id("move-under-recreated")),
         )
         .await
-        .expect("move lands in the recreated subtree");
+        .expect("the move into the recreated subtree is committed");
 }
 
 #[tokio::test]
@@ -1423,7 +1423,7 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
         &store,
         &namespace_id,
         "/docs/aba.txt",
-        b"must not land",
+        b"must not be committed",
         WritePreconditions {
             inode_id: Some(old.inode_id),
             revision_no: Some(RevisionNo(1)),
@@ -1455,7 +1455,7 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
         &store,
         &namespace_id,
         "/docs/aba.txt",
-        b"revision-only must not land",
+        b"revision-only must not be committed",
         WritePreconditions {
             inode_id: None,
             revision_no: Some(RevisionNo(1)),
@@ -1504,7 +1504,7 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     .expect("matching inode and revision preconditions allow replacement");
 
     let rejected_content = namespace_store(&store, &namespace_id)
-        .store_bytes_as_content(b"must not land")
+        .store_bytes_as_content(b"must not be committed")
         .await
         .expect("stage rejected content");
     let error = submit_operation(
@@ -1834,7 +1834,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     );
 
     // Replace compiles to one commit: the destination file's delete and the
-    // source's rebind land atomically.
+    // source's rebind are committed atomically.
     submit_operation(
         &store,
         &namespace_id,

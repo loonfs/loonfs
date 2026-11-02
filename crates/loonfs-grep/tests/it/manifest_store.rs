@@ -378,7 +378,7 @@ async fn missing_hint_etags_fail_without_repeated_store_attempts() {
 }
 
 #[tokio::test]
-async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
+async fn ambiguous_manifest_puts_reconcile_the_exact_written_state() {
     for apply in [false, true] {
         let directory = tempfile::tempdir().expect("directory");
         let namespace_id = namespace_id("ambiguous");
@@ -406,7 +406,7 @@ async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
         let next = state(namespace_id.clone(), ManifestNo(2), RunNo(1));
         let result = publish_grep_manifest(&store, Some(&first), &next, &deadline).await;
         if apply {
-            assert_eq!(result.expect("landed manifest").manifest_state(), &next);
+            assert_eq!(result.expect("written manifest").manifest_state(), &next);
         } else {
             assert_matches!(result, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
             let current =

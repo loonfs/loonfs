@@ -808,7 +808,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         other => panic!("expected invalid_request, got {other:?}"),
     }
 
-    // The valid first operation of the rejected batch did not land either.
+    // The valid first operation of the rejected batch was not committed either.
     assert_eq!(
         harness
             .client
@@ -1184,7 +1184,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
         .client
         .stat(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
         .await
-        .expect("the replace landed");
+        .expect("the replace is committed");
     assert_eq!(replaced.revision_no(), Some(RevisionNo(2)));
     assert_eq!(replaced.content_ref(), Some(&second.content_ref));
 

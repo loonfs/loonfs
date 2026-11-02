@@ -3,7 +3,7 @@
 
 use crate::metadata::{active_deletion_from_tombstone, MetadataState};
 use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_types::format::manifest::{ContentLayoutRecord, LandIndexRecord};
+use loonfs_types::format::manifest::{ContentLayoutRecord, MergeIndexRecord};
 use loonfs_types::{ChangeSeq, ContentId};
 use std::collections::HashMap;
 
@@ -77,11 +77,11 @@ pub(crate) fn manifest_rows_for_family(
             .cloned()
             .map(MetadataRow::Commit)
             .collect::<Vec<_>>(),
-        MetadataRowFamily::Lands => metadata_state
+        MetadataRowFamily::Merges => metadata_state
             .commits()
             .iter()
-            .filter_map(LandIndexRecord::from_commit)
-            .map(MetadataRow::Land)
+            .filter_map(MergeIndexRecord::from_commit)
+            .map(MetadataRow::Merge)
             .collect::<Vec<_>>(),
         MetadataRowFamily::Attributes => metadata_state
             .attributes_revisions()
@@ -142,7 +142,7 @@ pub(crate) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         },
         MetadataRow::CommitReceipt(record) => record.committed_seq,
         MetadataRow::Commit(record) => record.committed_seq,
-        MetadataRow::Land(record) => record.committed_seq,
+        MetadataRow::Merge(record) => record.committed_seq,
         MetadataRow::ContentLayout(record) => record.committed_seq,
         MetadataRow::AttributesRevision(record) => record.committed_seq,
         MetadataRow::AccessRevision(record) => record.committed_seq,
@@ -159,7 +159,7 @@ pub(crate) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::ActiveDeletion(_) => "active_deletion",
         MetadataRow::CommitReceipt(_) => "commit_receipt",
         MetadataRow::Commit(_) => "commit",
-        MetadataRow::Land(_) => "land",
+        MetadataRow::Merge(_) => "merge",
         MetadataRow::ContentLayout(_) => "content_layout",
         MetadataRow::AttributesRevision(_) => "attributes_revision",
         MetadataRow::AccessRevision(_) => "access_revision",

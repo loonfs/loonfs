@@ -287,7 +287,7 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
 }
 
 #[tokio::test]
-async fn a_pin_write_that_lands_and_fails_its_read_back_leaves_no_pin() {
+async fn a_pin_write_that_is_stored_and_fails_its_read_back_leaves_no_pin() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = FailStore::new(

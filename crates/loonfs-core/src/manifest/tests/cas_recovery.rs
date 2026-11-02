@@ -61,12 +61,12 @@ async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
         .inner()
         .head(&object_key)
         .await
-        .expect("landed manifest")
+        .expect("written manifest")
         .is_some());
 }
 
 #[tokio::test]
-async fn a_manifest_put_that_lands_nowhere_and_loses_its_answer_has_an_unknown_outcome() {
+async fn a_manifest_put_that_writes_nothing_and_loses_its_answer_has_an_unknown_outcome() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
@@ -731,7 +731,7 @@ async fn a_manifest_update_stops_after_the_contention_limit() {
 }
 
 #[tokio::test]
-async fn a_fold_whose_manifest_put_lands_without_an_answer_reports_published() {
+async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = FailStore::new(
@@ -986,7 +986,7 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
         .create()
         .await
         .expect("create");
-    // The claim landed, but a rival could have written the same bytes, so the
+    // The claim was written, but a rival could have written the same bytes, so the
     // claimant reads it as the rival's and takes the next epoch.
     let epoch = crate::test_support::NamespaceFixture::new(
         &store,

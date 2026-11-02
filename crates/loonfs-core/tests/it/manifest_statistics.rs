@@ -285,7 +285,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
             (MetadataRowFamily::ContentLayouts, 2),
             (MetadataRowFamily::Attributes, 0),
             (MetadataRowFamily::Access, 0),
-            (MetadataRowFamily::Lands, 0),
+            (MetadataRowFamily::Merges, 0),
         ])
     );
     assert_eq!(

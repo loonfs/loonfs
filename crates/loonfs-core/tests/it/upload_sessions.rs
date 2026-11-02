@@ -1072,7 +1072,7 @@ mod direct_multipart {
     }
 
     #[tokio::test]
-    async fn a_re_uploaded_part_is_the_one_that_lands() {
+    async fn a_re_uploaded_part_is_the_one_that_is_stored() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = default_writer();

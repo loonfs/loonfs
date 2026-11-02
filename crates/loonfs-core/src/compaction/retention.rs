@@ -18,11 +18,11 @@ pub(crate) enum RetentionRule {
     /// Keeps the first row in each group; layout keys sort the longest layout first,
     /// then the newest.
     FirstPerGroup,
-    /// A commit row, its receipt, or its land index row is judged by its own
-    /// commit sequence against the floor. The writer refuses a land whose
-    /// fork point is below the floor, and every land from a fork has a
-    /// sequence above the fork point, so this rule keeps every land index row
-    /// that a land's range check can read.
+    /// A commit row, its receipt, or its merge index row is judged by its own
+    /// commit sequence against the floor. The writer refuses a merge whose
+    /// fork point is below the floor, and every merge from a fork has a
+    /// sequence above the fork point, so this rule keeps every merge index row
+    /// that a merge's range check can read.
     CommitHistory,
     /// Every revision above the floor, plus the newest at or below it, per
     /// inode.
@@ -103,7 +103,7 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
             committed_seq, ..
         }) if *committed_seq < floor_seq => None,
         MetadataRow::Commit(record) if record.committed_seq < floor_seq => None,
-        MetadataRow::Land(record) if record.committed_seq < floor_seq => None,
+        MetadataRow::Merge(record) if record.committed_seq < floor_seq => None,
         _ => Some(row),
     }
 }
@@ -396,7 +396,7 @@ const COMMIT_CLUSTERS: [RetentionCluster; 3] = [
         rule: RetentionRule::CommitHistory,
     },
     RetentionCluster {
-        families: &[MetadataRowFamily::Lands],
+        families: &[MetadataRowFamily::Merges],
         locality: LocalityGrouping::Row,
         rule: RetentionRule::CommitHistory,
     },

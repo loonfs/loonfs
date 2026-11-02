@@ -30,7 +30,7 @@ use loonfs_types::format::manifest::{
     METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::wal::{
-    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, LandRecord, WalCodecError,
+    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, MergeRecord, WalCodecError,
     WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
 };
 use loonfs_types::ROOT_INODE_ID;
@@ -431,7 +431,7 @@ fn sample_wal_payload() -> WalObjectPayload {
             .expect("fingerprint"),
             committed_at_ms: 4_000,
             message: Some("golden commit".to_owned()),
-            land: None,
+            merge: None,
             deltas,
             inline_content: Vec::new(),
         }],
@@ -529,20 +529,20 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
     payload
 }
 
-/// The land record that the land samples include.
-fn sample_land() -> LandRecord {
-    LandRecord {
+/// The merge record that the merge samples include.
+fn sample_merge() -> MergeRecord {
+    MergeRecord {
         source_namespace_id: NamespaceId::parse("demo-fork").expect("valid namespace id"),
         source_after_seq: ChangeSeq(12),
         source_through_seq: ChangeSeq(30),
     }
 }
 
-/// A WAL object whose commit is a land. An absent land record writes no bytes,
+/// A WAL object whose commit is a merge. An absent merge record writes no bytes,
 /// so the other WAL samples don't pin its encoding.
-fn sample_wal_land_payload() -> WalObjectPayload {
+fn sample_wal_merge_payload() -> WalObjectPayload {
     let mut payload = sample_wal_payload();
-    payload.records[0].land = Some(sample_land());
+    payload.records[0].merge = Some(sample_merge());
     payload
 }
 
@@ -724,18 +724,19 @@ fn wal_object_inline_content_golden_decodes_to_sample() {
 }
 
 #[test]
-fn wal_object_land_document_matches_golden_bytes() {
-    let encoded = encode_wal_object_envelope_zstd(sample_wal_land_payload())
-        .expect("encode wal with a land record")
+fn wal_object_merge_document_matches_golden_bytes() {
+    let encoded = encode_wal_object_envelope_zstd(sample_wal_merge_payload())
+        .expect("encode wal with a merge record")
         .into_bytes();
-    assert_matches_golden("wal_object_land.v1.cbor", &unzstd(&encoded));
+    assert_matches_golden("wal_object_merge.v1.cbor", &unzstd(&encoded));
 }
 
 #[test]
-fn wal_object_land_golden_decodes_to_sample() {
-    let decoded = decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_land.v1.cbor")))
-        .expect("decode golden WAL object with a land record");
-    assert_eq!(decoded.into_payload(), sample_wal_land_payload());
+fn wal_object_merge_golden_decodes_to_sample() {
+    let decoded =
+        decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_merge.v1.cbor")))
+            .expect("decode golden WAL object with a merge record");
+    assert_eq!(decoded.into_payload(), sample_wal_merge_payload());
 }
 
 // The golden is the decompressed document. The stored object is that document
@@ -1381,7 +1382,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"content_layouts\"",
             "\"attributes\"",
             "\"access\"",
-            "\"lands\"",
+            "\"merges\"",
         ],
         "family tags are durable bytes in every manifest descriptor"
     );
@@ -1640,9 +1641,9 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
 }
 
 #[test]
-fn wal_decode_rejects_unknown_fields_inside_a_land_record() {
-    let document = wal_document_with_payload_edit(&sample_wal_land_payload(), |payload| {
-        with_future_field(cbor_entry(payload_commit(payload), "land"));
+fn wal_decode_rejects_unknown_fields_inside_a_merge_record() {
+    let document = wal_document_with_payload_edit(&sample_wal_merge_payload(), |payload| {
+        with_future_field(cbor_entry(payload_commit(payload), "merge"));
     });
     let error = decode_wal_object_envelope_zstd(&document)
         .expect_err("unknown durable fields must be rejected");
@@ -2156,7 +2157,7 @@ fn sample_commit_row() -> MetadataRow {
         .expect("fingerprint"),
         committed_at_ms: 9_000,
         message: None,
-        land: None,
+        merge: None,
         deltas: vec![
             WalCommitDelta {
                 semantic_operation_index: 0,
@@ -2186,25 +2187,25 @@ fn sample_commit_row() -> MetadataRow {
     })
 }
 
-/// A commit row of a land, whose land record a fold copies from the WAL.
-fn sample_land_commit_row() -> MetadataRow {
+/// A commit row of a merge, whose merge record a fold copies from the WAL.
+fn sample_merge_commit_row() -> MetadataRow {
     let MetadataRow::Commit(mut record) = sample_commit_row() else {
         panic!("the sample commit row is a commit row");
     };
-    record.land = Some(sample_land());
+    record.merge = Some(sample_merge());
     MetadataRow::Commit(record)
 }
 
-/// Land index rows of two forks, in row-key order: one fork's two lands
-/// newest first, then the other fork's land.
-fn sample_land_index_rows() -> [MetadataRow; 3] {
+/// Merge index rows of two forks, in row-key order: one fork's two merges
+/// newest first, then the other fork's merge.
+fn sample_merge_index_rows() -> [MetadataRow; 3] {
     [
         ("demo-fork", 41, 30, 36),
         ("demo-fork", 20, 12, 30),
         ("demo-other", 33, 5, 9),
     ]
     .map(|(source, committed_seq, after_seq, through_seq)| {
-        MetadataRow::Land(loonfs_types::format::manifest::LandIndexRecord {
+        MetadataRow::Merge(loonfs_types::format::manifest::MergeIndexRecord {
             source_namespace_id: NamespaceId::parse(source).expect("valid namespace id"),
             committed_seq: ChangeSeq(committed_seq),
             source_after_seq: ChangeSeq(after_seq),
@@ -2395,7 +2396,7 @@ fn family_block_position(
 }
 
 /// Counts the rows one block holds for the family `prefix` names, so a guard
-/// can state that every row of the family landed in the block a fixture pins.
+/// can state that every row of the family was written to the block a fixture pins.
 fn rows_under_prefix(
     block: &loonfs_types::format::segment_blocks::DecodedDataBlock,
     prefix: &str,
@@ -2582,32 +2583,35 @@ fn sst_block_data_commit_golden_decodes_to_sample_row() {
 }
 
 #[test]
-fn sst_block_data_land_commit_rows_match_golden_bytes() {
+fn sst_block_data_merge_commit_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden(
-        "sst_block_data_commits_land.v1.bin",
-        &[sample_land_commit_row()],
+        "sst_block_data_commits_merge.v1.bin",
+        &[sample_merge_commit_row()],
     );
 }
 
 #[test]
-fn sst_block_data_land_commit_golden_decodes_to_sample_row() {
-    let block = decode_golden_data_block("sst_block_data_commits_land.v1.bin");
-    assert_eq!(block.rows, [sample_land_commit_row()]);
+fn sst_block_data_merge_commit_golden_decodes_to_sample_row() {
+    let block = decode_golden_data_block("sst_block_data_commits_merge.v1.bin");
+    assert_eq!(block.rows, [sample_merge_commit_row()]);
 }
 
 #[test]
-fn sst_block_data_land_index_rows_match_golden_bytes() {
-    assert_rows_match_single_block_golden("sst_block_data_lands.v1.bin", &sample_land_index_rows());
+fn sst_block_data_merge_index_rows_match_golden_bytes() {
+    assert_rows_match_single_block_golden(
+        "sst_block_data_merges.v1.bin",
+        &sample_merge_index_rows(),
+    );
 }
 
 #[test]
-fn sst_block_data_land_index_golden_decodes_to_sample_rows() {
-    let block = decode_golden_data_block("sst_block_data_lands.v1.bin");
-    assert_eq!(block.rows, sample_land_index_rows());
+fn sst_block_data_merge_index_golden_decodes_to_sample_rows() {
+    let block = decode_golden_data_block("sst_block_data_merges.v1.bin");
+    assert_eq!(block.rows, sample_merge_index_rows());
     for row in &block.rows {
         let mut encoded = row_cbor(row);
         with_future_field(&mut encoded);
-        let refusal = assert_row_is_corrupt(&encoded, "a land index row is strict");
+        let refusal = assert_row_is_corrupt(&encoded, "a merge index row is strict");
         assert!(refusal.contains("field_from_the_future"), "{refusal}");
     }
 }

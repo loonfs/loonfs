@@ -163,12 +163,12 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
             "active-deletion-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
             "active-deletion-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
         ],
-        "a re-delete lands at a new sequence and adds a new row"
+        "a re-delete is committed at a new sequence and adds a new row"
     );
 }
 
 #[test]
-fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
+fn a_removal_carries_the_undeletes_sequence_so_it_is_written_to_that_commits_run() {
     let state = state_from_tombstones(vec![
         tombstone_set(InodeId(7), 5, "notes.txt", InodeKind::File),
         tombstone_revoke(InodeId(7), 9, 5),
@@ -1144,7 +1144,7 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
         .await
         .expect("create checkpoint");
 
-    // This pair lands after the manifest and is only in the WAL tail.
+    // This pair is committed after the manifest and is only in the WAL tail.
     write_test_file(
         &store,
         &namespace_id,

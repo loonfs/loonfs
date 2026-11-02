@@ -58,7 +58,7 @@ A stored row that maps a commit ID to the sequence it committed at. LoonFS uses 
 
 ### Semantic fingerprint
 
-A digest of a commit's logical request: the namespace, the actor, the subject, the operations, the preconditions, and the message, but not details like the writer epoch or the timestamp. When a request reuses a commit ID, LoonFS compares fingerprints to tell whether it's a retry of the original request or a different request (which fails with `commit_id_reuse_conflict`). A [land's](#land) fingerprint covers its land record in place of its operations and preconditions.
+A digest of a commit's logical request: the namespace, the actor, the subject, the operations, the preconditions, and the message, but not details like the writer epoch or the timestamp. When a request reuses a commit ID, LoonFS compares fingerprints to tell whether it's a retry of the original request or a different request (which fails with `commit_id_reuse_conflict`). A [merge's](#merge) fingerprint covers its merge record in place of its operations and preconditions.
 
 ### Change feed
 
@@ -132,7 +132,7 @@ The namespace whose commit started a chain, recorded in the chain's [layout](#la
 
 A byte range of one content object that stores part of a chain. Content objects are immutable, so the bytes appended to a chain are written to new content objects, and a chain's bytes usually end up spread across several objects. Each extent records which content object it's in, the offset in that object, and the length.
 
-Most extents are "own extents", which store bytes written for the chain itself. A "shared base extent" stores bytes of an earlier chain that this chain was started from. For example, a fork inherits `/log.txt`, whose chain the source namespace created. The fork isn't the chain's creator, so when it appends 10 bytes to the file, it starts a new chain. The new chain's layout lists the first chain's object as a shared base extent, followed by an own extent that stores the 10 new bytes. A fold never merges a shared base extent with other extents, so the shared bytes are never copied.
+Most extents are "own extents", which store bytes written for the chain itself. A "shared base extent" stores bytes of an earlier chain that this chain was started from. For example, a fork inherits `/log.txt`, whose chain the source namespace created. The fork isn't the chain's creator, so when it appends 10 bytes to the file, it starts a new chain. The new chain's layout lists the first chain's object as a shared base extent, followed by an own extent that stores the 10 new bytes. A fold never combines a shared base extent with other extents, so the shared bytes are never copied.
 
 ### Layout
 
@@ -198,7 +198,7 @@ A row family that stores a second key over facts that another family stores, for
 
 ### Family group
 
-A set of related metadata row families that compaction always processes together, so that they stay consistent. For example, the two directory binding indexes form one group, and commits, commit receipts, and the [land index](#land-index) form another.
+A set of related metadata row families that compaction always processes together, so that they stay consistent. For example, the two directory binding indexes form one group, and commits, commit receipts, and the [merge index](#merge-index) form another.
 
 ### Fold
 
@@ -245,7 +245,7 @@ The maintenance API's "checkpoint" inventory lists every pin of a namespace, so 
 
 ### Fork
 
-A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace appear in the other only when a [land](#land) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
+A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
 
 ### Fork family
 
@@ -255,13 +255,13 @@ A set of namespaces: one namespace that was created without a source (the [famil
 
 The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family root (`family_root_id`), and the family root's prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its garbage collection pass keeps collecting the family's content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
 
-### Land
+### Merge
 
-A commit that applies a fork's commits to the namespace that the fork was forked from, so that the changes made in the fork appear in its source as one commit. The commit's record includes a "land record", which identifies the fork and the range of the fork's commits that the land applied: the commits above `source_after_seq`, through `source_through_seq`. For example, if `sandbox` was forked from `main` at sequence 100 and then committed sequences 101 through 120, a land of those commits is one commit on `main` whose land record is `sandbox`, 100, and 120. The change feed reports the land record with the commit, and a land's [semantic fingerprint](#semantic-fingerprint) covers its land record in place of its operations. See [Commit identity and retries](format.md#65-commit-identity-and-retries) and [WAL records](format.md#a5-wal-records).
+A commit that applies a fork's commits to the namespace that the fork was forked from, so that the changes made in the fork appear in its source as one commit. The commit's record includes a "merge record", which identifies the fork and the range of the fork's commits that the merge applied: the commits above `source_after_seq`, through `source_through_seq`. For example, if `sandbox` was forked from `main` at sequence 100 and then committed sequences 101 through 120, a merge of those commits is one commit on `main` whose merge record is `sandbox`, 100, and 120. The change feed reports the merge record with the commit, and a merge's [semantic fingerprint](#semantic-fingerprint) covers its merge record in place of its operations. Rewriting metadata runs during [compaction](#compaction) isn't called a merge. See [Commit identity and retries](format.md#65-commit-identity-and-retries) and [WAL records](format.md#a5-wal-records).
 
-### Land index
+### Merge index
 
-A derived row family (`lands`) with one row for each land that a namespace committed, keyed by the fork that the land applied and then by the land's sequence, newest first. Each row records the land's sequence and its land record's range. Before LoonFS commits a land, it reads the fork's newest row and checks that the new land starts where that land stopped (or at the fork point, for the fork's first land), so a fork's commits are applied once and in order. For example, if `main` committed a land of `sandbox`'s commits 101 through 120 at sequence 300, and a land of commits 121 through 140 at sequence 350, the first row under `sandbox` is the land at 350, and the next land from `sandbox` has to start after 140. See [Validation](format.md#62-validation) and [Metadata rows and row keys](format.md#a6-metadata-rows-and-row-keys).
+A derived row family (`merges`) with one row for each merge that a namespace committed, keyed by the fork that the merge applied and then by the merge's sequence, newest first. Each row records the merge's sequence and its merge record's range. Before LoonFS commits a merge, it reads the fork's newest row and checks that the new merge starts where that merge stopped (or at the fork point, for the fork's first merge), so a fork's commits are applied once and in order. For example, if `main` committed a merge of `sandbox`'s commits 101 through 120 at sequence 300, and a merge of commits 121 through 140 at sequence 350, the first row under `sandbox` is the merge at 350, and the next merge from `sandbox` has to start after 140. See [Validation](format.md#62-validation) and [Metadata rows and row keys](format.md#a6-metadata-rows-and-row-keys).
 
 ### Writer position
 

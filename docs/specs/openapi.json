@@ -334,9 +334,9 @@
             },
             "type": "array"
           },
-          "land": {
-            "$ref": "#/components/schemas/Land",
-            "description": "The fork and the range of its commits that the commit applied, when the commit is a land.\nIt's absent for every other commit."
+          "merge": {
+            "$ref": "#/components/schemas/Merge",
+            "description": "The fork and the range of its commits that the commit applied, when the commit is a merge.\nIt's absent for every other commit."
           },
           "message": {
             "description": "The caller's optional annotation for the commit.",
@@ -1417,7 +1417,7 @@
           },
           "actual_after_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The fork sequence that the land started after."
+            "description": "The fork sequence that the merge started after."
           },
           "actual_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributesRevisionNo",
@@ -1465,7 +1465,7 @@
           },
           "expected_after_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The fork sequence that the land had to start after: the end of the previous land's range,\nor the fork point for the fork's first land."
+            "description": "The fork sequence that the merge had to start after: the end of the previous merge's range,\nor the fork point for the fork's first merge."
           },
           "expected_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributesRevisionNo",
@@ -1497,7 +1497,7 @@
           },
           "fork_point_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The fork point of the fork whose commits a land applies, which is the sequence of this\nnamespace that the fork was made at."
+            "description": "The fork point of the fork whose commits a merge applies, which is the sequence of this\nnamespace that the fork was made at."
           },
           "from_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -1535,7 +1535,7 @@
           },
           "source_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The fork whose land didn't continue the previous land from that fork."
+            "description": "The fork whose merge didn't continue the previous merge from that fork."
           }
         },
         "type": "object"
@@ -3064,29 +3064,6 @@
         ],
         "type": "string"
       },
-      "Land": {
-        "description": "The fork and the range of the fork's commits that a land applied.\n\nThe range follows the change feed's cursor convention, so reading the fork's change feed after\n`source_after_seq` through `source_through_seq` returns the commits that the land applied.",
-        "properties": {
-          "source_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The fork's commits above this sequence were applied. For a fork's first land, it's the\nsequence that the fork was made at."
-          },
-          "source_namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The fork whose commits the land applied."
-          },
-          "source_through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The fork's commits at or below this sequence were applied."
-          }
-        },
-        "required": [
-          "source_namespace_id",
-          "source_after_seq",
-          "source_through_seq"
-        ],
-        "type": "object"
-      },
       "ListChangesResponse": {
         "description": "The commits after a change feed cursor.",
         "properties": {
@@ -3319,6 +3296,29 @@
         "maximum": 9007199254740991,
         "minimum": 0,
         "type": "integer"
+      },
+      "Merge": {
+        "description": "The fork and the range of the fork's commits that a merge applied.\n\nThe range follows the change feed's cursor convention, so reading the fork's change feed after\n`source_after_seq` through `source_through_seq` returns the commits that the merge applied.",
+        "properties": {
+          "source_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork's commits above this sequence were applied. For a fork's first merge, it's the\nsequence that the fork was made at."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose commits the merge applied."
+          },
+          "source_through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork's commits at or below this sequence were applied."
+          }
+        },
+        "required": [
+          "source_namespace_id",
+          "source_after_seq",
+          "source_through_seq"
+        ],
+        "type": "object"
       },
       "MetadataMaintenanceOutcome": {
         "description": "Whether metadata maintenance left work due for a namespace.",
