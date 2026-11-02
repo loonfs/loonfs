@@ -591,7 +591,7 @@ fn index_enable_budgets_exit_nonzero_and_report_progress() {
         );
     }
 
-    // The index is untouched by the give-up, and a plain wait still lands.
+    // The index is untouched by the give-up, and a plain wait still succeeds.
     assert_success(&harness.run(&["maintenance", "index", "enable"]));
     let found = harness.run(&["--json", "grep", "needle"]);
     assert_success(&found);

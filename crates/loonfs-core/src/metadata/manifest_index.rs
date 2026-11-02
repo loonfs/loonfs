@@ -5,7 +5,7 @@ use super::row_decode::{
     access_revision_from_manifest_row, active_deletion_from_manifest_row,
     attributes_revision_from_manifest_row, commit_from_manifest_row,
     commit_receipt_from_manifest_row, direntry_binding_from_manifest_row, inode_from_manifest_row,
-    land_index_from_manifest_row, revision_from_manifest_row, tombstone_from_manifest_row,
+    merge_index_from_manifest_row, revision_from_manifest_row, tombstone_from_manifest_row,
 };
 use crate::error::Result;
 use crate::metadata::{
@@ -16,7 +16,7 @@ use crate::metadata::{
 use crate::segment::{Readahead, VerifiedMetadataSegments};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
-use loonfs_types::format::manifest::{LandIndexRecord, MetadataRow, MetadataRowFamily};
+use loonfs_types::format::manifest::{MergeIndexRecord, MetadataRow, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, RevisionNo};
@@ -456,20 +456,20 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
         .max_by_key(|receipt| receipt.committed_seq))
 }
 
-/// Returns the newest land from `source_namespace_id` at or below
+/// Returns the newest merge from `source_namespace_id` at or below
 /// `visible_seq`.
-pub(super) async fn newest_land<S: ObjectStore + ?Sized>(
+pub(super) async fn newest_merge<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     source_namespace_id: &NamespaceId,
     visible_seq: ChangeSeq,
-) -> Result<Option<LandIndexRecord>> {
+) -> Result<Option<MergeIndexRecord>> {
     newest_row_under_prefix(
         segments,
-        MetadataRowFamily::Lands,
-        lookup_keys::land_prefix(source_namespace_id),
-        lookup_keys::land_probe(source_namespace_id),
+        MetadataRowFamily::Merges,
+        lookup_keys::merge_prefix(source_namespace_id),
+        lookup_keys::merge_probe(source_namespace_id),
         visible_seq,
-        land_index_from_manifest_row,
+        merge_index_from_manifest_row,
         |record| record.committed_seq,
     )
     .await
@@ -518,7 +518,7 @@ pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
 /// family whose keys sort the rows of one prefix newest first (`revisions`
 /// or a whole-state family, which invert the revision number, the
 /// sequence, and the delta index, `tombstones`, which inverts the sequence
-/// and the delta index, or `lands`, which inverts the sequence), so the
+/// and the delta index, or `merges`, which inverts the sequence), so the
 /// first row at or below the sequence is the result.
 ///
 /// A read that sees every row of the manifest takes the first row of the

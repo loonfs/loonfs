@@ -46,7 +46,7 @@ fn commit_rows_reject_inline_content_and_decode_without_it() {
         semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("commit-row"),
         committed_at_ms: 9_000,
         message: None,
-        land: None,
+        merge: None,
         deltas: Vec::new(),
         inline_content: Vec::new(),
     };
@@ -136,7 +136,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
         committed_at_ms: 4_200,
         message: None,
-        land: None,
+        merge: None,
         deltas,
         inline_content: Vec::new(),
     };

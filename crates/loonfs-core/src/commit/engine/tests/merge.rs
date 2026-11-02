@@ -1,6 +1,6 @@
-//! Land commits: the land record in the WAL, the change feed, and the
-//! commit rows, a land's retry identity, the range rule that makes each
-//! land continue the previous land from its fork, and the refusal of a land
+//! Merge commits: the merge record in the WAL, the change feed, and the
+//! commit rows, a merge's retry identity, the range rule that makes each
+//! merge continue the previous merge from its fork, and the refusal of a merge
 //! whose fork point is below the retention floor.
 
 use super::*;
@@ -11,8 +11,8 @@ use crate::compaction::{
 };
 use crate::manifest::RetentionTarget;
 use crate::test_support::NamespaceFixture;
-use loonfs_types::format::wal::{LandRecord, MAX_WAL_OBJECT_BYTES};
-use loonfs_types::{CompactorEpoch, EffectiveLimit, InodeId, Land};
+use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES};
+use loonfs_types::{CompactorEpoch, EffectiveLimit, InodeId, Merge};
 use std::collections::BTreeMap;
 
 /// The sequence of `main` that the tests' fork was made at.
@@ -22,20 +22,20 @@ fn fork() -> NamespaceId {
     NamespaceId::parse("main-fork").expect("namespace")
 }
 
-/// A land of the fork's commits above `after_seq`, through `through_seq`.
-fn land(after_seq: u64, through_seq: u64) -> LandRecord {
-    LandRecord {
+/// A merge of the fork's commits above `after_seq`, through `through_seq`.
+fn merge(after_seq: u64, through_seq: u64) -> MergeRecord {
+    MergeRecord {
         source_namespace_id: fork(),
         source_after_seq: ChangeSeq(after_seq),
         source_through_seq: ChangeSeq(through_seq),
     }
 }
 
-fn reported(land: &LandRecord) -> Land {
-    Land {
-        source_namespace_id: land.source_namespace_id.clone(),
-        source_after_seq: land.source_after_seq,
-        source_through_seq: land.source_through_seq,
+fn reported(merge: &MergeRecord) -> Merge {
+    Merge {
+        source_namespace_id: merge.source_namespace_id.clone(),
+        source_after_seq: merge.source_after_seq,
+        source_through_seq: merge.source_through_seq,
     }
 }
 
@@ -44,11 +44,11 @@ fn fork_inode_id() -> InodeId {
     InodeId::generate(ChangeSeq(FORK_POINT.0 + 1), std::num::NonZeroU32::MIN)
 }
 
-/// A land of `land` under `commit_id` that creates `/{name}` under an inode
+/// A merge of `merge` under `commit_id` that creates `/{name}` under an inode
 /// ID from the fork.
-fn land_candidate(commit_id: &str, name: &str, land: LandRecord) -> CommitCandidate {
-    CommitCandidate::new(create_dir_request(commit_id, name)).with_land(
-        land,
+fn merge_candidate(commit_id: &str, name: &str, merge: MergeRecord) -> CommitCandidate {
+    CommitCandidate::new(create_dir_request(commit_id, name)).with_merge(
+        merge,
         FORK_POINT,
         BTreeMap::from([(0, fork_inode_id())]),
     )
@@ -96,11 +96,11 @@ async fn feed(store: &LocalFsStore, namespace_id: &NamespaceId) -> Vec<Commit> {
     .changes
 }
 
-/// Checks that the land record reaches the commit response, the change feed
+/// Checks that the merge record reaches the commit response, the change feed
 /// while the commit is in the WAL tail, and the change feed after a fold
 /// writes the commit row, and that an ordinary commit reports none.
 #[tokio::test]
-async fn the_feed_reports_a_land_record_before_and_after_a_fold() {
+async fn the_feed_reports_a_merge_record_before_and_after_a_fold() {
     let (_directory, store, namespace_id, writer) = setup().await;
     let ordinary = publish(
         &store,
@@ -110,16 +110,16 @@ async fn the_feed_reports_a_land_record_before_and_after_a_fold() {
     )
     .await
     .expect("ordinary commit");
-    assert_eq!(ordinary.land, None);
-    let landed = publish(
+    assert_eq!(ordinary.merge, None);
+    let merged = publish(
         &store,
         &namespace_id,
         &writer,
-        land_candidate("land", "landed", land(3, 7)),
+        merge_candidate("merge", "merged", merge(3, 7)),
     )
     .await
-    .expect("land");
-    assert_eq!(landed.land, Some(reported(&land(3, 7))));
+    .expect("merge");
+    assert_eq!(merged.merge, Some(reported(&merge(3, 7))));
 
     for folded in [false, true] {
         if folded {
@@ -131,26 +131,26 @@ async fn the_feed_reports_a_land_record_before_and_after_a_fold() {
         let changes = feed(&store, &namespace_id).await;
         assert_eq!(
             changes,
-            [ordinary.clone(), landed.clone()],
+            [ordinary.clone(), merged.clone()],
             "folded: {folded}"
         );
     }
 }
 
-/// Checks that a land's identity is its land record: a retry with the same
-/// commit ID and land record replays the original commit whatever its
+/// Checks that a merge's identity is its merge record: a retry with the same
+/// commit ID and merge record replays the original commit whatever its
 /// operations, before and after a fold, and a different range conflicts.
 #[tokio::test]
-async fn a_reused_commit_id_replays_the_same_land_and_conflicts_with_another_range() {
+async fn a_reused_commit_id_replays_the_same_merge_and_conflicts_with_another_range() {
     let (_directory, store, namespace_id, writer) = setup().await;
     let original = publish(
         &store,
         &namespace_id,
         &writer,
-        land_candidate("land", "landed", land(3, 7)),
+        merge_candidate("merge", "merged", merge(3, 7)),
     )
     .await
-    .expect("land");
+    .expect("merge");
 
     for folded in [false, true] {
         if folded {
@@ -163,7 +163,7 @@ async fn a_reused_commit_id_replays_the_same_land_and_conflicts_with_another_ran
             &store,
             &namespace_id,
             &writer,
-            land_candidate("land", "planned-again", land(3, 7)),
+            merge_candidate("merge", "planned-again", merge(3, 7)),
         )
         .await
         .expect("replay");
@@ -173,7 +173,7 @@ async fn a_reused_commit_id_replays_the_same_land_and_conflicts_with_another_ran
             &store,
             &namespace_id,
             &writer,
-            land_candidate("land", "landed", land(3, 8)),
+            merge_candidate("merge", "merged", merge(3, 8)),
         )
         .await
         .expect_err("a different range reuses the commit ID");
@@ -187,9 +187,9 @@ async fn a_reused_commit_id_replays_the_same_land_and_conflicts_with_another_ran
     assert_eq!(feed(&store, &namespace_id).await, [original]);
 }
 
-/// Checks a refused land's error, its wire code, and its details.
+/// Checks a refused merge's error, its wire code, and its details.
 fn assert_range_conflict(error: CoreError, expected_after_seq: u64, actual_after_seq: u64) {
-    assert_eq!(error.code(), ErrorCode::LandRangeConflict);
+    assert_eq!(error.code(), ErrorCode::MergeRangeConflict);
     assert_eq!(error.code().kind(), loonfs_types::ErrorKind::Conflict);
     let details = error.details().expect("details");
     assert_eq!(details.source_namespace_id, Some(fork()));
@@ -200,62 +200,62 @@ fn assert_range_conflict(error: CoreError, expected_after_seq: u64, actual_after
     assert_eq!(details.actual_after_seq, Some(ChangeSeq(actual_after_seq)));
     assert_matches!(
         error,
-        CoreError::LandRangeConflict { source_namespace_id, .. } if source_namespace_id == fork()
+        CoreError::MergeRangeConflict { source_namespace_id, .. } if source_namespace_id == fork()
     );
 }
 
-/// Checks that a fork's first land has to start at the fork point.
+/// Checks that a fork's first merge has to start at the fork point.
 #[tokio::test]
-async fn a_first_land_starts_at_the_fork_point() {
+async fn a_first_merge_starts_at_the_fork_point() {
     let (_directory, store, namespace_id, writer) = setup().await;
     for after_seq in [2, 4] {
         let error = publish(
             &store,
             &namespace_id,
             &writer,
-            land_candidate("early-or-late", "skipped", land(after_seq, 7)),
+            merge_candidate("early-or-late", "skipped", merge(after_seq, 7)),
         )
         .await
-        .expect_err("a first land that doesn't start at the fork point");
+        .expect_err("a first merge that doesn't start at the fork point");
         assert_range_conflict(error, FORK_POINT.0, after_seq);
     }
-    let landed = publish(
+    let merged = publish(
         &store,
         &namespace_id,
         &writer,
-        land_candidate("first", "first", land(FORK_POINT.0, 7)),
+        merge_candidate("first", "first", merge(FORK_POINT.0, 7)),
     )
     .await
-    .expect("a first land at the fork point");
-    assert_eq!(landed.land, Some(reported(&land(FORK_POINT.0, 7))));
+    .expect("a first merge at the fork point");
+    assert_eq!(merged.merge, Some(reported(&merge(FORK_POINT.0, 7))));
 }
 
-/// Checks that a repeat land has to start where the previous land stopped,
-/// whether the previous land's index row is in a folded run or in the WAL
-/// tail, and that a retry of the previous land with its original commit ID
+/// Checks that a repeat merge has to start where the previous merge stopped,
+/// whether the previous merge's index row is in a folded run or in the WAL
+/// tail, and that a retry of the previous merge with its original commit ID
 /// still replays, because the receipt check runs before the range rule.
 #[tokio::test]
-async fn a_repeat_land_continues_the_previous_land_exactly() {
+async fn a_repeat_merge_continues_the_previous_merge_exactly() {
     let (_directory, store, namespace_id, writer) = setup().await;
     let first = publish(
         &store,
         &namespace_id,
         &writer,
-        land_candidate("first", "first", land(3, 7)),
+        merge_candidate("first", "first", merge(3, 7)),
     )
     .await
-    .expect("first land");
+    .expect("first merge");
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
         .await
-        .expect("fold the first land");
+        .expect("fold the first merge");
 
     for (after_seq, why) in [(5, "an overlap"), (8, "a gap")] {
         let error = publish(
             &store,
             &namespace_id,
             &writer,
-            land_candidate("repeat", "repeat", land(after_seq, 9)),
+            merge_candidate("repeat", "repeat", merge(after_seq, 9)),
         )
         .await
         .expect_err(why);
@@ -265,28 +265,28 @@ async fn a_repeat_land_continues_the_previous_land_exactly() {
         &store,
         &namespace_id,
         &writer,
-        land_candidate("repeat", "repeat", land(7, 9)),
+        merge_candidate("repeat", "repeat", merge(7, 9)),
     )
     .await
-    .expect("a land that continues the first");
+    .expect("a merge that continues the first");
     let error = publish(
         &store,
         &namespace_id,
         &writer,
-        land_candidate("third", "third", land(7, 12)),
+        merge_candidate("third", "third", merge(7, 12)),
     )
     .await
-    .expect_err("a land that repeats the land in the WAL tail");
+    .expect_err("a merge that repeats the merge in the WAL tail");
     assert_range_conflict(error, 9, 7);
 
     let replayed = publish(
         &store,
         &namespace_id,
         &writer,
-        land_candidate("first", "planned-again", land(3, 7)),
+        merge_candidate("first", "planned-again", merge(3, 7)),
     )
     .await
-    .expect("a retry of the first land");
+    .expect("a retry of the first merge");
     assert_eq!(replayed, first);
 }
 
@@ -301,10 +301,10 @@ fn intent(commit_id: &str, operations: Vec<FilesystemOperation>) -> CommitIntent
     }
 }
 
-/// Checks that a land isn't held to the operation count that limits a
+/// Checks that a merge isn't held to the operation count that limits a
 /// request body, and that its creates make inodes under the fork's IDs.
 #[tokio::test]
-async fn a_land_of_ten_thousand_creates_is_admitted_where_an_explicit_commit_is_refused() {
+async fn a_merge_of_ten_thousand_creates_is_admitted_where_an_explicit_commit_is_refused() {
     let (_directory, store, namespace_id, writer) = setup().await;
     let creates = intent(
         "many",
@@ -331,15 +331,15 @@ async fn a_land_of_ten_thousand_creates_is_admitted_where_an_explicit_commit_is_
 
     let fork_ids: BTreeMap<usize, InodeId> =
         (0..10_000).map(|index| (index, fork_inode_id())).collect();
-    let landed = publish(
+    let merged = publish(
         &store,
         &namespace_id,
         &writer,
-        CommitCandidate::new(creates).with_land(land(3, 7), FORK_POINT, fork_ids.clone()),
+        CommitCandidate::new(creates).with_merge(merge(3, 7), FORK_POINT, fork_ids.clone()),
     )
     .await
-    .expect("a land of the same creates");
-    let created: Vec<InodeId> = landed
+    .expect("a merge of the same creates");
+    let created: Vec<InodeId> = merged
         .events
         .iter()
         .map(|event| match event {
@@ -350,13 +350,13 @@ async fn a_land_of_ten_thousand_creates_is_admitted_where_an_explicit_commit_is_
     assert_eq!(created, fork_ids.into_values().collect::<Vec<_>>());
 }
 
-/// Checks that a land whose planned record doesn't fit in one WAL object
-/// fails with `land_too_large`, which has the 413 kind, and writes no WAL
+/// Checks that a merge whose planned record doesn't fit in one WAL object
+/// fails with `merge_too_large`, which has the 413 kind, and writes no WAL
 /// object.
 #[tokio::test]
-async fn a_land_over_the_wal_object_bound_fails_with_land_too_large_and_writes_nothing() {
+async fn a_merge_over_the_wal_object_bound_fails_with_merge_too_large_and_writes_nothing() {
     let (_directory, store, namespace_id, writer) = setup().await;
-    // One engine publishes both commits, so the land's publication acquires
+    // One engine publishes both commits, so the merge's publication acquires
     // no writer epoch and writes no fence.
     let mut engine = NamespaceCommitEngine::new(
         crate::test_support::namespace_store(&store, &namespace_id),
@@ -385,8 +385,8 @@ async fn a_land_over_the_wal_object_bound_fails_with_land_too_large_and_writes_n
                 expected_attributes_revision_no: None,
             })
             .collect();
-        CommitCandidate::new(intent("too-large", operations)).with_land(
-            land(3, 7),
+        CommitCandidate::new(intent("too-large", operations)).with_merge(
+            merge(3, 7),
             FORK_POINT,
             BTreeMap::new(),
         )
@@ -402,13 +402,13 @@ async fn a_land_over_the_wal_object_bound_fails_with_land_too_large_and_writes_n
         .results
         .pop()
         .expect("one result")
-        .expect_err("a land over the bound");
+        .expect_err("a merge over the bound");
     assert_matches!(
         error,
-        CoreError::LandTooLarge { estimated_bytes, max_bytes }
+        CoreError::MergeTooLarge { estimated_bytes, max_bytes }
             if estimated_bytes > max_bytes && max_bytes == MAX_WAL_OBJECT_BYTES
     );
-    assert_eq!(error.code(), ErrorCode::LandTooLarge);
+    assert_eq!(error.code(), ErrorCode::MergeTooLarge);
     assert_eq!(
         error.code().kind(),
         loonfs_types::ErrorKind::ContentTooLarge
@@ -416,10 +416,10 @@ async fn a_land_over_the_wal_object_bound_fails_with_land_too_large_and_writes_n
     assert_eq!(wal_object_count(&store, &namespace_id).await, before);
 }
 
-/// Checks that a land refers only to content that the fork already wrote:
+/// Checks that a merge refers only to content that the fork already wrote:
 /// inline content and appended bytes are refused.
 #[tokio::test]
-async fn a_land_with_inline_content_or_an_append_is_refused() {
+async fn a_merge_with_inline_content_or_an_append_is_refused() {
     let (_directory, store, namespace_id, writer) = setup().await;
     let inline = InlineContent::new(
         ContentId::generate(),
@@ -447,27 +447,27 @@ async fn a_land_with_inline_content_or_an_append_is_refused() {
         }],
     );
     for candidate in [
-        CommitCandidate::with_inline_content(put, Vec::new(), vec![inline]).with_land(
-            land(3, 7),
+        CommitCandidate::with_inline_content(put, Vec::new(), vec![inline]).with_merge(
+            merge(3, 7),
             FORK_POINT,
             BTreeMap::from([(0, fork_inode_id())]),
         ),
-        CommitCandidate::new(append).with_land(land(3, 7), FORK_POINT, BTreeMap::new()),
+        CommitCandidate::new(append).with_merge(merge(3, 7), FORK_POINT, BTreeMap::new()),
     ] {
         let error = publish(&store, &namespace_id, &writer, candidate)
             .await
-            .expect_err("a land with bytes of its own");
+            .expect_err("a merge with bytes of its own");
         assert_matches!(
             error,
             CoreError::InvalidCommitRequest(message)
-                if message == "a land includes no inline content or appended bytes"
+                if message == "a merge includes no inline content or appended bytes"
         );
     }
 }
 
-/// A file that a fork created, landed into the namespace it was forked
+/// A file that a fork created, merged into the namespace it was forked
 /// from.
-struct LandedFile {
+struct MergedFile {
     store: RecordingStore<LocalFsStore>,
     main: NamespaceId,
     fork: NamespaceId,
@@ -475,12 +475,12 @@ struct LandedFile {
     bytes: Vec<u8>,
 }
 
-/// Forks `main`, writes a 1 MiB file in the fork, folds the fork, and lands
-/// the file into `main` the way the land planner does: a create under the
+/// Forks `main`, writes a 1 MiB file in the fork, folds the fork, and merges
+/// the file into `main` the way the merge planner does: a create under the
 /// fork's inode ID, with the reference and layout that the fork's rows
 /// record. The store records content requests, and its counters are reset
-/// just before the land.
-async fn land_a_forks_file() -> (tempfile::TempDir, LandedFile) {
+/// just before the merge.
+async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
     let directory = tempdir().expect("tempdir");
     let [main, fork] = ["main", "main-fork"].map(|name| NamespaceId::parse(name).expect("ns"));
     let store = RecordingStore::new(
@@ -539,7 +539,7 @@ async fn land_a_forks_file() -> (tempfile::TempDir, LandedFile) {
         .layout;
 
     let create = intent(
-        "land-big",
+        "merge-big",
         vec![FilesystemOperation::CreateFileByInode {
             parent_inode_id: loonfs_types::ROOT_INODE_ID,
             display_name: loonfs_types::DisplayName::parse("big.bin").expect("name"),
@@ -550,8 +550,8 @@ async fn land_a_forks_file() -> (tempfile::TempDir, LandedFile) {
         }],
     );
     let proof = PreparedContent::for_family_member(main.clone(), content_ref, layout, u64::MAX);
-    let candidate = CommitCandidate::prepared(create, vec![proof]).with_land(
-        LandRecord {
+    let candidate = CommitCandidate::prepared(create, vec![proof]).with_merge(
+        MergeRecord {
             source_namespace_id: fork.clone(),
             source_after_seq: fork_point_seq,
             source_through_seq: written.committed_seq,
@@ -565,15 +565,15 @@ async fn land_a_forks_file() -> (tempfile::TempDir, LandedFile) {
         .await
         .pop()
         .expect("one result")
-        .expect("land the file");
-    let landed = LandedFile {
+        .expect("merge the file");
+    let merged = MergedFile {
         store,
         main,
         fork,
         inode_id,
         bytes,
     };
-    (directory, landed)
+    (directory, merged)
 }
 
 async fn stat<S: ObjectStore>(
@@ -594,37 +594,37 @@ async fn stat<S: ObjectStore>(
         .expect("stat by inode ID")
 }
 
-/// Checks that a land admits a fork's file from the reference and layout
+/// Checks that a merge admits a fork's file from the reference and layout
 /// that the fork's rows record, without reading the file's bytes. The test
 /// store caches no content, so a read of the bytes would reach the store, as
-/// the read after the land does.
+/// the read after the merge does.
 #[tokio::test]
-async fn a_land_of_a_forks_file_reads_none_of_its_bytes() {
-    let (_directory, landed) = land_a_forks_file().await;
-    assert_eq!(landed.store.count(OperationSelector::Any), 0);
+async fn a_merge_of_a_forks_file_reads_none_of_its_bytes() {
+    let (_directory, merged) = merge_a_forks_file().await;
+    assert_eq!(merged.store.count(OperationSelector::Any), 0);
 
-    let read = crate::test_support::namespace_store(&landed.store, &landed.main)
+    let read = crate::test_support::namespace_store(&merged.store, &merged.main)
         .load_current_metadata_view()
         .await
         .expect("view")
         .read_file_bytes_by_inode(
-            landed.inode_id,
+            merged.inode_id,
             None,
             &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
         )
         .await
-        .expect("read the landed file");
-    assert_eq!(read.bytes, landed.bytes);
-    assert!(landed.store.count(OperationSelector::Read) > 0);
+        .expect("read the merged file");
+    assert_eq!(read.bytes, merged.bytes);
+    assert!(merged.store.count(OperationSelector::Read) > 0);
 }
 
-/// Checks that a land creates a fork's inode under the fork's ID, so a stat
+/// Checks that a merge creates a fork's inode under the fork's ID, so a stat
 /// by that ID finds the same file in both namespaces.
 #[tokio::test]
-async fn a_land_creates_the_forks_inode_under_the_forks_id() {
-    let (_directory, landed) = land_a_forks_file().await;
-    let in_main = stat(&landed.store, &landed.main, landed.inode_id).await;
-    let in_fork = stat(&landed.store, &landed.fork, landed.inode_id).await;
+async fn a_merge_creates_the_forks_inode_under_the_forks_id() {
+    let (_directory, merged) = merge_a_forks_file().await;
+    let in_main = stat(&merged.store, &merged.main, merged.inode_id).await;
+    let in_fork = stat(&merged.store, &merged.fork, merged.inode_id).await;
     assert_eq!(
         (&in_main.inode_id, &in_main.path),
         (&in_fork.inode_id, &in_fork.path)
@@ -687,14 +687,14 @@ async fn advance_floor_and_compact(
     advanced.response.retention_floor_seq
 }
 
-/// Checks that a land is admitted while the retention floor is at its fork
+/// Checks that a merge is admitted while the retention floor is at its fork
 /// point, and refused with `rebootstrap_required` once the floor is above
-/// the fork point. By then a compaction has removed the fork's land index
-/// rows, so without the refusal the writer would expect the next land to
-/// start at the fork point, and it would admit a land that applies the
-/// fork's landed commits again.
+/// the fork point. By then a compaction has removed the fork's merge index
+/// rows, so without the refusal the writer would expect the next merge to
+/// start at the fork point, and it would admit a merge that applies the
+/// fork's merged commits again.
 #[tokio::test]
-async fn a_land_whose_fork_point_is_below_the_retention_floor_is_refused() {
+async fn a_merge_whose_fork_point_is_below_the_retention_floor_is_refused() {
     let (_directory, store, namespace_id, writer) = setup().await;
     let mut head = ChangeSeq(0);
     while head < FORK_POINT {
@@ -705,49 +705,49 @@ async fn a_land_whose_fork_point_is_below_the_retention_floor_is_refused() {
             .expect("an ordinary commit")
             .committed_seq;
     }
-    let first = land_candidate("first", "first", land(3, 7));
+    let first = merge_candidate("first", "first", merge(3, 7));
     publish(&store, &namespace_id, &writer, first)
         .await
-        .expect("the first land");
+        .expect("the first merge");
     let floor =
         advance_floor_and_compact(&store, &namespace_id, RetentionTarget::Seq(FORK_POINT)).await;
     assert_eq!(floor, FORK_POINT);
-    let repeat = land_candidate("repeat", "repeat", land(7, 9));
+    let repeat = merge_candidate("repeat", "repeat", merge(7, 9));
     publish(&store, &namespace_id, &writer, repeat)
         .await
-        .expect("a land whose fork point is at the floor");
+        .expect("a merge whose fork point is at the floor");
 
     let after = CommitCandidate::new(create_dir_request("after", "after"));
     publish(&store, &namespace_id, &writer, after)
         .await
-        .expect("an ordinary commit after the lands");
+        .expect("an ordinary commit after the merges");
     let floor = advance_floor_and_compact(&store, &namespace_id, RetentionTarget::Head).await;
     let index = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_metadata_view()
         .await
         .expect("read view")
         .metadata_view()
-        .newest_land(&fork())
+        .newest_merge(&fork())
         .await
-        .expect("land lookup");
-    assert_eq!(index, None, "the compaction removes the fork's land rows");
+        .expect("merge lookup");
+    assert_eq!(index, None, "the compaction removes the fork's merge rows");
 
     for after_seq in [FORK_POINT.0, 9] {
         let error = publish(
             &store,
             &namespace_id,
             &writer,
-            land_candidate("third", "third", land(after_seq, 12)),
+            merge_candidate("third", "third", merge(after_seq, 12)),
         )
         .await
-        .expect_err("a land whose fork point is below the floor");
+        .expect_err("a merge whose fork point is below the floor");
         assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
         let details = error.details().expect("details");
         assert_eq!(details.fork_point_seq, Some(FORK_POINT));
         assert_eq!(details.retention_floor_seq, Some(floor));
         assert_matches!(
             error,
-            CoreError::LandRebootstrapRequired { fork_point_seq, retention_floor_seq }
+            CoreError::MergeRebootstrapRequired { fork_point_seq, retention_floor_seq }
                 if fork_point_seq == FORK_POINT && retention_floor_seq == floor
         );
     }
@@ -761,9 +761,9 @@ fn created_inode(commit: &Commit) -> InodeId {
     }
 }
 
-/// Checks that a land failed at `operation_index` with `InvalidCommitRequest`
+/// Checks that a merge failed at `operation_index` with `InvalidCommitRequest`
 /// and `message`.
-fn assert_refused_land(error: CoreError, operation_index: u32, message: &str) {
+fn assert_refused_merge(error: CoreError, operation_index: u32, message: &str) {
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_matches!(
         error,
@@ -773,11 +773,11 @@ fn assert_refused_land(error: CoreError, operation_index: u32, message: &str) {
     );
 }
 
-/// Checks that a land can't create an inode under an ID that the namespace
-/// already has, whether an ordinary commit or an earlier land created it, or
-/// under one ID twice, and that a refused land publishes nothing.
+/// Checks that a merge can't create an inode under an ID that the namespace
+/// already has, whether an ordinary commit or an earlier merge created it, or
+/// under one ID twice, and that a refused merge publishes nothing.
 #[tokio::test]
-async fn a_land_refuses_an_inode_id_that_already_exists() {
+async fn a_merge_refuses_an_inode_id_that_already_exists() {
     let (_directory, store, namespace_id, writer) = setup().await;
     let ordinary = publish(
         &store,
@@ -787,14 +787,14 @@ async fn a_land_refuses_an_inode_id_that_already_exists() {
     )
     .await
     .expect("an ordinary commit");
-    let landed = publish(
+    let merged = publish(
         &store,
         &namespace_id,
         &writer,
-        land_candidate("first", "first", land(3, 7)),
+        merge_candidate("first", "first", merge(3, 7)),
     )
     .await
-    .expect("the first land");
+    .expect("the first merge");
     let repeated = fork_inode_id();
     let creates = |names: &[&str]| {
         names
@@ -807,33 +807,33 @@ async fn a_land_refuses_an_inode_id_that_already_exists() {
     };
     let cases = [
         (vec![(0, created_inode(&ordinary))], 0),
-        (vec![(0, created_inode(&landed))], 0),
+        (vec![(0, created_inode(&merged))], 0),
         (vec![(0, repeated), (1, repeated)], 1),
     ];
     for (assigned, refused_index) in cases {
         let inode_id = assigned[refused_index].1;
-        let candidate = CommitCandidate::new(intent("again", creates(&["one", "two"]))).with_land(
-            land(7, 9),
+        let candidate = CommitCandidate::new(intent("again", creates(&["one", "two"]))).with_merge(
+            merge(7, 9),
             FORK_POINT,
             assigned.into_iter().collect(),
         );
         let error = publish(&store, &namespace_id, &writer, candidate)
             .await
-            .expect_err("a land of an inode ID that exists");
-        assert_refused_land(
+            .expect_err("a merge of an inode ID that exists");
+        assert_refused_merge(
             error,
             u32::try_from(refused_index).expect("index"),
-            &format!("a land creates inode `{inode_id}`, which already exists"),
+            &format!("a merge creates inode `{inode_id}`, which already exists"),
         );
     }
-    assert_eq!(feed(&store, &namespace_id).await, [ordinary, landed]);
+    assert_eq!(feed(&store, &namespace_id).await, [ordinary, merged]);
 }
 
-/// Checks that a land whose inode IDs don't match its creates fails instead
+/// Checks that a merge whose inode IDs don't match its creates fails instead
 /// of panicking the publisher: a create without an ID, and an ID for an
 /// operation that creates no inode.
 #[tokio::test]
-async fn a_land_whose_inode_ids_dont_match_its_creates_is_refused() {
+async fn a_merge_whose_inode_ids_dont_match_its_creates_is_refused() {
     let (_directory, store, namespace_id, writer) = setup().await;
     let directory = publish(
         &store,
@@ -855,27 +855,27 @@ async fn a_land_whose_inode_ids_dont_match_its_creates_is_refused() {
     let assigned = fork_inode_id();
     let cases = [
         (
-            CommitCandidate::new(create_dir_request("unassigned", "unassigned")).with_land(
-                land(3, 7),
+            CommitCandidate::new(create_dir_request("unassigned", "unassigned")).with_merge(
+                merge(3, 7),
                 FORK_POINT,
                 BTreeMap::new(),
             ),
-            "a land operation creates an inode but has no assigned inode ID".to_owned(),
+            "a merge operation creates an inode but has no assigned inode ID".to_owned(),
         ),
         (
-            CommitCandidate::new(intent("misassigned", vec![update])).with_land(
-                land(3, 7),
+            CommitCandidate::new(intent("misassigned", vec![update])).with_merge(
+                merge(3, 7),
                 FORK_POINT,
                 BTreeMap::from([(0, assigned)]),
             ),
-            format!("a land assigned inode `{assigned}` to an operation that creates no inode"),
+            format!("a merge assigned inode `{assigned}` to an operation that creates no inode"),
         ),
     ];
     for (candidate, message) in cases {
         let error = publish(&store, &namespace_id, &writer, candidate)
             .await
-            .expect_err("a land whose IDs don't match its creates");
-        assert_refused_land(error, 0, &message);
+            .expect_err("a merge whose IDs don't match its creates");
+        assert_refused_merge(error, 0, &message);
     }
     assert_eq!(feed(&store, &namespace_id).await, [directory]);
 }

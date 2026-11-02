@@ -1216,7 +1216,7 @@ async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
         .inner()
         .head(&wal_object(&namespace_id, &WalNo(1)))
         .await
-        .expect("landed fence")
+        .expect("written fence")
         .is_some());
 }
 
@@ -1340,7 +1340,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
         .inner()
         .head(&wal_object(&namespace_id, &WalNo(3)))
         .await
-        .expect("late put landed")
+        .expect("late put written")
         .is_some());
     let namespace = crate::test_support::namespace_store(&blocked, &namespace_id);
     let view = namespace

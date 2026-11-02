@@ -42,8 +42,8 @@ const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1
 /// publication requests it admits to the budget's totals, and takes its
 /// read, publication, fold, compaction, and content write permits from it, so the limits bound the
 /// work of every runtime that shares it. Publication admission never waits: a request
-/// past an admitted total fails at once with `commit_queue_full`, except a land larger
-/// than the whole byte total, which fails with `land_too_large`. Permit
+/// past an admitted total fails at once with `commit_queue_full`, except a merge larger
+/// than the whole byte total, which fails with `merge_too_large`. Permit
 /// waits are first come, first served, whichever runtime they belong to. No
 /// runtime has a reserved share, so an idle runtime reserves nothing. A
 /// host that wants to isolate runtimes from each other gives them separate

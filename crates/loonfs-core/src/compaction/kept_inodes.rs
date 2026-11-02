@@ -68,7 +68,7 @@ impl KeptInodeFilter {
             | MetadataRow::ActiveDeletion(_)
             | MetadataRow::CommitReceipt(_)
             | MetadataRow::Commit(_)
-            | MetadataRow::Land(_)
+            | MetadataRow::Merge(_)
             | MetadataRow::ContentLayout(_) => return true,
         };
         filter.may_contain(&filter_key(inode_id))

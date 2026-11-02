@@ -18,5 +18,5 @@ mod publish_path_planning;
 mod session;
 
 pub use intent::{CommitIntent, FilesystemOperation};
-pub(crate) use planner::{commit_fingerprint, land_fingerprint};
+pub(crate) use planner::{commit_fingerprint, merge_fingerprint};
 pub(crate) use session::PublishPlanningSession;

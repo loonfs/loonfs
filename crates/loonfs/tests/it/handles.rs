@@ -466,7 +466,7 @@ fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_is_commit
                 &replay_options,
             )
             .await
-            .expect("land the commit before the ceiling");
+            .expect("make the commit before the ceiling");
         let tail_store = LocalFsStore::new(temp_dir.path()).expect("open tail store");
         fill_wal_tail_to_write_stop(&tail_store, &namespace_id).await;
         stalled
@@ -695,7 +695,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
         };
         published
             .expect("join the crossing publish")
-            .expect("the crossing publish lands");
+            .expect("the crossing publish succeeds");
 
         blocking.release();
         namespace

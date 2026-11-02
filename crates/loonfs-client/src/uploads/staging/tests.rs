@@ -311,7 +311,7 @@ async fn a_direct_put_uses_the_checksum_algorithm_returned_at_begin() {
     assert_eq!(claim.checksum, Checksum::crc32c(&sent));
 }
 
-fn commit_landed() -> Outcome {
+fn commit_succeeded() -> Outcome {
     json(&Commit {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id"),
@@ -319,7 +319,7 @@ fn commit_landed() -> Outcome {
         committed_by: loonfs_test_support::test_actor(),
         committed_at_ms: 1_752_624_000_000,
         message: None,
-        land: None,
+        merge: None,
         events: Vec::new(),
     })
 }
@@ -349,7 +349,7 @@ fn multipart_script(parts: u32, uploaded: ContentRef) -> Vec<Outcome> {
     let mut script = vec![capabilities(true), begin_multipart()];
     script.extend(window_script(&(1..=parts).collect::<Vec<_>>()));
     script.push(completed(uploaded));
-    script.push(commit_landed());
+    script.push(commit_succeeded());
     script
 }
 
@@ -431,7 +431,7 @@ fn resumed_script(missing: &[u32], uploaded: ContentRef) -> Vec<Outcome> {
     let mut script = vec![capabilities(true)];
     script.extend(window_script(missing));
     script.push(completed(uploaded));
-    script.push(commit_landed());
+    script.push(commit_succeeded());
     script
 }
 
@@ -441,16 +441,16 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     let uploaded = content_ref(&payload);
     let journal = RecordingJournal::default();
 
-    // The first run lands parts 1 to 5 and is cut off when it signs part 9:
+    // The first run uploads parts 1 to 5 and is cut off when it signs part 9:
     // the script runs out where the interruption did. After the first
-    // signing request, each landed part is followed by the signing request
+    // signing request, each uploaded part is followed by the signing request
     // of the part that takes its place.
-    let landed: u32 = 5;
+    let uploaded_parts: u32 = 5;
     let mut first = vec![capabilities(true), begin_multipart()];
     first.extend(
         window_script(&(1..=TEST_PAYLOAD_PARTS).collect::<Vec<_>>())
             .into_iter()
-            .take(loonfs_types::usize_from_u64(2 * u64::from(landed))),
+            .take(loonfs_types::usize_from_u64(2 * u64::from(uploaded_parts))),
     );
     // A failed signing request leaves the session open. No abort is sent.
     first.push(Outcome::TransportFailure);
@@ -474,14 +474,14 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     interrupted.expect_err("part 9 never got signed");
     assert_eq!(
         journal.part_numbers(),
-        (1..=landed).collect::<Vec<_>>(),
-        "the journal holds exactly the parts that landed"
+        (1..=uploaded_parts).collect::<Vec<_>>(),
+        "the journal holds exactly the parts that were uploaded"
     );
     let resume = journal.resume();
     assert_eq!(resume.part_size_bytes, TEST_PART_BYTES);
 
     // The rerun sends only parts 6 onward.
-    let missing: Vec<u32> = (landed + 1..=TEST_PAYLOAD_PARTS).collect();
+    let missing: Vec<u32> = (uploaded_parts + 1..=TEST_PAYLOAD_PARTS).collect();
     let (source, retention) =
         watched_source(&payload, loonfs_types::usize_from_u64(TEST_PART_BYTES));
     let transport = scripted_transport::script(resumed_script(&missing, uploaded));
@@ -496,7 +496,7 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
             Some(&resume),
         )
         .await
-        .expect("a resumed multipart put should land");
+        .expect("a resumed multipart put should succeed");
 
     assert_eq!(
         resumed_journal.part_numbers(),
@@ -544,7 +544,7 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
             Some(&resume),
         )
         .await
-        .expect("the resumed multipart put should land");
+        .expect("the resumed multipart put should succeed");
 
     assert_eq!(journal.part_numbers(), missing);
     assert!(journal
@@ -570,7 +570,7 @@ async fn a_direct_multipart_put_holds_only_its_window() {
     client(&transport)
         .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
         .await
-        .expect("a scripted multipart put should land");
+        .expect("a scripted multipart put should succeed");
 
     let window_bound = DIRECT_MULTIPART_PARTS_IN_FLIGHT as u64 * TEST_PART_BYTES;
     assert_eq!(
@@ -612,13 +612,13 @@ async fn a_proxied_put_streams_its_body() {
             },
         }),
         completed(uploaded),
-        commit_landed(),
+        commit_succeeded(),
     ]);
 
     client(&transport)
         .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
         .await
-        .expect("a scripted proxied put should land");
+        .expect("a scripted proxied put should succeed");
 
     assert_eq!(
         retention.total_bytes(),
@@ -656,14 +656,14 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
             },
         }),
         completed(uploaded),
-        commit_landed(),
+        commit_succeeded(),
     ]);
 
     let client = client(&transport);
     client
         .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
         .await
-        .expect("a small streamed put should land");
+        .expect("a small streamed put should succeed");
 
     assert_eq!(
         transport
@@ -694,7 +694,7 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
         create_direct_put_upload(ChecksumAlgorithm::Crc32c),
         Outcome::Success(Vec::new()),
         completed(uploaded),
-        commit_landed(),
+        commit_succeeded(),
     ]);
 
     client(&transport)
@@ -733,7 +733,7 @@ async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
         create_direct_put_upload(ChecksumAlgorithm::Crc32c),
         Outcome::Success(Vec::new()),
         completed(uploaded),
-        commit_landed(),
+        commit_succeeded(),
     ]);
 
     client(&transport)
@@ -765,13 +765,13 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
         create_direct_put_upload(ChecksumAlgorithm::Crc64nvme),
         Outcome::Success(Vec::new()),
         completed(uploaded),
-        commit_landed(),
+        commit_succeeded(),
     ]);
 
     client(&transport)
         .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
         .await
-        .expect("a large streamed direct put should land");
+        .expect("a large streamed direct put should succeed");
 
     assert_eq!(retention.total_bytes(), TEST_PAYLOAD_BYTES as u64);
     assert!(
@@ -829,13 +829,13 @@ async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
         create_direct_put_upload(ChecksumAlgorithm::Crc64nvme),
         Outcome::Success(Vec::new()),
         completed(uploaded),
-        commit_landed(),
+        commit_succeeded(),
     ]);
 
     client(&transport)
         .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
         .await
-        .expect("a file-backed direct put should land");
+        .expect("a file-backed direct put should succeed");
 
     let object_write = transport
         .sent()
@@ -1091,7 +1091,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         }]
     );
     assert_eq!(saved.content_tokens, vec![proof]);
-    let transport = scripted_transport::script(vec![commit_landed()]);
+    let transport = scripted_transport::script(vec![commit_succeeded()]);
     client_without_retry(&transport)
         .commit(&namespace_id(), &saved_actor, &saved)
         .await
@@ -1138,9 +1138,9 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
     for bytes in [b"".as_slice(), b"same".as_slice()] {
         let transport = scripted_transport::script([
             inline_capabilities(),
-            commit_landed(),
-            commit_landed(),
-            commit_landed(),
+            commit_succeeded(),
+            commit_succeeded(),
+            commit_succeeded(),
         ]);
         let client = client_without_retry(&transport);
         client.get_capabilities().await.expect("capabilities");
@@ -1200,7 +1200,7 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
         let saved = serde_json::to_vec(&request).expect("encode journal");
         let recovered: CommitRequest = serde_json::from_slice(&saved).expect("decode journal");
         assert_eq!(recovered, request);
-        let transport = scripted_transport::script([commit_landed()]);
+        let transport = scripted_transport::script([commit_succeeded()]);
         client_without_retry(&transport)
             .commit(
                 &namespace_id(),
@@ -1221,7 +1221,7 @@ async fn streams_over_the_inline_limit_upload_the_buffered_prefix_and_remainder(
         begin_proxied(),
         completed(content_ref(bytes)),
         completed(content_ref(bytes)),
-        commit_landed(),
+        commit_succeeded(),
     ]);
     let (source, _) = watched_source(bytes, 11);
     client_without_retry(&transport)

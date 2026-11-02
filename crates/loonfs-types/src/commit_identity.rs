@@ -11,7 +11,7 @@
 
 use crate::digest::is_sha256_hex;
 use crate::id_macros::{string_id, validation_error};
-use crate::wal::LandRecord;
+use crate::wal::MergeRecord;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, AttributesRevisionNo, ChangeSeq, CommitPrecondition, ContentId, ContentRef,
@@ -28,8 +28,8 @@ use thiserror::Error;
 /// Domain separator included in every mutation fingerprint input.
 const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v1";
 
-/// Domain separator included in every land fingerprint input.
-const LAND_FINGERPRINT_DOMAIN: &str = "loonfs.commit.land.v1";
+/// Domain separator included in every merge fingerprint input.
+const MERGE_FINGERPRINT_DOMAIN: &str = "loonfs.commit.merge.v1";
 
 /// Format version and hash algorithm stored with each fingerprint.
 ///
@@ -720,29 +720,29 @@ impl CommitFingerprintInput<'_> {
     }
 }
 
-/// The inputs of one land's semantic fingerprint, which validates a reused
+/// The inputs of one merge's semantic fingerprint, which validates a reused
 /// commit ID.
 ///
-/// The server plans a land's operations from the land's inputs, so the land
-/// record identifies the land, and the preimage includes no operations and no
+/// The server plans a merge's operations from the merge's inputs, so the merge
+/// record identifies the merge, and the preimage includes no operations and no
 /// preconditions
-/// ([Land commits](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#b5-land-commits)).
+/// ([Merge commits](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#b5-merge-commits)).
 #[derive(Debug, Clone, Copy)]
-pub struct LandFingerprintInput<'a> {
-    /// The namespace that the land commits to.
+pub struct MergeFingerprintInput<'a> {
+    /// The namespace that the merge commits to.
     pub namespace_id: &'a NamespaceId,
-    /// The actor responsible for the land.
+    /// The actor responsible for the merge.
     pub actor_id: &'a ActorId,
-    /// The subject whose rights authorize the land, if any.
+    /// The subject whose rights authorize the merge, if any.
     pub subject_id: Option<&'a SubjectId>,
-    /// The fork and the range of its commits that the land applies.
-    pub land: &'a LandRecord,
-    /// The land's commit message.
+    /// The fork and the range of its commits that the merge applies.
+    pub merge: &'a MergeRecord,
+    /// The merge's commit message.
     pub message: Option<&'a str>,
 }
 
-impl LandFingerprintInput<'_> {
-    /// Computes the semantic fingerprint of the land.
+impl MergeFingerprintInput<'_> {
+    /// Computes the semantic fingerprint of the merge.
     pub fn fingerprint(&self) -> CommitFingerprint {
         fingerprint_bytes(&self.canonical_bytes())
     }
@@ -750,32 +750,32 @@ impl LandFingerprintInput<'_> {
     fn canonical_bytes(&self) -> Vec<u8> {
         /// The preimage in the member order Appendix B specifies.
         #[derive(Serialize)]
-        struct CanonicalLand<'a> {
+        struct CanonicalMerge<'a> {
             domain: &'static str,
             namespace_id: &'a str,
             actor_id: &'a str,
             subject_id: Option<&'a str>,
-            land: CanonicalLandRange<'a>,
+            merge: CanonicalMergeRange<'a>,
             message: Option<&'a str>,
         }
 
-        /// The land record's members, spelled apart from its durable encoding.
+        /// The merge record's members, spelled apart from its durable encoding.
         #[derive(Serialize)]
-        struct CanonicalLandRange<'a> {
+        struct CanonicalMergeRange<'a> {
             source_namespace_id: &'a str,
             source_after_seq: u64,
             source_through_seq: u64,
         }
 
-        serde_json::to_vec(&CanonicalLand {
-            domain: LAND_FINGERPRINT_DOMAIN,
+        serde_json::to_vec(&CanonicalMerge {
+            domain: MERGE_FINGERPRINT_DOMAIN,
             namespace_id: self.namespace_id.as_str(),
             actor_id: self.actor_id.as_str(),
             subject_id: self.subject_id.map(SubjectId::as_str),
-            land: CanonicalLandRange {
-                source_namespace_id: self.land.source_namespace_id.as_str(),
-                source_after_seq: self.land.source_after_seq.0,
-                source_through_seq: self.land.source_through_seq.0,
+            merge: CanonicalMergeRange {
+                source_namespace_id: self.merge.source_namespace_id.as_str(),
+                source_after_seq: self.merge.source_after_seq.0,
+                source_through_seq: self.merge.source_through_seq.0,
             },
             message: self.message,
         })
@@ -870,48 +870,48 @@ mod tests {
         }
     }
 
-    /// Pins the example bytes and digest of Appendix B's land section, and
-    /// checks that every member of the land record changes the digest.
+    /// Pins the example bytes and digest of Appendix B's merge section, and
+    /// checks that every member of the merge record changes the digest.
     #[test]
-    fn a_land_fingerprint_covers_the_land_record_and_matches_the_spec_example() {
+    fn a_merge_fingerprint_covers_the_merge_record_and_matches_the_spec_example() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
         let actor_id = ActorId::parse("usr_8f3c").expect("actor");
-        let land = LandRecord {
+        let merge = MergeRecord {
             source_namespace_id: NamespaceId::parse("demo-fork").expect("namespace"),
             source_after_seq: ChangeSeq(418),
             source_through_seq: ChangeSeq(425),
         };
-        let input = LandFingerprintInput {
+        let input = MergeFingerprintInput {
             namespace_id: &namespace_id,
             actor_id: &actor_id,
             subject_id: None,
-            land: &land,
+            merge: &merge,
             message: None,
         };
         assert_eq!(
             String::from_utf8(input.canonical_bytes()).expect("canonical UTF-8"),
-            r#"{"domain":"loonfs.commit.land.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"land":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}"#
+            r#"{"domain":"loonfs.commit.merge.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"merge":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}"#
         );
         let fingerprint = input.fingerprint();
         assert_eq!(
             fingerprint.as_str(),
-            "v1:sha256:eda60a5b52f0ee895214e1c51bdf6c7f741828bbaa37e22141499a77d4215451"
+            "v1:sha256:fd69abed548f0d6929753492171d2e653d08541ea84dd11fefe202124437b5e5"
         );
-        let other_source = LandRecord {
+        let other_source = MergeRecord {
             source_namespace_id: NamespaceId::parse("demo-other").expect("namespace"),
-            ..land.clone()
+            ..merge.clone()
         };
-        let other_after = LandRecord {
+        let other_after = MergeRecord {
             source_after_seq: ChangeSeq(419),
-            ..land.clone()
+            ..merge.clone()
         };
-        let other_through = LandRecord {
+        let other_through = MergeRecord {
             source_through_seq: ChangeSeq(426),
-            ..land.clone()
+            ..merge.clone()
         };
         for changed in [other_source, other_after, other_through] {
-            let changed_input = LandFingerprintInput {
-                land: &changed,
+            let changed_input = MergeFingerprintInput {
+                merge: &changed,
                 ..input
             };
             assert_ne!(changed_input.fingerprint(), fingerprint, "{changed:?}");

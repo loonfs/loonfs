@@ -209,7 +209,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
             // cannot claim a competing publisher's new output. Core successors can
             // encode identical changes to shared inputs.
             match load_grep_manifest(store, namespace_id, next.manifest_no()).await? {
-                Some(landed) if landed.payload() == next => {}
+                Some(stored) if stored.payload() == next => {}
                 Some(_) => return Err(GrepError::PublicationConflict { object_key }),
                 None => {
                     return Err(CoreError::OutcomeUnknown {

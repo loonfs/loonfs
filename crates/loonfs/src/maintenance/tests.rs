@@ -227,7 +227,7 @@ async fn namespace_with_a_frozen_base(
         .expect("fold the tail");
 
     // Compact everything into one base run per group, under the shipped budgets
-    // and with the floor still at the bottom, so the churn lands in the base.
+    // and with the floor still at the bottom, so the churn is written to the base.
     for _ in 0..64 {
         let response = maintenance
             .maintain_metadata_with_options(

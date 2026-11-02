@@ -112,7 +112,7 @@ async fn a_streamed_read_holds_one_chunk_of_its_file() {
 
     assert_eq!(
         read, payload,
-        "the file that arrives is the file that landed"
+        "the file that arrives is the file that was written"
     );
     assert_eq!(chunks, CHUNKS + 1, "ten full chunks and the remainder");
     let peaks = watched.peaks();

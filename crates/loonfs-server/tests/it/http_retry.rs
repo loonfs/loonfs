@@ -72,7 +72,7 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
             // The error carries the caller's reconciliation identity as
             // structured fields, not prose (API spec, "Standard error
             // contract"). The server decided this against the durable
-            // receipt, so it reports where the id landed too — the one read
+            // receipt, so it reports where the id was committed too — the one read
             // a retry needs, instead of a search of the feed.
             let details = response.details.expect("structured details");
             assert_eq!(details.commit_id, Some(commit_id));
@@ -352,7 +352,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
     assert_eq!(
         committed.message.as_deref(),
         Some("import batch"),
-        "the refused rerun did not rewrite the annotation that landed"
+        "the refused rerun did not rewrite the annotation that was committed"
     );
     let entry = harness.client.stat(&target).await.expect("stat path");
     assert_eq!(
@@ -416,7 +416,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
     {
         Err(ClientError::Api { response, .. }) => {
             assert_eq!(response.code, "commit_id_reuse_conflict");
-            // The receipt named both halves of what landed, so the client
+            // The receipt named both halves of what was committed, so the client
             // had everything it needed and still refused.
             let details = response.details.expect("structured details");
             let committed = details.committed.expect("the receipt");
@@ -799,7 +799,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     {
         Err(ClientError::Api { response, .. }) => {
             assert_eq!(response.code, "commit_id_reuse_conflict");
-            // The server still knows where the id landed; the feed just
+            // The server still knows where the id was committed; the feed just
             // cannot answer for that sequence any more.
             let details = response.details.expect("structured details");
             assert_eq!(

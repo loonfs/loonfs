@@ -118,7 +118,7 @@ error_codes! {
     Forbidden => "forbidden",
     StoragePermissionDenied => "storage_permission_denied",
     ContentTooLarge => "content_too_large",
-    LandTooLarge => "land_too_large",
+    MergeTooLarge => "merge_too_large",
     RangeNotSatisfiable => "range_not_satisfiable",
     NotSupported => "not_supported",
     RouteNotFound => "route_not_found",
@@ -143,7 +143,7 @@ error_codes! {
     WriterFenced => "writer_fenced",
     WouldCycle => "would_cycle",
     CommitIdReuseConflict => "commit_id_reuse_conflict",
-    LandRangeConflict => "land_range_conflict",
+    MergeRangeConflict => "merge_range_conflict",
     CommitOutcomeUnknown => "commit_outcome_unknown",
     OutcomeUnknown => "outcome_unknown",
     CommitQueueFull => "commit_queue_full",
@@ -182,9 +182,9 @@ impl ErrorCode {
             // This is a deployment storage failure, not a caller
             // authorization failure.
             ErrorCode::StoragePermissionDenied => ErrorKind::StoragePermissionDenied,
-            // A land that doesn't fit in one WAL object, which the caller
+            // A merge that doesn't fit in one WAL object, which the caller
             // splits by the fork's commit range.
-            ErrorCode::ContentTooLarge | ErrorCode::LandTooLarge => ErrorKind::ContentTooLarge,
+            ErrorCode::ContentTooLarge | ErrorCode::MergeTooLarge => ErrorKind::ContentTooLarge,
             ErrorCode::RangeNotSatisfiable => ErrorKind::RangeNotSatisfiable,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
@@ -234,8 +234,8 @@ impl ErrorCode {
             | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict
-            // A land doesn't continue the previous land from its fork.
-            | ErrorCode::LandRangeConflict
+            // A merge doesn't continue the previous merge from its fork.
+            | ErrorCode::MergeRangeConflict
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
             | ErrorCode::RebootstrapRequired => ErrorKind::Conflict,
@@ -260,7 +260,7 @@ impl ErrorCode {
             | ErrorCode::Forbidden
             | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
-            | ErrorCode::LandTooLarge
+            | ErrorCode::MergeTooLarge
             | ErrorCode::RangeNotSatisfiable
             | ErrorCode::NotSupported
             | ErrorCode::RouteNotFound
@@ -285,7 +285,7 @@ impl ErrorCode {
             | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict
-            | ErrorCode::LandRangeConflict
+            | ErrorCode::MergeRangeConflict
             | ErrorCode::CommitOutcomeUnknown
             | ErrorCode::OutcomeUnknown
             | ErrorCode::WriterSessionClosed
@@ -328,13 +328,13 @@ impl ErrorCode {
             | ErrorCode::BindingVersionMismatch
             | ErrorCode::NotDeleted
             | ErrorCode::WouldCycle
-            | ErrorCode::LandRangeConflict => true,
+            | ErrorCode::MergeRangeConflict => true,
             ErrorCode::InvalidRequest
             | ErrorCode::Unauthorized
             | ErrorCode::Forbidden
             | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
-            | ErrorCode::LandTooLarge
+            | ErrorCode::MergeTooLarge
             | ErrorCode::RangeNotSatisfiable
             | ErrorCode::NotSupported
             | ErrorCode::RouteNotFound

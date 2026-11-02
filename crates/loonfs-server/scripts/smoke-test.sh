@@ -45,7 +45,7 @@ file you use yourself.
 USAGE
 }
 
-# Every check lands here as it is decided, so the summary at the end reports
+# Every check is recorded here as it is decided, so the summary at the end reports
 # the run whether it passed or stopped part way.
 pass() {
   CHECKS+=("PASS  $1")

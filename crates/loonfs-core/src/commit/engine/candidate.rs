@@ -5,11 +5,13 @@
 use super::super::CommitFingerprint;
 use crate::authorize::CommitAuthority;
 use crate::error::{CoreError, Result};
-use crate::path::write::{commit_fingerprint, land_fingerprint, CommitIntent, FilesystemOperation};
+use crate::path::write::{
+    commit_fingerprint, merge_fingerprint, CommitIntent, FilesystemOperation,
+};
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::wal::{
-    LandRecord, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+    MergeRecord, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
 use loonfs_types::{
     ChangeSeq, CommitId, ContentId, ContentRef, FileContent, InlineContentIdentity, InodeId,
@@ -23,26 +25,26 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitCandidate {
     request: CandidateRequest,
-    /// The land that the commit is, if it's one. The commit's identity is
-    /// then its land record in place of its operations and preconditions.
-    land: Option<LandIntent>,
+    /// The merge that the commit is, if it's one. The commit's identity is
+    /// then its merge record in place of its operations and preconditions.
+    merge: Option<MergeIntent>,
     pub(crate) content: ContentPreparation,
     pub(crate) inline_content: Vec<InlineContent>,
     inline_content_identities: BTreeMap<ContentId, InlineContentIdentity>,
 }
 
-/// A land's record, the fork point that the land's range is checked
+/// A merge's record, the fork point that the merge's range is checked
 /// against, and the IDs that the inodes it creates have in the fork.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LandIntent {
-    /// The fork and the range of its commits that the land applies.
-    pub(crate) record: LandRecord,
+pub(crate) struct MergeIntent {
+    /// The fork and the range of its commits that the merge applies.
+    pub(crate) record: MergeRecord,
     /// The sequence of this namespace that the fork was made at, from the
-    /// fork's manifest (`fork_basis.source_head_seq`). The fork's first land
+    /// fork's manifest (`fork_basis.source_head_seq`). The fork's first merge
     /// starts after it.
     pub(crate) fork_point_seq: ChangeSeq,
     /// The fork's ID of the inode that each create operation makes, by the
-    /// operation's index. A land creates each inode under its ID in the
+    /// operation's index. A merge creates each inode under its ID in the
     /// fork, so an inode has one ID in both namespaces.
     pub(crate) created_inode_ids: BTreeMap<usize, InodeId>,
 }
@@ -136,7 +138,7 @@ impl CommitCandidate {
     fn with_request(request: CandidateRequest) -> Self {
         Self {
             request,
-            land: None,
+            merge: None,
             content: ContentPreparation::Ready(Vec::new()),
             inline_content: Vec::new(),
             inline_content_identities: BTreeMap::new(),
@@ -157,18 +159,18 @@ impl CommitCandidate {
         candidate
     }
 
-    /// Makes the candidate a land of `record`, from a fork made at
+    /// Makes the candidate a merge of `record`, from a fork made at
     /// `fork_point_seq`, whose create operations make the inodes that
     /// `created_inode_ids` lists by operation index. A commit request has no
-    /// land record, so a land can't arrive from a request body.
+    /// merge record, so a merge can't arrive from a request body.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn with_land(
+    pub fn with_merge(
         mut self,
-        record: LandRecord,
+        record: MergeRecord,
         fork_point_seq: ChangeSeq,
         created_inode_ids: BTreeMap<usize, InodeId>,
     ) -> Self {
-        self.land = Some(LandIntent {
+        self.merge = Some(MergeIntent {
             record,
             fork_point_seq,
             created_inode_ids,
@@ -176,23 +178,23 @@ impl CommitCandidate {
         self
     }
 
-    /// The land that the commit is, if it's one.
-    pub(crate) fn land(&self) -> Option<&LandIntent> {
-        self.land.as_ref()
+    /// The merge that the commit is, if it's one.
+    pub(crate) fn merge(&self) -> Option<&MergeIntent> {
+        self.merge.as_ref()
     }
 
-    /// Returns whether the commit is a land, which LoonFS publishes in a
+    /// Returns whether the commit is a merge, which LoonFS publishes in a
     /// WAL object of its own.
-    pub fn is_land(&self) -> bool {
-        self.land.is_some()
+    pub fn is_merge(&self) -> bool {
+        self.merge.is_some()
     }
 
     /// Returns the error for a commit whose estimated WAL bytes exceed the
-    /// WAL object's limit: `LandTooLarge` for a land, which its caller splits
+    /// WAL object's limit: `MergeTooLarge` for a merge, which its caller splits
     /// by the fork's commit range, and `CommitTooLarge` for any other commit.
     pub fn too_large_error(&self, estimated_bytes: usize, max_bytes: usize) -> CoreError {
-        if self.is_land() {
-            CoreError::LandTooLarge {
+        if self.is_merge() {
+            CoreError::MergeTooLarge {
                 estimated_bytes,
                 max_bytes,
             }
@@ -294,7 +296,7 @@ impl CommitCandidate {
 
     /// Indexes the proofs that prepared the candidate's references by
     /// reference, the first proof of each, so that planning finds the layout
-    /// that a revision records without a scan of every proof. A land has a
+    /// that a revision records without a scan of every proof. A merge has a
     /// proof for each file it creates, and a scan for each file would make
     /// its planning quadratic.
     pub(crate) fn proofs_by_reference(&self) -> HashMap<&ContentRef, &PreparedContent> {
@@ -372,8 +374,8 @@ impl CommitCandidate {
 
     /// Computes semantic identity without applying current operational request limits.
     pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> CommitFingerprint {
-        if let Some(land) = &self.land {
-            return land_fingerprint(namespace_id, self.intent(), &land.record);
+        if let Some(merge) = &self.merge {
+            return merge_fingerprint(namespace_id, self.intent(), &merge.record);
         }
         commit_fingerprint(
             namespace_id,
@@ -441,9 +443,9 @@ impl CommitCandidate {
                 .saturating_add(std::mem::size_of_val(intent.operations.as_slice()))
                 .saturating_add(std::mem::size_of_val(intent.preconditions.as_slice()))
                 .saturating_add(
-                    self.land
+                    self.merge
                         .as_ref()
-                        .map_or(0, |land| land.record.source_namespace_id.as_str().len()),
+                        .map_or(0, |merge| merge.record.source_namespace_id.as_str().len()),
                 ),
         );
         serde_json::to_writer(
@@ -525,7 +527,7 @@ impl CommitCandidate {
     ) -> usize {
         super::super::wal_size::estimated_wal_record_bytes(
             self.intent(),
-            self.land.as_ref().map(|land| &land.record),
+            self.merge.as_ref().map(|merge| &merge.record),
             inline_content,
         )
     }
@@ -539,7 +541,7 @@ impl CommitCandidate {
     ) -> usize {
         super::super::wal_size::planned_wal_record_bytes(
             self.intent(),
-            self.land.as_ref().map(|land| &land.record),
+            self.merge.as_ref().map(|merge| &merge.record),
             &self.inline_content,
             deltas,
             appended,
@@ -548,9 +550,9 @@ impl CommitCandidate {
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
         self.validate_request_has_operations()?;
-        if self.land.is_some() {
+        if self.merge.is_some() {
             self.validate_message_limit()?;
-            return self.validate_land_content();
+            return self.validate_merge_content();
         }
         // Apply limits to the complete request because the serialized publisher
         // processes every operation before releasing the write path.
@@ -626,11 +628,11 @@ impl CommitCandidate {
         Ok(())
     }
 
-    /// Refuses a land that includes inline content or appended bytes. A land
+    /// Refuses a merge that includes inline content or appended bytes. A merge
     /// refers to content that the fork already wrote, and LoonFS planned it
     /// itself, so the counts that limit a request body don't apply to it,
     /// and the WAL object's size bounds it instead.
-    fn validate_land_content(&self) -> Result<()> {
+    fn validate_merge_content(&self) -> Result<()> {
         if !self.inline_content.is_empty()
             || self
                 .intent()
@@ -639,7 +641,7 @@ impl CommitCandidate {
                 .any(|operation| operation.appended_content().is_some())
         {
             return Err(CoreError::InvalidCommitRequest(
-                "a land includes no inline content or appended bytes".to_owned(),
+                "a merge includes no inline content or appended bytes".to_owned(),
             ));
         }
         Ok(())

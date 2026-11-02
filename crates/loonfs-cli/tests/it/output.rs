@@ -33,7 +33,7 @@ fn a_download_reports_its_progress_to_an_agent() {
     let progress = events_of_kind(&get, "progress");
     assert!(
         !progress.is_empty(),
-        "a download past one chunk reports as it lands"
+        "a download past one chunk reports progress as it is written"
     );
     let last = progress.last().expect("a progress event");
     assert_eq!(last["op"], "get");

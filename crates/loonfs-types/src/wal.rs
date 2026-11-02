@@ -55,17 +55,17 @@ pub enum WalCodecError {
         /// Format rule violated by the layout.
         reason: &'static str,
     },
-    /// Reports a land record whose range is empty or inverted, or whose source
+    /// Reports a merge record whose range is empty or inverted, or whose source
     /// is the WAL object's own namespace.
     #[error(
-        "invalid WAL land record in commit `{seq}` from namespace `{source_namespace_id}`: {reason}"
+        "invalid WAL merge record in commit `{seq}` from namespace `{source_namespace_id}`: {reason}"
     )]
-    InvalidWalLand {
-        /// Commit containing the rejected land record.
+    InvalidWalMerge {
+        /// Commit containing the rejected merge record.
         seq: ChangeSeq,
-        /// The fork that the rejected land record identifies.
+        /// The fork that the rejected merge record identifies.
         source_namespace_id: NamespaceId,
-        /// Format rule violated by the land record.
+        /// Format rule violated by the merge record.
         reason: &'static str,
     },
 }
@@ -382,7 +382,7 @@ pub struct WalInlineContent {
     pub bytes: Vec<u8>,
 }
 
-/// Identifies the fork and the range of the fork's commits that a land
+/// Identifies the fork and the range of the fork's commits that a merge
 /// applied to the committing namespace.
 ///
 /// The range follows the change feed's convention: the fork's commits above
@@ -390,11 +390,11 @@ pub struct WalInlineContent {
 /// [WAL records](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LandRecord {
-    /// The fork whose commits the land applied.
+pub struct MergeRecord {
+    /// The fork whose commits the merge applied.
     pub source_namespace_id: NamespaceId,
     /// The fork's commits above this sequence were applied. For a fork's
-    /// first land, this is the fork point.
+    /// first merge, this is the fork point.
     pub source_after_seq: ChangeSeq,
     /// The fork's commits at or below this sequence were applied.
     pub source_through_seq: ChangeSeq,
@@ -423,9 +423,9 @@ pub struct WalCommitPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// The fork and the range of its commits that this commit applied, when
-    /// the commit is a land, and omitted for every other commit.
+    /// the commit is a merge, and omitted for every other commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub land: Option<LandRecord>,
+    pub merge: Option<MergeRecord>,
     /// Materialized mutations in their authoritative `delta_index` order.
     pub deltas: Vec<WalCommitDelta>,
     /// Content pieces governed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
@@ -479,7 +479,7 @@ pub(crate) fn encode_wal_payload_cbor(
     validate_wal_inline_content(payload)?;
     validate_wal_revision_layouts(payload)?;
     validate_wal_bind_revisions(payload)?;
-    validate_wal_lands(payload)?;
+    validate_wal_merges(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
@@ -546,7 +546,7 @@ fn decode_wal_object_envelope_zstd_with_limit(
     validate_wal_inline_content(&payload)?;
     validate_wal_revision_layouts(&payload)?;
     validate_wal_bind_revisions(&payload)?;
-    validate_wal_lands(&payload)?;
+    validate_wal_merges(&payload)?;
 
     Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
@@ -728,23 +728,23 @@ fn validate_wal_bind_revisions(payload: &WalObjectPayload) -> Result<(), WalCode
     Ok(())
 }
 
-/// Requires every land record's range to contain at least one sequence, and
+/// Requires every merge record's range to contain at least one sequence, and
 /// its source to be another namespace.
-fn validate_wal_lands(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
+fn validate_wal_merges(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
     for record in &payload.records {
-        let Some(land) = &record.land else {
+        let Some(merge) = &record.merge else {
             continue;
         };
-        let reason = if land.source_after_seq >= land.source_through_seq {
+        let reason = if merge.source_after_seq >= merge.source_through_seq {
             "`source_after_seq` must be below `source_through_seq`"
-        } else if land.source_namespace_id == payload.namespace_id {
+        } else if merge.source_namespace_id == payload.namespace_id {
             "the source is the committing namespace"
         } else {
             continue;
         };
-        return Err(WalCodecError::InvalidWalLand {
+        return Err(WalCodecError::InvalidWalMerge {
             seq: record.committed_seq,
-            source_namespace_id: land.source_namespace_id.clone(),
+            source_namespace_id: merge.source_namespace_id.clone(),
             reason,
         });
     }
@@ -827,7 +827,7 @@ mod tests {
                     .expect("fingerprint"),
                     committed_at_ms: 0,
                     message: None,
-                    land: None,
+                    merge: None,
                     deltas: vec![WalCommitDelta {
                         semantic_operation_index: 0,
                         delta: WalDelta::AppendFileRevision {
@@ -1193,28 +1193,28 @@ mod tests {
         }
     }
 
-    /// Checks that encoding and decoding refuse a land record whose range
+    /// Checks that encoding and decoding refuse a merge record whose range
     /// contains no sequence, or whose source is the committing namespace.
     #[test]
-    fn a_land_record_covers_at_least_one_commit_of_another_namespace() {
-        let land = |source: &str, after: u64, through: u64| LandRecord {
+    fn a_merge_record_covers_at_least_one_commit_of_another_namespace() {
+        let merge = |source: &str, after: u64, through: u64| MergeRecord {
             source_namespace_id: NamespaceId::parse(source).expect("namespace"),
             source_after_seq: ChangeSeq(after),
             source_through_seq: ChangeSeq(through),
         };
         let inverted = Some("`source_after_seq` must be below `source_through_seq`");
         for (record, rejected) in [
-            (land("fork", 4, 9), None),
-            (land("fork", 4, 5), None),
-            (land("fork", 9, 4), inverted),
-            (land("fork", 4, 4), inverted),
+            (merge("fork", 4, 9), None),
+            (merge("fork", 4, 5), None),
+            (merge("fork", 9, 4), inverted),
+            (merge("fork", 4, 4), inverted),
             (
-                land("bounded", 4, 9),
+                merge("bounded", 4, 9),
                 Some("the source is the committing namespace"),
             ),
         ] {
             let mut payload = inline_wal_object(&[0]);
-            payload.records[0].land = Some(record.clone());
+            payload.records[0].merge = Some(record.clone());
             let decoded = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload));
             let encoded = encode_wal_object_envelope_zstd(payload);
             match rejected {
@@ -1226,7 +1226,7 @@ mod tests {
                     for error in [decoded.err(), encoded.err()] {
                         assert_matches!(
                             error,
-                            Some(WalCodecError::InvalidWalLand {
+                            Some(WalCodecError::InvalidWalMerge {
                                 seq: ChangeSeq(1),
                                 source_namespace_id,
                                 reason,

@@ -4,7 +4,7 @@
 mod content;
 mod deletion;
 mod inline;
-mod land;
+mod merge;
 mod retention_floor;
 
 use super::*;
@@ -434,7 +434,7 @@ impl MonotonicTimer for ExpiredBudgetTimer {
 }
 
 #[tokio::test]
-async fn a_landed_put_refreshes_the_observation_the_next_budget_runs_from() {
+async fn a_successful_put_refreshes_the_observation_the_next_budget_runs_from() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -468,7 +468,7 @@ async fn a_landed_put_refreshes_the_observation_the_next_budget_runs_from() {
             )
             .await;
         published.results[0].as_ref().expect(name);
-        // The tip observation is the start of the attempt whose put landed.
+        // The tip observation is the start of the attempt whose put succeeded.
         // The HEAD that confirms an expired tip is the basis check below, so
         // the request count alone can't show which observation the budget
         // runs from.
@@ -484,7 +484,7 @@ async fn a_landed_put_refreshes_the_observation_the_next_budget_runs_from() {
         );
     }
     // More than the budget has passed since the first observation, but only
-    // 2 ms since the last landed put, so the third publish rediscovers
+    // 2 ms since the last successful put, so the third publish rediscovers
     // nothing. Its basis has gone more than a budget unconfirmed, so before
     // its put it makes one HEAD of the next manifest number and nothing else.
     let operations = store.take();
@@ -544,7 +544,7 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
     publish_one(&mut engine, &writer, "alpha").await;
     let basis = engine
         .read_position()
-        .expect("landed")
+        .expect("published")
         .read_basis
         .basis
         .manifest_no();
@@ -565,7 +565,7 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
     assert_eq!(
         engine
             .read_position()
-            .expect("landed")
+            .expect("published")
             .read_basis
             .basis
             .manifest_no(),
@@ -582,7 +582,7 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
     assert_eq!(
         engine
             .read_position()
-            .expect("landed")
+            .expect("published")
             .read_basis
             .basis
             .manifest_no(),
@@ -685,7 +685,7 @@ fn gated_store(directory: &tempfile::TempDir, gated: KeyPredicate) -> GatedStore
 }
 
 /// A writer on a manual clock, with the segment cache a runtime gives every
-/// engine, whose first publish loaded its view and landed.
+/// engine, whose first publish loaded its view and committed.
 async fn writer_after_one_publish<'a>(
     store: &'a GatedStore,
     namespace_id: &NamespaceId,
@@ -930,7 +930,7 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
 }
 
 #[tokio::test]
-async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
+async fn a_quiet_writer_finds_a_fold_and_commits_on_the_new_basis() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
@@ -955,7 +955,7 @@ async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
     assert_eq!(
         engine
             .read_position()
-            .expect("landed")
+            .expect("published")
             .read_basis
             .basis
             .manifest_no(),
@@ -1115,7 +1115,7 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
     assert_eq!(
         engine
             .read_position()
-            .expect("landed")
+            .expect("published")
             .read_basis
             .basis
             .manifest_no(),

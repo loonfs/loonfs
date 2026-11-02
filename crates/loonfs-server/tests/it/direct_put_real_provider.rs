@@ -781,7 +781,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
     );
 
     assert_gcs_completion_judges_the_object_that_is_there(&harness.client, &namespace_id).await;
-    assert_gcs_signed_writes_land_under_the_configured_prefix(&harness, &store_config).await;
+    assert_gcs_signed_writes_stay_under_the_configured_prefix(&harness, &store_config).await;
     assert_gcs_expired_capability_is_refused(&harness.client, &namespace_id).await;
     assert_gcs_cap_bound_object_moves_only_directly(&harness, namespace).await;
 
@@ -826,10 +826,10 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
     );
 }
 
-/// Every object a signed write creates lands beneath the deployment's
+/// Every object a signed write creates is written beneath the deployment's
 /// configured key prefix, so a capability cannot address the bucket outside
 /// this deployment's scope.
-async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
+async fn assert_gcs_signed_writes_stay_under_the_configured_prefix(
     harness: &crate::common::TestServer,
     store_config: &StoreConfig,
 ) {
@@ -999,7 +999,7 @@ async fn cloudflare_r2_direct_multipart_real_provider_round_trip() {
     .await;
 }
 
-/// A payload with a distinct byte at every offset, so a part landing in the
+/// A payload with a distinct byte at every offset, so a part written in the
 /// wrong place or twice cannot go unnoticed.
 fn multipart_payload(part_size: usize, parts: usize) -> Vec<u8> {
     (0..251_u8)
@@ -1329,7 +1329,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
             .await
             .expect("read the piped payload back"),
         payload,
-        "a payload nobody measured up front still lands byte for byte"
+        "a payload nobody measured up front is still stored byte for byte"
     );
 }
 

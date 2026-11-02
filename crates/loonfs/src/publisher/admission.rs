@@ -38,8 +38,8 @@ struct RequestWeight {
 enum NamespaceCharge {
     /// The namespace's request count and its byte allowance.
     RequestAndBytes,
-    /// The namespace's request count only, for a land. The byte allowance is
-    /// sized for request bodies, and the budget's byte total bounds a land
+    /// The namespace's request count only, for a merge. The byte allowance is
+    /// sized for request bodies, and the budget's byte total bounds a merge
     /// instead.
     RequestOnly,
 }
@@ -91,19 +91,19 @@ impl PublicationAdmission {
         Self::validate_candidate(candidate)?;
         let estimated_bytes =
             estimated_admission_bytes(namespace_id, candidate.estimated_retained_bytes);
-        if !candidate.candidate.is_land() {
+        if !candidate.candidate.is_merge() {
             return self.charge(
                 namespace_id,
                 estimated_bytes,
                 NamespaceCharge::RequestAndBytes,
             );
         }
-        // A land that exceeds the whole total would be refused on every
-        // retry, so it fails with an error that its caller handles by landing
+        // A merge that exceeds the whole total would be refused on every
+        // retry, so it fails with an error that its caller handles by merging
         // a smaller range of the fork's commits.
         let max_bytes = self.budget.max_admitted_bytes();
         if estimated_bytes > max_bytes {
-            return Err(CoreError::LandTooLarge {
+            return Err(CoreError::MergeTooLarge {
                 estimated_bytes,
                 max_bytes,
             });
@@ -200,7 +200,7 @@ pub(super) struct AdmissionPermit {
     /// The bytes charged to the budget's total.
     estimated_bytes: usize,
     /// The part of `estimated_bytes` charged to the namespace's byte
-    /// allowance, which is all of it, or none for a land.
+    /// allowance, which is all of it, or none for a merge.
     namespace_bytes: usize,
     inline_bytes: AtomicUsize,
 }
@@ -345,15 +345,15 @@ mod tests {
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
-    /// A land under the namespace `main` whose own estimate is
+    /// A merge under the namespace `main` whose own estimate is
     /// `estimated_request_bytes`.
-    fn land(estimated_request_bytes: usize) -> PreparedCandidate {
+    fn merge(estimated_request_bytes: usize) -> PreparedCandidate {
         let mut candidate = PreparedCandidate::new(
             CommitCandidate::new(super::super::tests::create_directory_request(
-                "land", "land",
+                "merge", "merge",
             ))
-            .with_land(
-                loonfs_types::format::wal::LandRecord {
+            .with_merge(
+                loonfs_types::format::wal::MergeRecord {
                     source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
                     source_after_seq: loonfs_types::ChangeSeq(3),
                     source_through_seq: loonfs_types::ChangeSeq(7),
@@ -373,13 +373,13 @@ mod tests {
         candidate
     }
 
-    /// Checks that a land is charged to the budget's total and counts as one
+    /// Checks that a merge is charged to the budget's total and counts as one
     /// request of its namespace, but isn't held to the namespace's byte
     /// allowance, which still refuses an ordinary commit of the same weight.
-    /// A land's permit keeps the inline reservation calls working, and it
+    /// A merge's permit keeps the inline reservation calls working, and it
     /// refunds exactly what it charged.
     #[test]
-    fn a_land_is_held_to_the_host_total_and_not_the_namespace_allowance() {
+    fn a_merge_is_held_to_the_host_total_and_not_the_namespace_allowance() {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
         let overhead = 512 + namespace_id.as_str().len();
         let budget = ExecutionBudget::builder()
@@ -404,8 +404,8 @@ mod tests {
         assert_eq!(admitted(&budget), (0, 0));
 
         let permit = admission
-            .acquire_candidate(&namespace_id, &land(2048))
-            .expect("a land above the namespace allowance");
+            .acquire_candidate(&namespace_id, &merge(2048))
+            .expect("a merge above the namespace allowance");
         assert_eq!(admitted(&budget), (1, 2048 + overhead));
         assert_eq!(admission.namespace_usage(&namespace_id), (1, 0, 0));
         assert_eq!(permit.reserve_inline(std::iter::empty(), 0, 1024), 0);
@@ -415,12 +415,12 @@ mod tests {
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
-    /// Checks that a land larger than the whole budget total fails with
-    /// `land_too_large` and charges nothing, while a land that fits the
+    /// Checks that a merge larger than the whole budget total fails with
+    /// `merge_too_large` and charges nothing, while a merge that fits the
     /// total but not beside the requests already admitted gets
     /// `commit_queue_full` and is admitted once they settle.
     #[test]
-    fn a_land_is_too_large_only_when_it_exceeds_the_whole_host_total() {
+    fn a_merge_is_too_large_only_when_it_exceeds_the_whole_host_total() {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
         let overhead = 512 + namespace_id.as_str().len();
         let budget = ExecutionBudget::builder()
@@ -433,26 +433,30 @@ mod tests {
         let charged = admitted(&budget);
 
         let error = admission
-            .acquire_candidate(&namespace_id, &land(4096 - overhead + 1))
+            .acquire_candidate(&namespace_id, &merge(4096 - overhead + 1))
             .err()
-            .expect("a land above the total");
-        assert_eq!(error.code(), loonfs_types::ErrorCode::LandTooLarge);
+            .expect("a merge above the total");
+        assert_eq!(error.code(), loonfs_types::ErrorCode::MergeTooLarge);
         assert_matches!(
             error,
-            CoreError::LandTooLarge { estimated_bytes, max_bytes }
+            CoreError::MergeTooLarge { estimated_bytes, max_bytes }
                 if estimated_bytes == 4097 && max_bytes == 4096
         );
         assert!(matches!(
-            admission.acquire_candidate(&namespace_id, &land(4096 - overhead)),
+            admission.acquire_candidate(&namespace_id, &merge(4096 - overhead)),
             Err(CoreError::CommitQueueFull)
         ));
-        assert_eq!(admitted(&budget), charged, "a refused land charges nothing");
+        assert_eq!(
+            admitted(&budget),
+            charged,
+            "a refused merge charges nothing"
+        );
         assert_eq!(admission.namespace_usage(&namespace_id), (1, overhead, 0));
 
         drop(held);
         let permit = admission
-            .acquire_candidate(&namespace_id, &land(4096 - overhead))
-            .expect("a land of the whole total once the queue is empty");
+            .acquire_candidate(&namespace_id, &merge(4096 - overhead))
+            .expect("a merge of the whole total once the queue is empty");
         assert_eq!(admitted(&budget), (1, 4096));
         drop(permit);
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());

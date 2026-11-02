@@ -49,10 +49,10 @@ pub enum MetadataRowFamily {
     /// Access rows are read only in this order, so the family has no
     /// secondary index and requires no cross-family parity check.
     Access,
-    /// Indexes the namespace's lands by the fork that each one applied,
-    /// newest first within each fork, derived from the commits' land
+    /// Indexes the namespace's merges by the fork that each one applied,
+    /// newest first within each fork, derived from the commits' merge
     /// records.
-    Lands,
+    Merges,
 }
 
 impl MetadataRowFamily {
@@ -69,7 +69,7 @@ impl MetadataRowFamily {
         Self::ContentLayouts,
         Self::Attributes,
         Self::Access,
-        Self::Lands,
+        Self::Merges,
     ];
 
     /// Returns the snake-case name used in durable keys and serialized values.
@@ -86,7 +86,7 @@ impl MetadataRowFamily {
             Self::ContentLayouts => "content_layouts",
             Self::Attributes => "attributes",
             Self::Access => "access",
-            Self::Lands => "lands",
+            Self::Merges => "merges",
         }
     }
 }
@@ -106,7 +106,7 @@ pub enum MetadataFamilyGroup {
     /// Active deletions.
     ActiveDeletions,
     /// Commit records and their idempotency receipts, one row each per
-    /// commit, and the land index, one row per land.
+    /// commit, and the merge index, one row per merge.
     Commits,
     /// Lists the objects that store each chain.
     ContentLayouts,
@@ -159,7 +159,7 @@ impl MetadataFamilyGroup {
             Self::Commits => &[
                 MetadataRowFamily::Commits,
                 MetadataRowFamily::CommitReceipts,
-                MetadataRowFamily::Lands,
+                MetadataRowFamily::Merges,
             ],
             Self::ContentLayouts => &[MetadataRowFamily::ContentLayouts],
             Self::Attributes => &[MetadataRowFamily::Attributes],
@@ -193,12 +193,12 @@ pub enum MetadataRow {
     /// One committed logical commit as its WAL record describes it, without inline bytes.
     /// The change feed and commit replay read this row.
     Commit(WalCommitPayload),
-    /// Derived row that indexes one land by the fork it applied.
+    /// Derived row that indexes one merge by the fork it applied.
     ///
-    /// Materialization writes one for each commit that includes a land
-    /// record, so a lookup finds a fork's newest land without reading commit
+    /// Materialization writes one for each commit that includes a merge
+    /// record, so a lookup finds a fork's newest merge without reading commit
     /// rows.
-    Land(LandIndexRecord),
+    Merge(MergeIndexRecord),
     /// Lists the objects that store one chain as of a fold or commit.
     ContentLayout(ContentLayoutRecord),
     /// Publishes one inode's complete attribute map at one revision.
@@ -433,15 +433,15 @@ pub struct CommitReceiptRecord {
     pub committed_seq: ChangeSeq,
 }
 
-/// Indexes one land by the fork whose commits it applied.
+/// Indexes one merge by the fork whose commits it applied.
 ///
 /// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LandIndexRecord {
-    /// The fork whose commits the land applied.
+pub struct MergeIndexRecord {
+    /// The fork whose commits the merge applied.
     pub source_namespace_id: NamespaceId,
-    /// Namespace sequence assigned to the land.
+    /// Namespace sequence assigned to the merge.
     pub committed_seq: ChangeSeq,
     /// The fork's commits above this sequence were applied.
     pub source_after_seq: ChangeSeq,
@@ -449,15 +449,15 @@ pub struct LandIndexRecord {
     pub source_through_seq: ChangeSeq,
 }
 
-impl LandIndexRecord {
-    /// Derives the land index row of `commit`, or `None` when the commit
-    /// isn't a land.
+impl MergeIndexRecord {
+    /// Derives the merge index row of `commit`, or `None` when the commit
+    /// isn't a merge.
     pub fn from_commit(commit: &WalCommitPayload) -> Option<Self> {
-        commit.land.as_ref().map(|land| Self {
-            source_namespace_id: land.source_namespace_id.clone(),
+        commit.merge.as_ref().map(|merge| Self {
+            source_namespace_id: merge.source_namespace_id.clone(),
             committed_seq: commit.committed_seq,
-            source_after_seq: land.source_after_seq,
-            source_through_seq: land.source_through_seq,
+            source_after_seq: merge.source_after_seq,
+            source_through_seq: merge.source_through_seq,
         })
     }
 }

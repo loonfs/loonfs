@@ -205,7 +205,7 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             };
             // Both providers verify a part's checksum on the way in, so a
             // part whose declared checksum does not match its bytes could
-            // never have landed.
+            // never have been stored.
             if part.etag != stored.etag
                 || part.checksum != Checksum::compute(part.checksum.algorithm(), &stored.bytes)
             {

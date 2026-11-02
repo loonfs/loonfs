@@ -216,7 +216,7 @@ impl Client {
         let part_size = usize::try_from(part_size_bytes).map_err(|_| {
             ClientError::Protocol("part size does not fit this platform".to_owned())
         })?;
-        let landed = continuity
+        let resumed_parts = continuity
             .resume
             .map_or::<&[CompletedUploadPart], _>(&[], |resume| &resume.parts);
         let mut source = payload.into_parts_of(part_size);
@@ -240,8 +240,11 @@ impl Client {
                 size_bytes += bytes.len() as u64;
                 let part_number = next_part_number;
                 next_part_number += 1;
-                if let Some(landed) = landed.iter().find(|part| part.part_number == part_number) {
-                    parts.push(landed.clone());
+                if let Some(resumed) = resumed_parts
+                    .iter()
+                    .find(|part| part.part_number == part_number)
+                {
+                    parts.push(resumed.clone());
                     continue;
                 }
                 unsigned.push(PendingPart {

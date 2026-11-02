@@ -12,7 +12,7 @@ use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{ChangeFeedPosition, ChangeSeq, EffectiveLimit, NamespaceId};
-use loonfs_types::{Commit, FilesystemChange, Land, ListChangesResponse};
+use loonfs_types::{Commit, FilesystemChange, ListChangesResponse, Merge};
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
@@ -318,10 +318,10 @@ fn committed_change_with_events(
         committed_by: record.committed_by.clone(),
         committed_at_ms: record.committed_at_ms,
         message: record.message.clone(),
-        land: record.land.as_ref().map(|land| Land {
-            source_namespace_id: land.source_namespace_id.clone(),
-            source_after_seq: land.source_after_seq,
-            source_through_seq: land.source_through_seq,
+        merge: record.merge.as_ref().map(|merge| Merge {
+            source_namespace_id: merge.source_namespace_id.clone(),
+            source_after_seq: merge.source_after_seq,
+            source_through_seq: merge.source_through_seq,
         }),
         events,
     }

@@ -14,7 +14,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::segment::VerifiedMetadataSegments;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::LandIndexRecord;
+use loonfs_types::format::manifest::MergeIndexRecord;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, InodeId, NameKey, NamespaceId};
 use std::collections::HashMap;
@@ -375,28 +375,28 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         ))
     }
 
-    /// Returns the newest land from `source_namespace_id` that the view
-    /// contains, from the land index.
-    pub(crate) async fn newest_land(
+    /// Returns the newest merge from `source_namespace_id` that the view
+    /// contains, from the merge index.
+    pub(crate) async fn newest_merge(
         &self,
         source_namespace_id: &NamespaceId,
-    ) -> Result<Option<LandIndexRecord>> {
-        let row_land = self
+    ) -> Result<Option<MergeIndexRecord>> {
+        let row_merge = self
             .row_states()
             .flat_map(MetadataState::commits)
             .filter(|commit| commit.committed_seq <= self.visible_seq())
-            .filter_map(LandIndexRecord::from_commit)
-            .filter(|land| land.source_namespace_id == *source_namespace_id)
-            .max_by_key(|land| land.committed_seq);
+            .filter_map(MergeIndexRecord::from_commit)
+            .filter(|merge| merge.source_namespace_id == *source_namespace_id)
+            .max_by_key(|merge| merge.committed_seq);
         Ok(newest(
-            row_land,
-            manifest_index::newest_land(
+            row_merge,
+            manifest_index::newest_merge(
                 self.manifest_segments(),
                 source_namespace_id,
                 self.visible_seq(),
             )
             .await?,
-            |land| land.committed_seq,
+            |merge| merge.committed_seq,
         ))
     }
 

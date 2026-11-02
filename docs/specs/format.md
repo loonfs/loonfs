@@ -59,7 +59,7 @@ A "fork" is a new namespace that starts from a retained view of another namespac
 
 A "fork family" is a set of namespaces: one namespace that was created without a source, and every namespace forked from it, directly or through other forks. Each namespace in a fork family is a "member" of the family, and a member leaves the fork family when it's retired. The namespace that was created without a source is the family's "family root". Every manifest records the namespace's family root (`family_root_id`). A plain create records the namespace itself, and a fork copies its source's value. The value can't change after creation. The family root's prefix stores the content objects and upload records of every member (see [File contents and ownership](#15-file-contents-and-ownership)).
 
-Every namespace's root directory has the inode ID whose 128 bits are all zero (`ino_00000000000000000000000000`), and a new namespace starts at sequence 0. Every other inode ID has two 64-bit words. The high word is the low 32 bits of the sequence of the commit that creates the inode (`committed_seq`), followed by the inode's "create number" within that commit. The create number is 1 for the first inode that the commit creates, 2 for the second, and so on, and it counts files and directories alike, including the parent directories that a commit creates for a path. The low word is random. For example, `ino_000000r0000013kje0d47gc8kw` is the ID of the second inode that commit 12 creates, and its high word is `0x0000000c00000002`. The high word orders IDs, and the low word identifies them. Create numbers start at 1, so no generated ID is all zero bits. The sequence field wraps after 2^32 commits, which changes the order of later IDs but doesn't make any of them invalid, and no rule in LoonFS depends on the order of two IDs. A [land](glossary.md#land) creates each inode under the ID that the inode has in the fork, so in the namespace that receives the land, that inode's high word comes from the fork's commit, and the random low word keeps it apart from every ID that the namespace generates. Renaming a file doesn't change its inode ID, but deleting a file and creating another one at the same path creates a new inode with a new ID.
+Every namespace's root directory has the inode ID whose 128 bits are all zero (`ino_00000000000000000000000000`), and a new namespace starts at sequence 0. Every other inode ID has two 64-bit words. The high word is the low 32 bits of the sequence of the commit that creates the inode (`committed_seq`), followed by the inode's "create number" within that commit. The create number is 1 for the first inode that the commit creates, 2 for the second, and so on, and it counts files and directories alike, including the parent directories that a commit creates for a path. The low word is random. For example, `ino_000000r0000013kje0d47gc8kw` is the ID of the second inode that commit 12 creates, and its high word is `0x0000000c00000002`. The high word orders IDs, and the low word identifies them. Create numbers start at 1, so no generated ID is all zero bits. The sequence field wraps after 2^32 commits, which changes the order of later IDs but doesn't make any of them invalid, and no rule in LoonFS depends on the order of two IDs. A [merge](glossary.md#merge) creates each inode under the ID that the inode has in the fork, so in the namespace that receives the merge, that inode's high word comes from the fork's commit, and the random low word keeps it apart from every ID that the namespace generates. Renaming a file doesn't change its inode ID, but deleting a file and creating another one at the same path creates a new inode with a new ID.
 
 Version 1 of the format defines two inode kinds, `dir` and `file`. ([Reserved functionality](#125-reserved-functionality) reserves a third kind, `link`.) An inode row records only the item's kind and creation metadata. The item's current parent and name are stored as directory bindings, and its contents are stored as file revisions, so neither the path nor the current content reference is stored on the inode row.
 
@@ -298,7 +298,7 @@ Each family is one of three kinds:
 
 - An "entity header" is a family with one immutable row for each entity, written when the entity is created (`inodes`, `commits`).
 - A "history family" stores the versions of one mutable part of an entity, keyed by the entity and then by version, newest first (`revisions`, `attributes`, `access`, `direntry_binds`, `direntry_child_binds`, `tombstones`). A row of a history family is a "history row". The entity of a binding family is an edge, and each of its rows is one version of the edge.
-- A "query index" is a family that stores a second key over facts that another family stores, for a read that the other family's key can't serve (`commit_receipts`, `active_deletions`, `content_layouts`, `lands`).
+- A "query index" is a family that stores a second key over facts that another family stores, for a read that the other family's key can't serve (`commit_receipts`, `active_deletions`, `content_layouts`, `merges`).
 
 A row can also copy a field of another entity, so that a read doesn't look up that entity. Binding rows copy the child's kind and creation attribution, a bound file's row in the [slot index](#13-directory-bindings) copies the file's [revision summary](glossary.md#revision-summary), and a `listed` row in `active_deletions` copies the deletion root's kind and the deletion's binding, actor, and time.
 
@@ -306,12 +306,12 @@ Every family follows these rules:
 
 1. Every row is computed from one delta or one commit record, in a fold or a replay, without reading another row (except the rows listed above).
 2. An entity header is keyed by its entity's stable ID (an inode ID, or a commit's sequence). A history row is keyed by its entity's stable ID, then by its revision number if the family has one, and then by its position (`committed_seq` and `delta_index`). The binding families key by the edge instead, because the name key is part of the edge's identity, and a query index starts with the key of the read it serves.
-3. Every history family sorts each entity's rows newest first, so the current value is the first row, and the value at sequence `N` is the first row at or below `N`. The other families have their own orders: `commits` sorts by ascending sequence, `commit_receipts` by commit ID and then ascending sequence, `active_deletions` by deletion sequence, `content_layouts` by longest layout and then newest commit, and `lands` by fork and then newest commit.
+3. Every history family sorts each entity's rows newest first, so the current value is the first row, and the value at sequence `N` is the first row at or below `N`. The other families have their own orders: `commits` sorts by ascending sequence, `commit_receipts` by commit ID and then ascending sequence, `active_deletions` by deletion sequence, `content_layouts` by longest layout and then newest commit, and `merges` by fork and then newest commit.
 4. Every history row records its commit's sequence, ID, actor, and time (`committed_seq`, `commit_id`, `committed_by`, and `committed_at_ms`). A query index row records the sequence of the commit it points to, and it records an actor or a time only as a copy.
 5. A row copies a field of another entity only if the field can't change, or if the delta that changes the field also writes the copy. LoonFS never changes a copy after the copy is written, and it never repairs a copy when it reads one.
 6. An entity header is kept for as long as its entity exists, so an inode row is kept until a base compaction removes the rows of an inode that an expired deletion hides, and a commit row until the [retention floor](glossary.md#retention-floor) moves above the commit's sequence. A history family keeps each entity's state at the retention floor and every later row (in the binding families, for each edge's binding events and summary rows separately), and a query index keeps the rows of the entities it indexes.
 7. A generated ID in a key is its 26-character body, without its prefix. A client-chosen string, such as a name key or a commit ID, is the lowercase hexadecimal encoding of its UTF-8 bytes, because a client can put a hyphen in it (a generated commit ID has the shape of a generated ID, but a client can supply any commit ID). A counter is zero-padded decimal at its type's width, and a counter that sorts newest first is stored as the type's maximum value minus the counter. A family's filter key is its prefix followed by the components that identify one entity, or one slot in `direntry_binds` (which also adds a parent probe) and one child in `direntry_child_binds`.
-8. Two families that store rows for the same deltas or commits, under the same retention rule, are compacted in one [family group](glossary.md#family-group). The two binding families form one group, and `commits`, `commit_receipts`, and `lands` form another.
+8. Two families that store rows for the same deltas or commits, under the same retention rule, are compacted in one [family group](glossary.md#family-group). The two binding families form one group, and `commits`, `commit_receipts`, and `merges` form another.
 
 This table lists each family's kind, the first component of its key, and its retention rule. [Row retention during a base compaction](#103-row-retention-during-a-base-compaction) defines each retention rule exactly, and [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) defines each key.
 
@@ -328,7 +328,7 @@ This table lists each family's kind, the first component of its key, and its ret
 | `commit_receipts` | Query index | Commit ID | Floor commit and later |
 | `active_deletions` | Query index | Deletion sequence | Until undeleted or expired |
 | `content_layouts` | Query index | Content ID | Longest referenced layout |
-| `lands` | Query index | Fork's namespace ID | Floor commit and later |
+| `merges` | Query index | Fork's namespace ID | Floor commit and later |
 
 Why is every row computed from one delta, without reading other rows? A row computed that way depends only on its commit, so a fold and a replay of the same commits compute the same rows, two readers that replay the same WAL tail agree on every row, and LoonFS can rebuild a row from its commit.
 
@@ -843,7 +843,7 @@ Why use epochs instead of a lease? With a lease, a new writer would have to wait
 
 ### 6.2 Validation
 
-Before it plans new mutations, the writer rebuilds the metadata state from a verified basis and the visible WAL. It resolves paths and inode references, checks content admission, evaluates preconditions, and generates an ID for each inode that a request creates, built from the commit's sequence and the inode's create number (see [Namespaces and identity](#11-namespaces-and-identity)). A [land](glossary.md#land) doesn't generate IDs: each inode that it creates keeps the ID that it has in the fork.
+Before it plans new mutations, the writer rebuilds the metadata state from a verified basis and the visible WAL. It resolves paths and inode references, checks content admission, evaluates preconditions, and generates an ID for each inode that a request creates, built from the commit's sequence and the inode's create number (see [Namespaces and identity](#11-namespaces-and-identity)). A [merge](glossary.md#merge) doesn't generate IDs: each inode that it creates keeps the ID that it has in the fork.
 
 The operations in one request are evaluated in order, and later operations see the tentative effects of earlier ones. When several requests share a publication batch, the writer chooses their order, and it evaluates each one against the requests accepted before it.
 
@@ -868,9 +868,9 @@ Checking the inode ID alone isn't equivalent, because the item might have been m
 
 Callers add specific checks with `expected_*` preconditions. Leaving out an optional precondition turns off that check, but it doesn't turn off the operation's normal structural validation. When a revision precondition comes with an optional inode precondition, the revision precondition requires the matching inode precondition. Inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves and deletes require `expected_binding_version`.
 
-A [land](glossary.md#land) MUST continue the previous land from its fork, so that each of the fork's commits is applied once and in order. The writer reads the fork's newest row in the [land index](glossary.md#land-index) (the `lands` family). If the fork has one, the land's `source_after_seq` MUST equal that row's `source_through_seq`. If it has none, the land is the fork's first, and its `source_after_seq` MUST equal the fork point, the sequence of this namespace that the fork was made at. Otherwise the land fails with `land_range_conflict`. For example, if a fork made at sequence 100 has landed its commits 101 through 120, its next land has to apply the commits after 120, and a land that starts after 110 (an overlap) or after 125 (a gap) is refused. The writer checks the commit receipt first, as for every commit, so a retry of a land with its original commit ID returns the original commit instead of a conflict.
+A [merge](glossary.md#merge) MUST continue the previous merge from its fork, so that each of the fork's commits is applied once and in order. The writer reads the fork's newest row in the [merge index](glossary.md#merge-index) (the `merges` family). If the fork has one, the merge's `source_after_seq` MUST equal that row's `source_through_seq`. If it has none, the merge is the fork's first, and its `source_after_seq` MUST equal the fork point, the sequence of this namespace that the fork was made at. Otherwise the merge fails with `merge_range_conflict`. For example, if a fork made at sequence 100 has had its commits 101 through 120 merged, its next merge has to apply the commits after 120, and a merge that starts after 110 (an overlap) or after 125 (a gap) is refused. The writer checks the commit receipt first, as for every commit, so a retry of a merge with its original commit ID returns the original commit instead of a conflict.
 
-The check that a land continues the previous land from its fork reads the fork's newest row in the land index, and a base compaction removes the `lands` rows strictly below the [retention floor](glossary.md#retention-floor) (see [Row retention during a base compaction](#103-row-retention-during-a-base-compaction)). So a land's fork point MUST be at or above the retention floor, and the writer refuses a land whose fork point is below the floor. The land fails with `rebootstrap_required`. Every land from a fork is committed after the fork was made, so its sequence is above the fork point, and while the floor is at or below the fork point, compaction keeps every `lands` row of the fork. Without this rule, a compaction after the floor passed the fork's newest land would remove that land's row, the writer would expect the fork's next land to start at the fork point, and a land that applied the fork's landed commits again would be accepted. For example, a fork made at sequence 100 landed its commits 101 through 120 as this namespace's commit 300. Once the floor is above 100, the writer refuses the fork's next land with `rebootstrap_required`, whether the floor is at 150 (the row for commit 300 is still kept) or at 310 (a compaction can remove it).
+The check that a merge continues the previous merge from its fork reads the fork's newest row in the merge index, and a base compaction removes the `merges` rows strictly below the [retention floor](glossary.md#retention-floor) (see [Row retention during a base compaction](#103-row-retention-during-a-base-compaction)). So a merge's fork point MUST be at or above the retention floor, and the writer refuses a merge whose fork point is below the floor. The merge fails with `rebootstrap_required`. Every merge from a fork is committed after the fork was made, so its sequence is above the fork point, and while the floor is at or below the fork point, compaction keeps every `merges` row of the fork. Without this rule, a compaction after the floor passed the fork's newest merge would remove that merge's row, the writer would expect the fork's next merge to start at the fork point, and a merge that applied the fork's merged commits again would be accepted. For example, a fork made at sequence 100 had its commits 101 through 120 merged as this namespace's commit 300. Once the floor is above 100, the writer refuses the fork's next merge with `rebootstrap_required`, whether the floor is at 150 (the row for commit 300 is still kept) or at 310 (a compaction can remove it).
 
 A rejected request isn't assigned a sequence number and creates no WAL record. Passing validation is only tentative acceptance, not success.
 
@@ -942,9 +942,9 @@ For example, suppose request A creates `/reports`, and request B also tries to c
 
 Every WAL commit and every `commit` row stores a semantic fingerprint (`semantic_commit_fingerprint`) of the logical request: the `namespace_id`, the `actor_id`, the optional `subject_id`, the ordered operations with their inline preconditions, the request-level preconditions, and the optional message. It doesn't include publication details, such as the writer epoch and the timestamp. [Semantic commit fingerprints](#appendix-b-semantic-commit-fingerprints) specifies the exact canonical bytes.
 
-A "land" is a commit that applies a fork's commits to the namespace that the fork was forked from, and its commit record includes a land record that identifies the fork and the range of the fork's commits that it applied (see [WAL records](#a5-wal-records)). LoonFS plans a land's operations itself, from that fork and range, so a land's fingerprint covers its land record in place of its operations and preconditions. A retry of a land with the same commit ID and land record (and the same actor, subject, and message) is a replay, even if LoonFS planned different operations for it, and a request that reuses the commit ID for a different range returns `commit_id_reuse_conflict`. Leaving the operations out also means that a change in how LoonFS plans a land doesn't change the land's identity. [Land commits](#b5-land-commits) specifies the canonical bytes.
+A "merge" is a commit that applies a fork's commits to the namespace that the fork was forked from, and its commit record includes a merge record that identifies the fork and the range of the fork's commits that it applied (see [WAL records](#a5-wal-records)). LoonFS plans a merge's operations itself, from that fork and range, so a merge's fingerprint covers its merge record in place of its operations and preconditions. A retry of a merge with the same commit ID and merge record (and the same actor, subject, and message) is a replay, even if LoonFS planned different operations for it, and a request that reuses the commit ID for a different range returns `commit_id_reuse_conflict`. Leaving the operations out also means that a change in how LoonFS plans a merge doesn't change the merge's identity. [Merge commits](#b5-merge-commits) specifies the canonical bytes.
 
-The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families are one family group and follow the same retention rule, so a commit row is kept for as long as its receipt. The `lands` family is in the same group, so a land's index row is kept for as long as its commit row.
+The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families are one family group and follow the same retention rule, so a commit row is kept for as long as its receipt. The `merges` family is in the same group, so a merge's index row is kept for as long as its commit row.
 
 While the receipt is kept:
 
@@ -1012,7 +1012,7 @@ Why does only a chain's creator extend the chain in place? Every member of a for
 
 The change feed is ordered by commit, not by WAL object. A WAL object that contains three commits contributes three commit boundaries to the feed. Within a commit, filesystem events follow the order of the request's operations, and one operation can produce several events.
 
-A consumer resuming after sequence `N` reads the `commits` family of the current file set, and then the commits in the unfolded WAL after it. Fence objects produce no change events. The feed reports a [land's](glossary.md#land) land record with its commit, from the WAL tail and from the `commits` row alike, so a consumer can tell which fork, and which of the fork's commits, the land applied. If the consumer's cursor is older than the retention floor, it MUST start again from a fresh pin. The [API specification][api-spec] specifies the event shapes and the cursor contract.
+A consumer resuming after sequence `N` reads the `commits` family of the current file set, and then the commits in the unfolded WAL after it. Fence objects produce no change events. The feed reports a [merge's](glossary.md#merge) merge record with its commit, from the WAL tail and from the `commits` row alike, so a consumer can tell which fork, and which of the fork's commits, the merge applied. If the consumer's cursor is older than the retention floor, it MUST start again from a fresh pin. The [API specification][api-spec] specifies the event shapes and the cursor contract.
 
 A consumer that needs permanent event history MUST keep its own copy before the floor advances. The stable keys are `(namespace_id, committed_seq)` for a commit's position and `(namespace_id, inode_id)` for item identity. A commit ID is useful for correlating events, but it isn't a permanent unique event key, because it can be reused after its receipt is removed.
 
@@ -1034,7 +1034,7 @@ Each run records `run_seq`, `tier`, and its segment descriptors. The manifest's 
 
 A manifest MUST NOT contain duplicate run numbers, or a run number at or above `next_run_no`. A family's segment ranges MUST NOT overlap or descend, and a metadata producer MUST NOT write the same logical row key twice within one run.
 
-Metadata rows describe immutable facts at specific positions. Reads merge those facts and apply the visibility rules, instead of choosing between conflicting values for one row key. The two directory binding indexes (by parent and name, and by child) contain the same binding events in different orders, and the slot index also contains summary rows. Manifest validation checks that each run's slot index has at least as many rows as its child index, and compaction checks that the binding events of its selected input runs agree row by row. The `commits` and `commit_receipts` families contain one row each per retained commit, and manifest validation checks that each run has the same number of rows in both.
+Metadata rows describe immutable facts at specific positions. Reads combine those rows and apply the visibility rules, instead of choosing between conflicting values for one row key. The two directory binding indexes (by parent and name, and by child) contain the same binding events in different orders, and the slot index also contains summary rows. Manifest validation checks that each run's slot index has at least as many rows as its child index, and compaction checks that the binding events of its selected input runs agree row by row. The `commits` and `commit_receipts` families contain one row each per retained commit, and manifest validation checks that each run has the same number of rows in both.
 
 ### 7.2 Publishing a materialized file set
 
@@ -1080,12 +1080,12 @@ For each chain, the fold builds a "candidate" (the new extent it will write) and
 
 1. The candidate starts as the ordered pieces, without joining their bytes. Its chain offset is the total length of the extents before it.
 2. Validation might already have written some bytes to content objects while they're still in the WAL tail. The fold keeps such an own extent whole and leaves out the pieces it covers. If it covers all the remaining pieces, the last own extent starts the candidate.
-3. While the chain's last own extent is at most twice the candidate's length, the fold merges that extent into the candidate (the "doubling rule"). Shared base extents are never merged.
-4. If the result would leave more than `MAX_LAYOUT_EXTENTS` (32) own extents, the fold merges every own extent after the chain's largest own extent into the candidate as well. Shared base extents stay separate, and they don't count toward this limit.
+3. While the chain's last own extent is at most twice the candidate's length, the fold combines that extent into the candidate (the "doubling rule"). Shared base extents are never combined.
+4. If the result would leave more than `MAX_LAYOUT_EXTENTS` (32) own extents, the fold combines every own extent after the chain's largest own extent into the candidate as well. Shared base extents stay separate, and they don't count toward this limit.
 
-For example, suppose a chain's layout has one own extent of 100 bytes, and the tail adds 30 bytes. The last extent (100 bytes) is more than twice the candidate (30 bytes), so the fold writes the 30 bytes as a new extent, and the layout has two extents. If the next fold has 70 new bytes, the last extent (30 bytes) is at most twice 70, so it's merged, and the candidate grows to 100 bytes. The next extent (100 bytes) is now at most twice the candidate, so it's merged too, and the fold writes one 200-byte extent.
+For example, suppose a chain's layout has one own extent of 100 bytes, and the tail adds 30 bytes. The last extent (100 bytes) is more than twice the candidate (30 bytes), so the fold writes the 30 bytes as a new extent, and the layout has two extents. If the next fold has 70 new bytes, the last extent (30 bytes) is at most twice 70, so it's combined, and the candidate grows to 100 bytes. The next extent (100 bytes) is now at most twice the candidate, so it's combined too, and the fold writes one 200-byte extent.
 
-The fold writes each chain's candidate with one assembly call. Each source of the assembly is a whole own extent (a chain's own extents are never cut), and one HEAD request per source supplies its stored checksum. A missing stored checksum, or one in another algorithm, is `namespace_corrupt`. The fold combines the source checksums and the tail checksum in the store's algorithm, and the tail bytes stay in ordered pieces. A candidate with no merged extents has no sources, at every size. A new chain shares the extents its delta included, and it writes only its own pieces.
+The fold writes each chain's candidate with one assembly call. Each source of the assembly is a whole own extent (a chain's own extents are never cut), and one HEAD request per source supplies its stored checksum. A missing stored checksum, or one in another algorithm, is `namespace_corrupt`. The fold combines the source checksums and the tail checksum in the store's algorithm, and the tail bytes stay in ordered pieces. A candidate with no combined extents has no sources, at every size. A new chain shares the extents its delta included, and it writes only its own pieces.
 
 A chain whose pieces start at offset 0 writes the whole object at its own key, when the tail has no shorter reference to it. Every other write is a span object, whose key uses the candidate's start and the newest reference's size (including a span that starts at 0). A failed fold can leave the first whole object behind, so later bytes MUST use a different key. Every chain extent is written with an assembly. If the key is already occupied with the same stored checksum, the write succeeds, and if the checksum is different or missing, the fold reports corruption, identifying the key. A fold never changes an existing object's bytes.
 
@@ -1298,7 +1298,7 @@ Within a fork family, a reference identifies the same object in every member, so
 
 An import identifies the source namespace, and it checks that namespace's current view for authorization, including an import within the same namespace. The import reads the requested reference where the source's current view finds its bytes (see [Content verification](#45-content-verification)): in the source's own tail pieces, or in content objects. Reclaimed content returns the same error as any missing content object. The import verifies the bytes and stages them under a new content ID in the destination's fork family. Forks pin manifests, so inherited content has always been written to content objects.
 
-A [land](glossary.md#land) admits its content references without an import. The land includes each reference with the layout that the fork's revision and layout rows record (the fork is folded before a land, so every reference has a layout), and LoonFS admits the reference without reading its bytes. The fork wrote those rows itself, and no caller supplied the references, so there's nothing to verify. Once the land is in the namespace's WAL tail, the namespace's own content roots keep the content (see [Content roots](#119-content-roots)).
+A [merge](glossary.md#merge) admits its content references without an import. The merge includes each reference with the layout that the fork's revision and layout rows record (the fork is folded before a merge, so every reference has a layout), and LoonFS admits the reference without reading its bytes. The fork wrote those rows itself, and no caller supplied the references, so there's nothing to verify. Once the merge is in the namespace's WAL tail, the namespace's own content roots keep the content (see [Content roots](#119-content-roots)).
 
 A subject that imports a bare reference MUST be an administrator of the source namespace. An unrestricted source, and a request with no subject, don't need an administrator grant. Authorization always uses the source's current head, and a deleted source uses the access state in its final manifest.
 
@@ -1364,7 +1364,7 @@ Why is the acknowledged floor never above the retention floor? A WAL object's ba
 
 ### 10.2 Compaction windows
 
-Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group, because they MUST stay consistent with each other. The `commits`, `commit_receipts`, and `lands` families form another group, and each of the other seven groups contains one family. [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists the groups.
+Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group, because they MUST stay consistent with each other. The `commits`, `commit_receipts`, and `merges` families form another group, and each of the other seven groups contains one family. [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists the groups.
 
 A compaction rewrites a contiguous window of at most eight of a group's runs into one run. The window either includes the group's oldest run or starts above it, and it can't skip a run in the middle.
 
@@ -1419,7 +1419,7 @@ These rules apply only when the selected inputs include the group's oldest run. 
 | `revisions` | For each file, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of a file that an expired deletion hides. |
 | `tombstones` | Keep every `set` and `revoke` event. |
 | `active_deletions` | Remove a cancelled `listed` and `removed` pair together, and remove the `listed` row of a deletion at or below the acknowledged floor. A deletion above the acknowledged floor keeps its `listed` row, even at or below the retention floor. |
-| `commits`, `commit_receipts`, `lands` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it (in a fork, it's the source's commit at the fork point). |
+| `commits`, `commit_receipts`, `merges` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it (in a fork, it's the source's commit at the fork point). |
 | `content_layouts` | Keep the first row for each content ID, ordered by longest layout and then newest commit. Drop chains that aren't in the basis's revision filter (see below). |
 | `attributes` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of an inode that an expired deletion hides. |
 | `access` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of an inode that an expired deletion hides. |
@@ -1689,7 +1689,7 @@ To find the protected objects, the pass:
 3. Scans the rows of each listed segment for extents whose content ID is different from their row's (shared base extents, which can point into any shard), and inserts their object keys into a Bloom filter.
 4. Scans the rows of the listed segments in disjoint content ID ranges, one shard at a time, and protects the exact extent object keys in that shard.
 
-The pass reads each segment's own rows, and doesn't merge the segments of a view. A view's layout rows are the rows of its segments, so the listed segments include every row of every view. That includes a superseded layout row (a shorter layout of a chain that a longer row replaces), so an object that only a superseded row refers to stays until a compaction drops that row and no layout view lists the segment that contains it.
+The pass reads each segment's own rows, and doesn't combine the segments of a view. A view's layout rows are the rows of its segments, so the listed segments include every row of every view. That includes a superseded layout row (a shorter layout of a chain that a longer row replaces), so an object that only a superseded row refers to stays until a compaction drops that row and no layout view lists the segment that contains it.
 
 Tail and session IDs protect every object of their chains. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
 
@@ -1971,7 +1971,7 @@ A WAL object's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_
 
 For a data WAL object, `prior_head_seq` is derived (with checked subtraction) from the first record's sequence, and `records` covers the sequences after it through `head_seq`, without gaps. A first sequence of 0 is invalid. The WAL number MUST match the key. A fence has an empty record list and an unchanged head, so its derived `prior_head_seq` equals `head_seq`. Fences take part in WAL numbering and epoch validation, but they produce no logical changes.
 
-Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, an optional `message`, an optional `land`, `deltas`, and an optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`, which is a kind-tagged object with these fields:
+Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, an optional `message`, an optional `merge`, `deltas`, and an optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`, which is a kind-tagged object with these fields:
 
 | Delta kind | Fields after `kind` |
 | --- | --- |
@@ -1995,17 +1995,17 @@ A revision delta's `layout` follows these rules:
 - A present layout validates against its own `size_bytes()`, and its extents can refer to other content IDs. Its size equals the lowest offset of the commit's pieces for that content ID, or the reference's `size_bytes` if the commit includes no piece for it. A failed check is `InvalidWalRevisionLayout`.
 - Upload evidence provides one whole extent. Copies, restores, and new chains include the required prefix from the planning view. Before it admits the reference, validation writes any pending pieces that prefix needs to content objects, the same way a fold does. The resulting layout refers to those objects even if compaction later removes the source chain's row.
 
-A [land's](glossary.md#land) commit includes a land record (`land`), and every other commit leaves the field out. The land record contains these fields:
+A [merge's](glossary.md#merge) commit includes a merge record (`merge`), and every other commit leaves the field out. The merge record contains these fields:
 
 | Field | Meaning |
 | --- | --- |
-| `source_namespace_id` | The fork whose commits the land applied. |
-| `source_after_seq` | The fork's commits above this sequence were applied. For a fork's first land, this is the fork point. |
+| `source_namespace_id` | The fork whose commits the merge applied. |
+| `source_after_seq` | The fork's commits above this sequence were applied. For a fork's first merge, this is the fork point. |
 | `source_through_seq` | The fork's commits at or below this sequence were applied. |
 
-The range follows the change feed's cursor convention, so a consumer that reads the fork's change feed after `source_after_seq`, through `source_through_seq`, reads the commits that the land applied. For example, a first land of a fork made at sequence 100, which applies the fork's commits 101 through 120, records 100 and 120. Encoding and decoding refuse a land record whose `source_after_seq` isn't below its `source_through_seq`, or whose `source_namespace_id` is the WAL object's own `namespace_id` (`InvalidWalLand`).
+The range follows the change feed's cursor convention, so a consumer that reads the fork's change feed after `source_after_seq`, through `source_through_seq`, reads the commits that the merge applied. For example, a first merge of a fork made at sequence 100, which applies the fork's commits 101 through 120, records 100 and 120. Encoding and decoding refuse a merge record whose `source_after_seq` isn't below its `source_through_seq`, or whose `source_namespace_id` is the WAL object's own `namespace_id` (`InvalidWalMerge`).
 
-LoonFS publishes a land as the only commit in its WAL object, so `MAX_WAL_OBJECT_BYTES` bounds the land alone, and no other commit shares a WAL object that the land's size could refuse. A land's `create_inode` deltas record the IDs that the inodes have in the fork, so an inode that a fork created has one ID in both namespaces after the land. A land includes no inline content and appends no bytes, because it refers only to content that the fork already wrote.
+LoonFS publishes a merge as the only commit in its WAL object, so `MAX_WAL_OBJECT_BYTES` bounds the merge alone, and no other commit shares a WAL object that the merge's size could refuse. A merge's `create_inode` deltas record the IDs that the inodes have in the fork, so an inode that a fork created has one ID in both namespaces after the merge. A merge includes no inline content and appends no bytes, because it refers only to content that the fork already wrote.
 
 `inline_content` is a list of pieces, `{content_id, offset, bytes}`, where `bytes` is a CBOR byte string that the chain contains starting at `offset`. The field is left out when it's empty, and it defaults to an empty list when absent. The reference that a piece goes with is an ordinary `blob_v1` reference. A whole value is a piece at offset 0. A piece past offset 0 continues an existing chain, or starts a new chain whose delta includes the layout of the first `offset` bytes. An append to zero bytes starts a new content ID with a whole value. A chain of zero bytes is never appended to, so its download grant can sign no range (see the [API specification][api-spec]).
 
@@ -2033,15 +2033,15 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `tombstone` | `root_inode_id`, `committed_seq`, `delta_index`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_seq` |
-| `commit` | `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `land?`, `deltas` |
-| `land` | `source_namespace_id`, `committed_seq`, `source_after_seq`, `source_through_seq` |
+| `commit` | `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `merge?`, `deltas` |
+| `merge` | `source_namespace_id`, `committed_seq`, `source_after_seq`, `source_through_seq` |
 | `content_layout` | `content_id`, `committed_seq`, `size_bytes`, `layout` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
 
 A `commit` row is the WAL commit record from [WAL records](#a5-wal-records), without its inline content. The `inline_content` field is left out, and a row that includes one is invalid.
 
-A `land` row indexes one land by the fork that it applied. A fold, and a replay of the WAL tail, write one `land` row for each commit record that includes a land record, with the land record's fork and range and the commit's own sequence, and they write none for any other commit. A scan of one fork's prefix in `lands` returns that fork's lands newest first, so the first row is the fork's newest land.
+A `merge` row indexes one merge by the fork that it applied. A fold, and a replay of the WAL tail, write one `merge` row for each commit record that includes a merge record, with the merge record's fork and range and the commit's own sequence, and they write none for any other commit. A scan of one fork's prefix in `merges` returns that fork's merges newest first, so the first row is the fork's newest merge.
 
 For a directory binding, `state` is `{"kind":"bound","display_name":...,"revision"?:...}` or `{"kind":"unbound"}`. A bound file row's `revision` is the file's revision summary, `{revision_no, size_bytes, revision_committed_by, revision_committed_at_ms}`, and a directory row has none. `bind_position` is a `DeltaPosition` value, `{seq, delta_index}`. Both binding families store the complete row.
 
@@ -2067,7 +2067,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id_body}-{sort_rank:010}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
 | `commits` | `commit-{committed_seq:020}` |
-| `lands` | `land-{source_namespace_id_hex}-{u64::MAX - committed_seq:020}` |
+| `merges` | `merge-{source_namespace_id_hex}-{u64::MAX - committed_seq:020}` |
 | `content_layouts` | `content-layout-{content_id_body}-{u64::MAX - size_bytes:020}-{u64::MAX - committed_seq:020}` |
 | `attributes` | `attribute-{inode_id_body}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id_body}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
@@ -2081,7 +2081,7 @@ An edge's value at sequence `N` is the first row in key order whose `committed_s
 
 Compaction groups both families by edge, and it decides each row as it arrives, without keeping a row back. It also tracks the last edge bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index. Commit validation enforces one child per slot and one parent per child (see [Directory bindings](#13-directory-bindings)), so a second child bound in one slot at the floor, or a second parent bound for one child at the floor, is corruption, and compaction refuses it.
 
-Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. It scans an edge's binding rows and a root's tombstone events newest first too, because their keys subtract the sequence and the delta index from the maximum values, and a fork's lands newest first, because their keys subtract the sequence. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
+Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. It scans an edge's binding rows and a root's tombstone events newest first too, because their keys subtract the sequence and the delta index from the maximum values, and a fork's merges newest first, because their keys subtract the sequence. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
 
 Bloom filters use these keys, which aren't always full row keys:
 
@@ -2095,7 +2095,7 @@ Bloom filters use these keys, which aren't always full row keys:
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id_body}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}` |
 | `commits` | The complete row key |
-| `lands` | `land-{source_namespace_id_hex}` |
+| `merges` | `merge-{source_namespace_id_hex}` |
 | `content_layouts` | `content-layout-{content_id_body}` |
 | `attributes` | `attribute-{inode_id_body}` |
 | `access` | `access-{inode_id_body}` |
@@ -2122,7 +2122,7 @@ The family groups are:
 | `inodes` | `inodes` |
 | `tombstones` | `tombstones` |
 | `active_deletions` | `active_deletions` |
-| `commits` | `commits`, `commit_receipts`, `lands` |
+| `commits` | `commits`, `commit_receipts`, `merges` |
 | `content_layouts` | `content_layouts` |
 | `attributes` | `attributes` |
 | `access` | `access` |
@@ -2244,7 +2244,7 @@ The fingerprint is the SHA-256 of compact UTF-8 JSON with these top-level fields
 }
 ```
 
-The layout above illustrates the schema, and the actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present (and `[]` for an empty list), and `message` and `subject_id` are always present (and `null` when absent). A land's fingerprint uses a different preimage, which [Land commits](#b5-land-commits) specifies.
+The layout above illustrates the schema, and the actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present (and `[]` for an empty list), and `message` and `subject_id` are always present (and `null` when absent). A merge's fingerprint uses a different preimage, which [Merge commits](#b5-merge-commits) specifies.
 
 The `namespace_id`, `actor_id`, `subject_id`, message, operation order, and caller preconditions are all significant. A changed `actor_id` is a changed logical request, even if a different process is retrying on behalf of the same application. The principal scope isn't included, because a namespace has one scope and refuses every other. The commit ID itself, the writer epoch, and the commit timestamp aren't included either.
 
@@ -2346,17 +2346,17 @@ A one-operation convenience call and a one-element commit request use the same c
 
 The complete shared vectors are in [commit_fingerprints_v1.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without binding versions, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders MUST preserve those exact bytes and digests.
 
-### B.5 Land commits
+### B.5 Merge commits
 
-A [land's](glossary.md#land) fingerprint covers its land record in place of its operations and preconditions (see [Commit identity and retries](#65-commit-identity-and-retries)). It's the SHA-256 of compact UTF-8 JSON with these top-level fields, in this exact order:
+A [merge's](glossary.md#merge) fingerprint covers its merge record in place of its operations and preconditions (see [Commit identity and retries](#65-commit-identity-and-retries)). It's the SHA-256 of compact UTF-8 JSON with these top-level fields, in this exact order:
 
 ```text
 {
-  "domain": "loonfs.commit.land.v1",
+  "domain": "loonfs.commit.merge.v1",
   "namespace_id": <namespace string>,
   "actor_id": <actor ID string>,
   "subject_id": <subject ID string or null>,
-  "land": {
+  "merge": {
     "source_namespace_id": <namespace string>,
     "source_after_seq": <integer>,
     "source_through_seq": <integer>
@@ -2367,16 +2367,16 @@ A [land's](glossary.md#land) fingerprint covers its land record in place of its 
 
 The preimage has no `operations` and no `preconditions` members. Every member is always present, `subject_id` and `message` are `null` when absent, and strings and integers follow [Strings, integers, and example bytes](#b4-strings-integers-and-example-bytes). The stored form is `v1:sha256:<64 lowercase hex>`, the same as an ordinary commit's.
 
-For example, this is the complete canonical preimage of a land into `demo` that applies the commits of the fork `demo-fork` above sequence 418, through sequence 425. The hashed bytes have no trailing newline:
+For example, this is the complete canonical preimage of a merge into `demo` that applies the commits of the fork `demo-fork` above sequence 418, through sequence 425. The hashed bytes have no trailing newline:
 
 ```json
-{"domain":"loonfs.commit.land.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"land":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}
+{"domain":"loonfs.commit.merge.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"merge":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}
 ```
 
 Its fingerprint is:
 
 ```text
-v1:sha256:eda60a5b52f0ee895214e1c51bdf6c7f741828bbaa37e22141499a77d4215451
+v1:sha256:fd69abed548f0d6929753492171d2e653d08541ea84dd11fefe202124437b5e5
 ```
 
 ## Appendix C. Timing and size reference
@@ -2451,11 +2451,11 @@ A direct multipart upload is also subject to the provider's transfer limits. The
 | `MAX_ATTRIBUTE_VALUE_BYTES` | 4,096 UTF-8 bytes |
 | `MAX_ATTRIBUTE_ENTRIES` | 100 |
 | `MAX_ATTRIBUTES_TOTAL_BYTES` | 65,536 logical UTF-8 bytes |
-| A land's planned WAL record | 536,870,912 bytes (`MAX_WAL_OBJECT_BYTES`) |
+| A merge's planned WAL record | 536,870,912 bytes (`MAX_WAL_OBJECT_BYTES`) |
 
 Attribute limits count the original UTF-8 strings, before JSON escaping or CBOR encoding. Path limits apply to canonical request paths.
 
-A [land](glossary.md#land) isn't held to the API's request limits on the number of operations, preconditions, content tokens, and content references, because LoonFS plans a land itself instead of reading it from a request body. `MAX_WAL_OBJECT_BYTES` bounds a land instead: LoonFS checks the land's planned WAL record against it, as it does for every commit, and a land that exceeds it fails with `land_too_large`. The reference server's limit on the total estimated bytes of the commit requests it has admitted (`max_admitted_bytes`) bounds a land too, as the `land_too_large` row in the API's [Standard error contract](api.md#3-standard-error-contract) describes.
+A [merge](glossary.md#merge) isn't held to the API's request limits on the number of operations, preconditions, content tokens, and content references, because LoonFS plans a merge itself instead of reading it from a request body. `MAX_WAL_OBJECT_BYTES` bounds a merge instead: LoonFS checks the merge's planned WAL record against it, as it does for every commit, and a merge that exceeds it fails with `merge_too_large`. The reference server's limit on the total estimated bytes of the commit requests it has admitted (`max_admitted_bytes`) bounds a merge too, as the `merge_too_large` row in the API's [Standard error contract](api.md#3-standard-error-contract) describes.
 
 ### C.4 Reference-implementation sizing and admission defaults
 

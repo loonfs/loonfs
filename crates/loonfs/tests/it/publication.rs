@@ -38,7 +38,7 @@ struct ParkedPuts {
 /// pending first poll proves the candidate sits in the open batch behind
 /// the parked publication. A settle sleep would leave a window where a
 /// caller cancelled early was never admitted at all — and a publication
-/// that never existed cannot land.
+/// that never existed cannot be committed.
 async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let namespace_id = NamespaceId::parse("parked").expect("valid namespace id");
     let store_impl = Arc::new(BlockingStore::matching(
@@ -157,15 +157,15 @@ async fn cancelled_caller_does_not_cancel_admitted_publication() {
     namespace
         .read_file("/a.txt")
         .await
-        .expect("the cancelled caller's admitted publication landed");
+        .expect("the cancelled caller's admitted publication succeeded");
     namespace
         .read_file("/b.txt")
         .await
-        .expect("the queued publication landed");
+        .expect("the queued publication succeeded");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn all_callers_cancelled_publication_still_lands() {
+async fn all_callers_cancelled_publication_still_commits() {
     let temp_dir = tempdir().expect("tempdir");
     let parked = park_two_puts(temp_dir.path()).await;
 
@@ -185,9 +185,9 @@ async fn all_callers_cancelled_publication_still_lands() {
     namespace
         .read_file("/a.txt")
         .await
-        .expect("the first admitted publication landed");
+        .expect("the first admitted publication succeeded");
     namespace
         .read_file("/b.txt")
         .await
-        .expect("the second admitted publication landed");
+        .expect("the second admitted publication succeeded");
 }

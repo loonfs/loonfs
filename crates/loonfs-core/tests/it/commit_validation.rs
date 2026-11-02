@@ -1046,7 +1046,7 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
         &context,
     )
     .await
-    .expect_err("the second precondition is stale once the first write lands");
+    .expect_err("the second precondition is stale once the first write is committed");
     assert_eq!(error.code(), ErrorCode::StaleRevision);
     assert_eq!(
         error

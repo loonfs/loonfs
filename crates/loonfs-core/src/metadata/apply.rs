@@ -287,7 +287,7 @@ impl MetadataState {
             semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
             committed_at_ms: record.committed_at_ms,
             message: record.message.clone(),
-            land: record.land.clone(),
+            merge: record.merge.clone(),
             deltas: record.deltas.clone(),
             inline_content: Vec::new(),
         });

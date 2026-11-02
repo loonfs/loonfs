@@ -688,7 +688,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     let outcome = worker
         .enable(&namespace_id)
         .await
-        .expect("confirm landed manifest");
+        .expect("confirm written manifest");
     assert_matches!(outcome, loonfs_grep::GrepEnableOutcome::Enabled { .. });
     assert_eq!(failing_store.attempts(), 1);
 
@@ -759,7 +759,7 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     let outcome = worker
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
-        .expect("confirm landed restart");
+        .expect("confirm written restart");
     assert_matches!(outcome, GrepBuildOutcome::BackfillRestarted { .. });
     assert_eq!(failing_store.attempts(), 1);
 
@@ -1172,7 +1172,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
     // One file per step, so the backfill is genuinely partway through the
-    // checkpointed file set when the commits below land.
+    // checkpointed file set when the commits below are made.
     let policy = GramIndexBuildPolicy {
         max_files_per_step: NonZeroUsize::MIN,
         ..GramIndexBuildPolicy::default()

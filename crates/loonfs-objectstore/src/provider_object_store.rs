@@ -1220,8 +1220,8 @@ mod tests {
 
     #[derive(Debug)]
     enum WriteScript {
-        FailWithoutLanding,
-        LandThenFail,
+        FailWithoutWriting,
+        WriteThenFail,
         FailAuth,
     }
 
@@ -1262,8 +1262,8 @@ mod tests {
             self.puts.fetch_add(1, Ordering::SeqCst);
             let script = self.put_script.lock().expect("put script").pop_front();
             match script {
-                Some(WriteScript::FailWithoutLanding) => Err(transport_glitch()),
-                Some(WriteScript::LandThenFail) => {
+                Some(WriteScript::FailWithoutWriting) => Err(transport_glitch()),
+                Some(WriteScript::WriteThenFail) => {
                     self.inner.put_opts(location, payload, opts).await?;
                     Err(transport_glitch())
                 }
@@ -1311,8 +1311,8 @@ mod tests {
                         deletes.fetch_add(1, Ordering::SeqCst);
                         let script = delete_script.lock().expect("delete script").pop_front();
                         match script {
-                            Some(WriteScript::FailWithoutLanding) => Err(transport_glitch()),
-                            Some(WriteScript::LandThenFail) => {
+                            Some(WriteScript::FailWithoutWriting) => Err(transport_glitch()),
+                            Some(WriteScript::WriteThenFail) => {
                                 inner.delete(&location).await?;
                                 Err(transport_glitch())
                             }
@@ -1459,16 +1459,16 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_landed_write_whose_answer_was_lost_resolves_through_its_stored_checksum() {
+    async fn a_successful_write_whose_answer_was_lost_resolves_through_its_stored_checksum() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
-        script_puts(&flaky, [WriteScript::LandThenFail]);
+        script_puts(&flaky, [WriteScript::WriteThenFail]);
         let key = "namespaces/demo/uploads/upl_3.json";
 
         store
             .put_immutable_verified(key, Bytes::from_static(b"payload"))
             .await
-            .expect("the retry finds its own landed write");
+            .expect("the retry finds its own successful write");
 
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         assert_eq!(flaky.heads.load(Ordering::SeqCst), 1);
@@ -1482,8 +1482,8 @@ mod tests {
         script_puts(
             &flaky,
             [
-                WriteScript::FailWithoutLanding,
-                WriteScript::FailWithoutLanding,
+                WriteScript::FailWithoutWriting,
+                WriteScript::FailWithoutWriting,
             ],
         );
         let key = "namespaces/demo/uploads/upl_4.json";
@@ -1501,7 +1501,7 @@ mod tests {
     async fn immutable_transport_failure_surfaces_after_the_retry_budget() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
-        script_puts(&flaky, (0..11).map(|_| WriteScript::FailWithoutLanding));
+        script_puts(&flaky, (0..11).map(|_| WriteScript::FailWithoutWriting));
         let key = "namespaces/demo/uploads/upl_9.json";
 
         let error = store
@@ -1524,7 +1524,7 @@ mod tests {
             .await
             .expect("seed head");
         let etag = seeded.etag.expect("etag");
-        script_puts(&flaky, [WriteScript::FailWithoutLanding]);
+        script_puts(&flaky, [WriteScript::FailWithoutWriting]);
 
         let error = store
             .compare_and_swap(key, &etag, Bytes::from_static(b"two"))
@@ -1552,13 +1552,13 @@ mod tests {
             ConfiguredObjectStoreKind::LocalFs,
             None,
         );
-        script_puts(&one_attempt, [WriteScript::LandThenFail]);
+        script_puts(&one_attempt, [WriteScript::WriteThenFail]);
         let key = "namespaces/demo/uploads/upl_11.json";
 
         let error = store
             .put_if_absent(key, Bytes::from_static(b"claim"))
             .await
-            .expect_err("the landed write's lost answer reaches the caller");
+            .expect_err("the successful write's lost answer reaches the caller");
         assert_matches!(error, ObjectStoreError::Transport { .. });
         assert_eq!(one_attempt.puts.load(Ordering::SeqCst), 1);
 
@@ -1601,7 +1601,7 @@ mod tests {
             .await
             .expect("seed object");
 
-        for script in [WriteScript::FailWithoutLanding, WriteScript::LandThenFail] {
+        for script in [WriteScript::FailWithoutWriting, WriteScript::WriteThenFail] {
             flaky.deletes.store(0, Ordering::SeqCst);
             flaky
                 .delete_script
@@ -1636,7 +1636,7 @@ mod tests {
             )
             .await
             .expect("one conditional put");
-        script_puts(&flaky, [WriteScript::FailWithoutLanding]);
+        script_puts(&flaky, [WriteScript::FailWithoutWriting]);
         store
             .put_immutable_verified(
                 "namespaces/demo/segments/seg_8.sst.zst",

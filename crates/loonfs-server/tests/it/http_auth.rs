@@ -149,7 +149,7 @@ async fn path_puts_without_a_proof_for_their_content_fail_content_not_prepared()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garbage() {
+async fn committed_path_put_replays_after_content_token_is_absent_rejected_or_garbage() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -187,7 +187,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
     let send = |request: &CommitRequest| {
         response_bytes(
             send_commit(&harness.server_url, &namespace, request)
-                .expect("landed put should replay"),
+                .expect("committed put should replay"),
         )
     };
     let original = send(&request);

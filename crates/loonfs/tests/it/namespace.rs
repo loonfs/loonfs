@@ -129,8 +129,8 @@ async fn close_drains_admitted_commits_and_refuses_later_work_from_every_clone()
     first
         .await
         .expect("join first mutation")
-        .expect("first mutation lands");
-    second.await.expect("second mutation lands");
+        .expect("first mutation commits");
+    second.await.expect("second mutation commits");
     let report = close.await.expect("close namespace session");
     assert_eq!(report.drained_commits, Some(2));
     assert!(!report.fenced);

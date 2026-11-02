@@ -50,7 +50,7 @@ fn a_gauge_reports_only_its_latest_value() {
 }
 
 #[test]
-fn histogram_observations_land_in_the_bucket_their_boundary_names() {
+fn histogram_observations_fall_in_the_bucket_their_boundary_names() {
     const BOUNDARIES: &[f64] = &[1.0, 2.0, 4.0];
     let recorder = DefaultMetricsRecorder::new();
     let histogram = recorder.register_histogram("loonfs.test.seconds", "Seconds", &[], BOUNDARIES);

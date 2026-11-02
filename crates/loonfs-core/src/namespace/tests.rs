@@ -196,7 +196,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
     let existing = crate::test_support::namespace_store(&store, &source)
         .load_metadata()
         .await
-        .expect("landed namespace");
+        .expect("created namespace");
     let adopted = crate::test_support::NamespaceFixture::new(&store, &source, &context())
         .engine()
         .bootstrap_namespace(
@@ -207,7 +207,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
             },
         )
         .await
-        .expect("allow existing returns the landed namespace");
+        .expect("allow existing returns the created namespace");
     assert_eq!(adopted, existing);
     let created = crate::test_support::NamespaceFixture::new(&store, &source, &context())
         .engine()

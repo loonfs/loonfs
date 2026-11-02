@@ -331,7 +331,7 @@ fn recursive_transfers_roundtrip_a_tree() {
     );
     assert!(downloaded.join("empty/inner").is_dir());
 
-    // Server-side copy: the tree lands without moving bytes — the copied
+    // Server-side copy: the tree is copied without moving bytes — the copied
     // file shares its source's content reference.
     let cp = harness.run(&["--json", "cp", "-r", "/up", "/copy"]);
     assert_success(&cp);
@@ -403,7 +403,7 @@ fn recursive_copy_accepts_existing_destination_directories() {
     fs::write(tree.join("docs/nested/b.txt"), b"beta").expect("write payload");
     assert_success(&harness.run(&["put", "-r", tree.to_str().expect("utf-8 path"), "/src"]));
 
-    // Copying into an existing destination lands at `/dst/src`, and every
+    // Copying into an existing destination puts the copy at `/dst/src`, and every
     // directory the copy would create is already there; only the file is new.
     assert_success(&harness.run(&["mkdir", "-p", "/dst/src/docs/nested"]));
     assert_success(&harness.run(&["mkdir", "-p", "/dst/src/empty/inner"]));
@@ -486,7 +486,7 @@ fn recursive_get_creates_an_absent_destination_root_in_both_modes() {
             b"a.txt"
         );
 
-        // Empty directories, nested, land as local directories.
+        // Empty directories, nested, are downloaded as local directories.
         let nested = harness.temp_dir.path().join(profile).join("nested");
         let nested_get = harness.run(&[
             "--json",

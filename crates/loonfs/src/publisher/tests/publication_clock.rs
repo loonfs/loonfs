@@ -117,10 +117,10 @@ async fn runtime_retry_preserves_uncertainty_when_the_content_proof_expires() {
 }
 
 #[tokio::test]
-async fn runtime_retry_replays_a_landed_commit_after_its_content_proof_expires() {
+async fn runtime_retry_replays_a_published_commit_after_its_content_proof_expires() {
     publish_after_retry_delay(5, true)
         .await
-        .expect("expiry after the put starts must not undo the landed commit");
+        .expect("expiry after the put starts must not undo the published commit");
 }
 
 #[tokio::test]

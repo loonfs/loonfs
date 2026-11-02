@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 mod candidate;
 
 pub use self::candidate::{CommitCandidate, ContentPreparationError};
-pub(crate) use self::candidate::{ContentPreparation, LandIntent};
+pub(crate) use self::candidate::{ContentPreparation, MergeIntent};
 
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
@@ -517,7 +517,7 @@ impl PositionState {
         );
         // A put that took effect is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
-        if update.landed && self.current.is_some() {
+        if update.advanced && self.current.is_some() {
             self.projection_observed = Some(attempt);
         }
         NamespaceCommitEnginePublishResult {
@@ -551,7 +551,7 @@ impl PositionState {
                 return TailProjectionUpdate {
                     wal_tail_objects: position.wal_tail_objects(),
                     wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
-                    landed: false,
+                    advanced: false,
                 };
             }
             PublishViewEffect::Advanced { records, head } => {
@@ -568,7 +568,7 @@ impl PositionState {
                     return TailProjectionUpdate {
                         wal_tail_objects: position.wal_tail_objects(),
                         wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
-                        landed: false,
+                        advanced: false,
                     };
                 }
             }
@@ -576,7 +576,7 @@ impl PositionState {
         let update = TailProjectionUpdate {
             wal_tail_objects: position.wal_tail_objects(),
             wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
-            landed: advanced,
+            advanced,
         };
         self.current = Some(position);
         update
@@ -599,7 +599,7 @@ struct LoadedPublishView<'a, S: ObjectStore + ?Sized> {
 struct TailProjectionUpdate {
     wal_tail_objects: u64,
     wal_tail_inline_bytes: usize,
-    landed: bool,
+    advanced: bool,
 }
 
 fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {

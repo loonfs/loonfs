@@ -903,7 +903,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
             .await
             .expect("write file");
     }
-    // Compact the delta runs so every inode row lands in one base segment.
+    // Compact the delta runs so every inode row is written to one base segment.
     let manifest_no = checkpoint_then_compact(
         &store,
         &namespace_id,
@@ -949,7 +949,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::Inodes)
         .expect("base inode segment");
     // A one-byte target closes a block on every push, the last row
-    // included. That is the shape a final row produces whenever it lands on
+    // included. That is the shape a final row produces whenever it falls on
     // the target crossing, which happens at any block size.
     rewrite_manifest_segment(
         &store,

@@ -82,7 +82,7 @@ fn a_created_snapshot_is_listed_with_its_expiry() {
 }
 
 #[tokio::test]
-async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
+async fn snapshot_create_recovers_a_record_write_with_an_ambiguous_outcome() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("snapshot-ambiguous-write");
     let store = Arc::new(
@@ -122,7 +122,7 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
 }
 
 #[tokio::test]
-async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
+async fn snapshot_extension_recovers_a_record_write_with_an_ambiguous_outcome() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("snapshot-ambiguous-extension");
     let pin_key_prefix = pin_prefix(&namespace_id);

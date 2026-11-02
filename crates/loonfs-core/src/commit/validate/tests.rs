@@ -293,7 +293,7 @@ async fn build_commit_plan(
         actor_id: loonfs_test_support::test_actor(),
         writer_epoch: context.head.writer_epoch,
         message: None,
-        land: None,
+        merge: None,
         semantic_identity: test_fingerprint(),
         apply_after_seq: context.head.seq,
         assigned_seq: committed_seq(context),

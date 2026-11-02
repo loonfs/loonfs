@@ -15,10 +15,10 @@ use crate::commit::{CommitFingerprint, NewChild};
 use crate::error::{CoreError, Result};
 use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::LandRecord;
+use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::{
     ChangeSeq, CommitFingerprintInput, ContentId, DestinationBehavior, FileContent,
-    InlineContentIdentity, InodeId, LandFingerprintInput, NamespaceId,
+    InlineContentIdentity, InodeId, MergeFingerprintInput, NamespaceId,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -44,18 +44,18 @@ pub(crate) fn commit_fingerprint(
     .fingerprint()
 }
 
-/// Computes the semantic fingerprint of a land, which covers the land record
+/// Computes the semantic fingerprint of a merge, which covers the merge record
 /// in place of the request's operations and preconditions.
-pub(crate) fn land_fingerprint(
+pub(crate) fn merge_fingerprint(
     namespace_id: &NamespaceId,
     request: &CommitIntent,
-    land: &LandRecord,
+    merge: &MergeRecord,
 ) -> CommitFingerprint {
-    LandFingerprintInput {
+    MergeFingerprintInput {
         namespace_id,
         actor_id: &request.actor_id,
         subject_id: request.subject.as_ref().map(|subject| &subject.subject_id),
-        land,
+        merge,
         message: request.message.as_deref(),
     }
     .fingerprint()
@@ -78,19 +78,19 @@ pub(super) enum CreatedInodeIds<'p> {
     /// Each ID is built from the commit's sequence and the create number of
     /// the next inode, which every operation in the commit shares.
     Generated { next_create_no: &'p mut NonZeroU32 },
-    /// The ID that the inode has in the fork, for a land's operation, which
+    /// The ID that the inode has in the fork, for a merge's operation, which
     /// creates at most one inode. The operation takes the ID when it creates
     /// the inode.
-    Land(Option<InodeId>),
+    Merge(Option<InodeId>),
 }
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     /// Returns the ID of the next inode that the commit creates.
     ///
-    /// A land whose operation creates an inode without an assigned ID, or
+    /// A merge whose operation creates an inode without an assigned ID, or
     /// more than one inode, fails with `InvalidCommitRequest`. Only a bug in
-    /// the land's planner causes that. A panic would return
-    /// `commit_outcome_unknown` and panic again on every retry, so the land
+    /// the merge's planner causes that. A panic would return
+    /// `commit_outcome_unknown` and panic again on every retry, so the merge
     /// fails with an error that the caller doesn't retry.
     pub(super) fn next_inode_id(&mut self) -> Result<InodeId> {
         match &mut self.created_inode_ids {
@@ -101,9 +101,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 );
                 Ok(InodeId::generate(self.committed_seq, create_no))
             }
-            CreatedInodeIds::Land(assigned) => assigned.take().ok_or_else(|| {
+            CreatedInodeIds::Merge(assigned) => assigned.take().ok_or_else(|| {
                 CoreError::InvalidCommitRequest(
-                    "a land operation creates an inode but has no assigned inode ID".to_owned(),
+                    "a merge operation creates an inode but has no assigned inode ID".to_owned(),
                 )
             }),
         }

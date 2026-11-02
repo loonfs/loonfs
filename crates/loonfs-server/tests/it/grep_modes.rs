@@ -274,7 +274,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     .await;
     assert_eq!(again.status, active.status);
 
-    // The file lands through a writer of its own, so this server holds no
+    // The file is written through a writer of its own, so this server holds no
     // session that saw the publish: the index stays where it was until the
     // next sweep pass.
     namespace

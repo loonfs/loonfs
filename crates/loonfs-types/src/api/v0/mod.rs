@@ -20,7 +20,7 @@ mod uploads;
 
 pub use commits::{
     Commit, CommitPrecondition, CommitRequest, DiffEntry, DiffEntryKind, DiffResponse,
-    DirectoryBinding, FilesystemChange, Land, ListChangesResponse,
+    DirectoryBinding, FilesystemChange, ListChangesResponse, Merge,
 };
 pub use downloads::{
     CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
