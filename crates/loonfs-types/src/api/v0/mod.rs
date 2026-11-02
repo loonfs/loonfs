@@ -44,7 +44,7 @@ pub use merges::{
 };
 pub use namespaces::{
     CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceAccessMode,
-    NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata,
+    NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata, NamespaceRebasedFrom,
 };
 pub use operations::{DeleteDirectoryBehavior, FileContent, FilesystemOperation};
 pub use preconditions::{DestinationBehavior, DestinationPrecondition};

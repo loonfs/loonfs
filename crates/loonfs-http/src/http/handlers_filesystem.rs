@@ -287,7 +287,7 @@ pub(super) struct DiffQuery {
             (status = 200, description = "Directory listing page", body = loonfs_types::ListPathEntriesResponse),
             (status = 400, description = "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -342,7 +342,7 @@ pub(super) async fn list_path_entries(
             (status = 200, description = "Path entry", body = loonfs_types::PathEntry),
             (status = 400, description = "Invalid path, include_attributes, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -391,7 +391,7 @@ pub(super) async fn get_path_entry(
             (status = 206, description = "The requested range of the file's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.", body = Vec<u8>, content_type = "application/octet-stream", headers(("Content-Range" = String, description = "The returned range and the file's size, as `bytes start-end/size`."), ("Accept-Ranges" = String, description = "`bytes`."))),
             (status = 400, description = "Invalid path, revision, snapshot ID, consistency, or `Range` header, or revision_no combined with snapshot_id", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             (status = 416, description = "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size.", body = ErrorResponse),
@@ -671,7 +671,7 @@ pub(super) async fn create_commit(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
             (status = 400, description = "Invalid change cursor, limit, snapshot ID, consistency, or after_seq above the head that the request reads", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 404, description = "Namespace or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "The cursor is older than the retained change history. Rebuild state from a fresh listing or snapshot, and follow the feed from that state's head.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses

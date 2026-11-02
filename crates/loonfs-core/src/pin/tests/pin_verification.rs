@@ -315,10 +315,10 @@ async fn a_pin_write_that_is_stored_and_fails_its_read_back_leaves_no_pin() {
 }
 
 /// Checks that a snapshot read accepts a user pin with or without an
-/// expiry, and that every snapshot operation refuses a fork pin's ID with
-/// `snapshot_not_found` and leaves the pin in place.
+/// expiry and a fork pin, and that every other snapshot operation refuses a
+/// fork pin's ID with `snapshot_not_found` and leaves the pin in place.
 #[tokio::test]
-async fn a_fork_pin_id_is_refused_by_every_snapshot_operation() {
+async fn a_fork_pin_id_is_read_like_a_snapshot_and_refused_by_every_other_snapshot_operation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -365,8 +365,8 @@ async fn a_fork_pin_id_is_refused_by_every_snapshot_operation() {
     snapshot_read(snapshot)
         .await
         .expect("read a pin with an expiry");
+    snapshot_read(fork).await.expect("read a fork pin");
     let cases = [
-        ("read of a fork pin", snapshot_read(fork).await.map(drop)),
         (
             "retrieve of a fork pin",
             crate::NamespaceEngine::reader(crate::test_support::namespace_store(

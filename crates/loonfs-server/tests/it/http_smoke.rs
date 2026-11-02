@@ -380,13 +380,9 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(forked.head_seq, ChangeSeq(1));
     assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
     assert!(forked.created_at_ms > 0);
-    assert_eq!(
-        forked.fork_basis,
-        Some(loonfs_types::NamespaceForkBasis {
-            source_namespace_id: namespace_id("demo"),
-            source_head_seq: ChangeSeq(1),
-        })
-    );
+    let fork_basis = forked.fork_basis.expect("a fork has a fork basis");
+    assert_eq!(fork_basis.source_namespace_id, namespace_id("demo"));
+    assert_eq!(fork_basis.source_head_seq, ChangeSeq(1));
 
     let source_entry = harness
         .client
@@ -528,19 +524,19 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
             &target,
             &loonfs_test_support::test_actor(),
             &loonfs_client::ForkNamespaceOptions {
-                snapshot_id: Some(snapshot.snapshot_id),
+                snapshot_id: Some(snapshot.snapshot_id.clone()),
             },
         )
         .await
         .expect("fork snapshot");
     assert_eq!(fork.head_seq, snapshot.captured_seq);
     assert!(fork.created_at_ms > 0);
-    assert_eq!(
-        fork.fork_basis,
-        Some(loonfs_types::NamespaceForkBasis {
-            source_namespace_id: source,
-            source_head_seq: snapshot.captured_seq,
-        })
+    let fork_basis = fork.fork_basis.expect("a fork has a fork basis");
+    assert_eq!(fork_basis.source_namespace_id, source);
+    assert_eq!(fork_basis.source_head_seq, snapshot.captured_seq);
+    assert_ne!(
+        fork_basis.source_pin_id, snapshot.snapshot_id,
+        "a fork of a snapshot pins the snapshot's manifest under a pin of its own"
     );
     harness.server.abort();
 }

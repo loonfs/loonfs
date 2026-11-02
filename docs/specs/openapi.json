@@ -3627,6 +3627,10 @@
       "NamespaceForkBasis": {
         "description": "The source namespace and sequence that a forked namespace started from.",
         "properties": {
+          "rebased_from": {
+            "$ref": "#/components/schemas/NamespaceRebasedFrom",
+            "description": "The fork whose unmerged commits a rebase replays into this namespace. Only a namespace that\na rebase created has this field."
+          },
           "source_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "The source namespace's sequence that the fork captured."
@@ -3634,11 +3638,16 @@
           "source_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace that the fork was taken from."
+          },
+          "source_pin_id": {
+            "$ref": "#/components/schemas/PinId",
+            "description": "The fork pin that keeps the source's state at `source_head_seq` readable. A read of the\nsource namespace accepts it as `snapshot_id`."
           }
         },
         "required": [
           "source_namespace_id",
-          "source_head_seq"
+          "source_head_seq",
+          "source_pin_id"
         ],
         "type": "object"
       },
@@ -3700,6 +3709,24 @@
           "family_root_id",
           "head_seq",
           "retention_floor_seq"
+        ],
+        "type": "object"
+      },
+      "NamespaceRebasedFrom": {
+        "description": "The fork whose unmerged commits a rebase replays into the namespace that the rebase created.",
+        "properties": {
+          "resume_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork sequence that the fork's next merge would have started after when the rebase\ncreated the namespace. The namespace's first replay commit starts after it."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose commits the namespace's replay commits apply."
+          }
+        },
+        "required": [
+          "source_namespace_id",
+          "resume_after_seq"
         ],
         "type": "object"
       },
@@ -6209,7 +6236,7 @@
                 }
               }
             },
-            "description": "Namespace or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -6706,7 +6733,7 @@
                 }
               }
             },
-            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -6818,7 +6845,7 @@
                 }
               }
             },
-            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -7000,7 +7027,7 @@
                 }
               }
             },
-            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -7136,7 +7163,7 @@
                 }
               }
             },
-            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -7841,7 +7868,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -8006,7 +8033,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -8195,7 +8222,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -8328,7 +8355,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -8538,7 +8565,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content": {
       "get": {
-        "description": "Reads and verifies one retained file revision by inode ID and revision number. A `Range` header asks for one byte range of the revision instead.",
+        "description": "Reads and verifies one retained file revision by inode ID and revision number, at the live head or in the state that a snapshot or a fork pin keeps. A `Range` header asks for one byte range of the revision instead.",
         "operationId": "get_file_revision_content_by_inode",
         "parameters": [
           {
@@ -8571,7 +8598,16 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default, unless the server's `consistency` setting is `strong`) reads at the head that\nthe server confirmed last while that confirmation is younger than the maximum staleness, and\n`strong` confirms the head before the read.",
+            "description": "A snapshot, or one of the namespace's fork pins, whose pinned state to find the revision\nin. The pinned manifest keeps the revision after the namespace's retention floor passes it.",
+            "in": "query",
+            "name": "snapshot_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PinId"
+            }
+          },
+          {
+            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default, unless the server's `consistency` setting is `strong`) reads at the head that\nthe server confirmed last while that confirmation is younger than the maximum staleness, and\n`strong` confirms the head before the read. It can't be combined with `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
@@ -8662,7 +8698,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, revision number, consistency, or `Range` header, or a snapshot_id, which can't be combined with a revision"
+            "description": "Invalid inode ID, revision number, snapshot ID, consistency, or `Range` header"
           },
           "401": {
             "content": {
@@ -8682,7 +8718,7 @@
                 }
               }
             },
-            "description": "Namespace, inode, or revision not found"
+            "description": "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {

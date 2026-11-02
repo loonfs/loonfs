@@ -19,8 +19,8 @@
 
 use loonfs_types::format::control::{
     decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
-    ManifestRef, NamespaceStatus, PinOwner, PinPayload, UploadOutcome, UploadOutcomePayload,
-    UploadSessionMode, UploadSessionPayload, WriterBlock,
+    ManifestRef, NamespaceStatus, PinOwner, PinPayload, RebasedFrom, UploadOutcome,
+    UploadOutcomePayload, UploadSessionMode, UploadSessionPayload, WriterBlock,
 };
 use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::format::manifest::{
@@ -680,9 +680,26 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
                 payload_checksum: payload_checksum(),
             },
             source_pin_id: pin_id("pin_00000000000000000002-0000000000000002"),
+            rebased_from: None,
         }),
         family_root_id: NamespaceId::parse("source").expect("valid namespace id"),
         ..sample_manifest_payload()
+    }
+}
+
+/// A rebase's new fork also records, in its fork basis, the fork whose
+/// commits the rebase replays into it.
+fn sample_rebase_manifest() -> NamespaceManifestPayload {
+    let fork = sample_fork_manifest();
+    NamespaceManifestPayload {
+        fork_basis: fork.fork_basis.clone().map(|basis| ForkBasis {
+            rebased_from: Some(RebasedFrom {
+                source_namespace_id: NamespaceId::parse("sandbox").expect("valid namespace id"),
+                resume_after_seq: ChangeSeq(1),
+            }),
+            ..basis
+        }),
+        ..fork
     }
 }
 
@@ -3212,6 +3229,7 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
     for (name, payload) in [
         ("manifest.deleted.v1.json", sample_deleted_manifest()),
         ("manifest.fork.v1.json", sample_fork_manifest()),
+        ("manifest.rebase.v1.json", sample_rebase_manifest()),
         ("manifest.acl.v1.json", sample_acl_manifest()),
         (
             "manifest.retention_window.v1.json",

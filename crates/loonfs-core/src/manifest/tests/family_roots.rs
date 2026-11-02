@@ -106,6 +106,7 @@ fn a_manifest_records_itself_as_its_family_root_exactly_when_it_has_no_fork_basi
             payload_checksum: loonfs_types::sha256_digest(b"source"),
         },
         source_pin_id: PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin"),
+        rebased_from: None,
     };
     for (manifest, expected) in [
         (

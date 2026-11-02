@@ -12,6 +12,7 @@ use loonfs_types::format::control::ForkBasis;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{
     ActorId, ChangeSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
+    NamespaceRebasedFrom,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -93,6 +94,11 @@ fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
     basis.map(|basis| NamespaceForkBasis {
         source_namespace_id: basis.manifest.owner_namespace_id,
         source_head_seq: basis.manifest.head_seq,
+        source_pin_id: basis.source_pin_id,
+        rebased_from: basis.rebased_from.map(|rebased_from| NamespaceRebasedFrom {
+            source_namespace_id: rebased_from.source_namespace_id,
+            resume_after_seq: rebased_from.resume_after_seq,
+        }),
     })
 }
 

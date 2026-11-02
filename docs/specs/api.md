@@ -232,7 +232,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `method_not_allowed` | 405 | The path exists, but it doesn't serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it doesn't exist. |
 | `namespace_deleted` | 410 | The namespace ID is deleted, and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
-| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no pin exists under it, the pin is a fork pin, or a read, fork, or extension found the snapshot expired. The checkpoint inventory's retrieve also returns this code for an ID with no pin. Refresh state or choose another snapshot. |
+| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no pin exists under it, the pin is a fork pin and the operation isn't a read, or a read, fork, or extension found the snapshot expired. The checkpoint inventory's retrieve also returns this code for an ID with no pin. Refresh state or choose another snapshot. |
 | `path_not_found` | 404 | No visible entry exists at the path. In an ACL namespace, the server also returns this code for a checked entry on which the subject has no rights. |
 | `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
 | `revision_not_found` | 404 | The file has no such revision. |
@@ -951,13 +951,15 @@ Deleting a missing snapshot, including one that was already deleted, returns the
 
 In an ACL namespace, creating, retrieving, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
 
-The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path and inode download requests include it in their bodies. File content and download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision routes identify their revision in the route, so they reject `snapshot_id` with `invalid_request`. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
+The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path and inode download requests include it in their bodies. The path content and path download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision content read (`GET /inodes/{inode_id}/revisions/{revision_no}/content`) identifies its revision in the route, and with `snapshot_id` it reads that revision in the snapshot's state, which keeps the revision after the namespace's retention floor passes it. The inode revision download route rejects `snapshot_id` with `invalid_request`. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
+
+A read also accepts one of the namespace's fork pins as `snapshot_id`, because a fork pin keeps a manifest just as a snapshot does. A fork's `fork_basis.source_pin_id` is the ID of its fork pin in the source namespace (see [`POST /forks`](#613-post-forks)), so a client can read the source as it was at the fork point for as long as the fork exists, whatever the source's retention floor does. For example, a client that compares a file in a fork with the file's version at the fork point reads that version from the source with `GET /inodes/{inode_id}/revisions/{revision_no}/content` and `snapshot_id` set to the fork's `source_pin_id`. A fork pin doesn't expire. The snapshot routes, and a fork's `snapshot_id`, still refuse a fork pin's ID with `snapshot_not_found`, because a fork pin isn't a snapshot.
 
 When an embedded read sets `snapshot_id` in its options, the read opens a read view of that snapshot, as the HTTP request does. A read view of a snapshot accepts options that refer to the same snapshot, and it rejects any other snapshot ID with `invalid_request`.
 
 A directory cursor from a read view of a snapshot identifies that snapshot. A read view of the same snapshot can resume the cursor, and a live listing or any other read view rejects it with `invalid_request`.
 
-A snapshot read requires an unexpired snapshot. A read of a missing, deleted, or expired snapshot returns `snapshot_not_found`, and the read never falls back to the current namespace state.
+A snapshot read requires an unexpired snapshot or a fork pin. A read of a missing pin, or of a deleted or expired snapshot, returns `snapshot_not_found`, and the read never falls back to the current namespace state.
 
 Why does an expired snapshot stay listed when it can't be read? A snapshot's expiry controls whether it can be read, and garbage collection deletes its pin later, after the grace window. Until then, the pin still keeps its manifest and segments, so the listing shows the snapshot as one of the records that keep old data.
 
@@ -1287,7 +1289,7 @@ The `NamespaceMetadata` object has exactly these fields:
 | `access` | The access mode, either `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`, the fork pin that keeps the source's state at that sequence readable, as `source_pin_id`, and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
 | `family_root_id` | The namespace's [family root](glossary.md#family-root), whose prefix stores the content objects and upload records of the namespace's [fork family](glossary.md#fork-family) (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork is its own family root, and a fork has the same family root as its source. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
@@ -1308,7 +1310,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `namespace_id` | The durable namespace ID. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`, the source's fork pin, as `source_pin_id`, and `rebased_from` for a namespace that a rebase created. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
 | `acknowledged_floor_seq` | The highest retention floor that a WAL object folded into the current manifest was validated against (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). It's at most `retention_floor_seq`, and after a floor advance it stays below the new floor until a WAL object validated against that floor is folded. |
@@ -1597,11 +1599,11 @@ For example, a revision listing returns:
 }
 ```
 
-The inode revision route, `GET /inodes/{inode_id}/revisions/{revision_no}/content`, reads and verifies a revision without resolving a current path, so a file under a recoverable deletion stays readable while its revision rows are kept. Once the retention floor reaches a deletion, this route and the inode revision listing return `inode_not_found` for every inode that the deletion hides, as they do for an unknown inode, whatever rights the subject has, and they keep returning it after a compaction removes the bindings under the deletion (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). A directory returns `path_conflict`, an unknown inode returns `inode_not_found`, and an unknown or removed revision returns `revision_not_found`.
+The inode revision route, `GET /inodes/{inode_id}/revisions/{revision_no}/content`, reads and verifies a revision without resolving a current path, so a file under a recoverable deletion stays readable while its revision rows are kept. Once the retention floor reaches a deletion, this route and the inode revision listing return `inode_not_found` for every inode that the deletion hides, as they do for an unknown inode, whatever rights the subject has, and they keep returning it after a compaction removes the bindings under the deletion (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). A directory returns `path_conflict`, an unknown inode returns `inode_not_found`, and an unknown or removed revision returns `revision_not_found`. With `snapshot_id`, which can be a snapshot or one of the namespace's fork pins (see [Snapshots](#snapshots)), the route finds the revision in the pinned manifest instead of at the live head, and it checks that the pinned manifest publishes the revision's content. So a revision stays readable through the pin after the namespace's retention floor passes it, and a revision committed after the pin returns `revision_not_found`. Like every snapshot read, it requires `history`.
 
 `GET /inodes/{inode_id}/content` reads the current revision of a visible file inode, wherever the inode is bound, and streams and verifies it like the path route. Like the path route without `revision_no`, it requires only the `read` right. A deleted or unknown inode returns `inode_not_found`, and a directory returns `path_conflict`. With `snapshot_id`, the route reads the revision that the snapshot captured, and like every snapshot read, it also requires `history`.
 
-Both content routes and the inode revision route accept `consistency` and `max_staleness_ms`, which work as they do on the entry route (see [Read consistency](#read-consistency)). A revision read finds the revision at the live head, so on a revision read the parameters select how recently the server confirms that head. Neither parameter can be combined with `snapshot_id`.
+Both content routes and the inode revision route accept `consistency` and `max_staleness_ms`, which work as they do on the entry route (see [Read consistency](#read-consistency)). A revision read without `snapshot_id` finds the revision at the live head, so on a revision read the parameters select how recently the server confirms that head. Neither parameter can be combined with `snapshot_id`.
 
 Embedded by-reference reads require administrator access to the reading namespace. The namespace's read view MUST contain a publication for the content, including publications inherited through a fork. A reference that's absent from that view returns `path_not_found` without reading any content bytes, even when the reading namespace uploaded the content. Content published after a snapshot isn't readable through that snapshot.
 
@@ -2617,7 +2619,8 @@ Representative response:
   "access": {"kind":"unrestricted"},
   "fork_basis": {
     "source_namespace_id": "demo",
-    "source_head_seq": 418
+    "source_head_seq": 418,
+    "source_pin_id": "pin_00000000000000000031-3f9c2a7d41e05b68"
   },
   "family_root_id": "demo",
   "head_seq": 418,
@@ -2631,6 +2634,8 @@ The `fork_basis` object identifies the captured source:
 | --- | --- |
 | `source_namespace_id` | The namespace that the fork captured. |
 | `source_head_seq` | The source sequence that the fork captured. |
+| `source_pin_id` | The fork pin in the source that keeps the source's state at `source_head_seq`. A read of the source accepts it as `snapshot_id` (see [Snapshots](#snapshots)). |
+| `rebased_from` | The fork whose unmerged commits a rebase replays into this namespace, as `source_namespace_id`, and `resume_after_seq`, the fork sequence that the fork's next merge would have started after when the rebase created this namespace. Only a namespace that a rebase created has this field, and a fork that this route creates never does. |
 
 The optional `snapshot_id` request field selects an unexpired snapshot of the source namespace. Without it, the server captures the current head.
 

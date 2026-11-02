@@ -3,6 +3,8 @@
 //! merge continue the previous merge from its fork, and the refusal of a merge
 //! whose fork point is below the retention floor.
 
+mod rebase;
+
 use super::*;
 use crate::changes::list_changes_after;
 use crate::compaction::{

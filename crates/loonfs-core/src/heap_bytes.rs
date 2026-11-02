@@ -8,7 +8,9 @@
 
 use crate::gc::{CompletedUploadSession, MemberState};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_types::format::control::{ForkBasis, ManifestRef, PinOwner, PinPayload, WriterBlock};
+use loonfs_types::format::control::{
+    ForkBasis, ManifestRef, PinOwner, PinPayload, RebasedFrom, WriterBlock,
+};
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
@@ -515,7 +517,15 @@ impl HeapBytes for PinPayload {
 
 impl HeapBytes for ForkBasis {
     fn heap_bytes(&self) -> usize {
-        self.manifest.heap_bytes() + self.source_pin_id.heap_bytes()
+        self.manifest.heap_bytes()
+            + self.source_pin_id.heap_bytes()
+            + self.rebased_from.heap_bytes()
+    }
+}
+
+impl HeapBytes for RebasedFrom {
+    fn heap_bytes(&self) -> usize {
+        self.source_namespace_id.heap_bytes()
     }
 }
 

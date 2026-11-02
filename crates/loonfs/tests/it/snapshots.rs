@@ -617,3 +617,83 @@ async fn shared_file_and_download_options_select_the_snapshot() {
     }
     writer.shutdown().await.expect("shutdown");
 }
+
+/// Checks that a read of the source through a fork pin returns a revision
+/// after the source's retention floor and a compaction removed it from the
+/// source's live history, and that a fork pin's ID still isn't a snapshot to
+/// fork from.
+#[tokio::test]
+async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = open_runtime_async(store(temp_dir.path()), "fork-pin-reads").await;
+    let actor = loonfs_test_support::test_actor();
+    let source = namespace_id("source");
+    fs.create_namespace(&source, &actor)
+        .await
+        .expect("create source namespace");
+    fs.put_file(&source, "/file.txt", b"forked", &actor)
+        .await
+        .expect("put the forked revision");
+    let forked = fs
+        .writer
+        .fork_namespace(&source, &namespace_id("fork"), &actor)
+        .await
+        .expect("fork source namespace");
+    let pin_id = forked.fork_basis.expect("fork basis").source_pin_id;
+    let replace = loonfs::PutFileOptions {
+        behavior: loonfs::DestinationBehavior::Replace,
+        ..Default::default()
+    };
+    fs.put_file_with_options(&source, "/file.txt", b"later", &actor, &replace)
+        .await
+        .expect("put a later revision");
+    // The floor advances to the folded head, so the later revision is folded
+    // first, and the compaction keeps only that revision.
+    fs.maintenance
+        .fold_wal(&source)
+        .await
+        .expect("fold the later revision");
+    fs.advance_retention_floor(&source)
+        .await
+        .expect("advance the floor to the head");
+    compact_until_done(&fs.maintenance, &source).await;
+
+    // A fresh reader reads the compacted manifest instead of a cached view.
+    let reader = loonfs::test_support::fresh_reader(store(temp_dir.path())).await;
+    let namespace = reader.namespace(&source);
+    let inode_id = namespace.stat("/file.txt").await.expect("stat").inode_id;
+    expect_code(
+        namespace
+            .read_file_revision_stream_by_inode(inode_id, RevisionNo(1))
+            .await
+            .map(drop),
+        ErrorCode::RevisionNotFound,
+    );
+    let pinned = loonfs::ReadFileStreamOptions {
+        at: ReadAt::Snapshot(pin_id.clone()),
+        ..Default::default()
+    };
+    let mut stream = namespace
+        .read_file_revision_stream_by_inode_with_options(inode_id, RevisionNo(1), &pinned)
+        .await
+        .expect("read the revision through the fork pin");
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next_chunk().await.expect("verified chunk") {
+        bytes.extend_from_slice(&chunk);
+    }
+    assert_eq!(bytes, b"forked");
+
+    expect_code(
+        fs.writer
+            .fork_namespace_with_options(
+                &source,
+                &namespace_id("again"),
+                &actor,
+                &ForkNamespaceOptions {
+                    snapshot_id: Some(pin_id),
+                },
+            )
+            .await,
+        ErrorCode::SnapshotNotFound,
+    );
+}

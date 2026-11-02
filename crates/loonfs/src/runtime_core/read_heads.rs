@@ -319,7 +319,8 @@ impl RuntimeCore {
         })
     }
 
-    /// Pins the metadata view an unexpired snapshot captured.
+    /// Pins the metadata view that an unexpired snapshot, or one of the
+    /// namespace's fork pins, captured.
     pub(crate) async fn pinned_read_at_snapshot(
         &self,
         namespace_id: &NamespaceId,

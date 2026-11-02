@@ -1261,7 +1261,11 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
             "namespace_id": "clone",
             "created_at_ms": json_data(&fork)["created_at_ms"],
             "created_by": "loonfs-cli",
-            "fork_basis": {"source_namespace_id": "demo", "source_head_seq": 1},
+            "fork_basis": {
+                "source_namespace_id": "demo",
+                "source_head_seq": 1,
+                "source_pin_id": json_data(&fork)["fork_basis"]["source_pin_id"]
+            },
             "family_root_id": "demo",
             "head_seq": 1,
             "retention_floor_seq": 1

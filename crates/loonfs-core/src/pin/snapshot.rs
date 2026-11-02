@@ -19,17 +19,24 @@ use loonfs_types::format::control::PinOwner;
 use loonfs_types::{DeleteSnapshotResponse, PinId, Snapshot};
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Resolves the read basis of an unexpired snapshot.
+    /// Resolves the read basis of an unexpired snapshot or of one of this
+    /// namespace's fork pins, which keeps a manifest just as a snapshot does
+    /// ([format section 8.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#83-reads-deletion-and-expiry)).
     ///
-    /// A missing snapshot, a fork pin, and a snapshot that expired at or before
-    /// the wall-clock time of the call return `snapshot_not_found`.
+    /// A missing pin, and a snapshot that expired at or before the wall-clock
+    /// time of the call, return `snapshot_not_found`.
     pub async fn load_snapshot_read_basis(
         &self,
         live_head: &NamespaceReadState,
         snapshot_id: &PinId,
     ) -> Result<ReadBasis> {
         let now_ms = self.wall_clock.now_ms();
-        let loaded = ensure_unexpired(self.load_user_pin(snapshot_id).await?, now_ms)?;
+        let Some(loaded) = self.load_pin(snapshot_id).await? else {
+            return Err(CoreError::SnapshotNotFound {
+                snapshot_id: snapshot_id.clone(),
+            });
+        };
+        let loaded = ensure_unexpired(loaded, now_ms)?;
         load_snapshot_read_basis_from_record(
             &self.store,
             &self.segment_cache,

@@ -295,8 +295,10 @@ impl<M: crate::Mode> Namespace<M> {
     /// path, as `options` asks. Complete verification requires consuming the
     /// stream to its end.
     ///
-    /// A snapshot captures one revision of each file, so options that read a
-    /// snapshot return `invalid_request`.
+    /// Options that read a snapshot, or one of the namespace's fork pins,
+    /// read the revision that the pinned manifest keeps, so a revision stays
+    /// readable through the pin after the namespace's retention floor passes
+    /// it.
     pub async fn read_file_revision_stream_by_inode_with_options(
         &self,
         inode_id: InodeId,

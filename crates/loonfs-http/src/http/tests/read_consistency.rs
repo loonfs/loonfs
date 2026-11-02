@@ -196,7 +196,7 @@ impl Fixture {
             LiveRead::get(format!("{namespace}/inodes/{file}/revisions"), false),
             LiveRead::get(
                 format!("{namespace}/inodes/{file}/revisions/1/content"),
-                false,
+                true,
             ),
             LiveRead::download(
                 format!("{namespace}/filesystem/downloads"),
@@ -300,9 +300,9 @@ async fn consistency_rejections_identify_the_parameter() {
             ),
             (vec![("consistency", json!("sometimes"))], "consistency"),
         ];
-        // The revision routes refuse a snapshot on its own, and the trash
-        // and revision listings don't take one, so they never reach the
-        // consistency check with one.
+        // The revision download routes refuse a snapshot on its own, and the
+        // trash and revision listings don't take one, so they never reach
+        // the consistency check with one.
         if read.takes_snapshot {
             for consistency in ["eventual", "strong"] {
                 cases.push((
