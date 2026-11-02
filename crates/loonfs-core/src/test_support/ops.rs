@@ -317,6 +317,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .expect("fingerprint"),
                 committed_at_ms: 0,
                 message: None,
+                land: None,
                 deltas: (0_u32..)
                     .zip(deltas)
                     .map(|(semantic_operation_index, delta)| WalCommitDelta {

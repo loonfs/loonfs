@@ -28,8 +28,29 @@ pub struct Commit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
+    /// The fork and the range of its commits that the commit applied, when the commit is a land.
+    /// It's absent for every other commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub land: Option<Land>,
     /// The semantic filesystem changes that the commit applied, in request order.
     pub events: Vec<FilesystemChange>,
+}
+
+/// The fork and the range of the fork's commits that a land applied.
+///
+/// The range follows the change feed's cursor convention, so reading the fork's change feed after
+/// `source_after_seq` through `source_through_seq` returns the commits that the land applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Land {
+    /// The fork whose commits the land applied.
+    pub source_namespace_id: NamespaceId,
+    /// The fork's commits above this sequence were applied. For a fork's first land, it's the
+    /// sequence that the fork was made at.
+    pub source_after_seq: ChangeSeq,
+    /// The fork's commits at or below this sequence were applied.
+    pub source_through_seq: ChangeSeq,
 }
 
 /// A directory entry's parent and name.
@@ -498,6 +519,12 @@ mod tests {
             committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
             message: Some("import the reports".to_owned()),
+            land: Some(super::Land {
+                source_namespace_id: crate::NamespaceId::parse("demo-fork")
+                    .expect("valid namespace id"),
+                source_after_seq: crate::ChangeSeq(12),
+                source_through_seq: crate::ChangeSeq(30),
+            }),
             events: vec![FilesystemChange::DirectoryCreated {
                 inode_id: InodeId(43),
                 parent_inode_id: crate::ROOT_INODE_ID,
@@ -515,6 +542,11 @@ mod tests {
                 "committed_by": "loonfs",
                 "committed_at_ms": 1_752_624_000_000_u64,
                 "message": "import the reports",
+                "land": {
+                    "source_namespace_id": "demo-fork",
+                    "source_after_seq": 12,
+                    "source_through_seq": 30,
+                },
                 "events": [{
                     "kind": "directory_created",
                     "inode_id": "ino_0000000000000000000000001b",
@@ -527,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_omits_an_absent_message() {
+    fn a_commit_omits_an_absent_message_and_land() {
         let response = Commit {
             namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
@@ -535,6 +567,7 @@ mod tests {
             committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
             message: None,
+            land: None,
             events: vec![FilesystemChange::DirectoryCreated {
                 inode_id: InodeId(43),
                 parent_inode_id: crate::ROOT_INODE_ID,

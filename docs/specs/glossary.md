@@ -58,7 +58,7 @@ A stored row that maps a commit ID to the sequence it committed at. LoonFS uses 
 
 ### Semantic fingerprint
 
-A digest of a commit's logical request: the namespace, the actor, the subject, the operations, the preconditions, and the message, but not details like the writer epoch or the timestamp. When a request reuses a commit ID, LoonFS compares fingerprints to tell whether it's a retry of the original request or a different request (which fails with `commit_id_reuse_conflict`).
+A digest of a commit's logical request: the namespace, the actor, the subject, the operations, the preconditions, and the message, but not details like the writer epoch or the timestamp. When a request reuses a commit ID, LoonFS compares fingerprints to tell whether it's a retry of the original request or a different request (which fails with `commit_id_reuse_conflict`). A [land's](#land) fingerprint covers its land record in place of its operations and preconditions.
 
 ### Change feed
 
@@ -245,7 +245,7 @@ The maintenance API's "checkpoint" inventory lists every pin of a namespace, so 
 
 ### Fork
 
-A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace never appear in the other. See [Forking a namespace](format.md#92-forking-a-namespace).
+A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace appear in the other only when a [land](#land) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
 
 ### Fork family
 
@@ -254,6 +254,10 @@ A set of namespaces: one namespace that was created without a source (the [famil
 ### Family root
 
 The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family root (`family_root_id`), and the family root's prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its garbage collection pass keeps collecting the family's content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
+
+### Land
+
+A commit that applies a fork's commits to the namespace that the fork was forked from, so that the changes made in the fork appear in its source as one commit. The commit's record includes a "land record", which identifies the fork and the range of the fork's commits that the land applied: the commits above `source_after_seq`, through `source_through_seq`. For example, if `sandbox` was forked from `main` at sequence 100 and then committed sequences 101 through 120, a land of those commits is one commit on `main` whose land record is `sandbox`, 100, and 120. The change feed reports the land record with the commit, and a land's [semantic fingerprint](#semantic-fingerprint) covers its land record in place of its operations. See [Commit identity and retries](format.md#65-commit-identity-and-retries) and [WAL records](format.md#a5-wal-records).
 
 ### Writer position
 

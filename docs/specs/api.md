@@ -563,6 +563,16 @@ Header names are case-insensitive, and HTTP/2 sends them in lowercase. Retries a
 
 Every successful commit returns a `Commit` with its `namespace_id`, `commit_id`, and `committed_seq`. The response also includes `committed_by`, `committed_at_ms`, the optional `message`, and `events`. These values match the change feed, including values such as newly created inode IDs.
 
+When the commit is a [land](glossary.md#land), which applies a fork's commits to the namespace that the fork was forked from, the response also includes `land`, and every other commit leaves it out. `land` identifies the fork and the range of the fork's commits that the land applied:
+
+| Field | Meaning |
+| --- | --- |
+| `source_namespace_id` | The fork whose commits the land applied. |
+| `source_after_seq` | The fork's commits above this sequence were applied. For a fork's first land, this is the fork's `fork_basis.source_head_seq`. |
+| `source_through_seq` | The fork's commits at or below this sequence were applied. |
+
+The range follows the change feed's cursor convention, so reading the fork's change feed from `after_seq={source_after_seq}` through `source_through_seq` returns the commits that the land applied.
+
 To retry a commit, a client resubmits the same request with the same `commit_id`:
 
 - If the original request committed, the response includes the original `committed_seq`, and no new commit is made.
@@ -570,6 +580,8 @@ To retry a commit, a client resubmits the same request with the same `commit_id`
 - If the ID was used for a different request, the retry returns `commit_id_reuse_conflict`. Changing a write precondition counts as a different request, even if the operations are unchanged.
 
 A new `commit_id` means a new commit. After `commit_outcome_unknown`, a transport failure, or a process restart, the client retries with the original ID and request. There's no separate commit-status lookup.
+
+A land's identity is its fork and range, not its operations, because LoonFS plans a land's operations itself. A retry of a land with the same `commit_id`, fork, and range returns the original commit, and a request that reuses the `commit_id` for a different range returns `commit_id_reuse_conflict`.
 
 These retry rules apply while the [commit receipt](glossary.md#commit-receipt) is kept. Once the retention floor passes the commit and the metadata runs are rebuilt, the receipt is removed. The same ID can then be used for a new commit, so a late retry might apply the operation again. For example, a replacing put might append another revision with the same content. An application that retries beyond this window MUST check whether the original operation took effect.
 
@@ -2302,7 +2314,7 @@ In an ACL namespace, the change feed requires an administrator when the request 
 
 The feed accepts `consistency` and `max_staleness_ms`, which work as they do on the read routes (see [Read consistency](#read-consistency)), and neither can be combined with `snapshot_id`. An `eventual` poll within its maximum staleness reads at the head that the server confirmed last, so it can miss commits from that time, and a later poll returns them. An `after_seq` above the head that an `eventual` poll reads returns `invalid_request`, so a poller that learned its `after_seq` from a fresher read retries the request as `strong`.
 
-Each change is one commit, represented as a `Commit` (the same object `POST /commits` returns). A change includes the commit's identity (`committed_seq`, `commit_id`, `committed_by`, the observational `committed_at_ms`, and the optional `message`) and its `events`, which are the semantic filesystem operations the commit applied, in the order it applied them.
+Each change is one commit, represented as a `Commit` (the same object `POST /commits` returns). A change includes the commit's identity (`committed_seq`, `commit_id`, `committed_by`, the observational `committed_at_ms`, and the optional `message`) and its `events`, which are the semantic filesystem operations the commit applied, in the order it applied them. A change that's a [land](glossary.md#land) also includes `land`, which identifies the fork and the range of the fork's commits that the land applied (see [Commit responses and safe retry](#52-commit-responses-and-safe-retry)). A land's events are the same kinds of events as any other commit's, and no event kind marks a land, so a consumer that needs to know which fork a change came from reads the commit's `land`.
 
 One request operation can apply several semantic operations. For example, a put creates each missing parent directory, a replacing move deletes the file it moves over, and a copy applies the source's attributes to the inode it just created. So a request with three operations can report more than three events. The events stay in request order.
 

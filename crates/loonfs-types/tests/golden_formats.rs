@@ -30,7 +30,7 @@ use loonfs_types::format::manifest::{
     METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::wal::{
-    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, WalCodecError,
+    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, LandRecord, WalCodecError,
     WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
 };
 use loonfs_types::ROOT_INODE_ID;
@@ -431,6 +431,7 @@ fn sample_wal_payload() -> WalObjectPayload {
             .expect("fingerprint"),
             committed_at_ms: 4_000,
             message: Some("golden commit".to_owned()),
+            land: None,
             deltas,
             inline_content: Vec::new(),
         }],
@@ -525,6 +526,23 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
     });
     payload.head_seq = ChangeSeq(3);
     payload.records.push(without_inline_content);
+    payload
+}
+
+/// The land record that the land samples include.
+fn sample_land() -> LandRecord {
+    LandRecord {
+        source_namespace_id: NamespaceId::parse("demo-fork").expect("valid namespace id"),
+        source_after_seq: ChangeSeq(12),
+        source_through_seq: ChangeSeq(30),
+    }
+}
+
+/// A WAL object whose commit is a land. An absent land record writes no bytes,
+/// so the other WAL samples don't pin its encoding.
+fn sample_wal_land_payload() -> WalObjectPayload {
+    let mut payload = sample_wal_payload();
+    payload.records[0].land = Some(sample_land());
     payload
 }
 
@@ -703,6 +721,21 @@ fn wal_object_inline_content_golden_decodes_to_sample() {
         decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_inline_content.v1.cbor")))
             .expect("decode golden WAL object with inline content");
     assert_eq!(decoded.into_payload(), sample_wal_inline_content_payload());
+}
+
+#[test]
+fn wal_object_land_document_matches_golden_bytes() {
+    let encoded = encode_wal_object_envelope_zstd(sample_wal_land_payload())
+        .expect("encode wal with a land record")
+        .into_bytes();
+    assert_matches_golden("wal_object_land.v1.cbor", &unzstd(&encoded));
+}
+
+#[test]
+fn wal_object_land_golden_decodes_to_sample() {
+    let decoded = decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_land.v1.cbor")))
+        .expect("decode golden WAL object with a land record");
+    assert_eq!(decoded.into_payload(), sample_wal_land_payload());
 }
 
 // The golden is the decompressed document. The stored object is that document
@@ -1606,6 +1639,20 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
 }
 
 #[test]
+fn wal_decode_rejects_unknown_fields_inside_a_land_record() {
+    let document = wal_document_with_payload_edit(&sample_wal_land_payload(), |payload| {
+        with_future_field(cbor_entry(payload_commit(payload), "land"));
+    });
+    let error = decode_wal_object_envelope_zstd(&document)
+        .expect_err("unknown durable fields must be rejected");
+    assert_matches!(
+        error,
+        WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
+            if message.contains("unknown field") && message.contains("field_from_the_future")
+    );
+}
+
+#[test]
 fn wal_decode_rejects_a_tombstone_delta_without_the_root_kind() {
     let envelope = wal_payload_with_deltas(vec![WalCommitDelta {
         semantic_operation_index: 0,
@@ -2108,6 +2155,7 @@ fn sample_commit_row() -> MetadataRow {
         .expect("fingerprint"),
         committed_at_ms: 9_000,
         message: None,
+        land: None,
         deltas: vec![
             WalCommitDelta {
                 semantic_operation_index: 0,
@@ -2135,6 +2183,15 @@ fn sample_commit_row() -> MetadataRow {
         ],
         inline_content: Vec::new(),
     })
+}
+
+/// A commit row of a land, whose land record a fold copies from the WAL.
+fn sample_land_commit_row() -> MetadataRow {
+    let MetadataRow::Commit(mut record) = sample_commit_row() else {
+        panic!("the sample commit row is a commit row");
+    };
+    record.land = Some(sample_land());
+    MetadataRow::Commit(record)
 }
 
 fn sample_inode_rows() -> [MetadataRow; 2] {
@@ -2503,6 +2560,20 @@ fn sst_block_data_commit_rows_match_golden_bytes() {
 fn sst_block_data_commit_golden_decodes_to_sample_row() {
     let block = decode_golden_data_block("sst_block_data_commits.v1.bin");
     assert_eq!(block.rows, [sample_commit_row()]);
+}
+
+#[test]
+fn sst_block_data_land_commit_rows_match_golden_bytes() {
+    assert_rows_match_single_block_golden(
+        "sst_block_data_commits_land.v1.bin",
+        &[sample_land_commit_row()],
+    );
+}
+
+#[test]
+fn sst_block_data_land_commit_golden_decodes_to_sample_row() {
+    let block = decode_golden_data_block("sst_block_data_commits_land.v1.bin");
+    assert_eq!(block.rows, [sample_land_commit_row()]);
 }
 
 #[test]

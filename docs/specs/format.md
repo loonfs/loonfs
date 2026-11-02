@@ -937,6 +937,8 @@ For example, suppose request A creates `/reports`, and request B also tries to c
 
 Every WAL commit and every `commit` row stores a semantic fingerprint (`semantic_commit_fingerprint`) of the logical request: the `namespace_id`, the `actor_id`, the optional `subject_id`, the ordered operations with their inline preconditions, the request-level preconditions, and the optional message. It doesn't include publication details, such as the writer epoch and the timestamp. [Semantic commit fingerprints](#appendix-b-semantic-commit-fingerprints) specifies the exact canonical bytes.
 
+A "land" is a commit that applies a fork's commits to the namespace that the fork was forked from, and its commit record includes a land record that identifies the fork and the range of the fork's commits that it applied (see [WAL records](#a5-wal-records)). LoonFS plans a land's operations itself, from that fork and range, so a land's fingerprint covers its land record in place of its operations and preconditions. A retry of a land with the same commit ID and land record (and the same actor, subject, and message) is a replay, even if LoonFS planned different operations for it, and a request that reuses the commit ID for a different range returns `commit_id_reuse_conflict`. Leaving the operations out also means that a change in how LoonFS plans a land doesn't change the land's identity. [Land commits](#b5-land-commits) specifies the canonical bytes.
+
 The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families are one family group and follow the same retention rule, so a commit row is kept for as long as its receipt.
 
 While the receipt is kept:
@@ -1005,7 +1007,7 @@ Why does only a chain's creator extend the chain in place? Every member of a for
 
 The change feed is ordered by commit, not by WAL object. A WAL object that contains three commits contributes three commit boundaries to the feed. Within a commit, filesystem events follow the order of the request's operations, and one operation can produce several events.
 
-A consumer resuming after sequence `N` reads the `commits` family of the current file set, and then the commits in the unfolded WAL after it. Fence objects produce no change events. If the consumer's cursor is older than the retention floor, it MUST start again from a fresh pin. The [API specification][api-spec] specifies the event shapes and the cursor contract.
+A consumer resuming after sequence `N` reads the `commits` family of the current file set, and then the commits in the unfolded WAL after it. Fence objects produce no change events. The feed reports a [land's](glossary.md#land) land record with its commit, from the WAL tail and from the `commits` row alike, so a consumer can tell which fork, and which of the fork's commits, the land applied. If the consumer's cursor is older than the retention floor, it MUST start again from a fresh pin. The [API specification][api-spec] specifies the event shapes and the cursor contract.
 
 A consumer that needs permanent event history MUST keep its own copy before the floor advances. The stable keys are `(namespace_id, committed_seq)` for a commit's position and `(namespace_id, inode_id)` for item identity. A commit ID is useful for correlating events, but it isn't a permanent unique event key, because it can be reused after its receipt is removed.
 
@@ -1962,7 +1964,7 @@ A WAL object's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_
 
 For a data WAL object, `prior_head_seq` is derived (with checked subtraction) from the first record's sequence, and `records` covers the sequences after it through `head_seq`, without gaps. A first sequence of 0 is invalid. The WAL number MUST match the key. A fence has an empty record list and an unchanged head, so its derived `prior_head_seq` equals `head_seq`. Fences take part in WAL numbering and epoch validation, but they produce no logical changes.
 
-Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, an optional `message`, `deltas`, and an optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`, which is a kind-tagged object with these fields:
+Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, an optional `message`, an optional `land`, `deltas`, and an optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`, which is a kind-tagged object with these fields:
 
 | Delta kind | Fields after `kind` |
 | --- | --- |
@@ -1985,6 +1987,16 @@ A revision delta's `layout` follows these rules:
 - A commit with a piece at offset 0 can't include a layout.
 - A present layout validates against its own `size_bytes()`, and its extents can refer to other content IDs. Its size equals the lowest offset of the commit's pieces for that content ID, or the reference's `size_bytes` if the commit includes no piece for it. A failed check is `InvalidWalRevisionLayout`.
 - Upload evidence provides one whole extent. Copies, restores, and new chains include the required prefix from the planning view. Before it admits the reference, validation writes any pending pieces that prefix needs to content objects, the same way a fold does. The resulting layout refers to those objects even if compaction later removes the source chain's row.
+
+A [land's](glossary.md#land) commit includes a land record (`land`), and every other commit leaves the field out. The land record contains these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `source_namespace_id` | The fork whose commits the land applied. |
+| `source_after_seq` | The fork's commits above this sequence were applied. For a fork's first land, this is the fork point. |
+| `source_through_seq` | The fork's commits at or below this sequence were applied. |
+
+The range follows the change feed's cursor convention, so a consumer that reads the fork's change feed after `source_after_seq`, through `source_through_seq`, reads the commits that the land applied. For example, a first land of a fork made at sequence 100, which applies the fork's commits 101 through 120, records 100 and 120. Encoding and decoding refuse a land record whose `source_after_seq` isn't below its `source_through_seq`, or whose `source_namespace_id` is the WAL object's own `namespace_id` (`InvalidWalLand`).
 
 `inline_content` is a list of pieces, `{content_id, offset, bytes}`, where `bytes` is a CBOR byte string that the chain contains starting at `offset`. The field is left out when it's empty, and it defaults to an empty list when absent. The reference that a piece goes with is an ordinary `blob_v1` reference. A whole value is a piece at offset 0. A piece past offset 0 continues an existing chain, or starts a new chain whose delta includes the layout of the first `offset` bytes. An append to zero bytes starts a new content ID with a whole value. A chain of zero bytes is never appended to, so its download grant can sign no range (see the [API specification][api-spec]).
 
@@ -2012,7 +2024,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `tombstone` | `root_inode_id`, `committed_seq`, `delta_index`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_seq` |
-| `commit` | `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `deltas` |
+| `commit` | `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `land?`, `deltas` |
 | `content_layout` | `content_id`, `committed_seq`, `size_bytes`, `layout` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
@@ -2218,7 +2230,7 @@ The fingerprint is the SHA-256 of compact UTF-8 JSON with these top-level fields
 }
 ```
 
-The layout above illustrates the schema, and the actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present (and `[]` for an empty list), and `message` and `subject_id` are always present (and `null` when absent).
+The layout above illustrates the schema, and the actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present (and `[]` for an empty list), and `message` and `subject_id` are always present (and `null` when absent). A land's fingerprint uses a different preimage, which [Land commits](#b5-land-commits) specifies.
 
 The `namespace_id`, `actor_id`, `subject_id`, message, operation order, and caller preconditions are all significant. A changed `actor_id` is a changed logical request, even if a different process is retrying on behalf of the same application. The principal scope isn't included, because a namespace has one scope and refuses every other. The commit ID itself, the writer epoch, and the commit timestamp aren't included either.
 
@@ -2319,6 +2331,39 @@ v1:sha256:2d44c045a1d4eaaf3e808abbe1088b581fa51292cd410bc34dfd8e63f67140d3
 A one-operation convenience call and a one-element commit request use the same canonical input. The wire request can leave out defaults that the canonical operation writes explicitly, so its raw request JSON isn't the fingerprint preimage.
 
 The complete shared vectors are in [commit_fingerprints_v1.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without binding versions, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders MUST preserve those exact bytes and digests.
+
+### B.5 Land commits
+
+A [land's](glossary.md#land) fingerprint covers its land record in place of its operations and preconditions (see [Commit identity and retries](#65-commit-identity-and-retries)). It's the SHA-256 of compact UTF-8 JSON with these top-level fields, in this exact order:
+
+```text
+{
+  "domain": "loonfs.commit.land.v1",
+  "namespace_id": <namespace string>,
+  "actor_id": <actor ID string>,
+  "subject_id": <subject ID string or null>,
+  "land": {
+    "source_namespace_id": <namespace string>,
+    "source_after_seq": <integer>,
+    "source_through_seq": <integer>
+  },
+  "message": <string or null>
+}
+```
+
+The preimage has no `operations` and no `preconditions` members. Every member is always present, `subject_id` and `message` are `null` when absent, and strings and integers follow [Strings, integers, and example bytes](#b4-strings-integers-and-example-bytes). The stored form is `v1:sha256:<64 lowercase hex>`, the same as an ordinary commit's.
+
+For example, this is the complete canonical preimage of a land into `demo` that applies the commits of the fork `demo-fork` above sequence 418, through sequence 425. The hashed bytes have no trailing newline:
+
+```json
+{"domain":"loonfs.commit.land.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"land":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}
+```
+
+Its fingerprint is:
+
+```text
+v1:sha256:eda60a5b52f0ee895214e1c51bdf6c7f741828bbaa37e22141499a77d4215451
+```
 
 ## Appendix C. Timing and size reference
 

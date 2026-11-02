@@ -5,11 +5,11 @@
 use super::super::CommitFingerprint;
 use crate::authorize::CommitAuthority;
 use crate::error::{CoreError, Result};
-use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
+use crate::path::write::{commit_fingerprint, land_fingerprint, CommitIntent, FilesystemOperation};
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::wal::{
-    MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+    LandRecord, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
 use loonfs_types::{
     CommitId, ContentId, ContentRef, FileContent, InlineContentIdentity, NamespaceId,
@@ -22,6 +22,10 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitCandidate {
     request: CandidateRequest,
+    /// The fork and the range of its commits that the commit applies, when
+    /// the commit is a land. The commit's identity is then its land record
+    /// in place of its operations and preconditions.
+    land: Option<LandRecord>,
     pub(crate) content: ContentPreparation,
     pub(crate) inline_content: Vec<InlineContent>,
     inline_content_identities: BTreeMap<ContentId, InlineContentIdentity>,
@@ -116,6 +120,7 @@ impl CommitCandidate {
     fn with_request(request: CandidateRequest) -> Self {
         Self {
             request,
+            land: None,
             content: ContentPreparation::Ready(Vec::new()),
             inline_content: Vec::new(),
             inline_content_identities: BTreeMap::new(),
@@ -134,6 +139,20 @@ impl CommitCandidate {
         }
         candidate.content = ContentPreparation::Ready(proofs);
         candidate
+    }
+
+    /// Makes the candidate a land of `land`. A commit request has no land
+    /// record, so a land can't arrive from a request body.
+    #[cfg(test)]
+    pub(crate) fn with_land(mut self, land: LandRecord) -> Self {
+        self.land = Some(land);
+        self
+    }
+
+    /// The fork and the range of its commits that the commit applies, when
+    /// the commit is a land.
+    pub(crate) fn land(&self) -> Option<&LandRecord> {
+        self.land.as_ref()
     }
 
     /// Wraps a mutation request whose content preparation failed.
@@ -304,6 +323,9 @@ impl CommitCandidate {
 
     /// Computes semantic identity without applying current operational request limits.
     pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> CommitFingerprint {
+        if let Some(land) = &self.land {
+            return land_fingerprint(namespace_id, self.intent(), land);
+        }
         commit_fingerprint(
             namespace_id,
             self.intent(),
@@ -368,7 +390,12 @@ impl CommitCandidate {
         let mut bytes = RequestByteCounter(
             std::mem::size_of_val(self)
                 .saturating_add(std::mem::size_of_val(intent.operations.as_slice()))
-                .saturating_add(std::mem::size_of_val(intent.preconditions.as_slice())),
+                .saturating_add(std::mem::size_of_val(intent.preconditions.as_slice()))
+                .saturating_add(
+                    self.land
+                        .as_ref()
+                        .map_or(0, |land| land.source_namespace_id.as_str().len()),
+                ),
         );
         serde_json::to_writer(
             &mut bytes,
@@ -447,7 +474,11 @@ impl CommitCandidate {
         &self,
         inline_content: &[InlineContent],
     ) -> usize {
-        super::super::wal_size::estimated_wal_record_bytes(self.intent(), inline_content)
+        super::super::wal_size::estimated_wal_record_bytes(
+            self.intent(),
+            self.land.as_ref(),
+            inline_content,
+        )
     }
 
     /// Bounds the planned WAL record, which can include layouts that the
@@ -459,6 +490,7 @@ impl CommitCandidate {
     ) -> usize {
         super::super::wal_size::planned_wal_record_bytes(
             self.intent(),
+            self.land.as_ref(),
             &self.inline_content,
             deltas,
             appended,

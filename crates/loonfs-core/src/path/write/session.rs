@@ -218,6 +218,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             actor_id: request.actor_id.clone(),
             writer_epoch: head.writer_epoch,
             message: request.message.clone(),
+            land: candidate.land().cloned(),
             semantic_identity,
             apply_after_seq: head.seq,
             assigned_seq: committed_seq,

@@ -3,7 +3,7 @@
 use crate::path::write::CommitIntent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::wal::{
-    cbor_map_bytes, cbor_string_bytes, WalCommitDelta, WalInlineContent,
+    cbor_map_bytes, cbor_string_bytes, LandRecord, WalCommitDelta, WalInlineContent,
 };
 use loonfs_types::{
     AbsolutePath, AccessRight, ActorId, CommitId, FilesystemOperation,
@@ -207,7 +207,12 @@ const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
 }
 
 /// Bounds a commit record's fields other than its deltas and pieces.
-fn commit_fields_bytes(commit_id: &CommitId, actor_id: &ActorId, message: Option<&str>) -> usize {
+fn commit_fields_bytes(
+    commit_id: &CommitId,
+    actor_id: &ActorId,
+    message: Option<&str>,
+    land: Option<&LandRecord>,
+) -> usize {
     cbor_map_bytes(&[
         ("committed_seq", INTEGER_BYTES),
         ("commit_id", cbor_string_bytes(commit_id.as_str().len())),
@@ -219,17 +224,32 @@ fn commit_fields_bytes(commit_id: &CommitId, actor_id: &ActorId, message: Option
         ("committed_at_ms", INTEGER_BYTES),
         ("message", cbor_string_bytes(message.map_or(0, str::len))),
         ("deltas", 9),
-    ])
+    ]) + land.map_or(0, land_bytes)
+}
+
+/// Bounds a land record and its field name in the commit record.
+fn land_bytes(land: &LandRecord) -> usize {
+    cbor_string_bytes("land".len())
+        + cbor_map_bytes(&[
+            (
+                "source_namespace_id",
+                cbor_string_bytes(land.source_namespace_id.as_str().len()),
+            ),
+            ("source_after_seq", INTEGER_BYTES),
+            ("source_through_seq", INTEGER_BYTES),
+        ])
 }
 
 pub(crate) fn estimated_wal_record_bytes(
     request: &CommitIntent,
+    land: Option<&LandRecord>,
     inline_content: &[InlineContent],
 ) -> usize {
     let fixed_bytes = commit_fields_bytes(
         &request.commit_id,
         &request.actor_id,
         request.message.as_deref(),
+        land,
     );
     let carries_pieces = !inline_content.is_empty()
         || request
@@ -261,6 +281,7 @@ pub(crate) fn estimated_wal_record_bytes(
 
 pub(crate) fn planned_wal_record_bytes(
     request: &CommitIntent,
+    land: Option<&LandRecord>,
     inline_content: &[InlineContent],
     deltas: &[WalCommitDelta],
     appended: &[WalInlineContent],
@@ -275,7 +296,7 @@ pub(crate) fn planned_wal_record_bytes(
     let planned = appended.iter().fold(0_usize, |total, piece| {
         total.saturating_add(APPEND_PIECE_BYTES + piece.bytes.len())
     });
-    estimated_wal_record_bytes(request, inline_content)
+    estimated_wal_record_bytes(request, land, inline_content)
         .saturating_sub(requested)
         .saturating_add(planned)
         .saturating_add(carried_layout_bytes(deltas))

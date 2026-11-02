@@ -42,6 +42,7 @@ fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -
         semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
         committed_at_ms: 0,
         message: None,
+        land: None,
         deltas: vec![WalCommitDelta {
             semantic_operation_index: 0,
             delta: WalDelta::AppendFileRevision {
