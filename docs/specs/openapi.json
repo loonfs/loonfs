@@ -3485,6 +3485,10 @@
             "$ref": "#/components/schemas/ActorId",
             "description": "The actor that created the namespace, as the application supplied it."
           },
+          "family_root_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace whose prefix stores the content of this namespace's fork family. For a\nnamespace that wasn't created by a fork, this is the namespace itself. A fork has the same\nfamily root as its source."
+          },
           "fork_basis": {
             "$ref": "#/components/schemas/NamespaceForkBasis",
             "description": "The namespace and sequence this namespace was forked from. Only a forked namespace has this\nfield."
@@ -3513,6 +3517,7 @@
           "namespace_id",
           "created_at_ms",
           "created_by",
+          "family_root_id",
           "head_seq",
           "retention_floor_seq"
         ],

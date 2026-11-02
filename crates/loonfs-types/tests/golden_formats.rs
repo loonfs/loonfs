@@ -548,6 +548,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         access: NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,
+        family_root_id: namespace_id(),
         status: NamespaceStatus::Active {},
         writer: Some(WriterBlock {
             writer_id: loonfs_types::WriterId::parse("writer-a").expect("writer"),
@@ -653,7 +654,8 @@ fn sample_deleted_manifest() -> NamespaceManifestPayload {
     }
 }
 
-/// A fork manifest records its source pin and manifest.
+/// A fork manifest records its source pin and manifest, and its source's
+/// family root.
 fn sample_fork_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         fork_basis: Some(ForkBasis {
@@ -666,6 +668,7 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
             },
             source_pin_id: pin_id("pin_00000000000000000002-0000000000000002"),
         }),
+        family_root_id: NamespaceId::parse("source").expect("valid namespace id"),
         ..sample_manifest_payload()
     }
 }
@@ -827,7 +830,7 @@ fn manifest_status_reading_is_fail_closed_on_unknown_statuses() {
 
 #[test]
 fn manifest_without_required_fields_is_rejected() {
-    for field in ["status", "created_by"] {
+    for field in ["status", "created_by", "family_root_id"] {
         let mut document = serde_json::to_value(sample_manifest_payload())
             .expect("encode active manifest as a document");
         document

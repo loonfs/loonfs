@@ -10,6 +10,7 @@ mod cas_recovery;
 mod directory_bindings;
 mod expired_deletion_rows;
 mod expired_subtrees;
+mod family_roots;
 mod fold_races;
 mod index_parity;
 pub(crate) mod inspection_materialization;
@@ -937,6 +938,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: head.fork_basis.clone(),
+        family_root_id: head.family_root_id.clone(),
         status: head.status,
         writer: head.writer.clone(),
         folded_wal_no: head.wal_no,
@@ -1056,6 +1058,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,
+        family_root_id: namespace_id.clone(),
         status: loonfs_types::format::control::NamespaceStatus::Active {},
         writer: None,
         folded_wal_no: loonfs_types::WalNo(0),
