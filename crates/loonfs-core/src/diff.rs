@@ -2,19 +2,22 @@
 //! sequences, found from the commits between them
 //! ([API section 6.12](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#612-get-diff)).
 
-use crate::changes::CommitScan;
+use crate::changes::{ensure_event_index_allowed, CommitScan};
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::HeapBytes;
-use crate::limits::DIFF_PAGE_TOUCHES;
+use crate::limits::{CHANGE_FEED_PAGE_BYTES, DIFF_PAGE_TOUCHES};
 use crate::metadata::{
     MetadataView, MetadataViewSession, MetadataVisibilityReads, ResolvedVisiblePath,
 };
 use crate::path::read::{resolve_visible_inode, LoadedMetadataView};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::{WalCommitPayload, WalDelta};
+use loonfs_types::format::wal::{
+    semantic_operation_groups, WalCommitDelta, WalCommitPayload, WalDelta,
+};
+use loonfs_types::options::{CommitSplitting, DiffOptions};
 use loonfs_types::{
-    u64_from_usize, AbsolutePath, AccessRevisionNo, AttributesRevisionNo, ChangeSeq, DiffEntry,
-    DiffEntryKind, DiffResponse, EffectiveLimit, InodeId, InodeKind, NameKey, NamespaceId,
+    u64_from_usize, AbsolutePath, AccessRevisionNo, AttributesRevisionNo, ChangeFeedPosition,
+    ChangeSeq, DiffEntry, DiffEntryKind, DiffResponse, InodeId, InodeKind, NameKey, NamespaceId,
     RevisionNo,
 };
 use std::collections::{BTreeSet, HashMap};
@@ -35,8 +38,8 @@ pub struct DiffPage {
     pub path_resolutions: u64,
 }
 
-/// Reads one page of the diff from `from_seq` to `to_seq` under `path`,
-/// starting after `after_seq`.
+/// Reads one page of the diff from `from_seq` to `options.to_seq` under
+/// `options.path`, starting after `options.after_seq`.
 ///
 /// `to_seq` defaults to the head of `view`, and `after_seq` to `from_seq`.
 /// The page checks `from_seq` against the retention floor of `view` before
@@ -45,34 +48,32 @@ pub struct DiffPage {
 pub(crate) async fn diff_page<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     from_seq: ChangeSeq,
-    to_seq: Option<ChangeSeq>,
-    after_seq: Option<ChangeSeq>,
-    limit: EffectiveLimit,
-    path: &AbsolutePath,
+    options: &DiffOptions,
 ) -> Result<DiffPage> {
-    diff_page_within(
-        view,
-        from_seq,
-        to_seq,
-        after_seq,
-        limit,
-        DIFF_PAGE_TOUCHES,
-        path,
-    )
-    .await
+    diff_page_within(view, from_seq, options, DIFF_PAGE_TOUCHES).await
 }
 
 /// Reads one page as [`diff_page`] does, and ends the page after the commit
-/// that brings the touches it has examined to `max_touches`.
+/// that brings the touches it has examined to `max_touches`. With
+/// [`CommitSplitting::AtPageBudget`], a commit that alone touches more than
+/// `max_touches` inodes is read across pages instead.
 async fn diff_page_within<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     from_seq: ChangeSeq,
-    to_seq: Option<ChangeSeq>,
-    after_seq: Option<ChangeSeq>,
-    limit: EffectiveLimit,
+    options: &DiffOptions,
     max_touches: usize,
-    path: &AbsolutePath,
 ) -> Result<DiffPage> {
+    let DiffOptions {
+        path,
+        to_seq,
+        after_seq,
+        event_index,
+        limit,
+        commit_splitting,
+        consistency: _,
+    } = options;
+    let (to_seq, after_seq, event_index, limit, splitting) =
+        (*to_seq, *after_seq, *event_index, *limit, *commit_splitting);
     let head = view.head();
     crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
     let retention_floor_seq = view.retention_floor_seq();
@@ -102,6 +103,13 @@ async fn diff_page_within<S: ObjectStore + ?Sized>(
             format!("`{after_seq}` is outside `from_seq` `{from_seq}` through `to_seq` `{to_seq}`"),
         ));
     }
+    ensure_event_index_allowed(event_index, splitting)?;
+    if event_index > 0 && after_seq == from_seq {
+        return Err(CoreError::InvalidEventIndex(format!(
+            "a position inside a commit resumes the commit at `after_seq`, which has to be after \
+             `from_seq` `{from_seq}`"
+        )));
+    }
 
     let to_view = view.metadata_view_at(to_seq);
     let mut diff = Diff {
@@ -113,15 +121,51 @@ async fn diff_page_within<S: ObjectStore + ?Sized>(
         commits_scanned: 0,
         touches_examined: 0,
     };
-    let mut scan = CommitScan::new(to_view, after_seq, limit);
+    let mut scan = CommitScan::new(
+        to_view,
+        ChangeFeedPosition {
+            after_seq,
+            event_index,
+        },
+        limit,
+        splitting,
+        CHANGE_FEED_PAGE_BYTES,
+    );
     let mut entries = Vec::new();
-    while let Some(record) = scan.next().await? {
-        let commit_entries = diff.commit_entries(&record).await?;
-        if scan.admit(record.committed_seq, commit_entries.heap_bytes()) {
-            entries.extend(commit_entries);
-            if diff.touches_examined >= u64_from_usize(max_touches) {
+    while let Some(scanned) = scan.next().await? {
+        let record = &scanned.record;
+        let split = splitting == CommitSplitting::AtPageBudget
+            && (scanned.first_event_index > 0
+                || touched_inodes(&record.deltas).len() > max_touches);
+        if split {
+            // A commit that alone exceeds the touch bound starts a page of
+            // its own, and the page reads its events until the bound.
+            if !scan.is_empty() {
                 scan.end_page();
+                continue;
             }
+            let part = diff
+                .commit_part_entries(record, scanned.first_event_index, max_touches)
+                .await?;
+            let heap_bytes = part.entries.heap_bytes();
+            match part.next_event_index {
+                Some(next_event_index) => {
+                    scan.admit_part(record.committed_seq, heap_bytes, next_event_index);
+                }
+                None => {
+                    scan.admit(record.committed_seq, heap_bytes);
+                }
+            }
+            entries.extend(part.entries);
+        } else {
+            let commit_entries = diff.commit_entries(record).await?;
+            if !scan.admit(record.committed_seq, commit_entries.heap_bytes()) {
+                continue;
+            }
+            entries.extend(commit_entries);
+        }
+        if diff.touches_examined >= u64_from_usize(max_touches) {
+            scan.end_page();
         }
     }
     Ok(DiffPage {
@@ -131,6 +175,7 @@ async fn diff_page_within<S: ObjectStore + ?Sized>(
             to_seq,
             after_seq,
             next_after_seq: scan.next_after_seq(),
+            next_event_index: scan.next_event_index(),
             retention_floor_seq,
             entries,
         },
@@ -167,7 +212,7 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
     async fn commit_entries(&mut self, record: &WalCommitPayload) -> Result<Vec<DiffEntry>> {
         self.commits_scanned += 1;
         let mut entries = Vec::new();
-        for inode_id in touched_inodes(record) {
+        for inode_id in touched_inodes(&record.deltas) {
             self.touches_examined += 1;
             let touched = self.touched_inode(inode_id).await?;
             if touched
@@ -179,6 +224,61 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
             entries.extend(self.entry(inode_id, touched).await?);
         }
         Ok(entries)
+    }
+
+    /// Returns the entries of the inodes that `record`'s events touch, from
+    /// the event at `first_event_index`, for the inodes whose last touch in
+    /// the range is the commit. The part ends after the event that brings
+    /// the inodes it has examined to `max_touches`, and the next page resumes
+    /// the commit at the event after it.
+    ///
+    /// An inode that the part's events touch more than once is examined once,
+    /// and an inode that events on two pages touch is reported on both.
+    async fn commit_part_entries(
+        &mut self,
+        record: &WalCommitPayload,
+        first_event_index: u32,
+        max_touches: usize,
+    ) -> Result<CommitPartEntries> {
+        self.commits_scanned += 1;
+        let groups: Vec<_> = semantic_operation_groups(&record.deltas).collect();
+        let first = usize::try_from(first_event_index).expect("a u32 index should fit in usize");
+        if first >= groups.len() {
+            return Err(CoreError::InvalidEventIndex(format!(
+                "commit `{}` has no event at index {first_event_index}",
+                record.committed_seq
+            )));
+        }
+        let mut examined = BTreeSet::new();
+        let mut entries = Vec::new();
+        for (index, group) in groups.iter().enumerate().skip(first) {
+            for inode_id in touched_inodes(group) {
+                if !examined.insert(inode_id) {
+                    continue;
+                }
+                self.touches_examined += 1;
+                let touched = self.touched_inode(inode_id).await?;
+                if touched
+                    .last_touch_seq
+                    .is_some_and(|seq| seq > record.committed_seq)
+                {
+                    continue;
+                }
+                entries.extend(self.entry(inode_id, touched).await?);
+            }
+            if examined.len() >= max_touches && index + 1 < groups.len() {
+                let next_event_index =
+                    u32::try_from(index + 1).expect("a commit's events should fit u32 indexes");
+                return Ok(CommitPartEntries {
+                    entries,
+                    next_event_index: Some(next_event_index),
+                });
+            }
+        }
+        Ok(CommitPartEntries {
+            entries,
+            next_event_index: None,
+        })
     }
 
     /// Returns what the page read about `inode_id` at `to_seq`, and reads it
@@ -323,6 +423,14 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
     }
 }
 
+/// The entries that one page reads from part of a commit.
+struct CommitPartEntries {
+    entries: Vec<DiffEntry>,
+    /// The event that the next page resumes the commit at, or `None` when the
+    /// part reaches the end of the commit.
+    next_event_index: Option<u32>,
+}
+
 /// One end of a diff: a session over the view at the end's sequence, and the
 /// paths resolved there.
 struct End<'a, 'store, S: ObjectStore + ?Sized> {
@@ -441,13 +549,12 @@ impl State {
     }
 }
 
-/// Returns the inodes that one commit touches, each once: the child of a
-/// bind or unbind, the inode of a revision, attribute, access, or creation
-/// delta, and the root of a deletion or undelete. A bind's parent isn't
-/// touched, because a child's binding doesn't change the parent's own state.
-fn touched_inodes(record: &WalCommitPayload) -> BTreeSet<InodeId> {
-    record
-        .deltas
+/// Returns the inodes that `deltas` touch, each once: the child of a bind or
+/// unbind, the inode of a revision, attribute, access, or creation delta,
+/// and the root of a deletion or undelete. A bind's parent isn't touched,
+/// because a child's binding doesn't change the parent's own state.
+fn touched_inodes(deltas: &[WalCommitDelta]) -> BTreeSet<InodeId> {
+    deltas
         .iter()
         .map(|delta| match &delta.delta {
             WalDelta::CreateInode { inode_id, .. }

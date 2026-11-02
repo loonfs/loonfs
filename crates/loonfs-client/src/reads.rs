@@ -5,15 +5,15 @@ use crate::read_at_fields::ReadAtFields;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, NamespacePath, PayloadStream, Result};
 use loonfs_types::options::{
-    DiffOptions, ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions,
-    ReadAt, ReadConsistency, ReadFileOptions, StatOptions,
+    CommitSplitting, DiffOptions, ListChangesOptions, ListFileRevisionsOptions, ListOptions,
+    ListTrashOptions, ReadAt, ReadConsistency, ReadFileOptions, StatOptions,
 };
+use loonfs_types::{ChangeFeedPosition, DiffResponse, ListChangesResponse};
 use loonfs_types::{
     ChangeSeq, EffectiveLimit, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListTrashResponse, NamespaceId, PageRequest, Pager, PathEntry,
     RevisionNo,
 };
-use loonfs_types::{DiffResponse, ListChangesResponse};
 
 /// Adds the query parameters that say what a read reads at.
 fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
@@ -32,6 +32,18 @@ fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
     }
     if let Some(max_staleness_ms) = fields.max_staleness_ms {
         query.push("max_staleness_ms", max_staleness_ms);
+    }
+}
+
+/// Adds `split_commits` and `event_index` to a change feed or diff request
+/// that sets them. A request for whole commits from a commit boundary sends
+/// neither, so it works with a server that doesn't support them.
+fn push_commit_splitting(query: &mut QueryBuilder, splitting: CommitSplitting, event_index: u32) {
+    if splitting == CommitSplitting::AtPageBudget {
+        query.push("split_commits", true);
+    }
+    if event_index > 0 {
+        query.push("event_index", event_index);
     }
 }
 
@@ -306,18 +318,17 @@ impl Client {
         after_seq: ChangeSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
+        let start = ChangeFeedPosition {
+            after_seq,
+            event_index: options.event_index,
+        };
         Pager::with_state(
-            (
-                self.clone(),
-                namespace_id.clone(),
-                after_seq,
-                options.clone(),
-            ),
-            |(client, namespace_id, after_seq, options), request: PageRequest<ChangeSeq>| async move {
+            (self.clone(), namespace_id.clone(), start, options.clone()),
+            |(client, namespace_id, start, options), request: PageRequest<ChangeFeedPosition>| async move {
                 client
                     .changes_page(
                         &namespace_id,
-                        request.cursor.unwrap_or(after_seq),
+                        request.cursor.unwrap_or(start),
                         request.limit,
                         &options,
                     )
@@ -329,12 +340,13 @@ impl Client {
     async fn changes_page(
         &self,
         namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
+        position: ChangeFeedPosition,
         limit: EffectiveLimit,
         options: &ListChangesOptions,
     ) -> Result<ListChangesResponse> {
         let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/changes"));
-        query.push("after_seq", after_seq.0);
+        query.push("after_seq", position.after_seq.0);
+        push_commit_splitting(&mut query, options.commit_splitting, position.event_index);
         query.push("limit", limit.get());
         push_read_at(&mut query, &options.at);
         self.send_json(self.request(operations::LIST_CHANGES, &query.build()))
@@ -370,6 +382,7 @@ impl Client {
         if let Some(after_seq) = options.after_seq {
             query.push("after_seq", after_seq.0);
         }
+        push_commit_splitting(&mut query, options.commit_splitting, options.event_index);
         query.push("limit", options.limit.get());
         push_read_at(&mut query, &ReadAt::Live(options.consistency));
         self.send_json(self.request(operations::LIST_DIFF, &query.build()))

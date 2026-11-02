@@ -129,8 +129,9 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &default_writer())
         .list_changes_after(
-            after_seq,
+            loonfs_types::ChangeFeedPosition::after(after_seq),
             page_limit(loonfs_types::DEFAULT_PAGE_LIMIT),
+            loonfs_types::options::CommitSplitting::Whole,
             &context,
         )
         .await

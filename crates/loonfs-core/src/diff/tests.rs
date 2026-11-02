@@ -8,8 +8,8 @@ use crate::test_support::{namespace_store, writer_at, NamespaceFixture};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, Commit, CommitId,
-    EntryInodeKind, FilesystemChange, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet,
-    Subject, SubjectId,
+    EffectiveLimit, EntryInodeKind, FilesystemChange, NamespaceAccess, PrincipalId, PrincipalScope,
+    PrincipalSet, Subject, SubjectId,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -121,16 +121,13 @@ impl History {
             .load_current_metadata_view()
             .await
             .expect("load the current view");
-        let limit = EffectiveLimit::new(NonZeroU32::new(limit).expect("a nonzero limit"));
-        diff_page(
-            &view,
-            from_seq,
+        let options = DiffOptions {
             to_seq,
             after_seq,
-            limit,
-            &AbsolutePath::root(),
-        )
-        .await
+            limit: EffectiveLimit::new(NonZeroU32::new(limit).expect("a nonzero limit")),
+            ..DiffOptions::default()
+        };
+        diff_page(&view, from_seq, &options).await
     }
 
     /// Reads every page of the diff from `from_seq` to the head under
@@ -141,21 +138,24 @@ impl History {
             .load_current_metadata_view()
             .await
             .expect("load the current view");
-        let path = AbsolutePath::parse(path).expect("path");
-        let limit = EffectiveLimit::new(NonZeroU32::new(limit).expect("a nonzero limit"));
-        let (mut to_seq, mut after_seq, mut entries) = (None, None, Vec::new());
+        let mut options = DiffOptions {
+            path: AbsolutePath::parse(path).expect("path"),
+            limit: EffectiveLimit::new(NonZeroU32::new(limit).expect("a nonzero limit")),
+            ..DiffOptions::default()
+        };
+        let mut entries = Vec::new();
         loop {
-            let page = diff_page(&view, from_seq, to_seq, after_seq, limit, &path)
+            let page = diff_page(&view, from_seq, &options)
                 .await
                 .expect("read a page")
                 .response;
-            assert_eq!(page.to_seq, to_seq.unwrap_or(view.head().seq));
-            to_seq = Some(page.to_seq);
+            assert_eq!(page.to_seq, options.to_seq.unwrap_or(view.head().seq));
+            options.to_seq = Some(page.to_seq);
             entries.extend(page.entries);
             let Some(next) = page.next_after_seq else {
                 return entries;
             };
-            after_seq = Some(next);
+            options.after_seq = Some(next);
         }
     }
 }
@@ -664,12 +664,9 @@ async fn a_page_ends_after_the_commit_that_reaches_the_touch_bound() {
         .load_current_metadata_view()
         .await
         .expect("load the current view");
-    let limit = EffectiveLimit::new(NonZeroU32::new(1000).expect("a nonzero limit"));
-    let root = AbsolutePath::root();
-
     // Each commit touches two files, so the second commit takes the page from
     // two touches to four, past the bound of three, and stays whole.
-    let first = diff_page_within(&view, from_seq, None, None, limit, 3, &root)
+    let first = diff_page_within(&view, from_seq, &DiffOptions::default(), 3)
         .await
         .expect("the first page");
     assert_eq!((first.commits_scanned, first.touches_examined), (2, 4));
@@ -682,11 +679,12 @@ async fn a_page_ends_after_the_commit_that_reaches_the_touch_bound() {
     let second = diff_page_within(
         &view,
         from_seq,
-        Some(first.response.to_seq),
-        first.response.next_after_seq,
-        limit,
+        &DiffOptions {
+            to_seq: Some(first.response.to_seq),
+            after_seq: first.response.next_after_seq,
+            ..DiffOptions::default()
+        },
         3,
-        &root,
     )
     .await
     .expect("the second page");
@@ -785,5 +783,147 @@ async fn a_range_out_of_bounds_is_rejected_and_an_empty_range_is_an_empty_page()
             "{from_seq} {to_seq:?} {after_seq:?}"
         );
         assert_eq!(error.code(), loonfs_types::ErrorCode::InvalidRequest);
+    }
+}
+
+/// Reads every page of a diff from `from_seq` with `options`, with
+/// `max_touches` as the page's bound, and returns the pages.
+async fn diff_pages(
+    history: &History,
+    from_seq: ChangeSeq,
+    mut options: DiffOptions,
+    max_touches: usize,
+) -> Vec<DiffResponse> {
+    let namespace = namespace_store(&history.store, &history.namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    let mut pages = Vec::new();
+    loop {
+        let page = diff_page_within(&view, from_seq, &options, max_touches)
+            .await
+            .expect("read a page")
+            .response;
+        options.to_seq = Some(page.to_seq);
+        options.after_seq = page.next_after_seq;
+        options.event_index = page.next_event_index.unwrap_or(0);
+        let more = page.next_after_seq.is_some();
+        pages.push(page);
+        if !more {
+            return pages;
+        }
+    }
+}
+
+/// Checks that with `split_commits` a commit that touches more inodes than
+/// one page examines is read across pages, that a page that ends inside the
+/// commit reports the next event's index, and that the entries keyed by
+/// inode ID, with the later entry kept, equal the diff read without
+/// splitting. An inode that the commit's events touch on two pages is
+/// reported on both.
+#[tokio::test]
+async fn a_commit_over_the_touch_bound_is_read_across_pages_with_split_commits() {
+    let history = History::unrestricted().await;
+    let from_seq = history.write("/kept.txt").await.committed_seq;
+    let mut operations: Vec<_> = (0..40)
+        .map(|index| FilesystemOperation::CreateDirectoryByInode {
+            parent_inode_id: loonfs_types::ROOT_INODE_ID,
+            display_name: loonfs_types::DisplayName::parse(format!("large-{index}")).expect("name"),
+        })
+        .collect();
+    operations.push(FilesystemOperation::UpdateAttributes {
+        path: AbsolutePath::parse("/large-0").expect("path"),
+        set: BTreeMap::from([(
+            AttributeKey::parse("touched").expect("key"),
+            AttributeValue::parse("twice").expect("value"),
+        )]),
+        remove: Vec::new(),
+        expected_inode_id: None,
+        expected_attributes_revision_no: None,
+    });
+    let large = history
+        .fixture()
+        .publish_candidates(vec![CommitCandidate::new(CommitIntent {
+            commit_id: CommitId::parse("large").expect("commit id"),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            operations,
+            preconditions: Vec::new(),
+        })])
+        .await
+        .pop()
+        .expect("one result")
+        .expect("publish the large commit");
+    history.write("/after.txt").await;
+
+    let split = diff_pages(
+        &history,
+        from_seq,
+        DiffOptions {
+            commit_splitting: CommitSplitting::AtPageBudget,
+            ..DiffOptions::default()
+        },
+        10,
+    )
+    .await;
+    let whole = diff_pages(&history, from_seq, DiffOptions::default(), 10).await;
+    assert_eq!(
+        whole.len(),
+        2,
+        "the large commit is one page without splitting"
+    );
+    assert!(split.len() > 4, "{} pages", split.len());
+    for page in &split[1..split.len() - 1] {
+        assert_eq!(page.next_after_seq, Some(large.committed_seq));
+        assert!(page.next_event_index.is_some());
+    }
+    let keyed = |pages: &[DiffResponse]| {
+        pages
+            .iter()
+            .flat_map(|page| page.entries.iter())
+            .map(|entry| (entry.inode_id, entry.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(keyed(&split), keyed(&whole));
+    let first_directory = history.inode_id("/large-0").await;
+    let pages_with_it = split
+        .iter()
+        .filter(|page| {
+            page.entries
+                .iter()
+                .any(|entry| entry.inode_id == first_directory)
+        })
+        .count();
+    assert_eq!(pages_with_it, 2);
+}
+
+/// Checks that a diff refuses a position inside a commit without
+/// `split_commits`, and one at `from_seq`, which is no commit of the range.
+#[tokio::test]
+async fn a_diff_refuses_an_event_index_without_split_commits_or_at_from_seq() {
+    let history = History::unrestricted().await;
+    let from_seq = history.write("/a.txt").await.committed_seq;
+    let after = history.write("/b.txt").await.committed_seq;
+    let namespace = namespace_store(&history.store, &history.namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    for (after_seq, commit_splitting) in [
+        (after, CommitSplitting::Whole),
+        (from_seq, CommitSplitting::AtPageBudget),
+    ] {
+        let options = DiffOptions {
+            after_seq: Some(after_seq),
+            event_index: 1,
+            commit_splitting,
+            ..DiffOptions::default()
+        };
+        let error = diff_page(&view, from_seq, &options)
+            .await
+            .expect_err("an invalid position");
+        assert_matches!(error, CoreError::InvalidEventIndex(_));
     }
 }

@@ -111,9 +111,9 @@ pub use attributes::{
 pub use capability::pagination_capability_limits;
 pub use capability::{
     CapabilityDocument, CapabilityDocumentError, ALL_LIMIT_KEYS, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_COMMIT_INLINE_CONTENT,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_CHANGES_SPLIT_COMMITS,
+    FEATURE_COMMIT_INLINE_CONTENT, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
@@ -160,10 +160,11 @@ pub use metadata_rows::MetadataFamilyGroup;
 pub use name_policy::name_key_for_display_name;
 pub use pagination::{
     decode_cursor, decode_token, decode_token_bytes, encode_cursor, encode_token,
-    encode_token_bytes, DirectoryPageCursor, DirectoryTreeFrame, DirectoryTreePageCursor,
-    EffectiveLimit, FileRevisionsPageCursor, GrepCursorPosition, GrepPageCursor, LimitError,
-    ListPageCursor, OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse,
-    Pager, TrashPageCursor, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
+    encode_token_bytes, ChangeFeedPosition, DirectoryPageCursor, DirectoryTreeFrame,
+    DirectoryTreePageCursor, EffectiveLimit, FileRevisionsPageCursor, GrepCursorPosition,
+    GrepPageCursor, LimitError, ListPageCursor, OpaqueToken, OpaqueTokenError, Page, PageCursor,
+    PageRequest, PagedResponse, Pager, TrashPageCursor, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, InodeKind, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES,

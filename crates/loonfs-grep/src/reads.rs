@@ -90,6 +90,7 @@ impl NamespaceReads {
     ) -> Result<ListChangesResponse> {
         let options = ListChangesOptions {
             at: ReadAt::Live(Some(Consistency::Strong)),
+            ..ListChangesOptions::default()
         };
         Ok(self
             .namespace
@@ -145,6 +146,7 @@ impl NamespaceReadView<'_> {
                 after_seq,
                 head_seq,
                 next_after_seq: None,
+                next_event_index: None,
                 changes: Vec::new(),
             });
         }

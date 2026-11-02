@@ -250,6 +250,7 @@ pub(crate) async fn run_changes(
             after_seq,
             &ListChangesOptions {
                 at: ReadAt::from(args.snapshot_id),
+                ..ListChangesOptions::default()
             },
         ),
         &args.pagination.page_limits,

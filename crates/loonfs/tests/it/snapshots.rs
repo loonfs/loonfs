@@ -567,7 +567,13 @@ async fn shared_file_and_download_options_select_the_snapshot() {
         .expect("snapshot read by inode");
     assert_eq!(by_inode.bytes, b"before");
     let feed = reader
-        .list_changes_with_options(ChangeSeq(0), &ListChangesOptions { at: at.clone() })
+        .list_changes_with_options(
+            ChangeSeq(0),
+            &ListChangesOptions {
+                at: at.clone(),
+                ..ListChangesOptions::default()
+            },
+        )
         .page()
         .await
         .expect("snapshot feed");

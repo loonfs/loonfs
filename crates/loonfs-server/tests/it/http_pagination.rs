@@ -5,9 +5,11 @@ use crate::common::{assert_api_code, collect_checkpoints, collect_path_entries, 
 use loonfs_client::{ClientError, ListOptions, MoveOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
+use loonfs_types::options::{CommitSplitting, DiffOptions, ListChangesOptions};
 use loonfs_types::{
-    ChangeSeq, CommitId, DestinationBehavior, ErrorCode, ErrorResponse, FilesystemChange,
-    ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo, MAX_PAGE_LIMIT,
+    AbsolutePath, ChangeSeq, CommitId, CommitRequest, DestinationBehavior, ErrorCode,
+    ErrorResponse, FilesystemChange, FilesystemOperation, ListCheckpointsResponse,
+    ListPathEntriesResponse, RevisionNo, MAX_PAGE_LIMIT,
 };
 use std::assert_matches;
 use tempfile::tempdir;
@@ -822,6 +824,180 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
         }
         other => panic!("expected revision_not_found, got {other:?}"),
     }
+
+    harness.server.abort();
+}
+
+/// Checks that `/changes` and `/diff` resume a commit at `event_index` when
+/// the request sets `split_commits`, and refuse a position inside a commit
+/// without the flag or past the commit's last event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-split-commits",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    harness
+        .client
+        .create_namespace(&namespace, &actor)
+        .await
+        .expect("create namespace");
+    let directories = ["/a", "/b", "/c"];
+    let committed = harness
+        .client
+        .commit(
+            &namespace,
+            &actor,
+            &CommitRequest {
+                preconditions: Vec::new(),
+                commit_id: CommitId::parse("three-directories").expect("valid commit id"),
+                message: None,
+                content_tokens: Vec::new(),
+                operations: directories
+                    .iter()
+                    .map(|path| FilesystemOperation::CreateDirectory {
+                        path: AbsolutePath::parse(path).expect("valid absolute path"),
+                        parents: false,
+                    })
+                    .collect(),
+            },
+        )
+        .await
+        .expect("commit three directories");
+    let commit_seq = committed.committed_seq;
+
+    let whole = harness
+        .client
+        .list_changes(&namespace, ChangeSeq(0))
+        .page()
+        .await
+        .expect("list the whole commit");
+    assert_eq!(whole.changes.len(), 1);
+    assert_eq!(whole.changes[0].events.len(), directories.len());
+
+    let split_at = |event_index| ListChangesOptions {
+        commit_splitting: CommitSplitting::AtPageBudget,
+        event_index,
+        ..ListChangesOptions::default()
+    };
+    // The commit fits on one page, so a page that starts at its first event
+    // returns it whole.
+    let from_start = harness
+        .client
+        .list_changes_with_options(&namespace, ChangeSeq(0), &split_at(0))
+        .page()
+        .await
+        .expect("list with split_commits");
+    assert_eq!(from_start.changes, whole.changes);
+    assert_eq!(from_start.next_event_index, None);
+
+    let resumed = harness
+        .client
+        .list_changes_with_options(&namespace, commit_seq, &split_at(1))
+        .page()
+        .await
+        .expect("resume the commit at its second event");
+    assert_eq!(resumed.after_seq, commit_seq);
+    assert_eq!(resumed.changes.len(), 1);
+    assert_eq!(resumed.changes[0].committed_seq, commit_seq);
+    assert_eq!(resumed.changes[0].events, whole.changes[0].events[1..]);
+    assert_eq!(
+        (resumed.next_after_seq, resumed.next_event_index),
+        (None, None)
+    );
+
+    let without_flag = ListChangesOptions {
+        event_index: 1,
+        ..ListChangesOptions::default()
+    };
+    assert_eq!(
+        error_param(
+            harness
+                .client
+                .list_changes_with_options(&namespace, commit_seq, &without_flag)
+                .page()
+                .await
+        )
+        .as_deref(),
+        Some("event_index")
+    );
+    let past_the_end = u32::try_from(directories.len()).expect("small count");
+    assert_eq!(
+        error_param(
+            harness
+                .client
+                .list_changes_with_options(&namespace, commit_seq, &split_at(past_the_end))
+                .page()
+                .await
+        )
+        .as_deref(),
+        Some("event_index")
+    );
+
+    let whole_diff = harness
+        .client
+        .diff(&namespace, ChangeSeq(0))
+        .await
+        .expect("diff the whole commit");
+    let resumed_diff = harness
+        .client
+        .diff_with_options(
+            &namespace,
+            ChangeSeq(0),
+            &DiffOptions {
+                after_seq: Some(commit_seq),
+                event_index: 1,
+                commit_splitting: CommitSplitting::AtPageBudget,
+                ..DiffOptions::default()
+            },
+        )
+        .await
+        .expect("resume the diff at the commit's second event");
+    let paths = |entries: &[loonfs_types::DiffEntry]| {
+        entries
+            .iter()
+            .filter_map(|entry| entry.path.as_ref().map(ToString::to_string))
+            .collect::<Vec<_>>()
+    };
+    assert!(paths(&whole_diff.entries).contains(&"/a".to_owned()));
+    let resumed_paths = paths(&resumed_diff.entries);
+    assert!(
+        !resumed_paths.contains(&"/a".to_owned()),
+        "{resumed_paths:?}"
+    );
+    for path in ["/b", "/c"] {
+        assert!(
+            resumed_paths.contains(&path.to_owned()),
+            "{resumed_paths:?}"
+        );
+    }
+    assert_eq!(
+        (resumed_diff.next_after_seq, resumed_diff.next_event_index),
+        (None, None)
+    );
+    assert_eq!(
+        error_param(
+            harness
+                .client
+                .diff_with_options(
+                    &namespace,
+                    ChangeSeq(0),
+                    &DiffOptions {
+                        after_seq: Some(commit_seq),
+                        event_index: 1,
+                        ..DiffOptions::default()
+                    },
+                )
+                .await
+        )
+        .as_deref(),
+        Some("event_index")
+    );
 
     harness.server.abort();
 }

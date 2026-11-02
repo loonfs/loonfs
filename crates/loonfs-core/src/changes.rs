@@ -10,20 +10,40 @@ use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
-use loonfs_types::{ChangeSeq, EffectiveLimit, NamespaceId};
+use loonfs_types::options::CommitSplitting;
+use loonfs_types::{ChangeFeedPosition, ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_types::{Commit, FilesystemChange, Land, ListChangesResponse};
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
-    after_seq: ChangeSeq,
+    position: ChangeFeedPosition,
     limit: EffectiveLimit,
+    splitting: CommitSplitting,
+) -> Result<ListChangesResponse> {
+    list_changes_within(view, position, limit, splitting, CHANGE_FEED_PAGE_BYTES).await
+}
+
+/// Reads one page of the change feed as [`list_changes_after`] does, within a
+/// budget of `max_page_bytes` of events.
+async fn list_changes_within<S: ObjectStore + ?Sized>(
+    view: &LoadedMetadataView<'_, S>,
+    position: ChangeFeedPosition,
+    limit: EffectiveLimit,
+    splitting: CommitSplitting,
+    max_page_bytes: usize,
 ) -> Result<ListChangesResponse> {
     let head = view.head();
     let retention_floor_seq = view.retention_floor_seq();
     let namespace_id = &head.namespace_id;
     crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+    let ChangeFeedPosition {
+        after_seq,
+        event_index,
+    } = position;
 
-    if after_seq < retention_floor_seq {
+    // A position inside a commit starts with that commit, so the commit has
+    // to be above the floor, where the feed returns commits.
+    if after_seq < retention_floor_seq || (event_index > 0 && after_seq == retention_floor_seq) {
         return Err(CoreError::RebootstrapRequired {
             after_seq,
             retention_floor_seq,
@@ -35,22 +55,50 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
             head.seq
         )));
     }
-    if after_seq == head.seq {
+    ensure_event_index_allowed(event_index, splitting)?;
+    if after_seq == head.seq && event_index == 0 {
         return Ok(ListChangesResponse {
             namespace_id: namespace_id.clone(),
             after_seq,
             head_seq: head.seq,
             next_after_seq: None,
+            next_event_index: None,
             changes: Vec::new(),
         });
     }
 
-    let mut scan = CommitScan::new(view.metadata_view(), after_seq, limit);
+    let mut scan = CommitScan::new(
+        view.metadata_view(),
+        position,
+        limit,
+        splitting,
+        max_page_bytes,
+    );
     let mut changes = Vec::new();
-    while let Some(record) = scan.next().await? {
-        let change = committed_change_from_wal_record(namespace_id, &record)?;
-        if scan.admit(change.committed_seq, change.events.heap_bytes()) {
-            changes.push(change);
+    while let Some(scanned) = scan.next().await? {
+        let record = &scanned.record;
+        let built = events_from_wal_deltas_within(
+            namespace_id,
+            record.committed_seq,
+            &record.deltas,
+            scanned.first_event_index,
+            scan.event_budget(),
+        )?;
+        let change = committed_change_with_events(namespace_id, record, built.events);
+        let heap_bytes = change.events.heap_bytes();
+        match built.next_event_index {
+            None => {
+                if scan.admit(change.committed_seq, heap_bytes) {
+                    changes.push(change);
+                }
+            }
+            Some(next_event_index) if scan.is_empty() => {
+                scan.admit_part(change.committed_seq, heap_bytes, next_event_index);
+                changes.push(change);
+            }
+            // The commit doesn't fit with the commits before it, so it
+            // starts the next page.
+            Some(_) => scan.end_page(),
         }
     }
 
@@ -59,8 +107,31 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         after_seq,
         head_seq: head.seq,
         next_after_seq: scan.next_after_seq(),
+        next_event_index: scan.next_event_index(),
         changes,
     })
+}
+
+/// Refuses a position inside a commit unless the request lets a page end
+/// inside a commit, because only such a page returns one.
+pub(crate) fn ensure_event_index_allowed(
+    event_index: u32,
+    splitting: CommitSplitting,
+) -> Result<()> {
+    if event_index > 0 && splitting == CommitSplitting::Whole {
+        return Err(CoreError::InvalidEventIndex(
+            "a position inside a commit requires `split_commits`".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// One commit that a [`CommitScan`] offers to its page, and the event that
+/// the page starts the commit at, which is 0 except for a commit that the
+/// page resumes.
+pub(crate) struct ScannedCommit {
+    pub(crate) record: WalCommitPayload,
+    pub(crate) first_event_index: u32,
 }
 
 /// The page loop that the change feed and the diff share. It reads the
@@ -69,15 +140,25 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
 /// A caller takes each commit from [`Self::next`], builds what its page
 /// reports for that commit, and offers the commit to [`Self::admit`] with
 /// the heap bytes of what it built. The page ends after `limit` commits, at
-/// the view's sequence, or at [`CHANGE_FEED_PAGE_BYTES`]. A commit that would
+/// the view's sequence, or at the page's byte budget. A commit that would
 /// take a page with other commits past the budget is left for the next page,
-/// so no commit is split across pages, and a commit larger than the budget
-/// is a page of its own.
+/// so a commit that fits isn't split across pages. A commit larger than
+/// the budget is a page of its own, or, with
+/// [`CommitSplitting::AtPageBudget`], is returned across pages through
+/// [`Self::admit_part`], and the next page resumes it at an event index.
 pub(crate) struct CommitScan<'a, 'store, S: ObjectStore + ?Sized> {
     view: MetadataView<'a, 'store, S>,
     limit: EffectiveLimit,
+    splitting: CommitSplitting,
+    max_page_bytes: usize,
     /// The last commit on the page, or the page's start before the first.
     through_seq: ChangeSeq,
+    /// The event at which the page resumes the commit at `through_seq`,
+    /// until [`Self::next`] returns that commit.
+    resume_event_index: Option<u32>,
+    /// The first event of the commit at `through_seq` that the page didn't
+    /// return, when the page ended inside that commit.
+    next_event_index: Option<u32>,
     commits: usize,
     page_bytes: usize,
     /// Whether the byte budget or the caller ended the page.
@@ -85,26 +166,48 @@ pub(crate) struct CommitScan<'a, 'store, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
-    /// Starts a page of the commits after `after_seq` that `view` contains.
+    /// Starts a page at `position` in the commits that `view` contains.
     pub(crate) fn new(
         view: MetadataView<'a, 'store, S>,
-        after_seq: ChangeSeq,
+        position: ChangeFeedPosition,
         limit: EffectiveLimit,
+        splitting: CommitSplitting,
+        max_page_bytes: usize,
     ) -> Self {
         Self {
             view,
             limit,
-            through_seq: after_seq,
+            splitting,
+            max_page_bytes,
+            through_seq: position.after_seq,
+            resume_event_index: (position.event_index > 0).then_some(position.event_index),
+            next_event_index: None,
             commits: 0,
             page_bytes: 0,
             full: false,
         }
     }
 
-    /// Returns the commit after the page's last one, or `None` once the page
-    /// has ended. The caller offers each commit to [`Self::admit`] before it
-    /// asks for the next one.
-    pub(crate) async fn next(&mut self) -> Result<Option<WalCommitPayload>> {
+    /// Returns the next commit for the page, or `None` once the page has
+    /// ended. The caller offers each commit to [`Self::admit`] or
+    /// [`Self::admit_part`] before it asks for the next one.
+    pub(crate) async fn next(&mut self) -> Result<Option<ScannedCommit>> {
+        if let Some(first_event_index) = self.resume_event_index.take() {
+            let record = self
+                .view
+                .commit_at_seq(self.through_seq)
+                .await?
+                .ok_or_else(|| {
+                    CoreError::InvalidEventIndex(format!(
+                        "no commit at sequence `{}` to resume",
+                        self.through_seq
+                    ))
+                })?;
+            return Ok(Some(ScannedCommit {
+                record,
+                first_event_index,
+            }));
+        }
         let end_seq = self.view.visible_seq();
         if self.full || self.commits >= self.limit.as_usize() || self.through_seq >= end_seq {
             return Ok(None);
@@ -113,7 +216,25 @@ impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
         if record.is_none() {
             self.through_seq = end_seq;
         }
-        Ok(record)
+        Ok(record.map(|record| ScannedCommit {
+            record,
+            first_event_index: 0,
+        }))
+    }
+
+    /// Returns whether the page has no commit yet.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.commits == 0
+    }
+
+    /// Returns how many bytes of events the next commit can bring to the
+    /// page: the rest of the budget, or no bound for a commit that starts an
+    /// empty page and is returned whole.
+    pub(crate) fn event_budget(&self) -> Option<usize> {
+        match (self.is_empty(), self.splitting) {
+            (true, CommitSplitting::Whole) => None,
+            _ => Some(self.max_page_bytes.saturating_sub(self.page_bytes)),
+        }
     }
 
     /// Puts the commit at `committed_seq` on the page if `heap_bytes` more
@@ -121,15 +242,36 @@ impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
     /// page, and the next page starts with it.
     pub(crate) fn admit(&mut self, committed_seq: ChangeSeq, heap_bytes: usize) -> bool {
         let page_bytes = self.page_bytes.saturating_add(heap_bytes);
-        if self.commits > 0 && page_bytes > CHANGE_FEED_PAGE_BYTES {
+        if self.commits > 0 && page_bytes > self.max_page_bytes {
             self.full = true;
             return false;
         }
         self.page_bytes = page_bytes;
         self.through_seq = committed_seq;
         self.commits += 1;
-        self.full = page_bytes >= CHANGE_FEED_PAGE_BYTES;
+        self.full = page_bytes >= self.max_page_bytes;
         true
+    }
+
+    /// Puts part of the commit at `committed_seq`, `heap_bytes` of its
+    /// events, on the page, and ends the page there, so the next page
+    /// resumes the commit at `next_event_index`. Only a commit that alone
+    /// exceeds the budget is returned in parts.
+    pub(crate) fn admit_part(
+        &mut self,
+        committed_seq: ChangeSeq,
+        heap_bytes: usize,
+        next_event_index: u32,
+    ) {
+        assert!(
+            self.is_empty() && self.splitting == CommitSplitting::AtPageBudget,
+            "only a page that splits commits returns part of a commit, and only by itself"
+        );
+        self.page_bytes = self.page_bytes.saturating_add(heap_bytes);
+        self.through_seq = committed_seq;
+        self.next_event_index = Some(next_event_index);
+        self.commits += 1;
+        self.full = true;
     }
 
     /// Ends the page after the commit that [`Self::admit`] took last, so
@@ -139,10 +281,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
         self.full = true;
     }
 
-    /// Returns the sequence that the next page starts after, or `None` when
-    /// this page reached the view's sequence.
+    /// Returns the sequence that the next page starts after, or resumes,
+    /// or `None` when this page reached the view's sequence.
     pub(crate) fn next_after_seq(&self) -> Option<ChangeSeq> {
-        (self.through_seq < self.view.visible_seq()).then_some(self.through_seq)
+        (self.next_event_index.is_some() || self.through_seq < self.view.visible_seq())
+            .then_some(self.through_seq)
+    }
+
+    /// Returns the event at which the next page resumes the commit at
+    /// [`Self::next_after_seq`], when this page ended inside it.
+    pub(crate) fn next_event_index(&self) -> Option<u32> {
+        self.next_event_index
     }
 }
 
@@ -151,7 +300,18 @@ pub(super) fn committed_change_from_wal_record(
     namespace_id: &NamespaceId,
     record: &WalCommitPayload,
 ) -> Result<Commit> {
-    Ok(Commit {
+    let events = events_from_wal_deltas(namespace_id, record.committed_seq, &record.deltas)?;
+    Ok(committed_change_with_events(namespace_id, record, events))
+}
+
+/// Builds the API change of `record` with `events`, which are the commit's
+/// events or, on a page that splits the commit, the page's part of them.
+fn committed_change_with_events(
+    namespace_id: &NamespaceId,
+    record: &WalCommitPayload,
+    events: Vec<FilesystemChange>,
+) -> Commit {
+    Commit {
         namespace_id: namespace_id.clone(),
         committed_seq: record.committed_seq,
         commit_id: record.commit_id.clone(),
@@ -163,8 +323,8 @@ pub(super) fn committed_change_from_wal_record(
             source_after_seq: land.source_after_seq,
             source_through_seq: land.source_through_seq,
         }),
-        events: events_from_wal_deltas(namespace_id, record.committed_seq, &record.deltas)?,
-    })
+        events,
+    }
 }
 
 /// Maps one commit's ordered WAL deltas to semantic filesystem events, one
@@ -186,14 +346,72 @@ pub(crate) fn events_from_wal_deltas(
     committed_seq: ChangeSeq,
     deltas: &[WalCommitDelta],
 ) -> Result<Vec<FilesystemChange>> {
+    Ok(events_from_wal_deltas_within(namespace_id, committed_seq, deltas, 0, None)?.events)
+}
+
+/// The events of one commit that one page returns.
+pub(crate) struct CommitEvents {
+    pub(crate) events: Vec<FilesystemChange>,
+    /// The index of the first event that the page didn't build, or `None`
+    /// when the events reach the end of the commit.
+    pub(crate) next_event_index: Option<u32>,
+}
+
+/// Maps a commit's deltas to its events as [`events_from_wal_deltas`] does,
+/// from the event at `first_event_index`, and stops before the event that
+/// would take the events past `max_heap_bytes`, after at least one event.
+///
+/// Each internal operation's deltas are contiguous and produce one event, so
+/// the event at an index is the operation group at that index, and the
+/// groups before it are skipped without building their events.
+pub(crate) fn events_from_wal_deltas_within(
+    namespace_id: &NamespaceId,
+    committed_seq: ChangeSeq,
+    deltas: &[WalCommitDelta],
+    first_event_index: u32,
+    max_heap_bytes: Option<usize>,
+) -> Result<CommitEvents> {
+    let no_event = || {
+        CoreError::InvalidEventIndex(format!(
+            "commit `{committed_seq}` has no event at index {first_event_index}"
+        ))
+    };
+    let mut groups = loonfs_types::format::wal::semantic_operation_groups(deltas).peekable();
+    // The index comes from a request, so the skip stops at the commit's last
+    // group instead of running to an index as large as `u32::MAX`.
+    for _ in 0..first_event_index {
+        groups.next().ok_or_else(no_event)?;
+    }
+    if first_event_index > 0 && groups.peek().is_none() {
+        return Err(no_event());
+    }
     let mut events = Vec::new();
+    let mut heap_bytes = 0_usize;
     let mut group = Vec::new();
-    for deltas in loonfs_types::format::wal::semantic_operation_groups(deltas) {
+    let mut event_index = first_event_index;
+    for deltas in groups {
         group.clear();
         group.extend(deltas.iter().map(|delta| &delta.delta));
-        events.push(event_from_op_deltas(namespace_id, committed_seq, &group)?);
+        let event = event_from_op_deltas(namespace_id, committed_seq, &group)?;
+        let event_bytes = std::mem::size_of::<FilesystemChange>() + event.heap_bytes();
+        if max_heap_bytes
+            .is_some_and(|max| !events.is_empty() && heap_bytes.saturating_add(event_bytes) > max)
+        {
+            return Ok(CommitEvents {
+                events,
+                next_event_index: Some(event_index),
+            });
+        }
+        heap_bytes = heap_bytes.saturating_add(event_bytes);
+        events.push(event);
+        event_index = event_index
+            .checked_add(1)
+            .expect("a commit should have fewer events than its 32-bit delta positions allow");
     }
-    Ok(events)
+    Ok(CommitEvents {
+        events,
+        next_event_index: None,
+    })
 }
 
 fn event_from_op_deltas(
@@ -355,6 +573,9 @@ fn binding_version(
 }
 
 #[cfg(test)]
+mod split_tests;
+
+#[cfg(test)]
 mod tests {
     use super::event_from_op_deltas;
     use crate::error::CoreError;
@@ -426,14 +647,24 @@ mod tests {
             NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
 
         let caught_up = engine
-            .list_changes_after(ChangeSeq(0), limit, &context)
+            .list_changes_after(
+                loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+                limit,
+                loonfs_types::options::CommitSplitting::Whole,
+                &context,
+            )
             .await
             .expect("the head is a valid cursor");
         assert!(caught_up.changes.is_empty());
         assert_eq!(caught_up.head_seq, ChangeSeq(0));
 
         let error = engine
-            .list_changes_after(ChangeSeq(1), limit, &context)
+            .list_changes_after(
+                loonfs_types::ChangeFeedPosition::after(ChangeSeq(1)),
+                limit,
+                loonfs_types::options::CommitSplitting::Whole,
+                &context,
+            )
             .await
             .expect_err("an unpublished sequence cannot be a valid cursor");
         assert_matches!(error, CoreError::InvalidCursor(_));
@@ -516,9 +747,14 @@ mod tests {
                 let mut after_seq = ChangeSeq(0);
                 let mut actual = Vec::new();
                 loop {
-                    let page = super::list_changes_after(&view, after_seq, limit)
-                        .await
-                        .expect("page");
+                    let page = super::list_changes_after(
+                        &view,
+                        loonfs_types::ChangeFeedPosition::after(after_seq),
+                        limit,
+                        loonfs_types::options::CommitSplitting::Whole,
+                    )
+                    .await
+                    .expect("page");
                     assert!(!page.changes.is_empty());
                     assert!(page.changes.len() <= limit.as_usize());
                     let bytes: usize = page

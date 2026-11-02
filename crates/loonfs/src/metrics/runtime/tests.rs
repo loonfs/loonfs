@@ -94,6 +94,7 @@ fn a_diff_page_reaches_the_diff_counters() {
             to_seq: loonfs_types::ChangeSeq(4),
             after_seq: loonfs_types::ChangeSeq(1),
             next_after_seq: None,
+            next_event_index: None,
             retention_floor_seq: loonfs_types::ChangeSeq(0),
             entries: vec![entry.clone(), entry],
         },

@@ -1865,8 +1865,9 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         .expect("load feed view");
     let changes = list_changes_after(
         &view,
-        ChangeSeq(0),
+        loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
         EffectiveLimit::new(NonZeroU32::new(200).expect("nonzero")),
+        loonfs_types::options::CommitSplitting::Whole,
     )
     .await
     .expect("list changes");

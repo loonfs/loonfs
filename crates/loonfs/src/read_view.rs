@@ -12,7 +12,8 @@ use crate::{
     ListPathEntriesResponse, NamespaceId, PathEntry, PinId, ReadAt, ReadFileStreamOptions, Result,
     RevisionNo, SharedObjectStore, StatOptions,
 };
-use loonfs_types::{AbsolutePath, EffectiveLimit, ListPageCursor, PageRequest};
+use loonfs_types::options::CommitSplitting;
+use loonfs_types::{AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest};
 use std::sync::Arc;
 
 /// A captured namespace state that related reads share.
@@ -132,9 +133,12 @@ impl ReadView {
     pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
         loonfs_types::Pager::with_state(
             (self.clone(), after_seq),
-            |(view, after_seq), request: PageRequest<ChangeSeq>| async move {
+            |(view, after_seq), request: PageRequest<ChangeFeedPosition>| async move {
                 let permit = view.core.read_permit().await;
-                view.changes_page(request.cursor.unwrap_or(after_seq), request.limit, &permit)
+                let position = request
+                    .cursor
+                    .unwrap_or(ChangeFeedPosition::after(after_seq));
+                view.changes_page(position, request.limit, CommitSplitting::Whole, &permit)
                     .await
             },
         )
@@ -142,11 +146,13 @@ impl ReadView {
 
     pub(crate) async fn changes_page(
         &self,
-        after_seq: ChangeSeq,
+        position: ChangeFeedPosition,
         limit: EffectiveLimit,
+        splitting: CommitSplitting,
         _permit: &BudgetPermit<'_>,
     ) -> Result<ListChangesResponse> {
-        self.read(self.pinned.changes_page(after_seq, limit)).await
+        self.read(self.pinned.changes_page(position, limit, splitting))
+            .await
     }
 
     /// Resolves an absolute path against this view.

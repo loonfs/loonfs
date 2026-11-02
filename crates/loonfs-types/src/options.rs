@@ -278,6 +278,20 @@ pub struct DownloadOptions {
     pub start_offset: u64,
 }
 
+/// Whether a page of the change feed or the diff can end inside a commit
+/// ([API section 6.11](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#611-get-changes)).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommitSplitting {
+    /// A page returns every commit whole, and a commit larger than the page's
+    /// budget is a page by itself.
+    #[default]
+    Whole,
+    /// A commit that alone exceeds the page's budget is returned across pages,
+    /// and a page that ends inside a commit reports the next event's index.
+    /// A commit that fits isn't split.
+    AtPageBudget,
+}
+
 /// Options for listing the change feed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListChangesOptions {
@@ -285,6 +299,13 @@ pub struct ListChangesOptions {
     /// live head at the runtime's default consistency. A snapshot's feed ends
     /// at the sequence that the snapshot captured.
     pub at: ReadAt,
+    /// Whether a page can end inside a commit. By default, it can't.
+    pub commit_splitting: CommitSplitting,
+    /// The event of the commit at the feed's `after_seq` that the first page
+    /// starts with, from a page that ended inside that commit, or 0 to start
+    /// after that commit. A position above 0 needs
+    /// [`CommitSplitting::AtPageBudget`].
+    pub event_index: u32,
 }
 
 /// Options for reading one page of a diff.
@@ -303,8 +324,14 @@ pub struct DiffOptions {
     /// The `next_after_seq` that the previous page returned, or `None` to
     /// start at the diff's start.
     pub after_seq: Option<ChangeSeq>,
+    /// The `next_event_index` that the previous page returned, when that page
+    /// ended inside the commit at `after_seq`, or 0 to start after that
+    /// commit. A position above 0 needs [`CommitSplitting::AtPageBudget`].
+    pub event_index: u32,
     /// The most commits the page reads, by default [`EffectiveLimit::DEFAULT`].
     pub limit: EffectiveLimit,
+    /// Whether the page can end inside a commit. By default, it can't.
+    pub commit_splitting: CommitSplitting,
     /// How recently the page confirms the live head, or `None` for the
     /// runtime's default.
     pub consistency: Option<Consistency>,
@@ -316,7 +343,9 @@ impl Default for DiffOptions {
             path: AbsolutePath::root(),
             to_seq: None,
             after_seq: None,
+            event_index: 0,
             limit: EffectiveLimit::DEFAULT,
+            commit_splitting: CommitSplitting::Whole,
             consistency: None,
         }
     }

@@ -157,8 +157,9 @@ async fn reads_commits_and_change_feed_never_list() {
     assert_eq!(bytes.bytes, b"hello\n");
     let changes = engine
         .list_changes_after(
-            ChangeSeq(0),
+            loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
             loonfs_test_support::ids::page_limit(1024),
+            loonfs_types::options::CommitSplitting::Whole,
             &ctx,
         )
         .await
