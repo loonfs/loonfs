@@ -14,6 +14,7 @@ mod family_roots;
 mod fold_races;
 mod index_parity;
 pub(crate) mod inspection_materialization;
+mod lands;
 mod manifest_gc_races;
 mod manifest_round_trips;
 mod newest_first_lookups;

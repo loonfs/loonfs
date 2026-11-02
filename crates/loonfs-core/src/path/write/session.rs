@@ -5,7 +5,7 @@ use super::planned_pieces::{CommitPieces, PlannedPieces};
 use super::planner::OperationPlanningSession;
 use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
-use crate::commit::engine::CommitCandidate;
+use crate::commit::engine::{CommitCandidate, LandIntent};
 use crate::commit::{AppendedContent, CommitFingerprint, CommitPlan, CommitValidationSession};
 use crate::error::{CoreError, Result};
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
@@ -82,6 +82,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
     ) -> Result<CommitPlan> {
         let base_view = self.base_view.with_durable_cache(&self.durable_cache);
         let pre_state = base_view.with_overlay(None, &self.accepted_rows, self.head.seq);
+        if let Some(land) = candidate.land() {
+            ensure_land_is_admissible(&pre_state, land).await?;
+        }
         self.planning_view(authorizer, pre_state)
             .evaluate_preconditions(&candidate.intent().preconditions, self.head.seq)
             .await?;
@@ -218,7 +221,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             actor_id: request.actor_id.clone(),
             writer_epoch: head.writer_epoch,
             message: request.message.clone(),
-            land: candidate.land().cloned(),
+            land: candidate.land().map(|land| land.record.clone()),
             semantic_identity,
             apply_after_seq: head.seq,
             assigned_seq: committed_seq,
@@ -305,6 +308,41 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         }
         Ok(())
     }
+}
+
+/// Requires a land's fork point to be at or above the retention floor of
+/// `view`, and the land to start where the newest land from its fork in
+/// `view` stopped, or at the fork point when `view` has no land from the
+/// fork, so that a fork's commits are applied once and in order.
+///
+/// The floor check runs first because the range check depends on it. A base
+/// compaction removes the land index rows below the floor, so if the fork
+/// point were below the floor, the fork's newest row might be gone, and the
+/// range check would expect the next land to start at the fork point.
+async fn ensure_land_is_admissible<S: ObjectStore + ?Sized>(
+    view: &MetadataView<'_, '_, S>,
+    land: &LandIntent,
+) -> Result<()> {
+    let retention_floor_seq = view.retention_floor_seq();
+    if land.fork_point_seq < retention_floor_seq {
+        return Err(CoreError::LandRebootstrapRequired {
+            fork_point_seq: land.fork_point_seq,
+            retention_floor_seq,
+        });
+    }
+    let source_namespace_id = &land.record.source_namespace_id;
+    let expected_after_seq = view
+        .newest_land(source_namespace_id)
+        .await?
+        .map_or(land.fork_point_seq, |previous| previous.source_through_seq);
+    if land.record.source_after_seq != expected_after_seq {
+        return Err(CoreError::LandRangeConflict {
+            source_namespace_id: source_namespace_id.clone(),
+            expected_after_seq,
+            actual_after_seq: land.record.source_after_seq,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -285,7 +285,7 @@ The `update_access` operation replaces an inode's access row, and it appears in 
 
 The metadata row families that the sections above describe follow the rules in this section.
 
-LoonFS stores metadata rows in eleven "row families". A row family is a set of rows with one key grammar, such as `revisions`, and each [metadata segment](glossary.md#metadata-segment) stores the rows of one family ([Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists every family and its keys). Each family is designed for one kind of read, such as a directory listing or a lookup by commit ID. The rules in this section settle four questions the same way for every family: how an entity's versions sort, what a version is, who committed a row, and what a row can copy from another entity. (Here, an entity is an inode, a commit, a binding edge, a deletion, or a chain.)
+LoonFS stores metadata rows in twelve "row families". A row family is a set of rows with one key grammar, such as `revisions`, and each [metadata segment](glossary.md#metadata-segment) stores the rows of one family ([Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists every family and its keys). Each family is designed for one kind of read, such as a directory listing or a lookup by commit ID. The rules in this section settle four questions the same way for every family: how an entity's versions sort, what a version is, who committed a row, and what a row can copy from another entity. (Here, an entity is an inode, a commit, a binding edge, a deletion, or a chain.)
 
 Every durable row is computed from exactly one WAL delta or one commit record. A [fold](glossary.md#fold) computes the row from that delta and its commit, and so does a replay of the WAL tail, without reading another row. When a row needs a field of another entity, the delta includes that field, because the planner read the field when it planned the commit. For example, a bind delta includes the child's kind and creation attribution, and the binding row copies them from the delta.
 
@@ -298,7 +298,7 @@ Each family is one of three kinds:
 
 - An "entity header" is a family with one immutable row for each entity, written when the entity is created (`inodes`, `commits`).
 - A "history family" stores the versions of one mutable part of an entity, keyed by the entity and then by version, newest first (`revisions`, `attributes`, `access`, `direntry_binds`, `direntry_child_binds`, `tombstones`). A row of a history family is a "history row". The entity of a binding family is an edge, and each of its rows is one version of the edge.
-- A "query index" is a family that stores a second key over facts that another family stores, for a read that the other family's key can't serve (`commit_receipts`, `active_deletions`, `content_layouts`).
+- A "query index" is a family that stores a second key over facts that another family stores, for a read that the other family's key can't serve (`commit_receipts`, `active_deletions`, `content_layouts`, `lands`).
 
 A row can also copy a field of another entity, so that a read doesn't look up that entity. Binding rows copy the child's kind and creation attribution, a bound file's row in the [slot index](#13-directory-bindings) copies the file's [revision summary](glossary.md#revision-summary), and a `listed` row in `active_deletions` copies the deletion root's kind and the deletion's binding, actor, and time.
 
@@ -306,12 +306,12 @@ Every family follows these rules:
 
 1. Every row is computed from one delta or one commit record, in a fold or a replay, without reading another row (except the rows listed above).
 2. An entity header is keyed by its entity's stable ID (an inode ID, or a commit's sequence). A history row is keyed by its entity's stable ID, then by its revision number if the family has one, and then by its position (`committed_seq` and `delta_index`). The binding families key by the edge instead, because the name key is part of the edge's identity, and a query index starts with the key of the read it serves.
-3. Every history family sorts each entity's rows newest first, so the current value is the first row, and the value at sequence `N` is the first row at or below `N`. The other families have their own orders: `commits` sorts by ascending sequence, `commit_receipts` by commit ID and then ascending sequence, `active_deletions` by deletion sequence, and `content_layouts` by longest layout and then newest commit.
+3. Every history family sorts each entity's rows newest first, so the current value is the first row, and the value at sequence `N` is the first row at or below `N`. The other families have their own orders: `commits` sorts by ascending sequence, `commit_receipts` by commit ID and then ascending sequence, `active_deletions` by deletion sequence, `content_layouts` by longest layout and then newest commit, and `lands` by fork and then newest commit.
 4. Every history row records its commit's sequence, ID, actor, and time (`committed_seq`, `commit_id`, `committed_by`, and `committed_at_ms`). A query index row records the sequence of the commit it points to, and it records an actor or a time only as a copy.
 5. A row copies a field of another entity only if the field can't change, or if the delta that changes the field also writes the copy. LoonFS never changes a copy after the copy is written, and it never repairs a copy when it reads one.
 6. An entity header is kept for as long as its entity exists, so an inode row is kept until a base compaction removes the rows of an inode that an expired deletion hides, and a commit row until the [retention floor](glossary.md#retention-floor) moves above the commit's sequence. A history family keeps each entity's state at the retention floor and every later row (in the binding families, for each edge's binding events and summary rows separately), and a query index keeps the rows of the entities it indexes.
 7. A generated ID in a key is its 26-character body, without its prefix. A client-chosen string, such as a name key or a commit ID, is the lowercase hexadecimal encoding of its UTF-8 bytes, because a client can put a hyphen in it (a generated commit ID has the shape of a generated ID, but a client can supply any commit ID). A counter is zero-padded decimal at its type's width, and a counter that sorts newest first is stored as the type's maximum value minus the counter. A family's filter key is its prefix followed by the components that identify one entity, or one slot in `direntry_binds` (which also adds a parent probe) and one child in `direntry_child_binds`.
-8. Two families that store rows for the same deltas or commits, under the same retention rule, are compacted in one [family group](glossary.md#family-group). The two binding families form one group, and `commits` and `commit_receipts` form another.
+8. Two families that store rows for the same deltas or commits, under the same retention rule, are compacted in one [family group](glossary.md#family-group). The two binding families form one group, and `commits`, `commit_receipts`, and `lands` form another.
 
 This table lists each family's kind, the first component of its key, and its retention rule. [Row retention during a base compaction](#103-row-retention-during-a-base-compaction) defines each retention rule exactly, and [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) defines each key.
 
@@ -328,6 +328,7 @@ This table lists each family's kind, the first component of its key, and its ret
 | `commit_receipts` | Query index | Commit ID | Floor commit and later |
 | `active_deletions` | Query index | Deletion sequence | Until undeleted or expired |
 | `content_layouts` | Query index | Content ID | Longest referenced layout |
+| `lands` | Query index | Fork's namespace ID | Floor commit and later |
 
 Why is every row computed from one delta, without reading other rows? A row computed that way depends only on its commit, so a fold and a replay of the same commits compute the same rows, two readers that replay the same WAL tail agree on every row, and LoonFS can rebuild a row from its commit.
 
@@ -867,6 +868,10 @@ Checking the inode ID alone isn't equivalent, because the item might have been m
 
 Callers add specific checks with `expected_*` preconditions. Leaving out an optional precondition turns off that check, but it doesn't turn off the operation's normal structural validation. When a revision precondition comes with an optional inode precondition, the revision precondition requires the matching inode precondition. Inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves and deletes require `expected_binding_version`.
 
+A [land](glossary.md#land) MUST continue the previous land from its fork, so that each of the fork's commits is applied once and in order. The writer reads the fork's newest row in the [land index](glossary.md#land-index) (the `lands` family). If the fork has one, the land's `source_after_seq` MUST equal that row's `source_through_seq`. If it has none, the land is the fork's first, and its `source_after_seq` MUST equal the fork point, the sequence of this namespace that the fork was made at. Otherwise the land fails with `land_range_conflict`. For example, if a fork made at sequence 100 has landed its commits 101 through 120, its next land has to apply the commits after 120, and a land that starts after 110 (an overlap) or after 125 (a gap) is refused. The writer checks the commit receipt first, as for every commit, so a retry of a land with its original commit ID returns the original commit instead of a conflict.
+
+The check that a land continues the previous land from its fork reads the fork's newest row in the land index, and a base compaction removes the `lands` rows strictly below the [retention floor](glossary.md#retention-floor) (see [Row retention during a base compaction](#103-row-retention-during-a-base-compaction)). So a land's fork point MUST be at or above the retention floor, and the writer refuses a land whose fork point is below the floor. The land fails with `rebootstrap_required`. Every land from a fork is committed after the fork was made, so its sequence is above the fork point, and while the floor is at or below the fork point, compaction keeps every `lands` row of the fork. Without this rule, a compaction after the floor passed the fork's newest land would remove that land's row, the writer would expect the fork's next land to start at the fork point, and a land that applied the fork's landed commits again would be accepted. For example, a fork made at sequence 100 landed its commits 101 through 120 as this namespace's commit 300. Once the floor is above 100, the writer refuses the fork's next land with `rebootstrap_required`, whether the floor is at 150 (the row for commit 300 is still kept) or at 310 (a compaction can remove it).
+
 A rejected request isn't assigned a sequence number and creates no WAL record. Passing validation is only tentative acceptance, not success.
 
 ### 6.3 Publication and group commit
@@ -939,7 +944,7 @@ Every WAL commit and every `commit` row stores a semantic fingerprint (`semantic
 
 A "land" is a commit that applies a fork's commits to the namespace that the fork was forked from, and its commit record includes a land record that identifies the fork and the range of the fork's commits that it applied (see [WAL records](#a5-wal-records)). LoonFS plans a land's operations itself, from that fork and range, so a land's fingerprint covers its land record in place of its operations and preconditions. A retry of a land with the same commit ID and land record (and the same actor, subject, and message) is a replay, even if LoonFS planned different operations for it, and a request that reuses the commit ID for a different range returns `commit_id_reuse_conflict`. Leaving the operations out also means that a change in how LoonFS plans a land doesn't change the land's identity. [Land commits](#b5-land-commits) specifies the canonical bytes.
 
-The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families are one family group and follow the same retention rule, so a commit row is kept for as long as its receipt.
+The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families are one family group and follow the same retention rule, so a commit row is kept for as long as its receipt. The `lands` family is in the same group, so a land's index row is kept for as long as its commit row.
 
 While the receipt is kept:
 
@@ -1357,7 +1362,7 @@ Why is the acknowledged floor never above the retention floor? A WAL object's ba
 
 ### 10.2 Compaction windows
 
-Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group, because they MUST stay consistent with each other. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists the groups.
+Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group, because they MUST stay consistent with each other. The `commits`, `commit_receipts`, and `lands` families form another group, and each of the other seven groups contains one family. [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists the groups.
 
 A compaction merges a contiguous window of at most eight of a group's runs. The window either includes the group's oldest run or starts above it, and it can't skip a run in the middle.
 
@@ -1412,7 +1417,7 @@ These rules apply only when the selected inputs include the group's oldest run. 
 | `revisions` | For each file, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of a file that an expired deletion hides. |
 | `tombstones` | Keep every `set` and `revoke` event. |
 | `active_deletions` | Remove a cancelled `listed` and `removed` pair together, and remove the `listed` row of a deletion at or below the acknowledged floor. A deletion above the acknowledged floor keeps its `listed` row, even at or below the retention floor. |
-| `commits`, `commit_receipts` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it (in a fork, it's the source's commit at the fork point). |
+| `commits`, `commit_receipts`, `lands` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it (in a fork, it's the source's commit at the fork point). |
 | `content_layouts` | Keep the first row for each content ID, ordered by longest layout and then newest commit. Drop chains that aren't in the basis's revision filter (see below). |
 | `attributes` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of an inode that an expired deletion hides. |
 | `access` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of an inode that an expired deletion hides. |
@@ -2025,11 +2030,14 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_seq` |
 | `commit` | `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `land?`, `deltas` |
+| `land` | `source_namespace_id`, `committed_seq`, `source_after_seq`, `source_through_seq` |
 | `content_layout` | `content_id`, `committed_seq`, `size_bytes`, `layout` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
 
 A `commit` row is the WAL commit record from [WAL records](#a5-wal-records), without its inline content. The `inline_content` field is left out, and a row that includes one is invalid.
+
+A `land` row indexes one land by the fork that it applied. A fold, and a replay of the WAL tail, write one `land` row for each commit record that includes a land record, with the land record's fork and range and the commit's own sequence, and they write none for any other commit. A scan of one fork's prefix in `lands` returns that fork's lands newest first, so the first row is the fork's newest land.
 
 For a directory binding, `state` is `{"kind":"bound","display_name":...,"revision"?:...}` or `{"kind":"unbound"}`. A bound file row's `revision` is the file's revision summary, `{revision_no, size_bytes, revision_committed_by, revision_committed_at_ms}`, and a directory row has none. `bind_position` is a `DeltaPosition` value, `{seq, delta_index}`. Both binding families store the complete row.
 
@@ -2055,6 +2063,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id_body}-{sort_rank:010}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
 | `commits` | `commit-{committed_seq:020}` |
+| `lands` | `land-{source_namespace_id_hex}-{u64::MAX - committed_seq:020}` |
 | `content_layouts` | `content-layout-{content_id_body}-{u64::MAX - size_bytes:020}-{u64::MAX - committed_seq:020}` |
 | `attributes` | `attribute-{inode_id_body}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id_body}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
@@ -2068,7 +2077,7 @@ An edge's value at sequence `N` is the first row in key order whose `committed_s
 
 Compaction groups both families by edge, and it decides each row as it arrives, without keeping a row back. It also tracks the last edge bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index. Commit validation enforces one child per slot and one parent per child (see [Directory bindings](#13-directory-bindings)), so a second child bound in one slot at the floor, or a second parent bound for one child at the floor, is corruption, and compaction refuses it.
 
-Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. It scans an edge's binding rows and a root's tombstone events newest first too, because their keys subtract the sequence and the delta index from the maximum values. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
+Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. It scans an edge's binding rows and a root's tombstone events newest first too, because their keys subtract the sequence and the delta index from the maximum values, and a fork's lands newest first, because their keys subtract the sequence. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
 
 Bloom filters use these keys, which aren't always full row keys:
 
@@ -2082,6 +2091,7 @@ Bloom filters use these keys, which aren't always full row keys:
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id_body}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}` |
 | `commits` | The complete row key |
+| `lands` | `land-{source_namespace_id_hex}` |
 | `content_layouts` | `content-layout-{content_id_body}` |
 | `attributes` | `attribute-{inode_id_body}` |
 | `access` | `access-{inode_id_body}` |
@@ -2108,7 +2118,7 @@ The family groups are:
 | `inodes` | `inodes` |
 | `tombstones` | `tombstones` |
 | `active_deletions` | `active_deletions` |
-| `commits` | `commits`, `commit_receipts` |
+| `commits` | `commits`, `commit_receipts`, `lands` |
 | `content_layouts` | `content_layouts` |
 | `attributes` | `attributes` |
 | `access` | `access` |

@@ -251,12 +251,15 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         let baseline = CommitCandidate::new(request.clone());
         let baseline_bound = baseline.wal_record_bytes_upper_bound();
         let candidate = if kind == "land" {
-            baseline.with_land(LandRecord {
-                source_namespace_id: NamespaceId::parse("s".repeat(MAX_ID_BYTES))
-                    .expect("namespace"),
-                source_after_seq: ChangeSeq(MAX_PUBLIC_INTEGER - 1),
-                source_through_seq: ChangeSeq(MAX_PUBLIC_INTEGER),
-            })
+            baseline.with_land(
+                LandRecord {
+                    source_namespace_id: NamespaceId::parse("s".repeat(MAX_ID_BYTES))
+                        .expect("namespace"),
+                    source_after_seq: ChangeSeq(MAX_PUBLIC_INTEGER - 1),
+                    source_through_seq: ChangeSeq(MAX_PUBLIC_INTEGER),
+                },
+                ChangeSeq(MAX_PUBLIC_INTEGER - 1),
+            )
         } else if kind == "inline" {
             let candidate =
                 CommitCandidate::with_inline_content(request, Vec::new(), vec![inline.clone()]);

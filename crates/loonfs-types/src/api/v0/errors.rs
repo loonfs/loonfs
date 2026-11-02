@@ -151,6 +151,11 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub from_seq: Option<ChangeSeq>,
+    /// The fork point of the fork whose commits a land applies, which is the sequence of this
+    /// namespace that the fork was made at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub fork_point_seq: Option<ChangeSeq>,
     /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
     /// or any later one, and the feed returns the changes committed after it. A diff request can
     /// set `from_seq` to this sequence or any later one.
@@ -165,6 +170,19 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_deletion_seq: Option<ChangeSeq>,
+    /// The fork whose land didn't continue the previous land from that fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub source_namespace_id: Option<NamespaceId>,
+    /// The fork sequence that the land had to start after: the end of the previous land's range,
+    /// or the fork point for the fork's first land.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub expected_after_seq: Option<ChangeSeq>,
+    /// The fork sequence that the land started after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub actual_after_seq: Option<ChangeSeq>,
     /// The head sequence that the request required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]

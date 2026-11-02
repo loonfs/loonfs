@@ -276,7 +276,7 @@ async fn expire_docs_beside_recoverable_trash<S: ObjectStore>(
 }
 
 /// Every row of `family` in the current manifest.
-async fn family_rows<S: ObjectStore + ?Sized>(
+pub(super) async fn family_rows<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     family: ApiMetadataRowFamily,
@@ -304,9 +304,10 @@ fn row_inodes(row: &MetadataRow) -> Vec<InodeId> {
         }
         MetadataRow::Tombstone(record) => vec![record.root_inode_id],
         MetadataRow::ActiveDeletion(record) => vec![record.root_inode_id],
-        MetadataRow::CommitReceipt(_) | MetadataRow::Commit(_) | MetadataRow::ContentLayout(_) => {
-            Vec::new()
-        }
+        MetadataRow::CommitReceipt(_)
+        | MetadataRow::Commit(_)
+        | MetadataRow::Land(_)
+        | MetadataRow::ContentLayout(_) => Vec::new(),
     }
 }
 
@@ -1177,7 +1178,7 @@ async fn kept_inode_filter_and_walk_reads(
 }
 
 /// Base-compacts `group` over the current manifest and publishes the output.
-async fn compact_group<S: ObjectStore + ?Sized>(
+pub(super) async fn compact_group<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &WriterAt,

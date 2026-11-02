@@ -198,7 +198,7 @@ A row family that stores a second key over facts that another family stores, for
 
 ### Family group
 
-A set of related metadata row families that compaction always processes together, so that they stay consistent. For example, the two directory binding indexes form one group, and commits and commit receipts form another.
+A set of related metadata row families that compaction always processes together, so that they stay consistent. For example, the two directory binding indexes form one group, and commits, commit receipts, and the [land index](#land-index) form another.
 
 ### Fold
 
@@ -258,6 +258,10 @@ The member of a [fork family](#fork-family) that was created without a source. E
 ### Land
 
 A commit that applies a fork's commits to the namespace that the fork was forked from, so that the changes made in the fork appear in its source as one commit. The commit's record includes a "land record", which identifies the fork and the range of the fork's commits that the land applied: the commits above `source_after_seq`, through `source_through_seq`. For example, if `sandbox` was forked from `main` at sequence 100 and then committed sequences 101 through 120, a land of those commits is one commit on `main` whose land record is `sandbox`, 100, and 120. The change feed reports the land record with the commit, and a land's [semantic fingerprint](#semantic-fingerprint) covers its land record in place of its operations. See [Commit identity and retries](format.md#65-commit-identity-and-retries) and [WAL records](format.md#a5-wal-records).
+
+### Land index
+
+A derived row family (`lands`) with one row for each land that a namespace committed, keyed by the fork that the land applied and then by the land's sequence, newest first. Each row records the land's sequence and its land record's range. Before LoonFS commits a land, it reads the fork's newest row and checks that the new land starts where that land stopped (or at the fork point, for the fork's first land), so a fork's commits are applied once and in order. For example, if `main` committed a land of `sandbox`'s commits 101 through 120 at sequence 300, and a land of commits 121 through 140 at sequence 350, the first row under `sandbox` is the land at 350, and the next land from `sandbox` has to start after 140. See [Validation](format.md#62-validation) and [Metadata rows and row keys](format.md#a6-metadata-rows-and-row-keys).
 
 ### Writer position
 

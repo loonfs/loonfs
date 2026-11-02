@@ -143,6 +143,16 @@ pub enum CoreError {
         /// fingerprint lets a retry verify that it represents the same request.
         committed: Option<CommittedReceipt>,
     },
+    /// A land doesn't start where the previous land from its fork stopped,
+    /// or, for the fork's first land, at the fork point.
+    #[error(
+        "land from `{source_namespace_id}` starts after `{actual_after_seq}`, but it has to continue from `{expected_after_seq}`"
+    )]
+    LandRangeConflict {
+        source_namespace_id: NamespaceId,
+        expected_after_seq: ChangeSeq,
+        actual_after_seq: ChangeSeq,
+    },
     #[error(transparent)]
     ContentPreparation(#[from] ContentPreparationError),
     #[error("commit queue is full; slow down and retry")]
@@ -209,6 +219,17 @@ pub enum CoreError {
     #[error("diff start `{from_seq}` is older than retention floor `{retention_floor_seq}`")]
     DiffRebootstrapRequired {
         from_seq: ChangeSeq,
+        retention_floor_seq: ChangeSeq,
+    },
+    /// A land's fork point is below the retention floor, so a base
+    /// compaction might have removed the fork's previous land from the land
+    /// index. The error has the change feed's code, and its details include
+    /// `fork_point_seq` in place of the change feed's `after_seq`.
+    #[error(
+        "fork point `{fork_point_seq}` is older than retention floor `{retention_floor_seq}`, so the fork can't land"
+    )]
+    LandRebootstrapRequired {
+        fork_point_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
     /// A diff's `from_seq`, `to_seq`, or `after_seq` is out of order with the
@@ -467,6 +488,7 @@ impl CoreError {
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
             CoreError::BindingVersionMismatch { .. } => ErrorCode::BindingVersionMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
+            CoreError::LandRangeConflict { .. } => ErrorCode::LandRangeConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
@@ -487,9 +509,9 @@ impl CoreError {
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
-            CoreError::RebootstrapRequired { .. } | CoreError::DiffRebootstrapRequired { .. } => {
-                ErrorCode::RebootstrapRequired
-            }
+            CoreError::RebootstrapRequired { .. }
+            | CoreError::DiffRebootstrapRequired { .. }
+            | CoreError::LandRebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
@@ -572,6 +594,7 @@ impl CoreError {
             | CoreError::DestinationExists { .. }
             | CoreError::BindingVersionMismatch { .. }
             | CoreError::CommitIdReuseConflict { .. }
+            | CoreError::LandRangeConflict { .. }
             | CoreError::ContentPreparation(_)
             | CoreError::CommitQueueFull
             | CoreError::WriterSessionClosed { .. }
@@ -590,6 +613,7 @@ impl CoreError {
             | CoreError::InvalidDiffRange { .. }
             | CoreError::RebootstrapRequired { .. }
             | CoreError::DiffRebootstrapRequired { .. }
+            | CoreError::LandRebootstrapRequired { .. }
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
             | CoreError::OutcomeUnknown { .. }
@@ -635,6 +659,16 @@ impl CoreError {
                 committed: committed.clone(),
                 ..ErrorDetails::default()
             }),
+            CoreError::LandRangeConflict {
+                source_namespace_id,
+                expected_after_seq,
+                actual_after_seq,
+            } => Some(ErrorDetails {
+                source_namespace_id: Some(source_namespace_id.clone()),
+                expected_after_seq: Some(*expected_after_seq),
+                actual_after_seq: Some(*actual_after_seq),
+                ..ErrorDetails::default()
+            }),
             CoreError::RangeNotSatisfiable { size_bytes, .. } => Some(ErrorDetails {
                 size_bytes: Some(*size_bytes),
                 ..ErrorDetails::default()
@@ -652,6 +686,14 @@ impl CoreError {
                 retention_floor_seq,
             } => Some(ErrorDetails {
                 from_seq: Some(*from_seq),
+                retention_floor_seq: Some(*retention_floor_seq),
+                ..ErrorDetails::default()
+            }),
+            CoreError::LandRebootstrapRequired {
+                fork_point_seq,
+                retention_floor_seq,
+            } => Some(ErrorDetails {
+                fork_point_seq: Some(*fork_point_seq),
                 retention_floor_seq: Some(*retention_floor_seq),
                 ..ErrorDetails::default()
             }),

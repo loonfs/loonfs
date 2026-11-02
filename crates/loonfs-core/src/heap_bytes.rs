@@ -13,8 +13,9 @@ use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
     CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord, InodeRecord,
-    MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestEnvelope,
-    NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    LandIndexRecord, MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess,
+    NamespaceManifestEnvelope, NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord,
+    TombstoneRowAction,
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{
@@ -291,6 +292,7 @@ impl HeapBytes for MetadataRow {
             MetadataRow::Tombstone(record) => record.heap_bytes(),
             MetadataRow::ActiveDeletion(record) => record.heap_bytes(),
             MetadataRow::CommitReceipt(record) => record.heap_bytes(),
+            MetadataRow::Land(record) => record.heap_bytes(),
             MetadataRow::Commit(record) => record.heap_bytes(),
             MetadataRow::ContentLayout(record) => record.heap_bytes(),
             MetadataRow::AttributesRevision(record) => record.heap_bytes(),
@@ -386,6 +388,12 @@ impl HeapBytes for WalCommitPayload {
 }
 
 impl HeapBytes for LandRecord {
+    fn heap_bytes(&self) -> usize {
+        self.source_namespace_id.heap_bytes()
+    }
+}
+
+impl HeapBytes for LandIndexRecord {
     fn heap_bytes(&self) -> usize {
         self.source_namespace_id.heap_bytes()
     }

@@ -12,7 +12,7 @@ use loonfs_types::format::wal::{
     LandRecord, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
 use loonfs_types::{
-    CommitId, ContentId, ContentRef, FileContent, InlineContentIdentity, NamespaceId,
+    ChangeSeq, CommitId, ContentId, ContentRef, FileContent, InlineContentIdentity, NamespaceId,
 };
 use std::collections::{BTreeMap, HashSet};
 use thiserror::Error;
@@ -22,13 +22,24 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitCandidate {
     request: CandidateRequest,
-    /// The fork and the range of its commits that the commit applies, when
-    /// the commit is a land. The commit's identity is then its land record
-    /// in place of its operations and preconditions.
-    land: Option<LandRecord>,
+    /// The land that the commit is, if it's one. The commit's identity is
+    /// then its land record in place of its operations and preconditions.
+    land: Option<LandIntent>,
     pub(crate) content: ContentPreparation,
     pub(crate) inline_content: Vec<InlineContent>,
     inline_content_identities: BTreeMap<ContentId, InlineContentIdentity>,
+}
+
+/// A land's record and the fork point that the land's range is checked
+/// against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LandIntent {
+    /// The fork and the range of its commits that the land applies.
+    pub(crate) record: LandRecord,
+    /// The sequence of this namespace that the fork was made at, from the
+    /// fork's manifest (`fork_basis.source_head_seq`). The fork's first land
+    /// starts after it.
+    pub(crate) fork_point_seq: ChangeSeq,
 }
 
 /// What a candidate commits, and whose authority it commits under.
@@ -141,17 +152,20 @@ impl CommitCandidate {
         candidate
     }
 
-    /// Makes the candidate a land of `land`. A commit request has no land
-    /// record, so a land can't arrive from a request body.
+    /// Makes the candidate a land of `record`, from a fork made at
+    /// `fork_point_seq`. A commit request has no land record, so a land
+    /// can't arrive from a request body.
     #[cfg(test)]
-    pub(crate) fn with_land(mut self, land: LandRecord) -> Self {
-        self.land = Some(land);
+    pub(crate) fn with_land(mut self, record: LandRecord, fork_point_seq: ChangeSeq) -> Self {
+        self.land = Some(LandIntent {
+            record,
+            fork_point_seq,
+        });
         self
     }
 
-    /// The fork and the range of its commits that the commit applies, when
-    /// the commit is a land.
-    pub(crate) fn land(&self) -> Option<&LandRecord> {
+    /// The land that the commit is, if it's one.
+    pub(crate) fn land(&self) -> Option<&LandIntent> {
         self.land.as_ref()
     }
 
@@ -324,7 +338,7 @@ impl CommitCandidate {
     /// Computes semantic identity without applying current operational request limits.
     pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> CommitFingerprint {
         if let Some(land) = &self.land {
-            return land_fingerprint(namespace_id, self.intent(), land);
+            return land_fingerprint(namespace_id, self.intent(), &land.record);
         }
         commit_fingerprint(
             namespace_id,
@@ -394,7 +408,7 @@ impl CommitCandidate {
                 .saturating_add(
                     self.land
                         .as_ref()
-                        .map_or(0, |land| land.source_namespace_id.as_str().len()),
+                        .map_or(0, |land| land.record.source_namespace_id.as_str().len()),
                 ),
         );
         serde_json::to_writer(
@@ -476,7 +490,7 @@ impl CommitCandidate {
     ) -> usize {
         super::super::wal_size::estimated_wal_record_bytes(
             self.intent(),
-            self.land.as_ref(),
+            self.land.as_ref().map(|land| &land.record),
             inline_content,
         )
     }
@@ -490,7 +504,7 @@ impl CommitCandidate {
     ) -> usize {
         super::super::wal_size::planned_wal_record_bytes(
             self.intent(),
-            self.land.as_ref(),
+            self.land.as_ref().map(|land| &land.record),
             &self.inline_content,
             deltas,
             appended,

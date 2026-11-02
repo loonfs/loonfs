@@ -10,7 +10,7 @@ use crate::metadata::{
     ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
-use loonfs_types::format::manifest::MetadataRow;
+use loonfs_types::format::manifest::{LandIndexRecord, MetadataRow};
 use loonfs_types::format::wal::WalCommitPayload;
 
 /// The scanned segment can only contain `expected_kind` rows; the foreign row's
@@ -70,6 +70,13 @@ pub(crate) fn commit_receipt_from_manifest_row(row: MetadataRow) -> Result<Commi
     match row {
         MetadataRow::CommitReceipt(record) => Ok(record),
         other => Err(foreign_row("commit_receipt", &other)),
+    }
+}
+
+pub(crate) fn land_index_from_manifest_row(row: MetadataRow) -> Result<LandIndexRecord> {
+    match row {
+        MetadataRow::Land(record) => Ok(record),
+        other => Err(foreign_row("land", &other)),
     }
 }
 

@@ -14,8 +14,9 @@ use crate::namespace::state::NamespaceReadState;
 use crate::segment::VerifiedMetadataSegments;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::LandIndexRecord;
 use loonfs_types::format::wal::WalCommitPayload;
-use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, InodeId, NameKey};
+use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, InodeId, NameKey, NamespaceId};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -371,6 +372,31 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             manifest_index::commit_receipt(self.manifest_segments(), commit_id, self.visible_seq())
                 .await?,
             |receipt| receipt.committed_seq,
+        ))
+    }
+
+    /// Returns the newest land from `source_namespace_id` that the view
+    /// contains, from the land index.
+    pub(crate) async fn newest_land(
+        &self,
+        source_namespace_id: &NamespaceId,
+    ) -> Result<Option<LandIndexRecord>> {
+        let row_land = self
+            .row_states()
+            .flat_map(MetadataState::commits)
+            .filter(|commit| commit.committed_seq <= self.visible_seq())
+            .filter_map(LandIndexRecord::from_commit)
+            .filter(|land| land.source_namespace_id == *source_namespace_id)
+            .max_by_key(|land| land.committed_seq);
+        Ok(newest(
+            row_land,
+            manifest_index::newest_land(
+                self.manifest_segments(),
+                source_namespace_id,
+                self.visible_seq(),
+            )
+            .await?,
+            |land| land.committed_seq,
         ))
     }
 

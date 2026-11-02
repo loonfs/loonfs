@@ -254,6 +254,10 @@ pub(crate) fn append_rows_to_metadata(
             MetadataRowFamily::ActiveDeletions => {
                 row_decode::active_deletion_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
+            // Derived from the commit rows, the same way.
+            MetadataRowFamily::Lands => {
+                row_decode::land_index_from_manifest_row(row.clone()).map_err(mismatch)?;
+            }
             MetadataRowFamily::ContentLayouts => metadata_state.push_content_layout(
                 row_decode::content_layout_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),

@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 
 mod candidate;
 
-pub(crate) use self::candidate::ContentPreparation;
 pub use self::candidate::{CommitCandidate, ContentPreparationError};
+pub(crate) use self::candidate::{ContentPreparation, LandIntent};
 
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
