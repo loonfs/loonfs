@@ -129,7 +129,7 @@ LoonFS puts a limit on everything, so that the worst case is known in advance, a
 
 ### Time
 
-- **Read the clock and entropy only through boundary functions.** `clippy.toml` disallows ambient clocks, sleeps, timeouts, and `rand`, so that protocol code behaves the same way every time it runs with the same inputs. Each boundary function has a function-scoped `allow` with a reason.
+- **Read the clock and entropy only through boundary functions.** `clippy.toml` disallows ambient clocks, sleeps, timeouts, and random generators, so that protocol code behaves the same way every time it runs with the same inputs. Each boundary function has a function-scoped `allow` with a reason. Generated IDs draw their random bits from one process-wide source, which a host replaces with `install_entropy` to make a run repeatable.
 
 - **Use the injected `MonotonicTimer`, and make every timer a configured interval** instead of an ambient sleep.
 

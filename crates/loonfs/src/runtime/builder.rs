@@ -23,6 +23,14 @@ use std::sync::Arc;
 /// budget, and the metrics recorders. The writer ID exists only on the
 /// writable builder. [`Self::read_only`] turns a writable builder into a
 /// read-only one.
+///
+/// A host that injects the clocks with [`Self::monotonic_timer`] and
+/// [`Self::wall_clock`] to make a run repeatable also needs repeatable IDs,
+/// and those aren't a builder setting. Generated IDs (content, segment,
+/// upload, pin, and commit IDs, and the low word of every inode ID) draw
+/// their random bits from one process-wide entropy source, and
+/// [`loonfs_types::install_entropy`] replaces that source for every runtime
+/// in the process.
 #[must_use]
 pub struct LoonFsBuilder<M> {
     core: CoreConfig,

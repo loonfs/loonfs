@@ -11,5 +11,6 @@ disallowed-methods = [
   { path = "tokio::time::interval_at", reason = "use a named host timer boundary so protocol code does not grow ambient time dependencies" },
   { path = "tokio::time::timeout", reason = "use a named timer boundary, or the test-support bound in tests, so protocol code does not grow ambient time dependencies" },
   { path = "rand::random", reason = "use explicit seeded randomness or generated IDs with named entropy boundaries" },
+  { path = "getrandom::fill", reason = "draw random bytes through the installed entropy source so a host can make generated IDs repeatable" },
 ]
 allow-panic-in-tests = true
