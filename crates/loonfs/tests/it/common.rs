@@ -341,6 +341,7 @@ impl TestRuntime {
             .await
     }
 
+    /// Imports `content_ref` from `namespace_id` itself into a file there.
     pub(crate) async fn put_file_content_ref(
         &self,
         namespace_id: &NamespaceId,
@@ -350,7 +351,7 @@ impl TestRuntime {
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
         namespace
-            .put_file_content_ref(absolute_path, content_ref, actor)
+            .put_file_content_ref(absolute_path, content_ref, namespace_id, actor)
             .await
     }
 

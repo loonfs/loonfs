@@ -57,13 +57,11 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
     head.writer_epoch = WriterEpoch(MAX_PUBLIC_INTEGER);
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
-        owner_namespace_id: namespace_id.clone(),
         content_id: ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
         size_bytes: u64::MAX,
         checksum: Checksum::crc64nvme(b"content"),
     };
     let log_ref = ContentRef::blob_v1(
-        NamespaceId::parse("o".repeat(MAX_ID_BYTES)).expect("owner"),
         ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg").expect("content id"),
         b"log",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -116,9 +114,9 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 revision_no: RevisionNo(MAX_PUBLIC_INTEGER - 1),
                 content_ref: content_ref.clone(),
                 layout: Some(loonfs_types::ContentLayout {
+                    creator_namespace_id: namespace_id.clone(),
                     extents: (0..16)
                         .map(|index| loonfs_types::ContentExtent {
-                            owner_namespace_id: content_ref.owner_namespace_id.clone(),
                             content_id: content_ref.content_id.clone(),
                             object: loonfs_types::ExtentObject::Whole,
                             offset: 0,
@@ -172,8 +170,8 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 revision_no: RevisionNo(MAX_PUBLIC_INTEGER - MAX_COMMIT_OPERATIONS as u64),
                 content_ref: log_ref.clone(),
                 layout: Some(loonfs_types::ContentLayout {
+                    creator_namespace_id: namespace_id.clone(),
                     extents: vec![loonfs_types::ContentExtent {
-                        owner_namespace_id: log_ref.owner_namespace_id.clone(),
                         content_id: log_ref.content_id.clone(),
                         object: loonfs_types::ExtentObject::Whole,
                         offset: 0,
@@ -186,7 +184,6 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
     );
     for kind in ["attributes", "copy", "put", "inline", "append"] {
         let inline = InlineContent::new(
-            namespace_id.clone(),
             ContentId::generate(),
             bytes::Bytes::from(vec![
                 0;
@@ -235,11 +232,14 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                             "d/".repeat(loonfs_types::MAX_PATH_DEPTH - 1)
                         ))
                         .expect("path"),
-                        content: loonfs_types::FileContent::Ref(if kind == "inline" {
-                            inline.content_ref().clone()
-                        } else {
-                            content_ref.clone()
-                        }),
+                        content: loonfs_types::FileContent::Ref {
+                            content_ref: if kind == "inline" {
+                                inline.content_ref().clone()
+                            } else {
+                                content_ref.clone()
+                            },
+                            source_namespace_id: None,
+                        },
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -277,7 +277,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             &head,
             &tail,
             MetadataView::in_memory(&manifest, &base, None, head.seq),
-            ContentWrites::new(&store, &content_writes),
+            ContentWrites::new(&store, &content_writes, &head),
             u64::MAX,
         );
         let plan = session

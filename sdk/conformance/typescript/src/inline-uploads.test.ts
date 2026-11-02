@@ -53,7 +53,6 @@ for (const fixture of cases) {
         digest.update(content);
         const claim = {
             kind: "blob_v1",
-            owner_namespace_id: "demo",
             content_id: "con_00000000000000000000000001",
             size_bytes: content.length,
             checksum: digest.finish(),

@@ -54,6 +54,29 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
         .boxed())
 }
 
+/// Verifies that the bytes at `location` match the size and checksum of
+/// `content_ref`, by reading them with the stream that an import copies them
+/// with, and discarding them.
+pub(crate) async fn verify_content_import<S: ObjectStore>(
+    store: S,
+    location: ContentLocation,
+    content_ref: &ContentRef,
+) -> std::result::Result<(), DurableContentValidationError> {
+    let mut source = FileContentStream::open_inner(
+        store,
+        location,
+        None,
+        content_ref.clone(),
+        CONTENT_READ_CHUNK_BYTES,
+        StreamRange::Whole { start_offset: 0 },
+    )
+    .await?;
+    // Each chunk moves the stream toward the end of the content, and the
+    // stream returns `None` only after it verifies the size and checksum.
+    while source.next_verified_chunk().await?.is_some() {}
+    Ok(())
+}
+
 /// The bytes of a file that a [`FileContentStream`] returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamRange {
@@ -345,7 +368,7 @@ impl<S> std::fmt::Debug for FileContentStream<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::content::tests::{put_content_object, test_store};
+    use super::super::content::tests::{family_root_id, put_content_object, test_store};
     use super::*;
 
     use loonfs_objectstore::keys::content_blob;
@@ -379,7 +402,6 @@ mod tests {
                 revision_no: loonfs_types::RevisionNo(1),
                 size_bytes: 0,
                 content_ref: Some(ContentRef::blob_v1(
-                    loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                     loonfs_types::ContentId::generate(),
                     b"",
                     loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -420,7 +442,7 @@ mod tests {
             .expect("the test opens a range inside the content");
         FileContentStream::open_inner(
             store,
-            super::ContentLocation::whole(content_ref),
+            super::ContentLocation::whole(&family_root_id(), content_ref),
             Some(test_entry()),
             content_ref.clone(),
             test_chunk_bytes(),
@@ -443,7 +465,7 @@ mod tests {
         let bytes = payload(3 * TEST_CHUNK_BYTES + 7);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
-        let key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
+        let key = content_blob(&family_root_id(), &content_ref.content_id);
         let start = TEST_CHUNK_BYTES / 2;
         let end = start + TEST_CHUNK_BYTES + 10;
 
@@ -485,7 +507,6 @@ mod tests {
         let mut planted = bytes.clone();
         planted[0] ^= 0xff;
         let planted_ref = ContentRef::blob_v1(
-            expected.owner_namespace_id.clone(),
             expected.content_id.clone(),
             &planted,
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -781,7 +802,6 @@ mod tests {
         let bytes = payload(2 * TEST_CHUNK_BYTES + 5);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(&bytes),
@@ -837,7 +857,6 @@ mod tests {
         let bytes = payload(2 * TEST_CHUNK_BYTES);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: checksum(&bytes),
@@ -897,7 +916,6 @@ mod tests {
         let mut planted = bytes.clone();
         planted[0] ^= 0xff;
         let planted_ref = ContentRef::blob_v1(
-            expected.owner_namespace_id.clone(),
             expected.content_id.clone(),
             &planted,
             loonfs_types::ChecksumAlgorithm::Crc64nvme,

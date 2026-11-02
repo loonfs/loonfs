@@ -65,11 +65,8 @@ fn assert_no_content_requests(store: &RecordingStore<LocalFsStore>) {
 async fn every_read_verifies_tail_content_without_requesting_an_object() {
     let (_directory, store, mut publisher, writer) = setup().await;
     let values = vec![
-        inline(
-            &publisher.namespace.namespace_id,
-            Bytes::from_static(b"inline bytes"),
-        ),
-        inline(&publisher.namespace.namespace_id, Bytes::new()),
+        inline(Bytes::from_static(b"inline bytes")),
+        inline(Bytes::new()),
     ];
     publish(&mut publisher, &writer, candidate("read", values.clone()))
         .await
@@ -194,10 +191,7 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
 #[tokio::test]
 async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     let (_directory, store, mut publisher, writer) = setup().await;
-    let value = inline(
-        &publisher.namespace.namespace_id,
-        Bytes::from_static(b"owned bytes"),
-    );
+    let value = inline(Bytes::from_static(b"owned bytes"));
     let result = publisher
         .publish_batch([candidate("owned", vec![value.clone()])], &writer.clock())
         .await;
@@ -262,10 +256,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     let old_tail = Arc::as_ptr(&tail) as usize;
     // Holding the tail here would make the publish copy it.
     drop((tail, context));
-    let later = inline(
-        &publisher.namespace.namespace_id,
-        Bytes::from_static(b"later"),
-    );
+    let later = inline(Bytes::from_static(b"later"));
     let published = publisher
         .publish_batch([candidate("later", vec![later])], &writer.clock())
         .await;
@@ -283,10 +274,7 @@ async fn a_publish_shares_every_earlier_chunk_with_a_tail_a_reader_holds() {
     let (_directory, _store, mut publisher, writer) = setup().await;
     let mut tails = Vec::new();
     for name in ["first", "second"] {
-        let value = inline(
-            &publisher.namespace.namespace_id,
-            Bytes::from_static(b"bytes"),
-        );
+        let value = inline(Bytes::from_static(b"bytes"));
         let published = publisher
             .publish_batch([candidate(name, vec![value])], &writer.clock())
             .await;
@@ -309,10 +297,7 @@ async fn a_publish_shares_every_earlier_chunk_with_a_tail_a_reader_holds() {
 #[tokio::test]
 async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     let (_directory, store, mut publisher, writer) = setup().await;
-    let value = inline(
-        &publisher.namespace.namespace_id,
-        Bytes::from_static(b"copied"),
-    );
+    let value = inline(Bytes::from_static(b"copied"));
     publish(
         &mut publisher,
         &writer,
@@ -371,10 +356,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
         publisher.writer_position().expect("publish tail").tail
     );
 
-    let later = inline(
-        &publisher.namespace.namespace_id,
-        Bytes::from_static(b"later"),
-    );
+    let later = inline(Bytes::from_static(b"later"));
     publish(&mut publisher, &writer, candidate("later", vec![later]))
         .await
         .expect("later publish");
@@ -408,10 +390,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
 #[tokio::test]
 async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write() {
     let (_directory, store, mut publisher, writer) = setup().await;
-    let value = inline(
-        &publisher.namespace.namespace_id,
-        Bytes::from_static(b"local"),
-    );
+    let value = inline(Bytes::from_static(b"local"));
     publish(
         &mut publisher,
         &writer,
@@ -423,12 +402,11 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
     let engine =
         NamespaceEngine::reader(caching_namespace(&store, &publisher.namespace.namespace_id));
     let foreign = ContentRef::blob_v1(
-        NamespaceId::parse("foreign").expect("owner"),
         value.content_ref().content_id.clone(),
         b"foreign",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
-    let key = content_blob(&foreign.owner_namespace_id, &foreign.content_id);
+    let key = content_blob(&family_root_id(), &foreign.content_id);
     store
         .put(
             &key,
@@ -456,6 +434,7 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
             put("/object", stored.content_ref()),
         ),
         vec![PreparedContent::for_durable_content_write(
+            publisher.namespace.namespace_id.clone(),
             stored.content_ref().clone(),
         )],
     );
@@ -485,10 +464,7 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
 #[tokio::test]
 async fn inline_checksum_failures_match_object_validation() {
     let (_directory, store, mut publisher, writer) = setup().await;
-    let value = inline(
-        &publisher.namespace.namespace_id,
-        Bytes::from_static(b"right"),
-    );
+    let value = inline(Bytes::from_static(b"right"));
     publish(
         &mut publisher,
         &writer,
@@ -573,7 +549,7 @@ async fn inline_checksum_failures_match_object_validation() {
         .put(&key, Bytes::from_static(b"wrong"), PutMode::CreateIfAbsent)
         .await
         .expect("bad object");
-    let expected = ContentLocation::whole(&corrupt_ref)
+    let expected = ContentLocation::whole(&family_root_id(), &corrupt_ref)
         .read_bytes(&store, None, &corrupt_ref)
         .await
         .expect_err("object mismatch");
@@ -588,11 +564,8 @@ async fn inline_checksum_failures_match_object_validation() {
 async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() {
     let (_directory, store, mut publisher, context) = setup().await;
     let values = vec![
-        inline(&publisher.namespace.namespace_id, Bytes::new()),
-        inline(
-            &publisher.namespace.namespace_id,
-            Bytes::from_static(b"materialized"),
-        ),
+        inline(Bytes::new()),
+        inline(Bytes::from_static(b"materialized")),
     ];
     publish(&mut publisher, &context, candidate("fold", values.clone()))
         .await

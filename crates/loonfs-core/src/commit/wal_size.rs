@@ -69,7 +69,6 @@ const TOMBSTONE_BYTES: usize = delta_bytes(
 const DELETE_BYTES: usize = UNBIND_BYTES + TOMBSTONE_BYTES;
 const CONTENT_REF_BYTES: usize = cbor_map_bytes(&[
     ("kind", cbor_string_bytes("blob_v1".len())),
-    ("owner_namespace_id", cbor_string_bytes(MAX_ID_BYTES)),
     ("content_id", cbor_string_bytes(MAX_ID_BYTES)),
     ("size_bytes", INTEGER_BYTES),
     (
@@ -116,8 +115,12 @@ const APPEND_PIECE_BYTES: usize = cbor_map_bytes(&[
     ("offset", INTEGER_BYTES),
     ("bytes", cbor_string_bytes(0)),
 ]);
+/// A layout without its extents: the creator and the extent array's header.
+const LAYOUT_BYTES: usize = cbor_map_bytes(&[
+    ("creator_namespace_id", cbor_string_bytes(MAX_ID_BYTES)),
+    ("extents", 9),
+]);
 const EXTENT_BYTES: usize = cbor_map_bytes(&[
-    ("owner_namespace_id", cbor_string_bytes(MAX_ID_BYTES)),
     ("content_id", cbor_string_bytes(MAX_ID_BYTES)),
     (
         "object",
@@ -140,7 +143,7 @@ fn carried_layout_bytes(deltas: &[WalCommitDelta]) -> usize {
                 ..
             } => bytes
                 .saturating_add(cbor_string_bytes("layout".len()))
-                .saturating_add(cbor_map_bytes(&[("extents", 9)]))
+                .saturating_add(LAYOUT_BYTES)
                 .saturating_add(layout.extents.len().saturating_mul(EXTENT_BYTES)),
             _ => bytes,
         })

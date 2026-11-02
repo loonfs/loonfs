@@ -37,7 +37,7 @@ fn content_namespace(key: &str) -> Option<String> {
     if let Some(parsed) =
         parse_object_key(key).filter(|parsed| parsed.family() == DurableObjectFamily::ContentBlob)
     {
-        return Some(parsed.owner_namespace_id().to_owned());
+        return Some(parsed.prefix_namespace_id().to_owned());
     }
     parse_key(key)
         .filter(|parsed| matches!(parsed.kind, GrepKeyKind::Segment { .. }))

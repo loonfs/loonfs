@@ -40,13 +40,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             open_owned_staging_session(&self.namespace.store, catalog, subject_id, &clock).await?;
         let stored = stage_bytes_under_content_id(
             &self.namespace.store,
-            catalog.namespace_id().clone(),
+            catalog.family_root_id(),
             session.content_id.clone(),
             bytes,
         )
         .await?;
         self.namespace
-            .complete_owned_staging(&session, stored.content_ref, &clock)
+            .complete_owned_staging(catalog, &session, stored.content_ref, &clock)
             .await
     }
 
@@ -73,34 +73,31 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .await
     }
 
-    /// Imports existing content under a fresh identity owned by this
-    /// namespace.
+    /// Imports existing content from another fork family under a fresh
+    /// identity in this namespace's fork family.
     ///
-    /// A content reference locates bytes but does not identify the namespace
-    /// whose upload session keeps them alive. This streams the source bytes
-    /// chunk by chunk into a new local upload session, verifying the claimed
-    /// size and checksum against what was staged, so collection in the source
-    /// namespace cannot invalidate a later publication here. `owner_location`
-    /// is where the owner's view finds the bytes; without one, they are read
-    /// from the content object.
+    /// A reference into another fork family's prefix would point at objects
+    /// whose collection pass doesn't read this namespace's roots. This streams
+    /// the source bytes chunk by chunk into a new local upload session,
+    /// verifying the claimed size and checksum against what was staged, so
+    /// collection in the source's family cannot invalidate a later
+    /// publication here. `source_location` is where the source's view finds
+    /// the bytes.
     pub async fn import_content_ref(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         subject_id: Option<&SubjectId>,
         content_ref: &ContentRef,
-        owner_location: Option<ContentLocation>,
+        source_location: ContentLocation,
     ) -> Result<PreparedContent>
     where
         S: Clone + 'static,
     {
         let catalog = self.own_catalog(catalog);
         let clock = self.namespace.start_clock();
-        let location = match owner_location {
-            Some(location) => location,
-            None => ContentLocation::whole(content_ref),
-        };
         let body =
-            open_content_import_reader(self.namespace.store.clone(), location, content_ref).await?;
+            open_content_import_reader(self.namespace.store.clone(), source_location, content_ref)
+                .await?;
         let _permit = self.namespace.content_writes.acquire().await;
         self.namespace
             .stage_owned_stream(
@@ -131,11 +128,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let session = open_owned_staging_session(&self.store, catalog, subject_id, clock).await?;
         let staged = stage_streamed_under_content_id(
             &self.store,
-            catalog.namespace_id().clone(),
+            catalog.family_root_id(),
             session.content_id.clone(),
             body,
             payload_kind,
-            self.ensure_session_still_open(&session.upload_id, clock),
+            self.ensure_session_still_open(catalog, &session.upload_id, clock),
         )
         .await?;
         if staged.already_present {
@@ -144,13 +141,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             // replay, and it fails loudly.
             return Err(CoreError::NamespaceCorrupt(format!(
                 "content object `{}` already holds bytes under a freshly minted identity",
-                content_blob(
-                    &staged.content_ref.owner_namespace_id,
-                    &staged.content_ref.content_id
-                )
+                content_blob(catalog.family_root_id(), &staged.content_ref.content_id)
             )));
         }
-        self.complete_owned_staging(&session, staged.content_ref, clock)
+        self.complete_owned_staging(catalog, &session, staged.content_ref, clock)
             .await
     }
 }
@@ -186,12 +180,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// and garbage collection removes its object.
     async fn complete_owned_staging(
         &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
         session: &UploadSessionPayload,
         written: ContentRef,
         clock: &OperationClock,
     ) -> Result<PreparedContent> {
         Ok(self
-            .record_completion(session, written, clock)
+            .record_completion(catalog.family_root_id(), session, written, clock)
             .await?
             .prepared)
     }

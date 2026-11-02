@@ -141,7 +141,10 @@ impl VisibilityHarness {
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(path).expect("valid path"),
-                    content: loonfs_types::FileContent::Ref(content_ref),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref,
+                        source_namespace_id: None,
+                    },
                     behavior,
                     expected_inode_id: None,
                     expected_revision_no: None,

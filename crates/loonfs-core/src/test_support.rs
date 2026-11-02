@@ -90,11 +90,12 @@ pub(crate) fn proxied_upload_session(
 }
 
 /// Writes an upload session's record, and its outcome record when `outcome`
-/// is set, as a session that ended that way leaves them. Returns the key of
-/// the session record.
+/// is set, under the prefix of `family_root_id`, as a session that ended that
+/// way leaves them. Returns the key of the session record.
 #[cfg(test)]
 pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
+    family_root_id: &NamespaceId,
     session: &loonfs_types::format::control::UploadSessionPayload,
     outcome: Option<loonfs_types::format::control::UploadOutcome>,
 ) -> String {
@@ -102,7 +103,7 @@ pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?S
     use loonfs_types::format::control::{
         encode_control_state, ControlObjectKind, UploadOutcomePayload,
     };
-    let key = loonfs_objectstore::keys::upload_session(&session.namespace_id, &session.upload_id);
+    let key = loonfs_objectstore::keys::upload_session(family_root_id, &session.upload_id);
     let bytes =
         encode_control_state(ControlObjectKind::UploadSession, session).expect("encode session");
     store
@@ -119,10 +120,7 @@ pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?S
             .expect("encode outcome");
         store
             .put_if_absent(
-                &loonfs_objectstore::keys::upload_outcome(
-                    &session.namespace_id,
-                    &session.upload_id,
-                ),
+                &loonfs_objectstore::keys::upload_outcome(family_root_id, &session.upload_id),
                 bytes::Bytes::from(bytes),
             )
             .await
@@ -198,6 +196,7 @@ pub fn content_head<S: ObjectStore + ?Sized>(
         .now_or_never()
         .expect("a view over a manifest without runs should answer without waiting")
         .expect("a view over a manifest without runs should not fail")
+        .map(|head| head.size_bytes)
 }
 
 mod content_write;

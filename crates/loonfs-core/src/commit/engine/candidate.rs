@@ -171,13 +171,9 @@ impl CommitCandidate {
     }
 
     /// Lists inline values in the order their operations first name them.
-    pub fn ordered_inline_content(&self, namespace_id: &NamespaceId) -> Result<Vec<InlineContent>> {
+    pub fn ordered_inline_content(&self) -> Result<Vec<InlineContent>> {
         let intent = self.intent();
-        super::super::candidates::validate_inline_content_references(
-            intent,
-            &self.inline_content,
-            namespace_id,
-        )?;
+        super::super::candidates::validate_inline_content_references(intent, &self.inline_content)?;
         let mut values: std::collections::HashMap<_, _> = self
             .inline_content
             .iter()
@@ -197,15 +193,15 @@ impl CommitCandidate {
         for operation in &mut self.request.intent_mut().operations {
             match operation {
                 FilesystemOperation::PutFile {
-                    content: FileContent::Ref(content_ref),
+                    content: FileContent::Ref { content_ref, .. },
                     ..
                 }
                 | FilesystemOperation::CreateFileByInode {
-                    content: FileContent::Ref(content_ref),
+                    content: FileContent::Ref { content_ref, .. },
                     ..
                 }
                 | FilesystemOperation::PutFileRevisionByInode {
-                    content: FileContent::Ref(content_ref),
+                    content: FileContent::Ref { content_ref, .. },
                     ..
                 } if &content_ref.content_id == content_id => *content_ref = reference.clone(),
                 _ => {}
@@ -228,9 +224,12 @@ impl CommitCandidate {
         }
     }
 
+    /// Returns the layout that a revision of `content_ref` records in a commit
+    /// of `namespace_id`, from the proof that prepared the reference.
     pub(crate) fn revision_layout(
         &self,
         content_ref: &ContentRef,
+        namespace_id: &NamespaceId,
     ) -> Option<loonfs_types::ContentLayout> {
         let ContentPreparation::Ready(proofs) = &self.content else {
             return None;
@@ -238,15 +237,7 @@ impl CommitCandidate {
         proofs
             .iter()
             .find(|proof| proof.content_ref() == content_ref)
-            .map(|_| loonfs_types::ContentLayout {
-                extents: vec![loonfs_types::ContentExtent {
-                    owner_namespace_id: content_ref.owner_namespace_id.clone(),
-                    content_id: content_ref.content_id.clone(),
-                    object: loonfs_types::ExtentObject::Whole,
-                    offset: 0,
-                    length: content_ref.size_bytes,
-                }],
-            })
+            .and_then(|proof| proof.revision_layout(namespace_id))
     }
 
     /// Request bytes before planning adds any resident bytes a fresh chain copies.
@@ -345,7 +336,6 @@ impl CommitCandidate {
     /// Estimates retained bytes after selected inline values are staged.
     pub fn estimated_retained_bytes_after_inline_staging(
         &self,
-        namespace_id: &NamespaceId,
         retained_inline_content: &[InlineContent],
         staged_inline_content: &[InlineContent],
     ) -> Result<usize> {
@@ -360,7 +350,6 @@ impl CommitCandidate {
             for value in staged_inline_content {
                 bytes = bytes
                     .saturating_add(PreparedContent::estimated_owned_staging_payload_bytes(
-                        namespace_id,
                         value,
                     ))
                     .saturating_add(std::mem::size_of::<ContentId>())

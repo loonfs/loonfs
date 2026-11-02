@@ -83,7 +83,7 @@ fn grants(principal: &str, rights: &[AccessRight]) -> AccessRevisionRecord {
 /// has expired and the deletion of `/keep` is recoverable. Ada has a direct
 /// grant on `/old/notes.txt`, which the access group still stores, and one
 /// on `/keep`.
-fn compacted_bindings_state(namespace_id: &NamespaceId) -> MetadataState {
+fn compacted_bindings_state() -> MetadataState {
     let mut builder = MetadataStateBuilder::default();
     for inode_id in [ROOT, OLD, NOTES, KEEP, KEPT_FILE] {
         builder.push_inode(InodeRecord {
@@ -121,7 +121,6 @@ fn compacted_bindings_state(namespace_id: &NamespaceId) -> MetadataState {
             committed_by: ActorId::loonfs(),
             delta_index: 0,
             content_ref: ContentRef::blob_v1(
-                namespace_id.clone(),
                 ContentId::parse("con_00000000000000000000000000").expect("content"),
                 b"text",
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -159,7 +158,7 @@ async fn a_read_by_inode_whose_ancestry_was_compacted_away_is_refused_for_every_
             head: &head,
             basis_manifest_no: None,
             retention_floor_seq: FLOOR,
-            metadata_state: &compacted_bindings_state(&namespace_id),
+            metadata_state: &compacted_bindings_state(),
         },
         MetadataRunPolicy::default(),
         ManifestNo(current.manifest.manifest().manifest_no.0 + 1),

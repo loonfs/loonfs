@@ -159,7 +159,6 @@ mod tests {
 
     fn content_ref() -> ContentRef {
         ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
@@ -169,7 +168,6 @@ mod tests {
     fn content_ref_json() -> serde_json::Value {
         serde_json::json!({
             "kind": "blob_v1",
-            "owner_namespace_id": "demo",
             "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
             "size_bytes": 5,
             "checksum": {

@@ -10,8 +10,8 @@ use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::control::PinOwner;
 use std::assert_matches;
 
-fn replace(namespace_id: &NamespaceId, bytes: &'static [u8]) -> CommitCandidate {
-    let value = inline(namespace_id, Bytes::from_static(bytes));
+fn replace(bytes: &'static [u8]) -> CommitCandidate {
+    let value = inline(Bytes::from_static(bytes));
     CommitCandidate::with_inline_content(
         CommitIntent::single(
             CommitId::parse("reused").expect("commit id"),
@@ -19,7 +19,10 @@ fn replace(namespace_id: &NamespaceId, bytes: &'static [u8]) -> CommitCandidate 
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/file").expect("path"),
-                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: value.content_ref().clone(),
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -78,10 +81,7 @@ async fn compact_and_check_pair(
 async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
-    let filler = candidate(
-        "filler",
-        vec![inline(&namespace_id, Bytes::from_static(b"padding"))],
-    );
+    let filler = candidate("filler", vec![inline(Bytes::from_static(b"padding"))]);
     publish(&mut engine, &context, filler)
         .await
         .expect("first run");
@@ -89,7 +89,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .fold_wal()
         .await
         .expect("first fold");
-    let request = replace(&namespace_id, b"before");
+    let request = replace(b"before");
     let old_reference = request.inline_content()[0].content_ref().clone();
     let original = publish(&mut engine, &context, request)
         .await
@@ -128,7 +128,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     .await;
 
     // Staging changes the object ID but must preserve the inline request identity.
-    let mut staged_retry = replace(&namespace_id, b"before");
+    let mut staged_retry = replace(b"before");
     let identity = staged_retry.semantic_identity(&namespace_id);
     let inline_id = staged_retry.inline_content()[0]
         .content_ref()
@@ -140,7 +140,10 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .expect("fallback content");
     staged_retry.stage_inline_content(
         &inline_id,
-        PreparedContent::for_durable_content_write(stored.content_ref().clone()),
+        PreparedContent::for_durable_content_write(
+            namespace_id.clone(),
+            stored.content_ref().clone(),
+        ),
     );
     assert_eq!(staged_retry.semantic_identity(&namespace_id), identity);
     engine.invalidate_projection();
@@ -153,10 +156,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     );
     assert_no_writes(&store);
 
-    let later = candidate(
-        "later",
-        vec![inline(&namespace_id, Bytes::from_static(b"later"))],
-    );
+    let later = candidate("later", vec![inline(Bytes::from_static(b"later"))]);
     let later = publish(&mut engine, &context, later)
         .await
         .expect("advance history");
@@ -217,7 +217,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     drop(current);
 
     engine.invalidate_projection();
-    let reused = publish(&mut engine, &context, replace(&namespace_id, b"after"))
+    let reused = publish(&mut engine, &context, replace(b"after"))
         .await
         .expect("a pruned ID can identify a new mutation");
     assert_eq!(reused.committed_seq, ChangeSeq(later.committed_seq.0 + 1));
@@ -248,13 +248,13 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     engine.invalidate_projection();
     store.reset();
     assert_eq!(
-        publish(&mut engine, &context, replace(&namespace_id, b"after"))
+        publish(&mut engine, &context, replace(b"after"))
             .await
             .expect("new receipt replay"),
         reused
     );
     assert_matches!(
-        publish(&mut engine, &context, replace(&namespace_id, b"before")).await,
+        publish(&mut engine, &context, replace(b"before")).await,
         Err(CoreError::CommitIdReuseConflict {
             committed: Some(loonfs_types::CommittedReceipt { committed_seq: seq, .. }),
             ..

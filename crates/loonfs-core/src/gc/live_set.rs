@@ -38,14 +38,43 @@ use std::pin::pin;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum RetirementStatus {
+pub(crate) enum RetirementStatus {
     Active,
     Retained { reclaimable_at_ms: Option<u64> },
     Eligible,
 }
 
+impl RetirementStatus {
+    /// Returns the [retirement](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#95-retirement)
+    /// status at `now_ms` of a namespace whose current manifest is `tombstone`
+    /// when the namespace is deleted, and whose complete pin listing returned
+    /// a key when `pinned`.
+    pub(super) fn of(
+        tombstone: Option<&NamespaceManifestPayload>,
+        pinned: bool,
+        retirement_grace_window_ms: u64,
+        now_ms: u64,
+    ) -> Self {
+        let Some(tombstone) = tombstone else {
+            return Self::Active;
+        };
+        let deadline_ms = retirement_deadline_ms(tombstone, retirement_grace_window_ms);
+        if now_ms < deadline_ms {
+            Self::Retained {
+                reclaimable_at_ms: Some(deadline_ms),
+            }
+        } else if pinned {
+            Self::Retained {
+                reclaimable_at_ms: None,
+            }
+        } else {
+            Self::Eligible
+        }
+    }
+}
+
 /// Whose roots one read adds to the live set.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Roots {
     /// The namespace that the pass collects, when it was forked from another
     /// namespace.
@@ -75,10 +104,15 @@ impl Roots {
 pub(super) struct ListedPins {
     /// Whether the listing returned any key, recognized or not, which keeps a
     /// tombstone from retirement.
-    any_key: bool,
+    pub(super) any_key: bool,
 }
 
 pub(super) struct LiveSet {
+    /// Whether the collected namespace is a fork or the root of its fork
+    /// family. Only the pass on a family root collects content and upload
+    /// records, because the family root's prefix stores them for the whole
+    /// family.
+    pub(super) collected: Roots,
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: ChargedSet<String>,
@@ -101,15 +135,16 @@ pub(super) struct LiveSet {
     pub(super) content_layout_rows: u64,
     /// What the pass read of its fork family's roots.
     pub(super) family: FamilyWalkReport,
-    /// Every member of the fork family that the walk has found, the family
-    /// root included. The pass on a fork finds no members.
+    /// The collected namespace, and on a family root's pass every other
+    /// member of the fork family that the walk has found.
     pub(super) members: ChargedMap<NamespaceId, MemberState>,
     /// The members whose roots the pass hasn't read yet, in the order that
     /// the fork pin listings found them.
     pub(super) member_queue: ChargedQueue<NamespaceId>,
     has_pins: bool,
-    grace_window_ms: u64,
-    now_ms: u64,
+    /// The configured grace, or the retirement grace when that's longer.
+    pub(super) retirement_grace_window_ms: u64,
+    pub(super) now_ms: u64,
     live_folded_wal_no: Option<WalNo>,
 }
 
@@ -139,16 +174,16 @@ impl LiveSet {
         };
         // Sessions are listed before the WAL tail is read. A session this pass
         // misses is newer than the pass, or it ended before the tail read and
-        // the tail or a rooted manifest names every commit of its content. A
-        // deleted family root's pass still sweeps content, so its sessions are
-        // still roots.
+        // the tail or a rooted manifest names every commit of its content. Only
+        // a family root's prefix stores upload sessions, and a deleted family
+        // root's pass still sweeps content, so its sessions are still roots.
         let memory = PassMemory::new(
             namespace_id,
             read_working_memory(Some(namespace.segment_cache.as_ref())),
         );
         let mut content_ids = ChargedSet::new(&memory);
         let mut completed_sessions = ChargedMap::new(&memory);
-        if roots == Roots::CollectedFamilyRoot || !manifest.payload().status.is_deleted() {
+        if roots == Roots::CollectedFamilyRoot {
             namespace
                 .load_upload_sessions(session_cache, |listed| match listed {
                     ListedUploadSession::Completed { upload_id, session } => {
@@ -166,6 +201,7 @@ impl LiveSet {
             .await?;
         let head = anchor.manifest.payload();
         let mut live = Self {
+            collected: roots,
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
             objects: ChargedSet::new(&memory),
@@ -180,16 +216,14 @@ impl LiveSet {
             manifest_charge: Charge::new(&memory),
             memory,
             has_pins: false,
-            grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
+            retirement_grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
             now_ms: clock.request_at_ms(),
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
-        // The family root is a member before its pin listing, so that a fork
-        // pin can't add it to the walk's queue.
-        if roots == Roots::CollectedFamilyRoot {
-            live.members
-                .insert(namespace_id.clone(), MemberState::Read)?;
-        }
+        // The collected namespace is a member before its pin listing, so that
+        // a fork pin can't add it to the walk's queue.
+        live.members
+            .insert(namespace_id.clone(), MemberState::Collected)?;
         let pins = live
             .load_namespace_roots(namespace, &anchor, roots, grace_window_ms, clock)
             .await?;
@@ -220,7 +254,7 @@ impl LiveSet {
             .content_layout_rows
             .saturating_add(content_layout_rows(head));
         // A tombstone roots its runs like any current manifest: an import from
-        // a deleted owner is still authorized against its final access state.
+        // a deleted source is still authorized against its final access state.
         self.protect_manifest(&anchor.manifest, roots)?;
         // A tombstone's runs cover its whole WAL, so it has no tail.
         if !head.status.is_deleted() {
@@ -445,31 +479,38 @@ impl LiveSet {
             }
     }
 
-    pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {
-        tombstone
-            .status
-            .deleted_at_ms()
-            .expect("a tombstone should carry its deletion stamp")
-            .saturating_add(self.grace_window_ms)
+    /// Returns whether the pass collects content and upload records, which
+    /// only the pass on a family root does.
+    pub(super) fn collects_family_content(&self) -> bool {
+        self.collected == Roots::CollectedFamilyRoot
     }
 
-    pub(super) fn retirement_status(&self) -> RetirementStatus {
-        let Some(tombstone) = &self.current_tombstone else {
-            return RetirementStatus::Active;
-        };
-        let deadline_ms = self.deadline(tombstone);
-        if self.now_ms < deadline_ms {
-            RetirementStatus::Retained {
-                reclaimable_at_ms: Some(deadline_ms),
-            }
-        } else if self.has_pins {
-            RetirementStatus::Retained {
-                reclaimable_at_ms: None,
-            }
-        } else {
-            RetirementStatus::Eligible
-        }
+    pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {
+        retirement_deadline_ms(tombstone, self.retirement_grace_window_ms)
     }
+
+    /// Returns the retirement status of the collected namespace.
+    pub(super) fn retirement_status(&self) -> RetirementStatus {
+        RetirementStatus::of(
+            self.current_tombstone.as_ref(),
+            self.has_pins,
+            self.retirement_grace_window_ms,
+            self.now_ms,
+        )
+    }
+}
+
+/// Returns the earliest time at which the namespace of `tombstone` can be
+/// retired.
+fn retirement_deadline_ms(
+    tombstone: &NamespaceManifestPayload,
+    retirement_grace_window_ms: u64,
+) -> u64 {
+    tombstone
+        .status
+        .deleted_at_ms()
+        .expect("a tombstone should carry its deletion stamp")
+        .saturating_add(retirement_grace_window_ms)
 }
 
 /// Returns the number of layout rows that `manifest` lists.

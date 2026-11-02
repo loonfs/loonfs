@@ -49,7 +49,7 @@ async fn a_failed_final_session_read_publishes_no_content() {
         .await
         .expect("begin upload");
     let loaded = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_upload_session_state(&session.upload_id)
+        .load_upload_session_state(&root_catalog(&namespace_id), &session.upload_id)
         .await
         .expect("load session");
     let session_key = upload_session(&namespace_id, &session.upload_id);
@@ -96,7 +96,7 @@ async fn a_failed_final_session_read_publishes_no_content() {
         .expect("get content")
         .is_none());
     let loaded = crate::test_support::namespace_store(&recording, &namespace_id)
-        .load_upload_session_state(&session.upload_id)
+        .load_upload_session_state(&root_catalog(&namespace_id), &session.upload_id)
         .await
         .expect("load the open session");
     assert_eq!(loaded.outcome, None);
@@ -157,9 +157,8 @@ async fn a_retried_upload_of_the_same_bytes_succeeds_and_other_bytes_conflict() 
     assert_eq!(
         retry.content_ref(),
         Some(&ContentRef::blob_v1(
-            namespace_id.clone(),
             crate::test_support::namespace_store(&store, &namespace_id)
-                .load_upload_session_state(&session.upload_id)
+                .load_upload_session_state(&root_catalog(&namespace_id), &session.upload_id)
                 .await
                 .expect("load session")
                 .session
@@ -211,7 +210,7 @@ async fn a_buffered_upload_aborted_during_its_write_is_refused_and_records_nothi
 
     assert_matches!(result, Err(CoreError::UploadNotFound { .. }));
     let loaded = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_upload_session_state(&session.upload_id)
+        .load_upload_session_state(&root_catalog(&namespace_id), &session.upload_id)
         .await
         .expect("load session");
     assert_matches!(loaded.outcome, Some(UploadOutcome::Aborted { .. }));
@@ -219,6 +218,20 @@ async fn a_buffered_upload_aborted_during_its_write_is_refused_and_records_nothi
 
 fn context(now_ms: u64) -> WriterAt {
     crate::test_support::writer_at("upload-test", now_ms)
+}
+
+/// Returns the catalog entry of `namespace_id` as a namespace that wasn't
+/// forked, which is the root of its own fork family.
+fn root_catalog(
+    namespace_id: &NamespaceId,
+) -> crate::namespace::catalog::VerifiedNamespaceCatalogEntry {
+    crate::namespace::catalog::VerifiedNamespaceCatalogEntry::from_head(
+        &crate::namespace::state::NamespaceReadState::initial(
+            namespace_id.clone(),
+            0,
+            loonfs_test_support::test_actor(),
+        ),
+    )
 }
 
 /// One store with a namespace and one open, staged session in it.
@@ -246,10 +259,7 @@ async fn staged_session(
     .await
     .expect("stage upload");
     let content_key = content_blob(
-        &staged
-            .content_ref()
-            .expect("staged content")
-            .owner_namespace_id,
+        &namespace_id,
         &staged.content_ref().expect("staged content").content_id,
     );
     (
@@ -317,7 +327,7 @@ async fn an_applied_outcome_put_that_fails_its_precondition_is_this_requests_own
 
     assert_eq!(completed.response.content_ref(), Some(&content_ref));
     let state = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_upload_session_state(&upload_id)
+        .load_upload_session_state(&root_catalog(&namespace_id), &upload_id)
         .await
         .expect("session");
     assert_eq!(
@@ -503,13 +513,8 @@ fn multipart_validation_uses_the_algorithm_frozen_in_the_session() {
         size_bytes: 7,
         checksum: Checksum::crc32c(b"payload"),
     };
-    let content_ref = claimed_content_ref(
-        session.namespace_id.clone(),
-        session.content_id.clone(),
-        &content,
-        required_algorithm,
-    )
-    .expect("the stored algorithm accepts the content claim");
+    let content_ref = claimed_content_ref(session.content_id.clone(), &content, required_algorithm)
+        .expect("the stored algorithm accepts the content claim");
     assert_eq!(content_ref.checksum.algorithm(), ChecksumAlgorithm::Crc32c);
 
     let part = CompletedUploadPart {
@@ -549,13 +554,8 @@ fn multipart_validation_uses_the_algorithm_frozen_in_the_session() {
         checksum: Checksum::crc64nvme(b"payload"),
     };
     assert_matches!(
-        claimed_content_ref(
-            session.namespace_id.clone(),
-            session.content_id,
-            &wrong_content,
-            required_algorithm
-        )
-        .expect_err("a content claim in another algorithm should be rejected"),
+        claimed_content_ref(session.content_id, &wrong_content, required_algorithm)
+            .expect_err("a content claim in another algorithm should be rejected"),
         CoreError::InvalidUploadContent(_)
     );
 }
@@ -596,7 +596,7 @@ async fn a_direct_put_requires_the_session_algorithm_and_replays_completion() {
             .expect_err("a different checksum algorithm is invalid content");
     assert_matches!(wrong_algorithm, CoreError::InvalidUploadContent(_));
     let open = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_upload_session_state(&begin.session.upload_id)
+        .load_upload_session_state(&root_catalog(&namespace_id), &begin.session.upload_id)
         .await
         .expect("session remains readable");
     assert_eq!(open.outcome, None);
@@ -662,7 +662,7 @@ async fn provider_abort_failure_stops_before_object_delete() {
         .await
         .expect("write unpublished content");
     let abandoned = AbandonedUpload {
-        owner_namespace_id: namespace_id.clone(),
+        family_root_id: namespace_id.clone(),
         content_id,
         provider_multipart_upload_id: Some("unsupported-provider-upload".to_owned()),
     };
@@ -699,7 +699,7 @@ async fn a_completion_after_an_abort_fails_terminally_and_touches_nothing() {
     assert_matches!(error, CoreError::UploadNotFound { .. });
 
     let state = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_upload_session_state(&upload_id)
+        .load_upload_session_state(&root_catalog(&namespace_id), &upload_id)
         .await
         .expect("session still readable");
     assert_eq!(
@@ -755,7 +755,7 @@ async fn a_mismatched_direct_put_claim_is_rejected_and_a_matching_one_completes(
         .expect_err("a claim the object does not match cannot complete");
     assert_matches!(error, CoreError::InvalidUploadContent(_));
     let state = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_upload_session_state(&begin.session.upload_id)
+        .load_upload_session_state(&root_catalog(&namespace_id), &begin.session.upload_id)
         .await
         .expect("session remains readable");
     assert_eq!(state.outcome, None);

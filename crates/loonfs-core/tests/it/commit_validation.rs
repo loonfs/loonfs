@@ -23,7 +23,10 @@ use tempfile::tempdir;
 fn put_file(absolute_path: &str, content_ref: loonfs_types::ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(absolute_path).expect("path"),
-        content: loonfs_types::FileContent::Ref(content_ref),
+        content: loonfs_types::FileContent::Ref {
+            content_ref,
+            source_namespace_id: None,
+        },
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -190,7 +193,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     // A live admission is the fast path: no content read at all.
     assert_eq!(store.count(OperationSelector::Read), 0);
     let mut forged_ref = content_ref.clone();
-    forged_ref.owner_namespace_id = NamespaceId::parse("other").expect("owner");
+    forged_ref.size_bytes += 1;
     let mut forged_token = token.clone();
     forged_token.content_ref = forged_ref.clone();
     assert_eq!(
@@ -212,7 +215,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .publish_batch(
             vec![CommitCandidate::prepared(
                 CommitIntent::single(
-                    commit_id("forged-content-owner"),
+                    commit_id("forged-content-size"),
                     loonfs_test_support::test_actor(),
                     None,
                     put_file("/docs/forged.txt", forged_ref),
@@ -224,7 +227,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .await
         .results;
     assert_eq!(
-        rejected[0].as_ref().expect_err("owner mismatch").code(),
+        rejected[0].as_ref().expect_err("reference mismatch").code(),
         ErrorCode::ContentNotPrepared
     );
     assert!(store.snapshot().is_empty());
@@ -528,7 +531,10 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
         commit_id("restore-replace"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/restore.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref(second.into_content_ref()),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: second.into_content_ref(),
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -632,7 +638,10 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/replace.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref(missing_content.clone()),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: missing_content.clone(),
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(observed.inode_id),
                 expected_revision_no: Some(RevisionNo(99)),
@@ -988,7 +997,10 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
     let replace =
         |content_ref: loonfs_types::ContentRef, expected: u64| FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/with_preconditions.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref(content_ref),
+            content: loonfs_types::FileContent::Ref {
+                content_ref,
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::Replace,
             expected_inode_id: Some(observed.inode_id),
             expected_revision_no: Some(RevisionNo(expected)),

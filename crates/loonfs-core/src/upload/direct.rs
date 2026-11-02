@@ -52,7 +52,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 "a part-signing request names at most {MAX_SIGNED_PARTS_PER_REQUEST} parts"
             )));
         }
-        let state = self.namespace.load_upload_session_state(upload_id).await?;
+        let state = self
+            .namespace
+            .load_upload_session_state(&catalog, upload_id)
+            .await?;
         ensure_session_subject(&state.session, self.subject.as_ref())?;
         ensure_session_open(&state, now_ms)?;
         let session = &state.session;
@@ -76,7 +79,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
 
         Ok(MultipartPartTargets {
-            object_key: content_blob(&session.namespace_id, &session.content_id),
+            object_key: content_blob(catalog.family_root_id(), &session.content_id),
             provider_upload_id: provider_upload_id.to_owned(),
             parts,
         })

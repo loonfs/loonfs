@@ -732,7 +732,6 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
             let values: Vec<_> = (0..count)
                 .map(|_| {
                     InlineContent::new(
-                        namespace_id.clone(),
                         loonfs_types::ContentId::generate(),
                         Bytes::from(vec![1; MAX_WAL_INLINE_CONTENT_BYTES]),
                         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -750,7 +749,10 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
                     .enumerate()
                     .map(|(index, value)| FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/{name}-{index}")).expect("path"),
-                        content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
+                        content: loonfs_types::FileContent::Ref {
+                            content_ref: value.content_ref().clone(),
+                            source_namespace_id: None,
+                        },
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -1957,7 +1959,10 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         None,
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/file.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref(prepared_content.content_ref().clone()),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: prepared_content.content_ref().clone(),
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -2279,7 +2284,6 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     .await
     .expect("seed tail");
     let value = InlineContent::new(
-        namespace_id.clone(),
         loonfs_types::ContentId::generate(),
         Bytes::from_static(b"folded inline bytes"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -2291,7 +2295,10 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/inline").expect("path"),
-                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: value.content_ref().clone(),
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

@@ -146,14 +146,16 @@ impl Writer {
         let mut values = Vec::new();
         for path in files {
             let value = InlineContent::new(
-                self.namespace_id.clone(),
                 ContentId::generate(),
                 Bytes::copy_from_slice(path.as_bytes()),
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
             );
             operations.push(FilesystemOperation::PutFile {
                 path: AbsolutePath::parse(*path).expect("path"),
-                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: value.content_ref().clone(),
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

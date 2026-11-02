@@ -292,7 +292,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
 
 fn prepared_reference(content: &FileContent) -> Result<&loonfs_types::ContentRef> {
     match content {
-        FileContent::Ref(reference) => Ok(reference),
+        FileContent::Ref {
+            content_ref: reference,
+            ..
+        } => Ok(reference),
         FileContent::Inline(_) => Err(CoreError::InvalidCommitRequest(
             "content must be prepared before planning".to_owned(),
         )),
@@ -347,7 +350,10 @@ mod tests {
     ) -> FilesystemOperation {
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse(path).expect("path"),
-            content: loonfs_types::FileContent::Ref(content_ref.clone()),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: content_ref.clone(),
+                source_namespace_id: None,
+            },
             behavior,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -410,15 +416,19 @@ mod tests {
             view.head(),
             view.wal_tail(),
             view.projected_metadata_view(),
-            ContentWrites::new(&namespace.store, &content_writes),
+            ContentWrites::new(&namespace.store, &content_writes, view.head()),
             1,
         );
         let content = request
             .operations
             .iter()
             .filter_map(FilesystemOperation::content_ref)
-            .cloned()
-            .map(crate::storage::content_admission::PreparedContent::for_durable_content_write)
+            .map(|content_ref| {
+                crate::storage::content_admission::PreparedContent::for_durable_content_write(
+                    namespace_id.clone(),
+                    content_ref.clone(),
+                )
+            })
             .collect();
         let candidate = CommitCandidate::prepared(request.clone(), content);
         let authorizer =
@@ -531,7 +541,10 @@ mod tests {
             &namespace_id,
             &request(FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/dead/new.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref(staged.into_content_ref()),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: staged.into_content_ref(),
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -561,7 +574,10 @@ mod tests {
                     create_dir("/reports"),
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/reports/a.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
+                        content: loonfs_types::FileContent::Ref {
+                            content_ref: staged.content_ref().clone(),
+                            source_namespace_id: None,
+                        },
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -653,7 +669,10 @@ mod tests {
                     },
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
+                        content: loonfs_types::FileContent::Ref {
+                            content_ref: staged.content_ref().clone(),
+                            source_namespace_id: None,
+                        },
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -757,7 +776,6 @@ mod tests {
             .expect("stage")
             .into_content_ref();
         let inline = crate::storage::content_admission::PreparedContent::inline(
-            namespace_id.clone(),
             bytes::Bytes::from_static(b"inline"),
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         )

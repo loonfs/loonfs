@@ -262,7 +262,7 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
 async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) -> String {
     let session =
         crate::test_support::proxied_upload_session(namespace_id, 1_000 + UPLOAD_SESSION_LEASE_MS);
-    crate::test_support::write_upload_records(store, &session, None).await
+    crate::test_support::write_upload_records(store, namespace_id, &session, None).await
 }
 
 async fn stage_upload<S: ObjectStore + ?Sized>(
@@ -297,8 +297,10 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
 ) -> Option<UploadSessionState> {
-    match crate::test_support::namespace_store(store, namespace_id)
-        .load_upload_session_state(upload_id)
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let catalog = namespace.load_catalog_entry().await.expect("catalog");
+    match namespace
+        .load_upload_session_state(&catalog, upload_id)
         .await
     {
         Ok(state) => Some(state),
@@ -562,10 +564,8 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
     let session_key = loonfs_objectstore::keys::upload_session(&namespace_id, &upload_id);
-    let content_key = loonfs_objectstore::keys::content_blob(
-        &content_ref.owner_namespace_id,
-        &content_ref.content_id,
-    );
+    let content_key =
+        loonfs_objectstore::keys::content_blob(&namespace_id, &content_ref.content_id);
 
     // Inside the lease nothing happens, however old the object looks: the
     // session carries its own expiry, so no provider timestamp decides this.
@@ -810,10 +810,8 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
     let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    let content_key = loonfs_objectstore::keys::content_blob(
-        &content_ref.owner_namespace_id,
-        &content_ref.content_id,
-    );
+    let content_key =
+        loonfs_objectstore::keys::content_blob(&namespace_id, &content_ref.content_id);
     let store = blocking_outcome_store(store, BlockedOutcome::Aborted);
     let gc_options = options();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -862,10 +860,8 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
     let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    let content_key = loonfs_objectstore::keys::content_blob(
-        &content_ref.owner_namespace_id,
-        &content_ref.content_id,
-    );
+    let content_key =
+        loonfs_objectstore::keys::content_blob(&namespace_id, &content_ref.content_id);
     let store = blocking_outcome_store(store, BlockedOutcome::Completed);
     let engine =
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside).engine();
@@ -960,7 +956,7 @@ async fn put_file_content_with_id<S: ObjectStore>(
         .expect("catalog");
     let stored = crate::storage::content_staging::stage_bytes_under_content_id(
         store,
-        namespace_id.clone(),
+        catalog.family_root_id(),
         content_id,
         bytes,
     )
@@ -979,7 +975,10 @@ async fn put_file_content_with_id<S: ObjectStore>(
                 None,
                 FilesystemOperation::PutFile {
                     path: loonfs_types::AbsolutePath::parse(path).expect("path"),
-                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref: content_ref.clone(),
+                        source_namespace_id: None,
+                    },
                     behavior: loonfs_types::DestinationBehavior::Replace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -1008,19 +1007,28 @@ async fn publish_inline(
     setup: &WriterAt,
 ) -> String {
     let value = crate::storage::inline_content::InlineContent::new(
-        namespace_id.clone(),
         loonfs_types::ContentId::generate(),
         Bytes::copy_from_slice(namespace_id.as_str().as_bytes()),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
-    let key = loonfs_objectstore::keys::content_blob(namespace_id, &value.content_ref().content_id);
+    let catalog = crate::test_support::namespace_store(store, namespace_id)
+        .load_catalog_entry()
+        .await
+        .expect("catalog");
+    let key = loonfs_objectstore::keys::content_blob(
+        catalog.family_root_id(),
+        &value.content_ref().content_id,
+    );
     let request = CommitIntent::single(
         loonfs_types::CommitId::parse(format!("write-{index}")).expect("commit"),
         loonfs_test_support::test_actor(),
         None,
         FilesystemOperation::PutFile {
             path: loonfs_types::AbsolutePath::parse(format!("/owned-{index}")).expect("path"),
-            content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: value.content_ref().clone(),
+                source_namespace_id: None,
+            },
             behavior: loonfs_types::DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1117,10 +1125,8 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
         .expect("bootstrap");
     let (upload_id, content_ref) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
-    let content_key = loonfs_objectstore::keys::content_blob(
-        &content_ref.owner_namespace_id,
-        &content_ref.content_id,
-    );
+    let content_key =
+        loonfs_objectstore::keys::content_blob(&namespace_id, &content_ref.content_id);
 
     let inside = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS - 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
@@ -1149,10 +1155,8 @@ async fn an_unpublished_completed_upload_loses_its_record_then_its_object() {
     write_test_file(&store, &namespace_id, "/docs/other.txt", "gc-other", &setup).await;
     let (upload_id, content_ref) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
-    let content_key = loonfs_objectstore::keys::content_blob(
-        &content_ref.owner_namespace_id,
-        &content_ref.content_id,
-    );
+    let content_key =
+        loonfs_objectstore::keys::content_blob(&namespace_id, &content_ref.content_id);
 
     let past = context(
         now_after_newest_object(

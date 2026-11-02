@@ -556,9 +556,7 @@ impl PositionState {
             }
             PublishViewEffect::Advanced { records, head } => {
                 position.read_basis.head = head;
-                if let Err(error) =
-                    Arc::make_mut(&mut position.tail).push_object(namespace_id, &records)
-                {
+                if let Err(error) = Arc::make_mut(&mut position.tail).push_object(&records) {
                     // The WAL is already durable. Discard the position;
                     // replay and folding will report the accounting error.
                     tracing::warn!(

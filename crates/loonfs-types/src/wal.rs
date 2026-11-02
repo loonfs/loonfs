@@ -531,10 +531,8 @@ fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), WalCode
         let mut reference_ends: BTreeMap<&ContentId, u64> = BTreeMap::new();
         for delta in &record.deltas {
             if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
-                if content_ref.owner_namespace_id == payload.namespace_id {
-                    let end = reference_ends.entry(&content_ref.content_id).or_default();
-                    *end = (*end).max(content_ref.size_bytes);
-                }
+                let end = reference_ends.entry(&content_ref.content_id).or_default();
+                *end = (*end).max(content_ref.size_bytes);
             }
         }
         let mut entries: BTreeMap<&ContentId, BTreeMap<u64, &WalInlineContent>> = BTreeMap::new();
@@ -553,7 +551,10 @@ fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), WalCode
                 ));
             }
             if !reference_ends.contains_key(&entry.content_id) {
-                return Err(invalid(&entry.content_id, "no `append_file_revision` reference in the same commit owned by the WAL object's `namespace_id`"));
+                return Err(invalid(
+                    &entry.content_id,
+                    "no `append_file_revision` reference in the same commit",
+                ));
             }
             if entries
                 .entry(&entry.content_id)
@@ -565,6 +566,25 @@ fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), WalCode
                     &entry.content_id,
                     "duplicate `content_id` and `offset` in commit",
                 ));
+            }
+        }
+        // A namespace's WAL includes pieces only for chains that the namespace
+        // created, so every layout of a chain with pieces records it.
+        for delta in &record.deltas {
+            if let WalDelta::AppendFileRevision {
+                content_ref,
+                layout: Some(layout),
+                ..
+            } = &delta.delta
+            {
+                if entries.contains_key(&content_ref.content_id)
+                    && layout.creator_namespace_id != payload.namespace_id
+                {
+                    return Err(invalid(
+                        &content_ref.content_id,
+                        "a layout of a chain with pieces records another namespace as its creator",
+                    ));
+                }
             }
         }
         for (content_id, by_offset) in entries {
@@ -763,7 +783,6 @@ mod tests {
                             child_created_at_ms: 0,
                             revision_no: RevisionNo(index as u64 + 1),
                             content_ref: ContentRef::blob_v1(
-                                namespace_id.clone(),
                                 content_id.clone(),
                                 &bytes,
                                 crate::ChecksumAlgorithm::Crc64nvme,
@@ -848,8 +867,8 @@ mod tests {
     }
 
     #[test]
-    fn inline_content_requires_a_local_revision_reference_in_the_same_commit() {
-        let expected_reason = "no `append_file_revision` reference in the same commit owned by the WAL object's `namespace_id`";
+    fn inline_content_requires_a_revision_reference_in_the_same_commit() {
+        let expected_reason = "no `append_file_revision` reference in the same commit";
         let mut missing = inline_wal_object(&[3, 3]);
         missing.records[0].deltas.clear();
         assert_inline_content_rejected(missing, 0, expected_reason);
@@ -858,10 +877,44 @@ mod tests {
         wrong_id.records[0].inline_content[0].content_id =
             ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg").expect("content id");
         assert_inline_content_rejected(wrong_id, 0, expected_reason);
+    }
 
-        let mut foreign = inline_wal_object(&[3]);
-        foreign.namespace_id = NamespaceId::parse("other").expect("namespace");
-        assert_inline_content_rejected(foreign, 0, expected_reason);
+    /// Checks rule 1 of the WAL records: a layout of a chain with pieces in
+    /// the commit records the WAL object's namespace as its creator, and a
+    /// layout of a chain without pieces, such as a copy's, can record any
+    /// member of the fork family.
+    #[test]
+    fn a_layout_of_a_chain_with_pieces_records_the_wal_namespace_as_its_creator() {
+        let with_creator = |payload: &mut WalObjectPayload, creator: &str| {
+            if let WalDelta::AppendFileRevision {
+                layout: Some(layout),
+                ..
+            } = &mut payload.records[0].deltas[0].delta
+            {
+                layout.creator_namespace_id = NamespaceId::parse(creator).expect("namespace");
+            }
+        };
+        assert_inline_content_accepted(appended_wal_object());
+        let mut payload = appended_wal_object();
+        with_creator(&mut payload, "other");
+        assert_inline_content_rejected(
+            payload,
+            0,
+            "a layout of a chain with pieces records another namespace as its creator",
+        );
+
+        let mut copy = appended_wal_object();
+        copy.records[0].inline_content.clear();
+        if let WalDelta::AppendFileRevision {
+            content_ref,
+            layout: Some(layout),
+            ..
+        } = &mut copy.records[0].deltas[0].delta
+        {
+            content_ref.size_bytes = layout.size_bytes();
+        }
+        with_creator(&mut copy, "other");
+        assert_inline_content_accepted(copy);
     }
 
     #[test]
@@ -912,8 +965,8 @@ mod tests {
         } = &mut record.deltas[0].delta
         {
             *layout = Some(crate::ContentLayout {
+                creator_namespace_id: payload.namespace_id.clone(),
                 extents: vec![crate::ContentExtent {
-                    owner_namespace_id: content_ref.owner_namespace_id.clone(),
                     content_id: content_ref.content_id.clone(),
                     object: crate::ExtentObject::Whole,
                     offset: 0,
@@ -1046,8 +1099,8 @@ mod tests {
                 panic!("revision");
             };
             *layout = layout_size.map(|length| crate::ContentLayout {
+                creator_namespace_id: payload.namespace_id.clone(),
                 extents: vec![crate::ContentExtent {
-                    owner_namespace_id: NamespaceId::parse("other").expect("namespace"),
                     content_id: ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg")
                         .expect("content"),
                     object: crate::ExtentObject::Whole,

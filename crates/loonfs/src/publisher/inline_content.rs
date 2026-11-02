@@ -19,8 +19,7 @@ impl NamespacePublisher {
         &self,
         candidate: CommitCandidate,
     ) -> Result<InlineCandidatePlan> {
-        let namespace_id = &self.namespace_id;
-        let values = candidate.ordered_inline_content(namespace_id)?;
+        let values = candidate.ordered_inline_content()?;
         let mut remaining = self
             .context
             .runtime_core
@@ -41,7 +40,6 @@ impl NamespacePublisher {
             .count();
         let candidate = PreparedCandidate::with_inline_placement(
             candidate,
-            namespace_id,
             &values[..wal_object_inline_values],
             &values[wal_object_inline_values..],
         )?;

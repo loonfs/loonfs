@@ -2,7 +2,7 @@
 
 use crate::hex::{hex_encode_bytes, is_lower_hex_byte, HexDecodeError};
 use crate::id_macros::{string_id, validation_error};
-use crate::ids::{ContentId, NamespaceId};
+use crate::ids::ContentId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
@@ -482,7 +482,7 @@ fn crc32_from_u64(value: u64) -> u32 {
     u32::try_from(value).expect("a CRC-32 value should fit in 32 bits")
 }
 
-/// A reference to a prefix of one content chain, by its owner, content ID, size, and checksum.
+/// A reference to a prefix of one content chain, by its content ID, size, and checksum.
 // Request bodies and durable records share this type, so it rejects unknown
 // fields in every context. After release, new content kinds, not new fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -491,10 +491,8 @@ fn crc32_from_u64(value: u64) -> u32 {
 pub struct ContentRef {
     /// The kind of content reference. The format defines one kind, `blob_v1`.
     pub kind: ContentRefKind,
-    /// The namespace that originally wrote the bytes.
-    pub owner_namespace_id: NamespaceId,
-    /// The immutable identity of the content. The content ID and the owner together determine the
-    /// object key.
+    /// The immutable identity of the content. The content ID and the reading namespace's family
+    /// root together determine the object key.
     pub content_id: ContentId,
     /// The length of the referenced bytes, which are a prefix of the content object.
     pub size_bytes: u64,
@@ -507,15 +505,9 @@ impl ContentRef {
     ///
     /// Every caller of this constructor moves the bytes through the LoonFS
     /// write path, so the checksum is trusted by construction.
-    pub fn blob_v1(
-        owner_namespace_id: NamespaceId,
-        content_id: ContentId,
-        bytes: &[u8],
-        algorithm: ChecksumAlgorithm,
-    ) -> Self {
+    pub fn blob_v1(content_id: ContentId, bytes: &[u8], algorithm: ChecksumAlgorithm) -> Self {
         Self {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id,
             content_id,
             size_bytes: bytes.len() as u64,
             checksum: Checksum::compute(algorithm, bytes),
@@ -568,7 +560,6 @@ mod tests {
 
         let json = r#"{
             "kind": "blob_v1",
-            "owner_namespace_id": "demo",
             "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
             "size_bytes": 5,
             "checksum": {"algorithm": "md5", "value": "00000000000000000000000000000000"}
@@ -578,13 +569,9 @@ mod tests {
     }
 
     #[test]
-    fn a_content_ref_requires_an_owner_and_one_checksum() {
-        let content_ref = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
-            content_id(),
-            b"hello",
-            crate::ChecksumAlgorithm::Crc64nvme,
-        );
+    fn a_content_ref_records_no_namespace_and_one_checksum() {
+        let content_ref =
+            ContentRef::blob_v1(content_id(), b"hello", crate::ChecksumAlgorithm::Crc64nvme);
 
         assert_eq!(content_ref.kind, ContentRefKind::BlobV1);
         assert_eq!(content_ref.size_bytes, 5);
@@ -592,16 +579,15 @@ mod tests {
 
         let document = serde_json::to_value(&content_ref).expect("encode content ref");
         let object = document.as_object().expect("content ref object");
-        assert_eq!(object.len(), 5);
-        assert_eq!(object["owner_namespace_id"], "demo");
-        let mut missing_owner = document.clone();
-        missing_owner
+        assert_eq!(object.len(), 4);
+        assert!(object.contains_key("checksum"));
+        let mut with_owner = document.clone();
+        with_owner
             .as_object_mut()
             .expect("reference")
-            .remove("owner_namespace_id");
-        serde_json::from_value::<ContentRef>(missing_owner)
-            .expect_err("a content ref without an owner should be rejected");
-        assert!(object.contains_key("checksum"));
+            .insert("owner_namespace_id".to_owned(), "demo".into());
+        serde_json::from_value::<ContentRef>(with_owner)
+            .expect_err("a content ref with a namespace field should be rejected");
     }
 
     #[test]
@@ -638,7 +624,6 @@ mod tests {
                 assert!(error.to_string().contains("hex characters"), "{error}");
                 let content_ref = serde_json::json!({
                     "kind": "blob_v1",
-                    "owner_namespace_id": "demo",
                     "content_id": content_id(),
                     "size_bytes": 5,
                     "checksum": { "algorithm": algorithm.as_str(), "value": "a".repeat(len) },

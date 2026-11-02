@@ -174,7 +174,10 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
                 CommitId::generate(),
                 FilesystemOperation::PutFile {
                     path: path.clone(),
-                    content: loonfs_types::FileContent::Ref(reference.clone()),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref: reference.clone(),
+                        source_namespace_id: None,
+                    },
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -681,10 +684,7 @@ mod streamed_content {
         assert_eq!(error.code(), ErrorCode::UploadContentConflict);
 
         let object_key = content_blob(
-            &first
-                .content_ref()
-                .expect("staged content")
-                .owner_namespace_id,
+            &namespace_id,
             &first.content_ref().expect("staged content").content_id,
         );
         assert_eq!(
@@ -778,10 +778,7 @@ mod streamed_content {
         };
 
         let object_key = content_blob(
-            &staged
-                .content_ref()
-                .expect("staged content")
-                .owner_namespace_id,
+            &namespace_id,
             &staged.content_ref().expect("staged content").content_id,
         );
         let stored = blocking
@@ -792,12 +789,6 @@ mod streamed_content {
         assert_eq!(
             staged.content_ref().expect("staged content").clone(),
             ContentRef::blob_v1(
-                staged
-                    .content_ref()
-                    .expect("staged content")
-                    .clone()
-                    .owner_namespace_id
-                    .clone(),
                 staged
                     .content_ref()
                     .expect("staged content")
@@ -1010,9 +1001,10 @@ mod direct_multipart {
             CommitId::generate(),
             FilesystemOperation::PutFile {
                 path: path.clone(),
-                content: loonfs_types::FileContent::Ref(
-                    completed.content_ref().cloned().expect("completed content"),
-                ),
+                content: loonfs_types::FileContent::Ref {
+                    content_ref: completed.content_ref().cloned().expect("completed content"),
+                    source_namespace_id: None,
+                },
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

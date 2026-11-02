@@ -184,7 +184,6 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
         reference.checksum,
         loonfs_types::Checksum::crc64nvme(b"same")
     );
-    assert_eq!(reference.owner_namespace_id, harness.namespace);
     harness.read("/file", b"same").await;
     harness.store.reset();
     let (status, replay) = harness.commit(request.clone()).await;

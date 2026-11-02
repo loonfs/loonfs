@@ -16,7 +16,6 @@
       "path": "/docs/report.txt",
       "content_ref": {
         "kind": "blob_v1",
-        "owner_namespace_id": "demo",
         "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
@@ -49,7 +48,6 @@
       "display_name": "report.txt",
       "content_ref": {
         "kind": "blob_v1",
-        "owner_namespace_id": "demo",
         "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
@@ -69,7 +67,6 @@
       "inode_id": "ino_0000000000000000000000001a",
       "content_ref": {
         "kind": "blob_v1",
-        "owner_namespace_id": "demo",
         "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
@@ -206,7 +203,6 @@
       "path": "/docs/report.txt",
       "content_ref": {
         "kind": "blob_v1",
-        "owner_namespace_id": "demo",
         "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
@@ -443,7 +439,6 @@
       "path": "/docs/report.txt",
       "content_ref": {
         "kind": "blob_v1",
-        "owner_namespace_id": "demo",
         "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
@@ -491,7 +486,6 @@
       "path": "/docs/report.txt",
       "content_ref": {
         "kind": "blob_v1",
-        "owner_namespace_id": "demo",
         "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
@@ -516,7 +510,6 @@
       "display_name": "report.txt",
       "content_ref": {
         "kind": "blob_v1",
-        "owner_namespace_id": "demo",
         "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {
@@ -539,7 +532,6 @@
       "inode_id": "ino_0000000000000000000000001a",
       "content_ref": {
         "kind": "blob_v1",
-        "owner_namespace_id": "demo",
         "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
         "size_bytes": 16,
         "checksum": {

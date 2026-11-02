@@ -15,11 +15,7 @@ pub(super) struct PlannedPieces {
 
 impl PlannedPieces {
     pub(super) fn content(&self, content_ref: &ContentRef) -> Option<&ProjectedContent> {
-        self.contents
-            .get(&content_ref.content_id)
-            .filter(|content| {
-                content.content_ref.owner_namespace_id == content_ref.owner_namespace_id
-            })
+        self.contents.get(&content_ref.content_id)
     }
 
     /// A content this layer has not seen starts from `below`, the newest

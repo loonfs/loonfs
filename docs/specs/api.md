@@ -377,7 +377,7 @@ To write a file, a client prepares the file's content and then commits the chang
 
 Uploaded content is durable before the commit, but the file isn't visible yet. Inline content becomes durable and visible in the same write (see [File contents and ownership](format.md#15-file-contents-and-ownership)). In both cases, the commit takes effect when the next numbered WAL object is written with put-if-absent. Accepting a request into a batch doesn't mean that the request has committed.
 
-A caller with an embedded `loonfs::Namespace<Writable>` can prepare content separately from committing it. `prepare_content` takes the file's bytes. Files at or below the enabled inline threshold stay in memory, and larger files are uploaded as content objects. To import existing content, the caller uses `prepare_content_ref`, which verifies the bytes and copies them to a new object owned by the destination namespace. Both calls return an opaque prepared value.
+A caller with an embedded `loonfs::Namespace<Writable>` can prepare content separately from committing it. `prepare_content` takes the file's bytes. Files at or below the enabled inline threshold stay in memory, and larger files are uploaded as content objects. To import existing content, the caller uses `prepare_content_ref` and identifies the namespace that the content comes from (the source). If the source is in the destination's [fork family](glossary.md#fork-family) and a revision or layout in the source's view refers to the content, `prepare_content_ref` reads the bytes and verifies them against the reference without copying them, and the prepared value refers to the same content. Otherwise, `prepare_content_ref` verifies the bytes and copies them to a new content object in the destination's fork family. Both calls return an opaque prepared value.
 
 `put_file_prepared` commits a prepared value. If WAL limits are reached, inline bytes might need to be uploaded first. Content that's already uploaded needs no more content-object I/O during publication. For an upload session, `complete_upload_prepared` returns both the completion response and a prepared value. Over HTTP, the commit request includes either inline bytes, or a content reference with its content token.
 
@@ -385,13 +385,15 @@ When preparation needs an upload, LoonFS records the upload session before it wr
 
 If the final deadline check rejects a candidate, that candidate receives its own error, and the other accepted candidates receive `stale_head` so that the publisher plans them again. The rejected batch writes nothing.
 
-Prepared content belongs to one namespace, and two namespaces can't share a prepared value. To import content into another namespace, a caller uses `prepare_content_ref`, and the result refers to the new copy owned by that namespace. To import a reference, the subject MUST be an administrator of the reference's owner namespace.
+Prepared content belongs to one namespace, and two namespaces can't share a prepared value. To use content in another namespace, a caller imports it there with `prepare_content_ref`. To import a reference, the subject MUST be an administrator of the source namespace.
 
-LoonFS checks an import's authorization against the owner namespace's current head. If the reference matches the owner's resident content, the import can read those bytes. Otherwise, the reference's owner namespace and content ID determine its object key. If that object is missing, the import returns `namespace_deleted` when the owner is deleted, or `namespace_corrupt` when the owner is active.
+LoonFS checks an import's authorization against the source namespace's current head. If the source is in the destination's fork family and a revision or layout in the source's view refers to the content, the import reads the bytes through the source's view and verifies them against the reference, and the prepared value includes the content's layout from the source's view. The prepared value expires 15 minutes (the direct transfer lifetime) after preparation started. Otherwise, the import reads the bytes from wherever they're stored in the source's view: in the source's resident content, or in the content object that the content ID and the source's family root identify. If that object is missing, the import returns `namespace_deleted` when the source is deleted, or `namespace_corrupt` when the source is active.
 
 Why do prepared uploads have a deadline? The deadline matches the lifetime of remote upload tokens (see [Upload transport](#69-upload-transport) and [Upload-session cleanup](format.md#116-upload-session-cleanup)), and checking it prevents publication from referring to content that might have been reclaimed.
 
-Why can't two namespaces share a prepared value? Uploads and garbage collection are tracked separately for each namespace.
+Why can't two namespaces share a prepared value? A commit that admits uploaded content records the committing namespace as the creator of the content's chain, and only the creator appends to a chain in place (see [Operations and WAL deltas](format.md#66-operations-and-wal-deltas)). If two namespaces committed one upload, both would append to the same chain.
+
+Why does a prepared value from the destination's fork family expire after 15 minutes? The value refers to content that a revision or layout in the source's view refers to, and garbage collection keeps every manifest of that view, and so the content, for longer than 15 minutes after the view was read, as it does for a direct download. A commit within that time finds the content in storage.
 
 ### 5.1 Commit identity and preconditions
 
@@ -861,7 +863,7 @@ Upload cleanup times include the lease plus grace, the abort grace, and the comp
 
 A GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the deadline defined in [Retirement](format.md#95-retirement), and it's included even when pins still block reclamation. It's absent for an active namespace.
 
-A GC response includes `listed_bytes`: the bytes of every object that the pass listed under the namespace, each object once, as the provider reported them, before the pass's deletes. The core collector lists every object family that it sweeps. When it doesn't sweep the content (because the shared base filter would exceed its byte cap, because it couldn't read every member's roots, or because the namespace is a deleted fork that isn't yet eligible for retirement), it lists the content prefix once to measure the content. So the value is the namespace's storage at the time of the pass, except the hint and extension objects. Each extension collector reports its own `listed_bytes` under `extensions`. An application that meters storage samples the two on each pass.
+A GC response includes `listed_bytes`: the bytes of every object that the pass listed under the namespace, each object once, as the provider reported them, before the pass's deletes. The core collector lists every object family that it sweeps. A fork's prefix stores no content objects or upload records, so a fork's pass lists neither. The pass on the fork's [family root](glossary.md#family-root) lists the content objects and upload records of the whole fork family. When a family root's pass doesn't sweep the content (because the shared base filter would exceed its byte cap, or because the pass couldn't read every member's roots), it lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the pass, except the hint and extension objects. Each extension collector reports its own `listed_bytes` under `extensions`. An application that meters storage samples the two on each pass.
 
 A GC response groups related counts:
 
@@ -870,7 +872,7 @@ A GC response groups related counts:
 
 Each deletion is counted once. When a fork's target namespace deletes its source pin, the deletion counts toward `fork` if the pin was present before the deletion, and repeating that deletion on an absent pin adds nothing. Every count field is present, including fields whose value is zero.
 
-`content_objects` counts the content objects that no retained view references (on a family root, the views of every member of its fork family), which the pass deleted once they were older than the grace window. `retired_content_objects` counts the keys that the pass listed under the deleted namespace's content prefix and successfully deleted. If there are no new objects, a repeated content sweep makes one empty LIST request and no DELETE requests, and it reports zero. The `retired_content_objects` count contributes to maintenance progress. `temporary_objects` counts the store's temporary objects that the pass deleted once they were older than the grace window.
+`content_objects` counts the content objects that no retained view references (on a family root, the views of every member of its fork family), which the pass deleted once they were older than the grace window. `retired_content_objects` counts the keys that the pass listed under a retired family root's content prefix and successfully deleted. That prefix stores the content of the family root's whole fork family. A fork's retirement deletes no content, so `retired_content_objects` is zero for a fork. If there are no new objects, a repeated content sweep makes one empty LIST request and no DELETE requests, and it reports zero. The `retired_content_objects` count contributes to maintenance progress. `temporary_objects` counts the store's temporary objects that the pass deleted once they were older than the grace window.
 
 Every core GC response also includes `retained`, which counts the candidates the pass kept, grouped by the reason each one was kept. The reasons are a closed set, so every field is always present, a zero means nothing was kept for that reason, and the fields sum to the total:
 
@@ -1077,7 +1079,7 @@ After it uploads to the presigned URL, the client completes the session with the
 
 The checksum algorithm MUST match the session's `checksum_algorithm`, and a different algorithm returns `invalid_request`. To complete the session, the server:
 
-1. Builds the final content reference from the session's namespace ID and content ID, plus the completion claim. The session's namespace is the owner.
+1. Builds the final content reference from the session's content ID and the completion claim.
 2. Compares the claimed size and checksum with the object in storage, using a provider metadata request. The server doesn't download the object during this check.
 
 If the stored object doesn't match the claim, the server returns `invalid_request` and changes nothing. The session stays open, nothing is deleted, and the client can complete again with a claim that matches the object, or abort. If the provider metadata request fails, the server returns `server_error` without changing the object or the session, so the client can retry.
@@ -1162,15 +1164,15 @@ The session record includes the provider's upload ID. So when a session is abort
 
 ### Content references and tokens
 
-A content reference contains `kind`, `owner_namespace_id`, `content_id`, `size_bytes`, and `checksum`. The owner is the namespace that originally wrote the bytes, and it doesn't change when the namespace is forked or the revision is restored (see [File contents and ownership](format.md#15-file-contents-and-ownership)). Clients send the complete reference back unchanged.
+A content reference contains `kind`, `content_id`, `size_bytes`, and `checksum`. It doesn't identify a namespace. The content ID and the reading namespace's [family root](glossary.md#family-root) determine where the bytes are stored, so a reference identifies the same content in every member of a fork family (see [File contents and ownership](format.md#15-file-contents-and-ownership)). Clients send the complete reference back unchanged.
 
-A server can return a short-lived `content_token` for completed content. Clients treat the token as opaque, and they can copy it directly into a commit request. Reading a completed session returns a new token while its token-issuing window is still open, and the session's `content_ref` stays available after that.
+A server can return a short-lived `content_token` for completed content. Clients treat the token as opaque, and they can copy it directly into a commit request. A token is valid only in the namespace where the content's upload session was completed. LoonFS rejects the token in every other namespace, including another member of the same fork family. (To use the content in another namespace, a caller imports it, as described in [`POST /commits`](#68-post-commits).) Reading a completed session returns a new token while its token-issuing window is still open, and the session's `content_ref` stays available after that.
 
 ```json
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
-  "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } }
+  "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } }
 }
 ```
 
@@ -1185,7 +1187,7 @@ For example, this commit request puts the uploaded content at `/docs/report.pdf`
   "commit_id": "commit-a",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1193,7 +1195,7 @@ For example, this commit request puts the uploaded content at `/docs/report.pdf`
     {
       "kind": "put_file",
       "path": "/docs/report.pdf",
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
       "behavior": "no_replace"
     }
   ]
@@ -1392,7 +1394,6 @@ Returns one authoritative path entry, addressed by path or by inode ID. Enum val
   "size_bytes": 19482,
   "content_ref": {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 19482,
     "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
@@ -1563,7 +1564,6 @@ For example, a revision listing returns:
       "committed_by": "render-worker",
       "content_ref": {
         "kind": "blob_v1",
-        "owner_namespace_id": "demo",
         "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
         "size_bytes": 19482,
         "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
@@ -1580,7 +1580,7 @@ The inode revision route, `GET /inodes/{inode_id}/revisions/{revision_no}/conten
 
 Both content routes and the inode revision route accept `consistency` and `max_staleness_ms`, which work as they do on the entry route (see [Read consistency](#read-consistency)). A revision read finds the revision at the live head, so on a revision read the parameters select how recently the server confirms that head. Neither parameter can be combined with `snapshot_id`.
 
-Embedded by-reference reads require administrator access to the reading namespace. The namespace's read view MUST contain a publication for the content, including publications inherited through a fork. A reference that's absent from that view returns `path_not_found` without reading any content bytes, even when the reading namespace owns the content. Content published after a snapshot isn't readable through that snapshot.
+Embedded by-reference reads require administrator access to the reading namespace. The namespace's read view MUST contain a publication for the content, including publications inherited through a fork. A reference that's absent from that view returns `path_not_found` without reading any content bytes, even when the reading namespace uploaded the content. Content published after a snapshot isn't readable through that snapshot.
 
 #### Ranged reads
 
@@ -1647,7 +1647,7 @@ The operations commit together, in order, as one logical commit, so either every
   "message": "import the January report",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1656,7 +1656,7 @@ The operations commit together, in order, as one logical commit, so either every
     {
       "kind": "put_file",
       "path": "/reports/2026/january.pdf",
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
       "behavior": "no_replace"
     },
     {
@@ -1691,7 +1691,11 @@ Three operations write file content. Each one requires either `content_ref` for 
 
 Supplying both content fields, or neither, returns `invalid_request` before commit planning. Unknown fields are also rejected.
 
-For uploaded content, the client includes the proof in `content_tokens`. One token covers every operation that uses its `content_ref`, and tokens for unused references are ignored.
+For content uploaded to this namespace, the client includes the proof in `content_tokens`. One token covers every operation that uses its `content_ref`, and tokens for unused references are ignored.
+
+To import content from another namespace (the source), the operation includes the source's ID in `source_namespace_id`, beside `content_ref`, and needs no content token. The subject MUST be an administrator of the source. If the source is in this namespace's [fork family](glossary.md#fork-family) and a revision or layout in the source's current view refers to the content, the server reads the bytes and verifies them against `content_ref` without copying them, and the commit refers to the same content. Otherwise, the server verifies the source's bytes and copies them under a new content ID in this namespace's fork family before commit planning, and the commit refers to the copy. Supplying `source_namespace_id` without `content_ref` returns `invalid_request`.
+
+Warning: if a client retries a commit that imports content from another fork family, the server copies the bytes again under another new content ID, so the retried request no longer matches the original commit. If the original commit succeeded, the retry returns `commit_id_reuse_conflict` instead of the original result. A client that receives that error reads the destination to confirm the original commit. A client that needs retries uploads the bytes to the destination and commits them with a content token, or imports once with the embedded `prepare_content_ref` and commits the prepared value, which gives the same result on every retry until the value expires.
 
 For inline content, the client encodes the complete file as a standard padded base64 JSON string, and no content token is needed. For example, this request writes `hello\n` to `/hello.txt`:
 
@@ -1750,8 +1754,8 @@ Without a precondition, appends are applied in commit order, each to the result 
 
 The new revision has an ordinary content reference whose size and checksum cover the whole file. The new reference either continues the current chain or starts a new one, depending on the current revision's content ID `C` and size `S`:
 
-- When this namespace owns `C`, `S` is positive, and no revision or layout refers to more than `S` bytes of `C`, the new reference keeps `C`. Its pieces start at offset `S`. Its delta omits the layout, and validation writes no content object.
-- Otherwise, the new reference uses a new content ID owned by this namespace, and the first `S` bytes of the new chain are the bytes of `C`. This happens when another revision has already extended `C` (for example, after a restore of an older revision, or after an append to a copy of the file), and in a fork whose file still refers to the source's content. The new chain shares the base's objects through the layout that its delta includes. Before it admits the reference, validation writes the base's unfolded bytes as an extent of the base chain. The commit includes only the appended bytes. An append to an empty file also starts a new content ID.
+- When this namespace created the chain of `C` (see [File contents and ownership](format.md#15-file-contents-and-ownership)), `S` is positive, and no revision or layout refers to more than `S` bytes of `C`, the new reference keeps `C`. Its pieces start at offset `S`. Its delta omits the layout, and validation writes no content object.
+- Otherwise, the new reference uses a new content ID, whose chain this namespace creates, and the first `S` bytes of the new chain are the bytes of `C`. This happens when another revision has already extended `C` (for example, after a restore of an older revision, or after an append to a copy of the file), and when another member of the fork family created the chain of `C`, such as in a fork whose file still refers to the source's content. The new chain shares the base's objects through the layout that its delta includes. Before it admits the reference, validation writes the base's unfolded bytes as an extent of the base chain. The commit includes only the appended bytes. An append to an empty file also starts a new content ID.
 
 Either way, the append's `content_changed` event in the commit response and the change feed includes `append_offset`, which is `S` (see [`GET /changes`](#611-get-changes)).
 
@@ -2021,13 +2025,13 @@ The same not-found and forbidden rule applies to reads. A subject with no right 
 | Trash listing | `read` on each deletion's saved original parent. |
 | Batch file resolution and grep candidates | `read` on the candidate inode. Snapshot resolution also requires `history`. |
 | Change feed, diff, or bare content reference read | Administrator. |
-| Bare content reference import | Administrator on the reference's owner namespace. |
+| Bare content reference import | Administrator on the source namespace. |
 
 Names belong to the directory, so a subject with `read` on a directory sees every child in a listing. A child that the subject can't read keeps its entry fields, but its `attributes` projection is left out, even when attributes were requested. A recursive listing also returns a child directory that the subject can't read, but it doesn't descend into that directory. For a snapshot read, LoonFS evaluates rights at the current head, on the historical inode that the snapshot resolves, never on the inode that occupies the path today. Every snapshot read of an inode also requires `history`. If an expired deletion hides that inode at the current head, which means that the deletion is at or below the retention floor of the current head's manifest, or if the inode's ancestry there is disconnected (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)), a snapshot read of it requires an administrator, and any other subject receives `path_not_found` or `inode_not_found`, as a live read of the inode does. For example, if a snapshot captured `/team/hr/salaries.csv` before `/team/hr` was deleted, then once the floor reaches that deletion, a principal with `read` and `history` on `/team/hr` can no longer read the file through the snapshot, but an administrator can.
 
 The trash listing filters out entries whose saved original parent the subject can't read. A filtered page can be short and still include `next_cursor`. Grep filters out candidates that the subject can't read before it reads their content, but those candidates still count against the page's candidate budget.
 
-When a subject is supplied, change feed reads, diff reads, bare content reference reads, and bare content reference imports require an administrator. An import checks the reference's owner namespace, including when the owner is also the destination or has been deleted. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. The checkpoint inventory and maintenance operations still read as the service.
+When a subject is supplied, change feed reads, diff reads, bare content reference reads, and bare content reference imports require an administrator. An import checks the source namespace, including when the source is also the destination or has been deleted. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. The checkpoint inventory and maintenance operations still read as the service.
 
 Why does a snapshot read of an expired subtree require an administrator? LoonFS evaluates a snapshot read's rights on the access rows at the current head, and after a deletion expires, base compactions remove the head's rows under it a family group at a time. So at the head, a boundary row can be gone while a grant above it is still stored, and evaluating another subject's rights on those rows could widen them. An administrator's rights don't depend on those rows.
 
@@ -2097,7 +2101,7 @@ A session starts `open` and then becomes `completed` or `aborted`, and both of t
 
 ```json
 { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_multipart", "status": "open", "expires_at_ms": 1730000000000, "checksum_algorithm": "crc64nvme", "part_size_bytes": 8388608 }
-{ "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "<16 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "<16 hex>" } }, "token": "<opaque>" } }
+{ "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "<16 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "<16 hex>" } }, "token": "<opaque>" } }
 { "namespace_id": "demo", "upload_id": "upl_...", "mode": "service_proxied", "status": "aborted", "aborted_at_ms": 1730000002000 }
 ```
 
@@ -2160,7 +2164,6 @@ Representative content-upload response:
   "checksum_algorithm": "crc64nvme",
   "content_ref": {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 20591,
     "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
@@ -2185,7 +2188,6 @@ Representative complete-upload response:
   "completed_at_ms": 1730000001000,
   "content_ref": {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 20591,
     "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
@@ -2193,7 +2195,6 @@ Representative complete-upload response:
   "content_token": {
     "content_ref": {
       "kind": "blob_v1",
-      "owner_namespace_id": "demo",
       "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
       "size_bytes": 20591,
       "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
@@ -2232,7 +2233,6 @@ The response contains a short-lived read capability, plus everything the reader 
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
@@ -2260,7 +2260,6 @@ The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
@@ -2327,7 +2326,6 @@ One request operation can apply several semantic operations. For example, a put 
           "revision_no": 8,
           "content_ref": {
             "kind": "blob_v1",
-            "owner_namespace_id": "demo",
             "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
             "size_bytes": 20591,
             "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
@@ -2374,7 +2372,6 @@ Directory and file creation use separate event shapes. A file creation always in
   "revision_no": 1,
   "content_ref": {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
     "size_bytes": 20591,
     "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
@@ -2391,7 +2388,6 @@ A `content_changed` event for an append includes `append_offset`, the offset whe
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
-    "owner_namespace_id": "demo",
     "content_id": "con_2bfn591c9z1p65wthb86fjmv0e",
     "size_bytes": 1036,
     "checksum": { "algorithm": "crc64nvme", "value": "3c1..." }
@@ -2556,7 +2552,7 @@ The snapshot has to stay unexpired, and the source namespace has to stay live, w
 
 Forking doesn't extend the snapshot, and a later deletion of the snapshot doesn't affect the fork. The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator. Namespace creation and forking produce no change-feed event.
 
-The new namespace reads inherited content at each reference's owner key, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
+The new namespace has the same family root as its source. It reads inherited content under the family root's prefix, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
 
 1. Might first fold the source's outstanding WAL tail, if the fork captures the current head. The fold writes that tail's inline content to content objects.
 2. Creates a fork pin in the source, so the source-owned immutable metadata segments stay available for as long as the target might still read them.
@@ -2655,7 +2651,7 @@ A conforming server MUST:
 2. Publish visible metadata only through logical commits stored in visible numbered WAL objects.
 3. Make referenced content durable no later than the commit that references it (see [File contents and ownership](format.md#15-file-contents-and-ownership)).
 4. Preserve `(namespace_id, inode_id)` as the canonical identity of an item, and preserve the namespace lifetime described in [Namespaces and identity](format.md#11-namespaces-and-identity).
-5. Resolve content through the reference's owner namespace and content ID.
+5. Resolve content through the reading namespace's family root and the reference's content ID.
 6. Implement tombstone-first delete.
 7. Serve replay from the highest-numbered verified manifest found through `hint.json`, plus the numbered WAL objects after the folded boundary, replayed as logical commits. Pins keep manifest versions for retention, stable reads, restore, and forks.
 8. Map sibling names to name keys exactly as described in [Names and paths](format.md#14-names-and-paths).

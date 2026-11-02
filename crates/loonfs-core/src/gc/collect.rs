@@ -22,7 +22,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// On a family root, the pass also reads the roots of every other member
     /// of its fork family, which it finds through fork pins, and protects the
-    /// content that any member refers to.
+    /// content that any member refers to. A pass on a fork lists and sweeps no
+    /// content and no upload records, because the family root's prefix stores
+    /// them.
     ///
     /// The root scan reads each distinct layout segment of the rooted manifests
     /// once per scan, through the segment cache, and charges exact content
@@ -74,24 +76,26 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .boxed();
             self.apply_decisions(decisions, &mut report).await?;
         }
-        // Upload sessions are swept as pairs of records, from their own listing.
-        let decisions = self
-            .list_uploads()
-            .and_then(|listed| sweep.upload(listed))
-            .boxed();
-        self.apply_decisions(decisions, &mut report).await?;
+        if live.collects_family_content() {
+            // Upload sessions are swept as pairs of records, from their own listing.
+            let decisions = self
+                .list_uploads()
+                .and_then(|listed| sweep.upload(listed))
+                .boxed();
+            self.apply_decisions(decisions, &mut report).await?;
+        }
         let content_listed = self.reclaim_namespace(&live, &mut report).await? || content.is_some();
-        // A skipped content sweep or a retained tombstone leaves the content
-        // unlisted, but the content still occupies storage.
-        if !content_listed {
+        // A skipped content sweep or a retained tombstone leaves the family's
+        // content unlisted, but the content still occupies storage.
+        if !content_listed && live.collects_family_content() {
             report.listed_bytes += self.list_content_bytes().await?;
         }
         report.listed_bytes += sweep.listed_bytes.into_inner();
         Ok(report)
     }
 
-    /// Lists the namespace's content prefix and returns the sum of the listed
-    /// object sizes.
+    /// Lists the content prefix of this namespace, a family root, and returns
+    /// the sum of the listed object sizes.
     async fn list_content_bytes(&self) -> Result<u64> {
         let prefix = content_prefix(&self.namespace_id);
         self.store

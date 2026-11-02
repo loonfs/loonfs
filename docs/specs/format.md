@@ -343,7 +343,7 @@ This section describes the objects LoonFS stores for a namespace, how their keys
 
 ### 2.1 Storage layout
 
-Each namespace's objects are stored under its own prefix, except that a fork's content objects and upload records are stored under its family root's prefix ([Object keys](#a8-object-keys) lists the complete key patterns):
+Each namespace's objects are stored under its own prefix, except that a fork's content objects and upload records are stored under its family root's prefix, and a temporary object is stored under the prefix of the key that it assembles ([Object keys](#a8-object-keys) lists the complete key patterns):
 
 ```text
 namespaces/{namespace_id}/

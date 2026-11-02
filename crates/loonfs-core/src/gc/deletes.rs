@@ -29,7 +29,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         .await
                         .map_err(|error| CoreError::store(key, &error))?,
                     Decision::DeleteUploadSession { upload_id } => {
-                        self.delete_upload_session_records(upload_id).await?
+                        // Only a family root's pass sweeps upload records.
+                        self.delete_upload_session_records(&self.namespace_id, upload_id)
+                            .await?
                     }
                     Decision::Retain { .. } | Decision::Gone => {}
                 }

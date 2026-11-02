@@ -8,6 +8,7 @@ use super::session::{
 };
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content::{verify_durable_content_checksum, DurableContentValidationError};
 use crate::storage::content_staging::{stage_streamed_under_content_id, StreamedPayloadKind};
@@ -16,7 +17,7 @@ use bytes::Bytes;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteStream, ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{UploadSessionMode, UploadSessionPayload};
-use loonfs_types::{ContentRef, ContentRefKind, Subject, UploadId, UploadSession};
+use loonfs_types::{ContentRef, ContentRefKind, NamespaceId, Subject, UploadId, UploadSession};
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Uploads whole-file content into an upload session.
@@ -77,35 +78,41 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<UploadSession> {
         let catalog = self.ensure_upload_namespace_available().await?;
+        let family_root_id = catalog.family_root_id();
         authorize_upload_subject(&self.namespace_id, catalog.access(), subject)?;
         let loaded = self
-            .load_open_proxied_session(upload_id, subject, clock)
+            .load_open_proxied_session(&catalog, upload_id, subject, clock)
             .await?;
         let session = &loaded.session;
         let content_ref = match payload {
             ProxiedPayload::Bytes(bytes) => {
-                write_proxied_bytes(&self.store, session, bytes).await?
+                write_proxied_bytes(&self.store, family_root_id, session, bytes).await?
             }
             ProxiedPayload::Stream(body) => {
                 let staged = stage_streamed_under_content_id(
                     &self.store,
-                    session.namespace_id.clone(),
+                    family_root_id,
                     session.content_id.clone(),
                     body,
                     StreamedPayloadKind::Request,
-                    self.ensure_session_still_open(upload_id, clock),
+                    self.ensure_session_still_open(&catalog, upload_id, clock),
                 )
                 .await?;
                 if staged.already_present {
-                    ensure_stored_content_matches(&self.store, upload_id, &staged.content_ref)
-                        .await?;
+                    ensure_stored_content_matches(
+                        &self.store,
+                        family_root_id,
+                        upload_id,
+                        &staged.content_ref,
+                    )
+                    .await?;
                 }
                 staged.content_ref
             }
         };
         // An abort during the write deletes the object it was writing, so the
         // bytes are reported as uploaded only if the session is still open.
-        let state = self.load_upload_session_state(upload_id).await?;
+        let state = self.load_upload_session_state(&catalog, upload_id).await?;
         ensure_session_open(&state, clock.request_at_ms())?;
         Ok(session_response(
             &state,
@@ -116,11 +123,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     async fn load_open_proxied_session(
         &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         subject: Option<&Subject>,
         clock: &OperationClock,
     ) -> Result<UploadSessionState> {
-        let state = self.load_upload_session_state(upload_id).await?;
+        let state = self.load_upload_session_state(catalog, upload_id).await?;
         ensure_session_subject(&state.session, subject)?;
         ensure_session_open(&state, clock.request_at_ms())?;
         if !matches!(state.session.mode, UploadSessionMode::ServiceProxied {}) {
@@ -138,19 +146,20 @@ pub(crate) enum ProxiedPayload<'a> {
     Stream(ByteStream),
 }
 
-/// Writes a proxied upload's buffered bytes to the session's content object.
+/// Writes a proxied upload's buffered bytes to the session's content object,
+/// under the prefix of `family_root_id`.
 async fn write_proxied_bytes<S: ObjectStore + ?Sized>(
     store: &S,
+    family_root_id: &NamespaceId,
     session: &UploadSessionPayload,
     bytes: &[u8],
 ) -> Result<ContentRef> {
     let content_ref = ContentRef::blob_v1(
-        session.namespace_id.clone(),
         session.content_id.clone(),
         bytes,
         store.checksum_algorithm(),
     );
-    let object_key = content_blob(&session.namespace_id, &session.content_id);
+    let object_key = content_blob(family_root_id, &session.content_id);
     match store
         .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
         .await
@@ -167,10 +176,11 @@ async fn write_proxied_bytes<S: ObjectStore + ?Sized>(
 /// its stored size and checksum match the bytes of this request.
 async fn ensure_stored_content_matches<S: ObjectStore + ?Sized>(
     store: &S,
+    family_root_id: &NamespaceId,
     upload_id: &UploadId,
     content_ref: &ContentRef,
 ) -> Result<()> {
-    match verify_durable_content_checksum(store, content_ref).await {
+    match verify_durable_content_checksum(store, family_root_id, content_ref).await {
         Ok(()) => Ok(()),
         Err(error @ DurableContentValidationError::Store { .. }) => {
             Err(CoreError::DurableContent(error))
@@ -181,18 +191,19 @@ async fn ensure_stored_content_matches<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Builds the reference of a proxied session's content object from the
-/// object's stored size and checksum, or returns `None` if no upload has
-/// written it yet.
+/// Builds the reference of a proxied session's content object, under the
+/// prefix of `family_root_id`, from the object's stored size and checksum, or
+/// returns `None` if no upload has written it yet.
 ///
 /// Only this session writes the object, with a create that the store makes
 /// conditional, so the stored object contains the bytes that one request
 /// uploaded.
 pub(crate) async fn find_proxied_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
+    family_root_id: &NamespaceId,
     session: &UploadSessionPayload,
 ) -> Result<Option<ContentRef>> {
-    let object_key = content_blob(&session.namespace_id, &session.content_id);
+    let object_key = content_blob(family_root_id, &session.content_id);
     let Some(stored) = store
         .head(&object_key)
         .await
@@ -210,7 +221,6 @@ pub(crate) async fn find_proxied_content_ref<S: ObjectStore + ?Sized>(
     })?;
     Ok(Some(ContentRef {
         kind: ContentRefKind::BlobV1,
-        owner_namespace_id: session.namespace_id.clone(),
         content_id: session.content_id.clone(),
         size_bytes: stored.size_bytes,
         checksum,

@@ -83,7 +83,7 @@ pub(crate) fn pin_key_ids(
             reason: format!("the key belongs to durable family `{:?}`", parsed.family()),
         });
     }
-    let namespace = parsed.owner_namespace_id();
+    let namespace = parsed.prefix_namespace_id();
     let identifier = parsed
         .identifier()
         .expect("`parse_object_key` should give every pin key its pin ID");

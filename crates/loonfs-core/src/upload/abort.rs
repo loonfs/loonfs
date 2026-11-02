@@ -25,7 +25,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let clock = self.namespace.start_clock();
         let namespace_id = catalog.namespace_id();
         authorize_upload_subject(namespace_id, catalog.access(), self.subject.as_ref())?;
-        let loaded = self.namespace.load_upload_session_state(upload_id).await?;
+        let loaded = self
+            .namespace
+            .load_upload_session_state(&catalog, upload_id)
+            .await?;
         ensure_session_subject(&loaded.session, self.subject.as_ref())?;
         let aborted_at_ms = match &loaded.outcome {
             Some(outcome) => repeated_abort(outcome, upload_id)?,
@@ -35,7 +38,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 };
                 match self
                     .namespace
-                    .create_upload_outcome(&loaded.session, &outcome)
+                    .create_upload_outcome(catalog.family_root_id(), &loaded.session, &outcome)
                     .await?
                 {
                     OutcomeCreation::Created => clock.request_at_ms(),
@@ -44,7 +47,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
         };
 
-        if !AbandonedUpload::of(&loaded.session)
+        if !AbandonedUpload::of(catalog.family_root_id(), &loaded.session)
             .release(&self.namespace.store)
             .await
         {
@@ -81,13 +84,16 @@ fn repeated_abort(outcome: &UploadOutcome, upload_id: &UploadId) -> Result<u64> 
 /// cleanup only after the aborted outcome record exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AbandonedUpload {
-    pub(crate) owner_namespace_id: NamespaceId,
+    /// The family root whose prefix stores the session's content object.
+    pub(crate) family_root_id: NamespaceId,
     pub(crate) content_id: ContentId,
     pub(crate) provider_multipart_upload_id: Option<String>,
 }
 
 impl AbandonedUpload {
-    pub(crate) fn of(state: &UploadSessionPayload) -> Self {
+    /// Returns what the session `state` left under the prefix of
+    /// `family_root_id`.
+    pub(crate) fn of(family_root_id: &NamespaceId, state: &UploadSessionPayload) -> Self {
         let provider_multipart_upload_id = match &state.mode {
             UploadSessionMode::DirectMultipart {
                 provider_upload_id, ..
@@ -95,7 +101,7 @@ impl AbandonedUpload {
             UploadSessionMode::ServiceProxied { .. } | UploadSessionMode::DirectPut { .. } => None,
         };
         Self {
-            owner_namespace_id: state.namespace_id.clone(),
+            family_root_id: family_root_id.clone(),
             content_id: state.content_id.clone(),
             provider_multipart_upload_id,
         }
@@ -112,14 +118,14 @@ impl AbandonedUpload {
         if !self.release_provider(store).await {
             return false;
         }
-        delete_unpublished_content_object(store, &self.owner_namespace_id, &self.content_id).await
+        delete_unpublished_content_object(store, &self.family_root_id, &self.content_id).await
     }
 
     pub(crate) async fn release_provider<S: ObjectStore + ?Sized>(&self, store: &S) -> bool {
         if let Some(provider_upload_id) = &self.provider_multipart_upload_id {
             if !abort_unpublished_multipart_upload(
                 store,
-                &self.owner_namespace_id,
+                &self.family_root_id,
                 &self.content_id,
                 provider_upload_id,
             )
@@ -145,10 +151,10 @@ impl AbandonedUpload {
 #[must_use]
 pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
     store: &S,
-    owner_namespace_id: &NamespaceId,
+    family_root_id: &NamespaceId,
     content_id: &ContentId,
 ) -> bool {
-    let object_key = content_blob(owner_namespace_id, content_id);
+    let object_key = content_blob(family_root_id, content_id);
     match store.delete(&object_key).await {
         Ok(()) => true,
         Err(error) => {
@@ -173,11 +179,11 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
 #[must_use]
 pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
-    owner_namespace_id: &NamespaceId,
+    family_root_id: &NamespaceId,
     content_id: &ContentId,
     provider_upload_id: &str,
 ) -> bool {
-    let object_key = content_blob(owner_namespace_id, content_id);
+    let object_key = content_blob(family_root_id, content_id);
     match store
         .abort_multipart_upload(&object_key, provider_upload_id)
         .await

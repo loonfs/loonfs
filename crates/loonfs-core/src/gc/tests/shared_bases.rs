@@ -34,15 +34,14 @@ fn shared_layout(namespace_id: &NamespaceId, index: usize) -> ContentLayoutRecor
     let base_id =
         ContentId::parse(format!("con_{}b{index:023}", shard_prefix(index + 1))).expect("base id");
     ContentLayoutRecord {
-        owner_namespace_id: namespace_id.clone(),
         content_id: content_id.clone(),
         size_bytes: 2,
         committed_seq: ChangeSeq(1),
         layout: ContentLayout {
+            creator_namespace_id: namespace_id.clone(),
             extents: [base_id, content_id]
                 .into_iter()
                 .map(|content_id| ContentExtent {
-                    owner_namespace_id: namespace_id.clone(),
                     content_id,
                     object: ExtentObject::Whole,
                     offset: 0,
@@ -75,7 +74,7 @@ async fn layout_manifest(
     let mut keys = BTreeSet::new();
     for row in rows {
         for extent in &row.layout.extents {
-            let key = extent_object_key(extent);
+            let key = extent_object_key(namespace_id, extent);
             store
                 .put_if_absent(&key, Bytes::from_static(b"x"))
                 .await
@@ -218,7 +217,10 @@ async fn a_shared_base_false_positive_is_collected_with_a_later_pass_seed() {
     let namespace_id = NamespaceId::parse("shared-false-positive").expect("namespace");
     let (manifest, protected) = shared_layout_manifest(&store, &namespace_id, 1).await;
     publish_layout_manifest(&store, manifest).await;
-    let base_key = extent_object_key(&shared_layout(&namespace_id, 0).layout.extents[0]);
+    let base_key = extent_object_key(
+        &namespace_id,
+        &shared_layout(&namespace_id, 0).layout.extents[0],
+    );
     let mut first = BloomFilter::new(1, GRACE_MS + 1);
     let mut second = BloomFilter::new(1, GRACE_MS + 2);
     first.insert(base_key.as_bytes()).expect("insert");
@@ -393,13 +395,12 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     let namespace_id = NamespaceId::parse("superseded-layout").expect("namespace");
     let chain = ContentId::generate();
     let layout = |object, size_bytes, committed_seq| ContentLayoutRecord {
-        owner_namespace_id: namespace_id.clone(),
         content_id: chain.clone(),
         size_bytes,
         committed_seq: ChangeSeq(committed_seq),
         layout: ContentLayout {
+            creator_namespace_id: namespace_id.clone(),
             extents: vec![ContentExtent {
-                owner_namespace_id: namespace_id.clone(),
                 content_id: chain.clone(),
                 object,
                 offset: 0,

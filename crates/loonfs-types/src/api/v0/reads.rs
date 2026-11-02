@@ -435,7 +435,6 @@ mod tests {
     #[test]
     fn a_file_entry_serializes_its_required_payload_with_the_kind() {
         let content_ref = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             crate::ContentId::generate(),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
@@ -521,7 +520,6 @@ mod tests {
         );
 
         let content_ref = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             crate::ContentId::generate(),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
@@ -692,7 +690,6 @@ mod tests {
     #[test]
     fn file_revision_provenance_fields_are_pinned_on_the_wire() {
         let content_ref = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             crate::ContentId::generate(),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,

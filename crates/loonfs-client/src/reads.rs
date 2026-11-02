@@ -679,7 +679,6 @@ mod tests {
                     "revision_no": 7,
                     "size_bytes": 5,
                     "content_ref": ContentRef::blob_v1(
-                        namespace_id.clone(),
                         ContentId::generate(),
                         b"hello", loonfs_types::ChecksumAlgorithm::Crc64nvme),
                     "revision_committed_by": "render-worker",
@@ -894,7 +893,6 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let content_id = ContentId::parse("con_4z59p0wjvx9a8b2frdhhf6mat1").expect("content id");
         let content_ref = ContentRef::blob_v1(
-            namespace_id.clone(),
             content_id,
             b"hello",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,

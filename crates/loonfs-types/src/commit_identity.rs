@@ -393,9 +393,10 @@ fn content_fingerprint_input<'a>(
     inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> ContentRefFingerprintInput<'a> {
     match content {
-        FileContent::Ref(reference) => {
-            content_ref_fingerprint_input(reference, inline_content_identities)
-        }
+        FileContent::Ref {
+            content_ref: reference,
+            ..
+        } => content_ref_fingerprint_input(reference, inline_content_identities),
         FileContent::Inline(bytes) => InlineContentIdentity::from_bytes(bytes).preimage(),
     }
 }
@@ -833,12 +834,7 @@ mod tests {
             crate::ChecksumAlgorithm::Crc32c,
         ] {
             let content_id = ContentId::generate();
-            let reference = ContentRef::blob_v1(
-                namespace_id.clone(),
-                content_id.clone(),
-                b"hello",
-                algorithm,
-            );
+            let reference = ContentRef::blob_v1(content_id.clone(), b"hello", algorithm);
             let identities =
                 BTreeMap::from([(content_id, InlineContentIdentity::from_bytes(b"hello"))]);
             assert_eq!(
@@ -1245,14 +1241,16 @@ mod tests {
     #[test]
     fn put_file_preconditions_change_the_fingerprint_deterministically() {
         let content_ref = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
             b"put bytes",
             crate::ChecksumAlgorithm::Crc64nvme,
         );
         let operation = |expected_inode_id, expected_revision_no| FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-            content: FileContent::Ref(content_ref.clone()),
+            content: FileContent::Ref {
+                content_ref: content_ref.clone(),
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::Replace,
             expected_inode_id,
             expected_revision_no,
@@ -1325,14 +1323,12 @@ mod tests {
 
         for content_ref in [
             ContentRef::blob_v1(
-                crate::NamespaceId::parse("demo").expect("namespace id"),
                 content_id.clone(),
                 bytes,
                 crate::ChecksumAlgorithm::Crc64nvme,
             ),
             ContentRef {
                 kind: ContentRefKind::BlobV1,
-                owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
                 content_id: content_id.clone(),
                 size_bytes: bytes.len() as u64,
                 checksum: Checksum::crc32c(bytes),
@@ -1365,7 +1361,10 @@ mod tests {
     fn put(path: &str, content_ref: ContentRef) -> FilesystemOperation {
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse(path).expect("path"),
-            content: FileContent::Ref(content_ref),
+            content: FileContent::Ref {
+                content_ref,
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1377,13 +1376,11 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let bytes = b"identical bytes, two uploads";
         let first = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
             crate::ChecksumAlgorithm::Crc64nvme,
         );
         let second = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
             crate::ChecksumAlgorithm::Crc64nvme,
@@ -1476,7 +1473,6 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let path = AbsolutePath::parse("/a.txt").expect("path");
         let content_ref = ContentRef::blob_v1(
-            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
@@ -1494,7 +1490,10 @@ mod tests {
                     message: options.commit.message.as_deref(),
                     operations: &[FilesystemOperation::PutFile {
                         path: path.clone(),
-                        content: FileContent::Ref(content_ref.clone()),
+                        content: FileContent::Ref {
+                            content_ref: content_ref.clone(),
+                            source_namespace_id: None,
+                        },
                         behavior: options.behavior,
                         expected_inode_id: options.expected_inode_id,
                         expected_revision_no: options.expected_revision_no,

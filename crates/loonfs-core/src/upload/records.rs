@@ -9,11 +9,11 @@
 //! [upload sessions]: https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#51-upload-sessions
 
 use crate::control_object::{
-    expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
-    LoadedControl,
+    expect_identity_field, load_control_object, ControlObjectLoadError, LoadedControl,
 };
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::{CoreError, Result};
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::{upload_outcome, upload_session};
@@ -23,7 +23,7 @@ use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, UploadOutcome, UploadOutcomePayload,
     UploadSessionPayload,
 };
-use loonfs_types::UploadId;
+use loonfs_types::{NamespaceId, UploadId};
 
 /// An upload session's record, together with its outcome if the session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,41 +34,52 @@ pub(crate) struct UploadSessionState {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Loads an upload session's records.
+    /// Loads the records of an upload session that the namespace `catalog`
+    /// describes created, from its family root's prefix.
     ///
     /// The outcome record is read before the session record. Garbage collection
     /// deletes the session record first, so if the session record is still
     /// there after the outcome was found missing, the session was open when the
     /// outcome was read, and not deleted. A missing session record returns
-    /// `UploadNotFound`, whatever the outcome read found.
+    /// `UploadNotFound`, whatever the outcome read found, and so does a session
+    /// that another member of the fork family created, because the session's
+    /// key doesn't identify the member.
     pub(crate) async fn load_upload_session_state(
         &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
     ) -> Result<UploadSessionState> {
-        let outcome = self.load_upload_outcome(upload_id).await?;
+        let family_root_id = catalog.family_root_id();
+        let outcome = self.load_upload_outcome(family_root_id, upload_id).await?;
         let session = self
-            .load_upload_session_record(upload_id)
+            .load_upload_session_record(family_root_id, upload_id)
             .await?
+            .filter(|session| session.namespace_id == *catalog.namespace_id())
             .ok_or_else(|| CoreError::UploadNotFound {
                 upload_id: upload_id.clone(),
             })?;
         if let Some(outcome) = &outcome {
             ensure_outcome_matches_session(&session, outcome)?;
         }
-        Ok(UploadSessionState { session, outcome })
+        Ok(UploadSessionState {
+            session,
+            outcome: outcome.map(|record| record.outcome),
+        })
     }
 
-    /// Loads the record that started an upload session, or `None` if it's gone.
+    /// Loads the record that started an upload session, from the prefix of
+    /// `family_root_id`, or `None` if it's gone. The record identifies the
+    /// member of the fork family that created the session.
     pub(crate) async fn load_upload_session_record(
         &self,
+        family_root_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> Result<Option<UploadSessionPayload>> {
         let loaded = load_control_object(
             &self.store,
-            upload_session(&self.namespace_id, upload_id),
+            upload_session(family_root_id, upload_id),
             ControlObjectKind::UploadSession,
             |session: &UploadSessionPayload| {
-                expect_namespace(&self.namespace_id, &session.namespace_id)?;
                 expect_identity_field("upload id", upload_id.as_str(), session.upload_id.as_str())
             },
         )
@@ -76,26 +87,27 @@ impl<S: ObjectStore> NamespaceStore<S> {
         present(loaded).map(|loaded| loaded.map(|loaded| loaded.state))
     }
 
-    /// Loads how an upload session ended, or `None` if it has no outcome record.
+    /// Loads the record of how an upload session ended, from the prefix of
+    /// `family_root_id`, or `None` if it has no outcome record.
     pub(crate) async fn load_upload_outcome(
         &self,
+        family_root_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<Option<UploadOutcome>> {
+    ) -> Result<Option<UploadOutcomePayload>> {
         let loaded = load_control_object(
             &self.store,
-            upload_outcome(&self.namespace_id, upload_id),
+            upload_outcome(family_root_id, upload_id),
             ControlObjectKind::UploadOutcome,
             |record: &UploadOutcomePayload| {
-                expect_namespace(&self.namespace_id, &record.namespace_id)?;
                 expect_identity_field("upload id", upload_id.as_str(), record.upload_id.as_str())
             },
         )
         .await;
-        present(loaded).map(|loaded| loaded.map(|loaded| loaded.state.outcome))
+        present(loaded).map(|loaded| loaded.map(|loaded| loaded.state))
     }
 
-    /// Records how an upload session ended, then confirms that the session
-    /// record still exists.
+    /// Records how an upload session ended, under the prefix of
+    /// `family_root_id`, then confirms that the session record still exists.
     ///
     /// The outcome record is created with put-if-absent, so a completion, a
     /// client's abort, and garbage collection's abort of an expired session race
@@ -118,14 +130,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// session record.
     pub(crate) async fn create_upload_outcome(
         &self,
+        family_root_id: &NamespaceId,
         session: &UploadSessionPayload,
         outcome: &UploadOutcome,
     ) -> Result<OutcomeCreation> {
-        let namespace_id = &session.namespace_id;
         let upload_id = &session.upload_id;
-        let object_key = upload_outcome(namespace_id, upload_id);
+        let object_key = upload_outcome(family_root_id, upload_id);
         let record = UploadOutcomePayload {
-            namespace_id: namespace_id.clone(),
+            namespace_id: session.namespace_id.clone(),
             upload_id: upload_id.clone(),
             outcome: outcome.clone(),
         };
@@ -142,11 +154,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 ) => error,
                 Err(error) => return Err(CoreError::store(&object_key, &error)),
             };
-            match self.load_upload_outcome(upload_id).await? {
-                Some(stored) if stored == *outcome => {
+            match self.load_upload_outcome(family_root_id, upload_id).await? {
+                Some(stored) if stored == record => {
                     Ok(CasOutcome::Settled(OutcomeCreation::Created))
                 }
-                Some(stored) => Ok(CasOutcome::Settled(OutcomeCreation::Existing(stored))),
+                Some(stored) => {
+                    ensure_outcome_matches_session(session, &stored)?;
+                    Ok(CasOutcome::Settled(OutcomeCreation::Existing(
+                        stored.outcome,
+                    )))
+                }
                 // An earlier attempt's put can still be applied after this read,
                 // so a write whose result is unknown is sent again.
                 None if matches!(error, ObjectStoreError::Transport { .. }) => {
@@ -160,7 +177,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }
         })
         .await??;
-        let session_key = upload_session(namespace_id, upload_id);
+        let session_key = upload_session(family_root_id, upload_id);
         match self.store.head(&session_key).await {
             Ok(Some(_)) => Ok(creation),
             Ok(None) => Err(CoreError::UploadNotFound {
@@ -170,7 +187,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
     }
 
-    /// Deletes an ended upload session's records, the session record first.
+    /// Deletes an ended upload session's records from the prefix of
+    /// `family_root_id`, the session record first.
     ///
     /// An outcome record counts only while its session record exists, so the
     /// session record goes first. If this call stops between the two deletes,
@@ -181,10 +199,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// and delete its content, which a commit might reference. This order is
     /// also what lets [`create_upload_outcome`] detect a session that was
     /// deleted while the caller stalled.
-    pub(crate) async fn delete_upload_session_records(&self, upload_id: &UploadId) -> Result<()> {
+    pub(crate) async fn delete_upload_session_records(
+        &self,
+        family_root_id: &NamespaceId,
+        upload_id: &UploadId,
+    ) -> Result<()> {
         for object_key in [
-            upload_session(&self.namespace_id, upload_id),
-            upload_outcome(&self.namespace_id, upload_id),
+            upload_session(family_root_id, upload_id),
+            upload_outcome(family_root_id, upload_id),
         ] {
             self.store
                 .delete(&object_key)
@@ -207,14 +229,21 @@ fn present<T>(
 
 /// Refuses an outcome that contradicts its session record.
 ///
-/// Each record is valid on its own, so only the pair can disagree: a
-/// completed reference to another content object, or one in a checksum
-/// algorithm that the session's direct mode didn't select.
+/// Each record is valid on its own, so only the pair can disagree: an
+/// outcome of another namespace's session, a completed reference to another
+/// content object, or one in a checksum algorithm that the session's direct
+/// mode didn't select.
 fn ensure_outcome_matches_session(
     session: &UploadSessionPayload,
-    outcome: &UploadOutcome,
+    record: &UploadOutcomePayload,
 ) -> Result<()> {
-    let UploadOutcome::Completed { content_ref, .. } = outcome else {
+    if record.namespace_id != session.namespace_id {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "upload session `{}` belongs to namespace `{}` but its outcome belongs to `{}`",
+            session.upload_id, session.namespace_id, record.namespace_id
+        )));
+    }
+    let UploadOutcome::Completed { content_ref, .. } = &record.outcome else {
         return Ok(());
     };
     if content_ref.content_id != session.content_id {
@@ -287,7 +316,6 @@ mod tests {
             };
             let content_ref = ContentRef {
                 kind: ContentRefKind::BlobV1,
-                owner_namespace_id: namespace_id.clone(),
                 content_id: if other_content {
                     ContentId::generate()
                 } else {
@@ -300,9 +328,16 @@ mod tests {
                 completed_at_ms: 1_500,
                 content_ref,
             };
-            write_upload_records(&store, &session, Some(outcome.clone())).await;
+            write_upload_records(&store, &namespace_id, &session, Some(outcome.clone())).await;
+            let catalog = VerifiedNamespaceCatalogEntry::from_head(
+                &crate::namespace::state::NamespaceReadState::initial(
+                    namespace_id.clone(),
+                    1_000,
+                    loonfs_test_support::test_actor(),
+                ),
+            );
             let loaded = crate::test_support::namespace_store(&store, &namespace_id)
-                .load_upload_session_state(&session.upload_id)
+                .load_upload_session_state(&catalog, &session.upload_id)
                 .await;
             match refusal {
                 None => assert_eq!(loaded.expect("consistent records").outcome, Some(outcome)),

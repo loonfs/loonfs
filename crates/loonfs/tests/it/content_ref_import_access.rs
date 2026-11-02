@@ -240,14 +240,19 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
 
     recording.reset();
     let error = namespace
-        .prepare_content_ref(content_ref.clone())
+        .prepare_content_ref(content_ref.clone(), &source)
         .await
         .expect_err("prepare requires source administrator");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
     recording.reset();
     let error = namespace
-        .put_file_content_ref("/imported", content_ref, &loonfs_test_support::test_actor())
+        .put_file_content_ref(
+            "/imported",
+            content_ref,
+            &source,
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect_err("put requires source administrator");
     assert_forbidden_without_writes(recording.as_ref(), error);
@@ -277,19 +282,21 @@ async fn same_namespace_inline_tail_import_requires_its_administrator() {
         .put_file_content_ref(
             "/imported",
             content_ref.clone(),
+            &namespace_id,
             &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("same-namespace import requires administrator");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
+    // A namespace is in its own fork family, so the import keeps the
+    // reference.
     let prepared = namespace
         .with_subject(subject("administrator"))
-        .prepare_content_ref(content_ref.clone())
+        .prepare_content_ref(content_ref.clone(), &namespace_id)
         .await
         .expect("administrator imports same-namespace reference");
-    assert_eq!(prepared.content_ref().owner_namespace_id, namespace_id);
-    assert_ne!(prepared.content_ref().content_id, content_ref.content_id);
+    assert_eq!(prepared.content_ref(), &content_ref);
 }
 
 #[tokio::test]
@@ -309,22 +316,28 @@ async fn bare_reference_import_accepts_service_administrator_and_unrestricted_au
     let acl_ref = publish_inline(&writer, &acl_source).await;
     let unrestricted_ref = publish_inline(&writer, &unrestricted_source).await;
 
-    for (authority, content_ref) in [
-        (writer.clone(), acl_ref.clone()),
+    for (authority, content_ref, source) in [
+        (writer.clone(), acl_ref.clone(), &acl_source),
         (
             writer.with_subject(subject("administrator")),
             acl_ref.clone(),
+            &acl_source,
         ),
-        (writer.with_subject(subject("stranger")), unrestricted_ref),
+        (
+            writer.with_subject(subject("stranger")),
+            unrestricted_ref,
+            &unrestricted_source,
+        ),
     ] {
         let namespace = authority
             .open_namespace(&destination)
             .expect("open namespace");
         let prepared = namespace
-            .prepare_content_ref(content_ref.clone())
+            .prepare_content_ref(content_ref.clone(), source)
             .await
             .expect("authorized import");
-        assert_eq!(prepared.content_ref().owner_namespace_id, destination);
+        // The source is in another fork family, so the import copies the
+        // bytes under a new content ID.
         assert_ne!(prepared.content_ref().content_id, content_ref.content_id);
     }
 }
@@ -367,7 +380,7 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
     recording.reset();
     let error = destination_writer
         .with_subject(subject("administrator"))
-        .prepare_content_ref(content_ref)
+        .prepare_content_ref(content_ref, &source)
         .await
         .expect_err("reclaimed owner");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
@@ -442,16 +455,15 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
     recording.reset();
     let error = destination_writer
         .with_subject(subject("administrator"))
-        .prepare_content_ref(content_ref.clone())
+        .prepare_content_ref(content_ref.clone(), &source)
         .await
         .expect_err("former administrator is refused");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
     let prepared = destination_writer
         .with_subject(subject("replacement"))
-        .prepare_content_ref(content_ref.clone())
+        .prepare_content_ref(content_ref.clone(), &source)
         .await
         .expect("surviving access state authorizes administrator");
-    assert_eq!(prepared.content_ref().owner_namespace_id, destination);
     assert_ne!(prepared.content_ref().content_id, content_ref.content_id);
 }

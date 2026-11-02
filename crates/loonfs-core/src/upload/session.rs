@@ -99,7 +99,7 @@ pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
             .request_at_ms()
             .saturating_add(UPLOAD_SESSION_LEASE_MS),
     };
-    let object_key = upload_session(catalog.namespace_id(), &upload_id);
+    let object_key = upload_session(catalog.family_root_id(), &upload_id);
     let encoded = encode_control_state(ControlObjectKind::UploadSession, &record)
         .expect("an upload session record should encode");
     create_control_object_under_generated_id(store, &object_key, Bytes::from(encoded)).await?;
@@ -151,10 +151,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// object the request writes.
     pub(crate) async fn ensure_session_still_open(
         &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         clock: &OperationClock,
     ) -> Result<()> {
-        let state = self.load_upload_session_state(upload_id).await?;
+        let state = self.load_upload_session_state(catalog, upload_id).await?;
         ensure_session_open(&state, clock.request_at_ms())
     }
 }

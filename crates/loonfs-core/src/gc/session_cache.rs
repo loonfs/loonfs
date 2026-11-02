@@ -6,16 +6,19 @@ use crate::block_cache::{
     DecodedBlockKey,
 };
 use crate::heap_bytes::HeapBytes;
-use loonfs_types::{ContentId, UploadId};
+use loonfs_types::{ContentId, NamespaceId, UploadId};
 use std::sync::Arc;
 
-/// The two facts that garbage collection uses from a completed upload
-/// session's outcome record.
+/// The facts that garbage collection uses from a completed upload session's
+/// outcome record.
 ///
-/// LoonFS never changes an outcome record, so both facts stay true for as
+/// LoonFS never changes an outcome record, so these facts stay true for as
 /// long as the session's records exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompletedUploadSession {
+    /// The namespace that created the session, whose retirement status the
+    /// sweep applies to the session.
+    pub(crate) namespace_id: NamespaceId,
     /// The content that the session uploaded, which a pass protects.
     pub(crate) content_id: ContentId,
     /// When the session was completed. The sweep deletes the session's
@@ -129,10 +132,11 @@ mod tests {
     use super::{CompletedUploadSession, CompletedUploadSessionCache};
     use crate::block_cache::CacheScope;
     use crate::block_cache::{charged_bytes, DecodedBlockCacheStats};
-    use loonfs_types::{ContentId, UploadId};
+    use loonfs_types::{ContentId, NamespaceId, UploadId};
 
     fn session() -> CompletedUploadSession {
         CompletedUploadSession {
+            namespace_id: NamespaceId::parse("fork").expect("namespace"),
             content_id: ContentId::generate(),
             completed_at_ms: 1_000,
         }

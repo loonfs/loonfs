@@ -171,7 +171,10 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(path).expect("path"),
-                    content: loonfs_types::FileContent::Ref(content_ref),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref,
+                        source_namespace_id: None,
+                    },
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

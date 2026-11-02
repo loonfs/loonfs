@@ -1,7 +1,7 @@
 //! Content bytes that a commit includes, with their ordinary blob reference.
 
 use bytes::Bytes;
-use loonfs_types::{ChecksumAlgorithm, ContentId, ContentRef, NamespaceId};
+use loonfs_types::{ChecksumAlgorithm, ContentId, ContentRef};
 
 /// Keeps bytes with a reference built from them, so the two agree by construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,14 +13,9 @@ pub struct InlineContent {
 impl InlineContent {
     /// The caller draws a fresh `ContentId` for every value and never reuses it.
     /// A content ID belongs to exactly one staged upload or one committed inline value.
-    pub fn new(
-        owner_namespace_id: NamespaceId,
-        content_id: ContentId,
-        bytes: Bytes,
-        algorithm: ChecksumAlgorithm,
-    ) -> Self {
+    pub fn new(content_id: ContentId, bytes: Bytes, algorithm: ChecksumAlgorithm) -> Self {
         Self {
-            content_ref: ContentRef::blob_v1(owner_namespace_id, content_id, &bytes, algorithm),
+            content_ref: ContentRef::blob_v1(content_id, &bytes, algorithm),
             bytes,
         }
     }

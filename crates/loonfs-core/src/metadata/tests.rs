@@ -94,7 +94,6 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
             child_created_at_ms: 0,
             revision_no: RevisionNo(1),
             content_ref: ContentRef::blob_v1(
-                loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                 ContentId::generate(),
                 b"revision",
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
@@ -670,13 +669,11 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
 #[test]
 fn metadata_builder_tracks_the_highest_row_sequence() {
     let content_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         b"first revision bytes",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let replacement_ref = ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         b"second revision bytes",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,

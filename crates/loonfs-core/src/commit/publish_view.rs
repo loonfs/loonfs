@@ -53,7 +53,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 
     /// Returns where the content writes that the batch's planning sends go.
     pub(super) fn content_writes(&self) -> ContentWrites<'_, S> {
-        ContentWrites::new(self.store(), self.content_write_permits)
+        ContentWrites::new(self.store(), self.content_write_permits, self.head())
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {

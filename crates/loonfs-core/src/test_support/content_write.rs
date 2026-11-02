@@ -18,7 +18,7 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         let catalog = self.namespace.load_catalog_entry().await?;
         let stored = stage_bytes_under_content_id(
             &self.namespace.store,
-            catalog.namespace_id().clone(),
+            catalog.family_root_id(),
             loonfs_types::ContentId::generate(),
             bytes,
         )

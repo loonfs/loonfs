@@ -19,12 +19,11 @@ pub enum ExtentObject {
     },
 }
 
-/// One run of chain bytes stored in an immutable object.
+/// One run of chain bytes stored in an immutable object under the family
+/// root's prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContentExtent {
-    /// Namespace that owns the object.
-    pub owner_namespace_id: NamespaceId,
     /// Chain whose key contains the object.
     pub content_id: ContentId,
     /// Object under the chain's key.
@@ -35,10 +34,17 @@ pub struct ContentExtent {
     pub length: u64,
 }
 
-/// Objects in order from the first byte of a chain.
+/// Objects in order from the first byte of a chain, and the namespace that
+/// created the chain.
+///
+/// See [metadata rows](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContentLayout {
+    /// The namespace whose commit started the chain, which is the only
+    /// namespace that extends the chain in place. Every layout of one chain
+    /// records the same creator.
+    pub creator_namespace_id: NamespaceId,
     /// Consecutive runs of chain bytes.
     pub extents: Vec<ContentExtent>,
 }
@@ -58,7 +64,8 @@ impl ContentLayout {
         self.extents.iter().map(|extent| extent.length).sum()
     }
 
-    /// Checks coverage and object bounds.
+    /// Checks coverage and object bounds. The creator and each content ID
+    /// are valid by construction, because their types parse every value.
     pub fn validate(&self, size_bytes: u64) -> Result<(), ContentLayoutError> {
         let invalid = |reason| ContentLayoutError { reason };
         if size_bytes == 0
@@ -107,7 +114,6 @@ mod tests {
     #[test]
     fn layouts_cover_the_chain_and_validate_empty_and_span_extents() {
         let whole = ContentExtent {
-            owner_namespace_id: NamespaceId::parse("owner").expect("namespace"),
             content_id: ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content"),
             object: ExtentObject::Whole,
             offset: 0,
@@ -118,7 +124,9 @@ mod tests {
             length: 5,
             ..whole.clone()
         };
+        let creator = NamespaceId::parse("creator").expect("namespace");
         let layout = ContentLayout {
+            creator_namespace_id: creator.clone(),
             extents: vec![whole.clone(), span.clone()],
         };
         assert_eq!(layout.size_bytes(), 15);
@@ -129,10 +137,14 @@ mod tests {
         layout
             .validate(16)
             .expect_err("a size above the layout length should be rejected");
-        ContentLayout { extents: vec![] }
-            .validate(0)
-            .expect_err("an empty layout should be rejected");
+        ContentLayout {
+            creator_namespace_id: creator.clone(),
+            extents: vec![],
+        }
+        .validate(0)
+        .expect_err("an empty layout should be rejected");
         assert!(ContentLayout {
+            creator_namespace_id: creator.clone(),
             extents: vec![ContentExtent {
                 length: 0,
                 ..whole.clone()
@@ -147,6 +159,7 @@ mod tests {
             (ExtentObject::Whole, 0, 1),
         ] {
             ContentLayout {
+                creator_namespace_id: creator.clone(),
                 extents: vec![ContentExtent {
                     object,
                     length,
@@ -157,6 +170,7 @@ mod tests {
             .expect_err("an extent whose length does not fit its object should be rejected");
         }
         assert!(ContentLayout {
+            creator_namespace_id: creator.clone(),
             extents: vec![ContentExtent {
                 length: 3,
                 ..span.clone()
@@ -165,6 +179,7 @@ mod tests {
         .validate(3)
         .is_ok());
         ContentLayout {
+            creator_namespace_id: creator.clone(),
             extents: vec![ContentExtent {
                 offset: 4,
                 length: 2,
@@ -174,6 +189,7 @@ mod tests {
         .validate(2)
         .expect_err("a first extent that does not start at offset 0 should be rejected");
         assert!(ContentLayout {
+            creator_namespace_id: creator.clone(),
             extents: vec![ContentExtent {
                 offset: 1,
                 length: 2,
@@ -183,6 +199,7 @@ mod tests {
         .validate(2)
         .is_ok());
         ContentLayout {
+            creator_namespace_id: creator.clone(),
             extents: vec![
                 ContentExtent {
                     length: u64::MAX,

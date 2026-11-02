@@ -5,7 +5,8 @@ use super::live_set::LiveSet;
 use super::pins::{GraceAge, PinSweep};
 use super::session_cache::CompletedUploadSessionCache;
 use super::uploads::{
-    sweep_completed_session, ListedUpload, ListedUploadKind, OutcomeListing, UploadSessionSweep,
+    retain_undated, sweep_completed_session, ListedUpload, ListedUploadKind, OutcomeListing,
+    UploadSessionSweep,
 };
 use crate::error::Result;
 use crate::namespace::store::NamespaceStore;
@@ -133,12 +134,20 @@ impl<S: ObjectStore> Sweep<'_, S> {
         outcome_listing: OutcomeListing,
     ) -> Result<Decision> {
         let sweep = match self.live.completed_sessions.get(&upload_id) {
+            // The pass listed this session as completed before the walk, so its
+            // namespace's status decides it, including when a finished walk
+            // didn't find the namespace because it has been retired.
             Some(session) => {
-                let sweep = sweep_completed_session(
-                    self.live,
-                    self.clock.request_at_ms(),
-                    session.completed_at_ms,
-                );
+                let sweep = self
+                    .live
+                    .find_retirement_status(&session.namespace_id)
+                    .map_or_else(retain_undated, |status| {
+                        sweep_completed_session(
+                            status,
+                            self.clock.request_at_ms(),
+                            session.completed_at_ms,
+                        )
+                    });
                 // The sweep adds a kept session to the cache, so a later pass
                 // doesn't read its record. Adding it here instead of when the
                 // record is read means that this pass's inserts can't evict an

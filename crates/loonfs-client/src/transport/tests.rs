@@ -551,7 +551,6 @@ async fn response_progress_resets_inactivity_without_resetting_total_deadlines()
 
 fn test_content_ref(bytes: &[u8]) -> ContentRef {
     ContentRef::blob_v1(
-        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         bytes,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,

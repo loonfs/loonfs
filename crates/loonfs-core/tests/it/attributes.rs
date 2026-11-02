@@ -749,7 +749,10 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
             operations: vec![
                 FilesystemOperation::PutFile {
                     path: path("/docs/a.txt"),
-                    content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref: content.content_ref().clone(),
+                        source_namespace_id: None,
+                    },
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

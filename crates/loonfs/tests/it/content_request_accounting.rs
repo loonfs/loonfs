@@ -187,7 +187,10 @@ fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> 
         None,
         FilesystemOperation::PutFile {
             path: parse_mutation_path(path).expect("valid mutation path"),
-            content: loonfs_types::FileContent::Ref(content_ref),
+            content: loonfs_types::FileContent::Ref {
+                content_ref,
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -235,7 +238,12 @@ async fn put_file_content_ref_validates_content_before_publication() {
     // The convenience method should validate the referenced content exactly
     // once before publishing it.
     namespace
-        .put_file_content_ref("/file.txt", content_ref, &loonfs_test_support::test_actor())
+        .put_file_content_ref(
+            "/file.txt",
+            content_ref,
+            &harness.namespace_id,
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("publish content ref");
 
@@ -388,7 +396,7 @@ async fn prepare_content_ref_rejects_bytes_that_do_not_match_the_ref() {
     lying_ref.checksum = loonfs_types::Checksum::crc64nvme(b"other bytes");
 
     let error = namespace
-        .prepare_content_ref(lying_ref)
+        .prepare_content_ref(lying_ref, &harness.namespace_id)
         .await
         .expect_err("import must reject a ref whose checksum does not match the bytes");
     assert!(
@@ -409,7 +417,7 @@ async fn prepare_content_ref_accepts_a_matching_crc64nvme_ref() {
     content_ref.checksum = loonfs_types::Checksum::crc64nvme(bytes);
 
     let prepared = namespace
-        .prepare_content_ref(content_ref)
+        .prepare_content_ref(content_ref, &harness.namespace_id)
         .await
         .expect("import must validate with the source ref's checksum algorithm");
 
@@ -433,7 +441,7 @@ async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
     harness.recording.reset();
 
     let prepared = namespace
-        .prepare_content_ref(content_ref)
+        .prepare_content_ref(content_ref, &harness.namespace_id)
         .await
         .expect("import a source larger than one read chunk");
 
@@ -457,7 +465,7 @@ async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing()
     harness.recording.reset();
 
     let prepared = namespace
-        .prepare_content_ref(content_ref.clone())
+        .prepare_content_ref(content_ref.clone(), &harness.namespace_id)
         .await
         .expect("prepare content ref");
 
@@ -632,7 +640,10 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                 None,
                 FilesystemOperation::PutFile {
                     path: parse_mutation_path("/file.txt").expect("valid mutation path"),
-                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
+                    content: loonfs_types::FileContent::Ref {
+                        content_ref: content_ref.clone(),
+                        source_namespace_id: None,
+                    },
                     behavior,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -690,7 +701,10 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     // ref, so one proof covers both.
     let put = |path: &str, content_ref: loonfs::ContentRef| FilesystemOperation::PutFile {
         path: parse_mutation_path(path).expect("valid mutation path"),
-        content: loonfs_types::FileContent::Ref(content_ref),
+        content: loonfs_types::FileContent::Ref {
+            content_ref,
+            source_namespace_id: None,
+        },
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,

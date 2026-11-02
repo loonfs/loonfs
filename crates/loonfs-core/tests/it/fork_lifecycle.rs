@@ -413,7 +413,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .expect("read back");
     assert_eq!(file.bytes, b"hello");
     let content_ref = file.entry.content_ref().expect("content reference");
-    let content_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
+    let content_key = content_blob(&namespace_id, &content_ref.content_id);
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
         keys.iter().all(|key| key == &hint(&namespace_id)
@@ -548,14 +548,16 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         .await
         .expect("bootstrap source");
     let source_ref = upload_content(&store, &source_namespace_id, b"base", &context).await;
-    assert_eq!(source_ref.owner_namespace_id, source_namespace_id);
     submit_operation(
         &store,
         &source_namespace_id,
         commit_id("seed-shared"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref(source_ref),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: source_ref,
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -645,7 +647,6 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         .expect("clone stat");
     assert_eq!(source_entry.content_ref(), clone_entry.content_ref());
     let inherited_ref = source_entry.content_ref().expect("file content").clone();
-    assert_eq!(inherited_ref.owner_namespace_id, source_namespace_id);
     let source_hint = hint(&source_namespace_id);
     let source_manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&source_namespace_id);
     let guarded = FailStore::new(
@@ -698,14 +699,16 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
 
     let uploaded_ref =
         upload_content(&store, &clone_namespace_id, b"clone-after-fork", &context).await;
-    assert_eq!(uploaded_ref.owner_namespace_id, clone_namespace_id);
     let clone_write = submit_operation(
         &store,
         &clone_namespace_id,
         commit_id("clone-after-fork"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref(uploaded_ref.clone()),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: uploaded_ref.clone(),
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -715,11 +718,20 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     .await
     .expect("clone replace");
     assert_eq!(clone_write.committed_seq, ChangeSeq(2));
+    // An upload in a fork is stored under the family root's prefix, so the
+    // fork's own content and uploads prefixes stay empty.
     assert!(store
-        .head(&content_blob(&clone_namespace_id, &uploaded_ref.content_id))
+        .head(&content_blob(
+            &source_namespace_id,
+            &uploaded_ref.content_id
+        ))
         .await
-        .expect("owner content")
+        .expect("family root content")
         .is_some());
+    assert!(namespace_keys(&store, &clone_namespace_id)
+        .await
+        .iter()
+        .all(|key| !key.contains("/content/") && !key.contains("/uploads/")));
     assert_eq!(
         read_file_bytes(&store, &source_namespace_id, "/docs/shared.txt")
             .await
@@ -1255,7 +1267,10 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
         CommitId::parse("before-delete").expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/keep.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: content.content_ref().clone(),
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1292,7 +1307,10 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
         CommitId::parse("after-delete").expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/late.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: content.content_ref().clone(),
+                source_namespace_id: None,
+            },
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1598,6 +1616,9 @@ async fn a_creator_losing_after_namespace_discovery_leaves_no_extra_objects() {
     );
 }
 
+/// Checks that a fork's retirement deletes no content, and that the family
+/// root's pass collects the content that only a retired fork wrote, while
+/// the content of live members stays.
 #[tokio::test]
 async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_content() {
     let directory = tempdir().expect("tempdir");
@@ -1624,12 +1645,12 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         .await
         .expect("source");
     let source_ref = source_file.entry.content_ref().expect("source content");
-    let source_key = content_blob(&source_ref.owner_namespace_id, &source_ref.content_id);
+    let source_key = content_blob(&source, &source_ref.content_id);
     let sibling_file = read_file_bytes(&store, &sibling, "/docs/sibling.txt")
         .await
         .expect("sibling");
     let sibling_ref = sibling_file.entry.content_ref().expect("sibling content");
-    let sibling_key = content_blob(&sibling_ref.owner_namespace_id, &sibling_ref.content_id);
+    let sibling_key = content_blob(&source, &sibling_ref.content_id);
     let options = loonfs_core::GcOptions::default();
     let mut aged = setup.clone();
     aged.now_ms = u64::MAX / 4;
@@ -1660,7 +1681,12 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .await
             .expect("leaf");
         let leaf_ref = leaf_file.entry.content_ref().expect("leaf content");
-        let leaf_key = content_blob(&leaf_ref.owner_namespace_id, &leaf_ref.content_id);
+        // The leaf's content is stored under the family root's prefix.
+        let leaf_key = content_blob(&source, &leaf_ref.content_id);
+        assert!(namespace_keys(&store, &leaf)
+            .await
+            .iter()
+            .all(|key| !key.contains("/content/")));
         namespace_engine(&store, &leaf, &setup)
             .delete_namespace(Default::default())
             .await
@@ -1669,19 +1695,27 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         let report = namespace_store(&store, &leaf)
             .gc(None, &options, &aged.clock())
             .await
-            .expect("collect leaf");
-        assert_eq!(report.deleted.retired_content_objects, 1);
+            .expect("retire leaf");
+        assert_eq!(report.deleted.retired_content_objects, 0);
+        assert_eq!(report.deleted_checkpoints_by_owner.fork, 1);
         let content_lists = store
             .snapshot()
             .into_iter()
-            .filter_map(|operation| match operation {
-                RecordedOperation::List { prefix, .. } if prefix.contains("/content/") => {
-                    Some(prefix)
-                }
-                _ => None,
+            .filter(|operation| {
+                matches!(operation, RecordedOperation::List { prefix, .. }
+                    if prefix.contains("/content/") || prefix.contains("/uploads/"))
             })
-            .collect::<Vec<_>>();
-        assert_eq!(content_lists, [format!("namespaces/{leaf}/content/")]);
+            .count();
+        assert_eq!(
+            content_lists, 0,
+            "a fork's pass lists no content and no sessions"
+        );
+        assert!(store.head(&leaf_key).await.expect("leaf content").is_some());
+        let report = namespace_store(&store, &source)
+            .gc(None, &options, &aged.clock())
+            .await
+            .expect("collect the family's content");
+        assert_eq!(report.deleted.content_objects, 1);
         assert!(store.head(&leaf_key).await.expect("leaf content").is_none());
         for key in [&source_key, &sibling_key] {
             assert!(store.head(key).await.expect("retained content").is_some());
