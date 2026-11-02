@@ -40,7 +40,7 @@ pub use maintenance::{
 };
 pub use merges::{
     MergeBound, MergeConflict, MergeConflictKind, MergeConflictRevision, MergeConflictVersion,
-    MergeForkRequest,
+    MergeForkRequest, RebaseForkRequest, RebaseForkResponse,
 };
 pub use namespaces::{
     CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceAccessMode,

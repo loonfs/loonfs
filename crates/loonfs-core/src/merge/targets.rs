@@ -8,7 +8,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     DisplayName, InodeId, InodeKind, MergeConflictKind, MergeConflictVersion, NameKey,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The inodes whose binding a merge changes, by what happens to them.
 struct Rebound {
@@ -69,10 +69,26 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 Err((kind, theirs)) => self.target_conflict(inode_id, kind, theirs).await?,
             }
         }
-        // The commit can't free a name when the change of the inode that has
-        // the name conflicts, so the inode that takes the name conflicts too.
+        self.block_takers(&holders).await?;
+        Ok(holders)
+    }
+
+    /// Records a `name` conflict for each inode in `holders` that takes the
+    /// name of a conflicting inode, and returns how many it recorded. The
+    /// commit can't free a name when the change of the inode that has the
+    /// name conflicts, so the inode that takes the name conflicts too.
+    ///
+    /// Each pass records at least one conflict, so the loop runs at most
+    /// once for each inode in `holders`.
+    pub(super) async fn block_takers(
+        &mut self,
+        holders: &HashMap<InodeId, InodeId>,
+    ) -> Result<usize> {
+        let mut recorded = 0;
         loop {
-            let blocked: Vec<_> = holders
+            // In inode ID order, so that a replay commit's report has one
+            // order.
+            let blocked: BTreeMap<_, _> = holders
                 .iter()
                 .filter(|(taker, holder)| {
                     self.conflicted.contains(*holder) && !self.conflicted.contains(*taker)
@@ -80,7 +96,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 .map(|(taker, holder)| (*taker, *holder))
                 .collect();
             if blocked.is_empty() {
-                return Ok(holders);
+                return Ok(recorded);
             }
             for (taker, holder) in blocked {
                 let theirs = self
@@ -90,12 +106,13 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                     .and_then(|state| state.conflict_version());
                 self.target_conflict(taker, MergeConflictKind::Name, theirs)
                     .await?;
+                recorded += 1;
             }
         }
     }
 
     /// Records the conflict of a create or move of `inode_id`.
-    async fn target_conflict(
+    pub(super) async fn target_conflict(
         &mut self,
         inode_id: InodeId,
         kind: MergeConflictKind,

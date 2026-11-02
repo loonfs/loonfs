@@ -130,7 +130,7 @@ This section defines every feature key and the operations it gates. The registry
 | `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes, and the grep collection in a `gc` run. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes. Its `gc` runs return the core collector's result without an `extensions.grep` report. |
 | `filesystem.changes.split_commits` | The `split_commits` and `event_index` query parameters of `GET /v0/namespaces/{ns}/changes` and `GET /v0/namespaces/{ns}/diff`, and the `next_event_index` field of their responses. | A page with `split_commits=true` can end inside a commit that alone exceeds the page budget, and the next request resumes the commit at an event (see [`GET /changes`](#611-get-changes)). Without the parameter, both routes return each commit whole. |
 | `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | A deployment advertises this key when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, a client uploads the content before committing. |
-| `filesystem.merges` | Merging a fork into a namespace (`POST /v0/namespaces/{ns}/merges`). | The server plans the fork's net change since its previous merge and commits it as one commit, or refuses it with `merge_conflict` (see [`POST /merges`](#614-post-merges)). A deployment advertises this key only when merges are enabled (in the reference server, when `max_merge_bytes` isn't zero). A deployment with merges disabled returns `not_supported`, with this key in its `feature` field, for the merge route. |
+| `filesystem.merges` | Merging a fork into a namespace (`POST /v0/namespaces/{ns}/merges`), and rebasing a fork (`POST /v0/namespaces/{ns}/rebases`). | The server plans the fork's net change since its previous merge and commits it as one commit, or refuses it with `merge_conflict` (see [`POST /merges`](#614-post-merges)). A rebase replays the fork's unmerged commits into a new fork and reports the changes that conflict (see [`POST /rebases`](#615-post-rebases)). A deployment advertises this key only when merges are enabled (in the reference server, when `max_merge_bytes` isn't zero). A deployment with merges disabled returns `not_supported`, with this key in its `feature` field, for the merge and rebase routes. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider MUST report a durable whole-object checksum after the write. A deployment advertises the key only on an endpoint that the live conformance suite has run against. The key is independent of `filesystem.uploads.direct_multipart`, so a provider can offer this feature and no multipart API at all. Raw object keys and caller-managed object-store writes aren't part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability for each part. This feature needs an S3-style multipart API in addition to the signing that the other keys need, so a deployment whose provider has no multipart API leaves out this key and can still advertise the others. |
 | `filesystem.downloads.direct_get` | Requesting path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write also advertises this key, because a deployment that lets a client create an object larger than `download.service_proxied.max_content_bytes` has to be able to return that object. Raw object keys aren't part of this feature. |
@@ -552,6 +552,7 @@ Four request headers contain identity information. `Loonfs-Actor` is for attribu
 | `create_commit`, `merge_fork` | Required. Recorded as `committed_by`. | Required in an ACL namespace. |
 | `create_namespace` | Required. Recorded as `created_by`. | Not read. |
 | `fork_namespace` | Required. Recorded as `created_by`. | Optional. When it's present, an ACL source requires an administrator subject. When it's absent, the request acts as the token holder. |
+| `rebase_fork` | Required. Recorded as the new fork's `created_by` and as the replay commit's `committed_by`. | Required in an ACL namespace, and creating the new fork requires an administrator subject. |
 | `delete_namespace`, `create_snapshot`, `list_snapshots`, `get_snapshot`, `extend_snapshot`, `delete_snapshot`, `list_changes`, `list_diff` | Not required. | Optional, with the same administrator rule as `fork_namespace`. |
 | Path and inode reads, downloads, `list_trash`, `grep`, and upload-session operations | Not required. | Required in an ACL namespace. |
 | `run_maintenance` | Required by `recover_administrator`, which records it as `committed_by` on the recovery commit. Other jobs don't record it, but they still reject a malformed value. | Not read. |
@@ -756,6 +757,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin, and a missing ID succeeds) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header. |
 | Merge a fork | `merge_fork` | `replayable` | `POST /v0/namespaces/{ns}/merges`. Requires the `Loonfs-Actor` header. |
+| Rebase a fork | `rebase_fork` | `replayable` | `POST /v0/namespaces/{ns}/rebases`. Requires the `Loonfs-Actor` header. |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
@@ -766,7 +768,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable` (idempotent) |
 | Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/disable` (idempotent) |
-| Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#616-get-metrics).) |
+| Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#617-get-metrics).) |
 
 ### Maintenance runs
 
@@ -951,9 +953,9 @@ Deleting a missing snapshot, including one that was already deleted, returns the
 
 In an ACL namespace, creating, retrieving, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
 
-The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path and inode download requests include it in their bodies. The path content and path download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision content read (`GET /inodes/{inode_id}/revisions/{revision_no}/content`) identifies its revision in the route, and with `snapshot_id` it reads that revision in the snapshot's state, which keeps the revision after the namespace's retention floor passes it. The inode revision download route rejects `snapshot_id` with `invalid_request`. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
+The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path and inode download requests include it in their bodies. The path content and path download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision content read (`GET /inodes/{inode_id}/revisions/{revision_no}/content`) identifies its revision in the route, and with `snapshot_id` it reads that revision in the snapshot's state, and the snapshot keeps that revision readable after the namespace's retention floor passes it. The inode revision download route rejects `snapshot_id` with `invalid_request`. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
 
-A read also accepts one of the namespace's fork pins as `snapshot_id`, because a fork pin keeps a manifest just as a snapshot does. A fork's `fork_basis.source_pin_id` is the ID of its fork pin in the source namespace (see [`POST /forks`](#613-post-forks)), so a client can read the source as it was at the fork point for as long as the fork exists, whatever the source's retention floor does. For example, a client that compares a file in a fork with the file's version at the fork point reads that version from the source with `GET /inodes/{inode_id}/revisions/{revision_no}/content` and `snapshot_id` set to the fork's `source_pin_id`. A fork pin doesn't expire. The snapshot routes, and a fork's `snapshot_id`, still refuse a fork pin's ID with `snapshot_not_found`, because a fork pin isn't a snapshot.
+A read also accepts one of the namespace's fork pins as `snapshot_id`, because a fork pin keeps a manifest just as a snapshot does. A fork's `fork_basis.source_pin_id` is the ID of its fork pin in the source namespace (see [`POST /forks`](#613-post-forks)), so a client can read the source as it was at the fork point for as long as the fork exists, even after the source's retention floor passes the fork point. For example, a client that compares a file in a fork with the file's version at the fork point reads that version from the source with `GET /inodes/{inode_id}/revisions/{revision_no}/content` and `snapshot_id` set to the fork's `source_pin_id`. A fork pin doesn't expire. The snapshot routes and `POST /forks` still refuse a fork pin's ID with `snapshot_not_found`, because a fork pin isn't a snapshot.
 
 When an embedded read sets `snapshot_id` in its options, the read opens a read view of that snapshot, as the HTTP request does. A read view of a snapshot accepts options that refer to the same snapshot, and it rejects any other snapshot ID with `invalid_request`.
 
@@ -1289,7 +1291,7 @@ The `NamespaceMetadata` object has exactly these fields:
 | `access` | The access mode, either `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`, the fork pin that keeps the source's state at that sequence readable, as `source_pin_id`, and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. It also includes the fork pin that keeps the source's state at that sequence readable (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
 | `family_root_id` | The namespace's [family root](glossary.md#family-root), whose prefix stores the content objects and upload records of the namespace's [fork family](glossary.md#fork-family) (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork is its own family root, and a fork has the same family root as its source. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
@@ -1310,7 +1312,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `namespace_id` | The durable namespace ID. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`, the source's fork pin, as `source_pin_id`, and `rebased_from` for a namespace that a rebase created. Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. It also includes the source's fork pin (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
 | `acknowledged_floor_seq` | The highest retention floor that a WAL object folded into the current manifest was validated against (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). It's at most `retention_floor_seq`, and after a floor advance it stays below the new floor until a WAL object validated against that floor is folded. |
@@ -2635,7 +2637,7 @@ The `fork_basis` object identifies the captured source:
 | `source_namespace_id` | The namespace that the fork captured. |
 | `source_head_seq` | The source sequence that the fork captured. |
 | `source_pin_id` | The fork pin in the source that keeps the source's state at `source_head_seq`. A read of the source accepts it as `snapshot_id` (see [Snapshots](#snapshots)). |
-| `rebased_from` | The fork whose unmerged commits a rebase replays into this namespace, as `source_namespace_id`, and `resume_after_seq`, the fork sequence that the fork's next merge would have started after when the rebase created this namespace. Only a namespace that a rebase created has this field, and a fork that this route creates never does. |
+| `rebased_from` | The fork whose unmerged commits a rebase replays into this namespace (`source_namespace_id`), and the fork sequence that the fork's next merge would have started after when the rebase created this namespace (`resume_after_seq`). Only a namespace that a rebase created has this field, and a fork that this route creates never does. |
 
 The optional `snapshot_id` request field selects an unexpired snapshot of the source namespace. Without it, the server captures the current head.
 
@@ -2773,8 +2775,108 @@ Errors beyond those that any commit returns:
 | `inode_not_found` | 404 | This namespace changed between the plan and the commit four times in a row, and the last time a deletion hid an inode that the merge changes, or the directory that an inode goes into. Retry the merge. |
 | `commit_queue_full` | 503 | Another merge, into any namespace, has the merge slot while the server plans or commits it, and the server admits one merge at a time. That merge can be an earlier request with the same `commit_id`. Retry later. |
 | `invalid_request` | 400 | The fork doesn't exist, was deleted, or wasn't made from this namespace (`param` is `/source_namespace_id`). Or `through_seq` isn't above the range's start and at or below the fork's head, or the planner couldn't order the merge's operations (`param` is `/through_seq`). |
+| `not_supported` | 501 | The deployment has merges disabled (in the reference server, `max_merge_bytes` is zero). The error has `filesystem.merges` in its `feature` field, and the server reads and writes nothing. |
 
-### 6.15 `GET /grep`
+### 6.15 `POST /rebases`
+
+Rebases a fork. A [rebase](glossary.md#rebase) replays the fork's unmerged commits into a new fork of this namespace as one "replay commit". The replay commit applies the changes that don't conflict with this namespace, and the response reports the ones that do. A client rebases a fork whose merge returned `merge_conflict`, a program or a person resolves the reported files in the new fork with ordinary commits, and the client then merges the new fork into this namespace with [`POST /merges`](#614-post-merges).
+
+Representative request:
+
+`Loonfs-Actor: usr_8f3c`
+
+```json
+{
+  "source_namespace_id": "demo-branch",
+  "new_namespace_id": "demo-branch-2",
+  "commit_id": "c_rebase_demo_branch_1"
+}
+```
+
+Representative response:
+
+```json
+{
+  "namespace": {
+    "namespace_id": "demo-branch-2",
+    "created_at_ms": 1752625200000,
+    "created_by": "usr_8f3c",
+    "access": {"kind":"unrestricted"},
+    "fork_basis": {
+      "source_namespace_id": "demo",
+      "source_head_seq": 431,
+      "source_pin_id": "pin_00000000000000000035-5c2e8f1a9b7d4e60",
+      "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
+    },
+    "family_root_id": "demo",
+    "head_seq": 432,
+    "retention_floor_seq": 431
+  },
+  "conflicts": [
+    {
+      "inode_id": "ino_000000r0000013kje0d47gc8kw",
+      "kind": "content",
+      "base": {"path": "/docs/report.txt", "revision_no": 7, "content_ref": {"kind": "blob_v1", "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1", "size_bytes": 19482, "checksum": {"algorithm": "crc64nvme", "value": "42d..."}}},
+      "ours": {"path": "/docs/report.txt", "revision_no": 8, "content_ref": {"kind": "blob_v1", "content_id": "con_1p2q9w3e4r5t6y7v8j9k0a1s2d", "size_bytes": 20117, "checksum": {"algorithm": "crc64nvme", "value": "9c1..."}}},
+      "theirs": {"path": "/docs/report.txt", "revision_no": 8, "content_ref": {"kind": "blob_v1", "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat2", "size_bytes": 20591, "checksum": {"algorithm": "crc64nvme", "value": "7ab..."}}}
+    }
+  ]
+}
+```
+
+| Request field | Meaning |
+| --- | --- |
+| `source_namespace_id` | The fork. The manifest that the fork was made from has to belong to this namespace, as for a merge. |
+| `new_namespace_id` | The new fork. The first rebase of the fork creates it from this namespace's head, and a later rebase continues into it. |
+| `through_seq` | Optional. The fork sequence that the replay commit replays the fork's commits through, with the same rules as a merge's `through_seq`. |
+| `commit_id` | The replay commit's idempotency key. |
+| `message` | Optional. An annotation that's part of the replay commit's identity. |
+
+The response contains the new fork's namespace object (`namespace`, see [`GET /v0/namespaces/{ns}`](#62-get-v0namespacesns)) and the replay commit's "conflict report" (`conflicts`), with one conflict entry for each inode whose change the replay commit left out. The new fork's `fork_basis` records `rebased_from`, which identifies the fork (`source_namespace_id`) and the fork sequence that the fork's next merge into this namespace would have started after when the rebase created the new fork (`resume_after_seq`).
+
+To rebase a fork, the server:
+
+1. Checks that the fork was made from this namespace, and reads the fork point.
+2. If `new_namespace_id` doesn't exist, refuses a fork point below this namespace's retention floor with `rebootstrap_required`, and then creates the new fork from this namespace's head, as [`POST /forks`](#613-post-forks) does. If `new_namespace_id` exists, checks that the new fork's `rebased_from` identifies the fork.
+3. Looks up the commit receipt of `commit_id` in the new fork, and returns the new fork without a conflict report if a replay commit with that ID was committed.
+4. Takes the merge slot, as a merge does.
+5. Finds where the range starts: after the new fork's previous replay commit, or after `resume_after_seq` for the first replay commit. It refuses a start below the fork's own retention floor, or a new fork whose retention floor is above the new fork's own fork point, with `rebootstrap_required`.
+6. Folds the fork, computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` if the replay commit doesn't fit, as a merge does.
+7. Classifies the change under the conflict rule against the new fork's head, and reads this namespace's history up to the new fork's fork point through the new fork's fork pin.
+8. Commits the changes that don't conflict into the new fork as one replay commit, and returns the new fork and the conflict report. If the commit fails because the new fork changed after the plan, the server keeps the slot, goes back to step 3, and plans the same range again, up to three times, before it returns the commit's error, as a merge does. A later plan reports a row that changed in between, and that isn't the fork's own, in the conflict report.
+
+If a rebase fails after step 2 created the new fork, the new fork stays, because a later rebase continues into it.
+
+A replay commit is a merge of the fork into the new fork. Its merge record identifies the range of the fork's commits that the replay commit examined, and the replay commit leaves out the changes that conflict. A change that depends on a change that the replay commit left out is left out too, with a conflict entry of kind `dependency` after the entry of the change that it depends on. Such a change is a create, an undelete, or a move into a directory whose create or undelete was skipped, or the delete of a directory that still contains an inode whose move out of it was skipped, because the directory's delete would delete that inode in the new fork. When the replay commit leaves out a change that would free a name, it also leaves out the create or move that takes the name, with a conflict entry of kind `name`. If every change conflicts, the replay commit has the merge record and no operations, so the next rebase continues after its range.
+
+The new fork takes ordinary commits while a rebase runs, so the replay commit's preconditions work as a merge's do (see [`POST /merges`](#614-post-merges)). Each operation's precondition is the new fork's current value, and when the replay commit deletes or moves a directory, or moves an inode through a temporary name, the commit also expects the new fork's head to be the head that the plan read. A commit that fails because the new fork changed after the plan returns one of the codes that a merge's commit returns, and the server plans the replay commit again (step 8). For example, if another writer creates a file below a directory that the replay commit deletes, the commit fails with `stale_head`, and the next plan reports the directory as a `subtree` conflict and keeps the file.
+
+The conflict rule is the one that a merge applies (see [`POST /merges`](#614-post-merges)), with the new fork in place of this namespace. The new fork supplies the current values, the preconditions, and the name and visibility checks. A row at or below the new fork's fork point is the fork's own when this namespace's commit that wrote it is at or below the fork's fork point or is a merge of the fork. A row above the new fork's fork point is the fork's own when a replay commit wrote it, and a row that any other commit in the new fork wrote, such as a commit that resolves a conflict, is foreign. A file that the fork deleted, merged, and then restored is a `visibility` conflict, because every deletion that the new fork inherits has expired there.
+
+Each conflict entry has the shape of a `merge_conflict` error's `conflict` (see [`POST /merges`](#614-post-merges)), and `kind` can also be `dependency`. For a `dependency` entry, `theirs` is the fork's version of the inode whose change was skipped (the directory, or the moved inode), so its path is the `ours` path of that inode's own entry. A client reads `base` from this namespace with the inode revision content route and `snapshot_id` set to the new fork's `fork_basis.source_pin_id` (see [Snapshots](#snapshots)). The fork pin keeps this namespace's state at the new fork's fork point for as long as the new fork exists, so the base revision stays readable after this namespace's retention floor passes it.
+
+The conflict report exists only in the response to the request that committed the replay commit, because a change that the replay commit left out leaves no trace in the new fork. A retry whose `commit_id` identifies a replay commit that was committed returns the new fork without `conflicts`. A client that lost the report deletes the new fork and rebases the fork again into another new fork.
+
+A range that's too large for one replay commit is replayed in pieces. The client rebases through the `split_at_seq` of the `merge_too_large` error, and then rebases again into the same new fork. The next replay commit continues where the previous one stopped.
+
+A rebase needs the rights to create the new fork and to commit the replay commit. Creating the new fork needs the right to fork this namespace, which an ACL namespace grants to the token holder, and to a subject only when the subject is an administrator. The replay commit is authorized against its net change as a merge is, and the check uses the new fork's access rows, which the new fork inherits from this namespace.
+
+Errors beyond those that any commit returns:
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `merge_range_conflict` | 409 | Another replay commit of the fork into the new fork committed after this request planned its range. |
+| `merge_too_large` | 413 | The replay commit doesn't fit, as for a merge. Rebase a shorter range with `through_seq`. |
+| `rebootstrap_required` | 409 | The fork point is below this namespace's retention floor, the range's start is below the fork's own floor, or the new fork's floor is above its own fork point. The details say which. |
+| `stale_head`, `stale_revision`, `stale_attributes`, `stale_access`, `binding_version_mismatch`, `path_conflict`, `not_deleted` | 409 | The new fork changed between the plan and the commit four times in a row. Retry the rebase. |
+| `inode_not_found` | 404 | The new fork changed between the plan and the commit four times in a row, and the last time a deletion hid an inode that the replay commit changes, or the directory that an inode goes into. Retry the rebase. |
+| `commit_queue_full` | 503 | Another merge or replay commit has the merge slot. Retry later. |
+| `invalid_request` | 400 | The fork doesn't exist, was deleted, or wasn't made from this namespace (`param` is `/source_namespace_id`), or `new_namespace_id` exists but wasn't created by a rebase of the fork from this namespace (`param` is `/new_namespace_id`). Or `through_seq` is invalid, or the planner couldn't order the replay commit's operations (`param` is `/through_seq`). |
+| `not_supported` | 501 | The deployment has merges disabled (in the reference server, `max_merge_bytes` is zero). The error has `filesystem.merges` in its `feature` field, and the server reads and writes nothing. |
+
+A rebase never returns `merge_conflict`, because it reports conflicts instead of failing on them.
+
+### 6.16 `GET /grep`
 
 Searches the content of the namespace's files for lines that match a pattern, and returns a page of matches.
 
@@ -2836,7 +2938,7 @@ The `path_prefix` value is a complete absolute path, not a partial prefix of a p
 
 If the namespace has no active grep index, the request returns `not_supported` with the `feature` field set to `query.grep`, the same key that the capability document uses to advertise grep (see [Data-dependent features](#23-data-dependent-features)).
 
-### 6.16 `GET /metrics`
+### 6.17 `GET /metrics`
 
 Returns metrics about what the process has been doing, in Prometheus text exposition format 0.0.4, with `Content-Type: text/plain; version=0.0.4`.
 

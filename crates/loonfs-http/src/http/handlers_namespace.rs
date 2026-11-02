@@ -12,10 +12,11 @@ use loonfs_types::ChangeSeq;
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
     CapabilityDocument, Commit, CreateNamespaceRequest, ForkNamespaceRequest, MergeForkRequest,
-    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_MERGES,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
+    RebaseForkRequest, RebaseForkResponse, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
+    FEATURE_MERGES, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES,
+    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
@@ -437,6 +438,94 @@ pub(super) async fn merge_fork(
             ApiResponseError::runtime_for_namespace_writer(
                 state.namespaces.as_ref(),
                 &namespace_id,
+                error,
+            )
+            .with_commit_id(&commit_id)
+        })?;
+    Ok(Json(response))
+}
+
+/// Rebases a fork: replays its unmerged commits into a new fork of the
+/// namespace, which the first rebase creates. The server stores the
+/// `Loonfs-Actor` header, and the shared token doesn't verify the header. A
+/// runtime whose merge allowance is zero returns `not_supported` for
+/// `filesystem.merges` before it reads or creates a namespace.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        operation_id = "rebase_fork",
+        extensions(
+            ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-retry" = json!("replayable")),
+        ),
+        path = "/v0/namespaces/{namespace_id}/rebases",
+        tag = "namespaces",
+        summary = "Rebase a fork",
+        description = "Replays a fork's unmerged commits into a new fork of the namespace as one replay commit, which applies the changes that don't conflict with the namespace and reports the ones that do. The first rebase of a fork creates the new fork from the namespace's head, and a later rebase continues into it. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
+        params(("namespace_id" = String, Path, description = "The namespace that the fork was forked from.")),
+        request_body = RebaseForkRequest,
+        responses(
+            (status = 200, description = "Fork rebased", body = RebaseForkResponse),
+            (status = 400, description = "Invalid request, the source isn't a fork of this namespace, or the new namespace isn't a rebase of the fork", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 409, description = "Range conflict, or history below a retention floor", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "The replay commit is too large, or the JSON body exceeds the 2 MiB limit", body = ErrorResponse),
+            (status = 501, description = "Merges are disabled", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn rebase_fork(
+    State(state): State<Arc<BindingState>>,
+    ActorHeader(actor_id): ActorHeader,
+    SubjectHeaders(subject): SubjectHeaders,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
+    AppJson(request): AppJson<RebaseForkRequest>,
+) -> Result<Json<RebaseForkResponse>, ApiResponseError> {
+    let RebaseForkRequest {
+        source_namespace_id,
+        new_namespace_id,
+        through_seq,
+        commit_id,
+        message,
+    } = request;
+    if state.runtime.execution_budget().max_merge_bytes() == 0 {
+        return Err(
+            ApiResponseError::not_supported(FEATURE_MERGES, "merges are disabled")
+                .with_commit_id(&commit_id),
+        );
+    }
+    state
+        .runtime_for(subject.clone())
+        .fork_namespace_for_rebase(
+            &namespace_id,
+            &source_namespace_id,
+            &new_namespace_id,
+            &actor_id,
+        )
+        .await
+        .map_err(|error| ApiResponseError::runtime(error).with_commit_id(&commit_id))?;
+    let new_fork = state
+        .open_writer(&new_namespace_id, subject)
+        .await
+        .map_err(|error| error.with_commit_id(&commit_id))?;
+    let options = MergeForkOptions {
+        commit_id: Some(commit_id.clone()),
+        message,
+        through_seq,
+    };
+    let response = new_fork
+        .replay_fork_with_options(&source_namespace_id, &actor_id, &options)
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace_writer(
+                state.namespaces.as_ref(),
+                &new_namespace_id,
                 error,
             )
             .with_commit_id(&commit_id)

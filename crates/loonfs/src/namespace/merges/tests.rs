@@ -1,7 +1,7 @@
 //! Merges that race another writer of the namespace they merge into, merges
 //! that keep the merge slot, and merges from a source that isn't a live fork.
 
-use super::{missing_fork, PlannedCommit, PlannedMerge};
+use super::{missing_fork, MergeOutcome, PlannedCommit, PlannedMerge};
 use crate::publisher::MergeSlot;
 use crate::{
     ActorId, Commit, CommitId, CoreError, DeleteOptions, ErrorCode, LoonFs, MergeForkOptions,
@@ -114,9 +114,11 @@ impl Family {
         planned: PlannedCommit,
         replan: impl FnMut(MergeRequest, MergeSlot) -> BoxFuture<'a, Result<PlannedMerge>>,
     ) -> Result<Commit> {
-        self.main
+        let (MergeOutcome::Found(commit) | MergeOutcome::Committed { commit, .. }) = self
+            .main
             .commit_merge(request, PlannedMerge::Candidate(Box::new(planned)), replan)
-            .await
+            .await?;
+        Ok(commit)
     }
 }
 

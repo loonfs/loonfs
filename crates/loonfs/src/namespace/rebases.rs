@@ -1,0 +1,254 @@
+//! Rebasing a fork: the new fork that a rebase creates or continues into,
+//! and the replay commit that replays the fork's unmerged commits into it
+//! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
+
+use super::merges::{missing_fork, MergeOutcome, PlannedCommit, PlannedMerge};
+use crate::publisher::MergeSlot;
+use crate::trace::{self, operation_span};
+use crate::{
+    ActorId, CommitId, Consistency, CoreError, Error, LoonFs, MergeConflict, MergeForkOptions,
+    Namespace, NamespaceId, NamespaceMetadata, RebaseForkResponse, Result, Writable,
+};
+use loonfs_core::MergeRequest;
+
+impl LoonFs<Writable> {
+    /// Creates `new_namespace_id` as a rebase's new fork of
+    /// `namespace_id`'s head for the fork `source_namespace_id`, or returns
+    /// it when it already is one
+    /// ([API section 6.15](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#615-post-rebases)).
+    ///
+    /// Before it creates anything, the call checks that
+    /// `source_namespace_id` is a fork of `namespace_id` and that the fork
+    /// point is at or above `namespace_id`'s retention floor. Creating the
+    /// new fork needs the right to fork `namespace_id`, as
+    /// [`Self::fork_namespace`] does. A namespace that already exists and
+    /// isn't a rebase's new fork of `namespace_id` for `source_namespace_id`
+    /// returns `invalid_request`.
+    pub async fn fork_namespace_for_rebase(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
+        actor: &ActorId,
+    ) -> Result<NamespaceMetadata> {
+        trace::in_operation(
+            operation_span!(self.core, "fork_namespace_for_rebase", namespace_id),
+            async {
+                match self.namespace(new_namespace_id).metadata().await {
+                    Ok(existing) => {
+                        return ensure_rebase(
+                            existing,
+                            namespace_id,
+                            source_namespace_id,
+                            new_namespace_id,
+                        );
+                    }
+                    Err(Error::Core(CoreError::NamespaceNotFound {
+                        namespace_id: missing,
+                    })) if missing == *new_namespace_id => {}
+                    Err(error) => return Err(error),
+                }
+                self.namespace(namespace_id).ensure_administrator().await?;
+                let main = self
+                    .core
+                    .pinned_read(namespace_id, Consistency::Strong)
+                    .await?;
+                let fork_point_seq = async {
+                    let fork = self
+                        .core
+                        .pinned_read(source_namespace_id, Consistency::Strong)
+                        .await?;
+                    Ok(main
+                        .engine
+                        .fork_point_for_rebase(&main.context, &fork.engine, &fork.context)
+                        .await?)
+                }
+                .await
+                .map_err(|error| missing_fork(source_namespace_id, error))?;
+                let engine = self.engine(namespace_id);
+                self.install_fork(namespace_id, new_namespace_id, true, async move {
+                    engine
+                        .fork_namespace_for_rebase(
+                            new_namespace_id,
+                            actor,
+                            source_namespace_id,
+                            fork_point_seq,
+                        )
+                        .await
+                })
+                .await
+            },
+        )
+        .await
+    }
+}
+
+/// Returns `existing` when it's a rebase's new fork of `namespace_id` for
+/// `source_namespace_id`, and `invalid_request` otherwise.
+fn ensure_rebase(
+    existing: NamespaceMetadata,
+    namespace_id: &NamespaceId,
+    source_namespace_id: &NamespaceId,
+    new_namespace_id: &NamespaceId,
+) -> Result<NamespaceMetadata> {
+    let rebase = existing
+        .fork_basis
+        .as_ref()
+        .filter(|basis| basis.source_namespace_id == *namespace_id)
+        .and_then(|basis| basis.rebased_from.as_ref());
+    if rebase.is_some_and(|rebased_from| rebased_from.source_namespace_id == *source_namespace_id) {
+        return Ok(existing);
+    }
+    Err(CoreError::InvalidMerge {
+        param: "/new_namespace_id",
+        message: format!(
+            "namespace `{new_namespace_id}` isn't a rebase of fork `{source_namespace_id}` of \
+             `{namespace_id}`"
+        ),
+    }
+    .into())
+}
+
+impl Namespace<Writable> {
+    /// Replays the fork `source_namespace_id`'s unmerged commits into this
+    /// namespace, a rebase's new fork, through the fork's head.
+    ///
+    /// See [`Self::replay_fork_with_options`].
+    pub async fn replay_fork(
+        &self,
+        source_namespace_id: &NamespaceId,
+        actor: &ActorId,
+    ) -> Result<RebaseForkResponse> {
+        self.replay_fork_with_options(source_namespace_id, actor, &MergeForkOptions::default())
+            .await
+    }
+
+    /// Replays the fork `source_namespace_id`'s unmerged commits into this
+    /// namespace, a rebase's new fork, through `options.through_seq` or the
+    /// fork's head, as one replay commit
+    /// ([API section 6.15](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#615-post-rebases)).
+    ///
+    /// The replay commit is a merge of the fork into this namespace. It
+    /// applies the fork's net change since its previous replay commit, or
+    /// since the `resume_after_seq` that this namespace's fork basis
+    /// records, leaves out each change that conflicts with this namespace
+    /// under the conflict rule, and returns them as the conflict report with
+    /// this namespace's metadata. A retry with the commit ID of a replay
+    /// commit that committed returns the metadata without a report. When
+    /// the commit fails because this namespace changed after the plan, the
+    /// replay plans again, up to three times, as a merge does, and a later
+    /// plan reports a changed row that isn't the fork's own. The subject of
+    /// this handle has to be able to read each inode whose change the replay
+    /// commit applies in the fork, and needs the rights in this namespace
+    /// that each planned operation needs.
+    pub async fn replay_fork_with_options(
+        &self,
+        source_namespace_id: &NamespaceId,
+        actor: &ActorId,
+        options: &MergeForkOptions,
+    ) -> Result<RebaseForkResponse> {
+        trace::in_operation(
+            operation_span!(self.core, "replay_fork", self.namespace_id),
+            async {
+                let request = MergeRequest {
+                    source_namespace_id: source_namespace_id.clone(),
+                    through_seq: options.through_seq,
+                    after_seq: None,
+                    commit_id: options.commit_id.clone().unwrap_or_else(CommitId::generate),
+                    actor_id: actor.clone(),
+                    message: options.message.clone(),
+                };
+                let planned = self.plan_replay(&request, None).await?;
+                let conflicts = match self
+                    .commit_merge(&request, planned, |request, slot| {
+                        Box::pin(async move { self.plan_replay(&request, Some(slot)).await })
+                    })
+                    .await?
+                {
+                    MergeOutcome::Found(_) => None,
+                    MergeOutcome::Committed { report, .. } => Some(report),
+                };
+                Ok(RebaseForkResponse {
+                    namespace: self.metadata().await?,
+                    conflicts,
+                })
+            },
+        )
+        .await
+    }
+
+    /// Returns the replay commit that this namespace committed under the
+    /// request's commit ID, or the replay commit planned against this
+    /// namespace's head under `slot`, or under a merge slot that the plan
+    /// takes, with its conflict report, as [`Self::plan_merge`] does for a
+    /// merge.
+    ///
+    /// The plan checks that this namespace is a rebase's new fork for the
+    /// fork and checks both floors, folds the fork, and plans against this
+    /// namespace's head, reading the source through this namespace's fork
+    /// pin.
+    pub(crate) async fn plan_replay(
+        &self,
+        request: &MergeRequest,
+        slot: Option<MergeSlot>,
+    ) -> Result<PlannedMerge<Vec<MergeConflict>>> {
+        let source_namespace_id = &request.source_namespace_id;
+        let new_fork = self
+            .core
+            .pinned_read(&self.namespace_id, Consistency::Strong)
+            .await?;
+        if let Some(commit) = new_fork
+            .engine
+            .find_merge(&new_fork.context, request)
+            .await?
+        {
+            return Ok(PlannedMerge::Committed(commit));
+        }
+        let slot = match slot {
+            Some(slot) => slot,
+            None => self.session().acquire_merge_slot()?,
+        };
+        let plan = async {
+            let fork = self
+                .core
+                .pinned_read(source_namespace_id, Consistency::Strong)
+                .await?;
+            let basis = new_fork
+                .engine
+                .check_replay(&new_fork.context, &fork.engine, &fork.context, request)
+                .await?;
+            let fork = self.fold_and_read(source_namespace_id).await?;
+            let source = self
+                .core
+                .pinned_read_at_snapshot(&basis.manifest.owner_namespace_id, &basis.source_pin_id)
+                .await?;
+            Ok(new_fork
+                .engine
+                .plan_replay(
+                    &new_fork.context,
+                    &fork.engine,
+                    &fork.context,
+                    &source.engine,
+                    &source.context,
+                    request,
+                    self.core.now_ms(),
+                    self.session().merge_allowance(),
+                )
+                .await?)
+        }
+        .await
+        .map_err(|error| missing_fork(source_namespace_id, error))?;
+        self.session().validate_merge(plan.candidate())?;
+        let record = plan.record().clone();
+        let report = plan.conflicts().to_vec();
+        Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
+            candidate: plan.into_candidate(),
+            slot,
+            record,
+            report,
+        })))
+    }
+}
+
+#[cfg(test)]
+mod tests;

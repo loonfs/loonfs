@@ -4,6 +4,7 @@
 //! and plans what the merge's commit does to each inode.
 
 use super::operations::{access_update, attributes_update, display_name, BindingChange, InodePlan};
+use super::replay::Replay;
 use super::state::{Edge, InodeState, StateReader};
 use super::MergeAllowance;
 use crate::authorize::{require, Absence, Authorizer};
@@ -61,9 +62,9 @@ impl Changed {
 /// merged-into namespace a merge checks for changes that aren't the fork's
 /// own, with the versions that a `subtree` conflict reports.
 pub(super) struct SubtreeCheck {
-    directory: InodeId,
+    pub(super) directory: InodeId,
     /// The directory's path at the merged-into namespace's head.
-    path: AbsolutePath,
+    pub(super) path: AbsolutePath,
     ours: InodeState,
     theirs: Option<MergeConflictVersion>,
 }
@@ -116,6 +117,9 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     pub(super) conflicted: HashSet<InodeId>,
     /// The conflicting inode with the smallest ID.
     pub(super) first_conflict: Option<MergeConflict>,
+    /// What a rebase's replay commit reads and reports beyond a merge, or
+    /// `None` for a merge, which reports its first conflict only.
+    pub(super) replay: Option<Replay<'v, S>>,
 }
 
 impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
@@ -507,7 +511,8 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
 
     /// Returns whether the row committed at `seq` is the fork's own. A row is
     /// the fork's own when it was committed at or below the fork point, or by
-    /// a merge from this fork.
+    /// a merge from this fork. A replay commit reads the commit at or below
+    /// the new fork's fork point through the pin.
     pub(super) async fn is_own(&mut self, seq: ChangeSeq) -> Result<bool> {
         if seq <= self.fork_point_seq {
             return Ok(true);
@@ -515,16 +520,15 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         if let Some(own) = self.own_seqs.get(&seq) {
             return Ok(*own);
         }
-        let commit = self
-            .theirs
-            .view()
-            .commit_at_seq(seq)
-            .await?
-            .ok_or_else(|| {
-                CoreError::NamespaceCorrupt(format!(
-                    "a row was committed at sequence `{seq}`, where the namespace keeps no commit"
-                ))
-            })?;
+        let history = match &self.replay {
+            Some(replay) if seq <= replay.pinned.head().seq => replay.pinned.metadata_view(),
+            _ => self.theirs.view(),
+        };
+        let commit = history.commit_at_seq(seq).await?.ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "a row was committed at sequence `{seq}`, where the namespace keeps no commit"
+            ))
+        })?;
         let own = commit
             .merge
             .as_ref()
@@ -538,51 +542,56 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// merged-into namespace after the fork point through a row that isn't
     /// the fork's own (see [`Self::is_own`]).
     ///
-    /// One diff of the namespace from the fork point to its head, over the
-    /// root, finds the changes. An entry counts for each checked directory
-    /// that its path at either end is at or below, other than its own, and
-    /// an entry below none of them is skipped. The diff's pages advance
-    /// through the commits after the fork point, so the loop ends after the
-    /// namespace's head.
+    /// One diff over the root for each part of the history after the fork
+    /// point that [`Self::history_parts`] lists finds the changes. An entry
+    /// counts for each checked directory that its path at either end of the
+    /// part is at or below, other than its own, and an entry below none of
+    /// them is skipped. Each diff's pages advance through the commits of its
+    /// part, so each loop ends at the end of the part.
     async fn check_subtrees(&mut self) -> Result<()> {
         if self.subtree_checks.is_empty() {
             return Ok(());
         }
         let checks = std::mem::take(&mut self.subtree_checks);
-        let by_path: HashMap<Vec<NameKey>, usize> = checks
-            .iter()
-            .enumerate()
-            .map(|(index, check)| (name_keys(&check.path), index))
-            .collect();
         let mut changed = vec![false; checks.len()];
-        let mut options = DiffOptions {
-            path: AbsolutePath::root(),
-            to_seq: Some(self.main.head().seq),
-            ..DiffOptions::default()
-        };
-        loop {
-            let page = crate::diff::diff_page(self.main, self.fork_point_seq, &options).await?;
-            for entry in &page.response.entries {
-                let below: BTreeSet<usize> = [entry.path.as_ref(), entry.previous_path.as_ref()]
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|path| {
-                        let keys = name_keys(path);
-                        (0..=keys.len())
-                            .filter_map(|length| by_path.get(&keys[..length]).copied())
-                            .collect::<Vec<_>>()
-                    })
-                    .filter(|index| !changed[*index] && checks[*index].directory != entry.inode_id)
-                    .collect();
-                if !below.is_empty() && self.has_foreign_row(entry.inode_id).await? {
-                    for index in below {
-                        changed[index] = true;
+        for part in self.history_parts(&checks).await? {
+            let by_path: HashMap<Vec<NameKey>, usize> = part
+                .paths
+                .iter()
+                .map(|(index, path)| (name_keys(path), *index))
+                .collect();
+            let mut options = DiffOptions {
+                path: AbsolutePath::root(),
+                to_seq: Some(part.to_seq),
+                ..DiffOptions::default()
+            };
+            loop {
+                let page = crate::diff::diff_page(part.view, part.from_seq, &options).await?;
+                for entry in &page.response.entries {
+                    let below: BTreeSet<usize> =
+                        [entry.path.as_ref(), entry.previous_path.as_ref()]
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|path| {
+                                let keys = name_keys(path);
+                                (0..=keys.len())
+                                    .filter_map(|length| by_path.get(&keys[..length]).copied())
+                                    .collect::<Vec<_>>()
+                            })
+                            .filter(|index| {
+                                !changed[*index] && checks[*index].directory != entry.inode_id
+                            })
+                            .collect();
+                    if !below.is_empty() && self.has_foreign_row(entry.inode_id).await? {
+                        for index in below {
+                            changed[index] = true;
+                        }
                     }
                 }
-            }
-            match page.response.next_after_seq {
-                Some(after_seq) => options.after_seq = Some(after_seq),
-                None => break,
+                match page.response.next_after_seq {
+                    Some(after_seq) => options.after_seq = Some(after_seq),
+                    None => break,
+                }
             }
         }
         for (check, changed) in checks.into_iter().zip(changed) {
@@ -627,9 +636,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         Ok(false)
     }
 
-    /// Counts a conflict, and keeps it as the first when its inode has the
-    /// smallest ID so far. `theirs` is the merged-into namespace's version
-    /// that the conflict reports. An inode's later conflicts change nothing.
+    /// Counts a conflict, keeps it as the first when its inode has the
+    /// smallest ID so far, and adds it to a replay commit's report. `theirs`
+    /// is the merged-into namespace's version that the conflict reports. An
+    /// inode's later conflicts change nothing.
     pub(super) async fn conflict(
         &mut self,
         inode_id: InodeId,
@@ -640,11 +650,11 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         if !self.conflicted.insert(inode_id) {
             return Ok(());
         }
-        if self
+        let first = self
             .first_conflict
             .as_ref()
-            .is_some_and(|first| first.inode_id < inode_id)
-        {
+            .is_none_or(|first| inode_id < first.inode_id);
+        if !first && self.replay.is_none() {
             return Ok(());
         }
         let base = self
@@ -652,13 +662,19 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             .state(inode_id)
             .await?
             .and_then(|state| state.conflict_version());
-        self.first_conflict = Some(MergeConflict {
+        let conflict = MergeConflict {
             inode_id,
             kind,
             base,
             ours: ours.conflict_version(),
             theirs,
-        });
+        };
+        if let Some(replay) = &mut self.replay {
+            replay.report.push(conflict.clone());
+        }
+        if first {
+            self.first_conflict = Some(conflict);
+        }
         Ok(())
     }
 }

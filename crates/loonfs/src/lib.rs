@@ -113,8 +113,8 @@ pub use loonfs_types::{
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
     FilesystemChange, ListChangesResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
-    MergeConflictVersion, ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession,
-    UploadSessionStatus,
+    MergeConflictVersion, ObjectTransferAccess, RebaseForkResponse, UploadContentClaim, UploadMode,
+    UploadSession, UploadSessionStatus,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.

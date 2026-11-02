@@ -6,33 +6,28 @@
 mod classify;
 mod operations;
 mod order;
+mod plan;
+mod replay;
 mod state;
 mod targets;
 
-use crate::authorize::{Authorizer, CommitAuthority};
+use crate::authorize::Authorizer;
 use crate::commit::candidates::commit_response_from_commit_receipt;
 use crate::commit::engine::CommitCandidate;
-use crate::commit::wal_size::commit_fields_bytes;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, MergeBound, MergeHistory, Result};
-use crate::limits::DIRECT_TRANSFER_URL_TTL_MS;
 use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::read::LoadedMetadataView;
 use crate::path::write::{merge_fingerprint, CommitIntent, PublishPlanningSession};
-use crate::storage::content_admission::PreparedContent;
 use crate::storage::tail_content::ContentWrites;
-use classify::Classifier;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::{
-    u64_from_usize, ActorId, ChangeSeq, Commit, CommitId, CommitPrecondition, FilesystemOperation,
-    InodeKind, MergeConflict, NamespaceId,
+    ActorId, ChangeSeq, Commit, CommitId, CommitPrecondition, FilesystemOperation, MergeConflict,
+    NamespaceId,
 };
-use operations::BindingChange;
-use order::MergeOperations;
-use state::StateReader;
-use std::collections::{HashMap, HashSet};
+pub use replay::ReplayPlan;
 
 /// A request to merge a fork's commits into a namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,101 +216,27 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<MergePlan> {
         let main = self.namespace.load_metadata_view(context).await?;
         let fork_view = fork.namespace.load_metadata_view(fork_context).await?;
-        let fork_head = fork_view.head();
-        let (fork_point_seq, source_after_seq) = range_start(&main, &fork_view, request).await?;
-        let source_namespace_id = &fork_head.namespace_id;
-        let record = MergeRecord {
-            source_namespace_id: source_namespace_id.clone(),
-            source_after_seq,
-            source_through_seq: through_seq(
-                source_namespace_id,
-                fork_view.anchor.manifest_head_seq,
-                source_after_seq,
-                request.through_seq,
-            )?,
-        };
-        let intent = self.merge_intent(request, Vec::new(), Vec::new());
-        let mut classifier = Classifier {
-            main: &main,
-            theirs: StateReader::new(main.metadata_view()),
-            base: StateReader::new(main.metadata_view_at(fork_point_seq)),
-            ours: StateReader::new(fork_view.metadata_view_at(record.source_through_seq)),
-            before: StateReader::new(fork_view.metadata_view_at(source_after_seq)),
-            fork_authorizer: Authorizer::for_request(
-                source_namespace_id,
-                &fork_head.access,
-                CommitAuthority::Subject(fork.subject.as_ref()),
-            )?,
-            record: &record,
-            fork_point_seq,
-            allowance,
-            own_seqs: HashMap::new(),
-            plans: Vec::new(),
-            layouts: HashMap::new(),
-            planned_bytes: commit_fields_bytes(
-                &intent.commit_id,
-                &intent.actor_id,
-                intent.message.as_deref(),
-                Some(&record),
-            ),
-            subtree_checks: Vec::new(),
-            conflicted: HashSet::new(),
-            first_conflict: None,
-        };
-        classifier.classify().await?;
-        let holders = classifier.check_targets().await?;
-        let MergeOperations {
-            operations,
-            created_inode_ids,
-            temporary_moves,
-            preconditions: file_revisions,
-        } = classifier.order(&holders).await?;
-        let moves_or_deletes_a_directory = classifier.plans.iter().any(|plan| {
-            plan.kind == InodeKind::Directory
-                && matches!(
-                    plan.binding,
-                    Some(BindingChange::Move { .. } | BindingChange::Delete { .. })
-                )
-        });
-        let head = (moves_or_deletes_a_directory || !temporary_moves.is_empty()).then(|| {
-            CommitPrecondition::NamespaceHead {
-                expected_head_seq: main.head().seq,
-            }
-        });
-        let preconditions = head.into_iter().chain(file_revisions).collect();
-        let conflict = classifier
-            .first_conflict
-            .take()
-            .map(|first| (u64_from_usize(classifier.conflicted.len()), first));
-        let expires_at_ms = prepared_at_ms.saturating_add(DIRECT_TRANSFER_URL_TTL_MS);
-        let proofs = classifier
-            .layouts
-            .drain()
-            .map(|(content_ref, layout)| {
-                PreparedContent::for_family_member(
-                    self.namespace.namespace_id.clone(),
-                    content_ref,
-                    layout,
-                    expires_at_ms,
-                )
-            })
-            .collect();
-        // The classifier borrows the record, which the commit takes.
-        drop(classifier);
-        let candidate = CommitCandidate::prepared(
-            self.merge_intent(request, operations, preconditions),
-            proofs,
-        )
-        .with_merge(record.clone(), fork_point_seq, created_inode_ids)
-        .with_temporary_moves(temporary_moves);
-        if conflict.is_none() {
-            self.check_merge_rights(&main, &candidate, prepared_at_ms)
+        let range = range_start(&main, &fork_view, request, &main.head().namespace_id).await?;
+        let planned = self
+            .plan_merge_commit(
+                &main,
+                None,
+                fork,
+                &fork_view,
+                range,
+                request,
+                prepared_at_ms,
+                allowance,
+            )
+            .await?;
+        if planned.first_conflict.is_none() {
+            self.check_merge_rights(&main, &planned.candidate, prepared_at_ms)
                 .await?;
         }
         Ok(MergePlan {
-            candidate,
-            record,
-            conflict,
+            candidate: planned.candidate,
+            record: planned.record,
+            conflict: planned.first_conflict,
         })
     }
 
@@ -367,7 +288,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<()> {
         let main = self.namespace.load_metadata_view(context).await?;
         let fork_view = fork.namespace.load_metadata_view(fork_context).await?;
-        range_start(&main, &fork_view, request).await.map(|_| ())
+        range_start(&main, &fork_view, request, &main.head().namespace_id)
+            .await
+            .map(|_| ())
     }
 
     /// Returns the commit request of a merge with `operations` and
@@ -437,18 +360,20 @@ pub(crate) async fn merge_after_seq<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Returns the fork point and the start of a merge's range. The fork point is
-/// the sequence of `main` that `fork_view`'s namespace was made at. The range
-/// starts where [`merge_after_seq`] says, and that start has to be at or
-/// above the fork's own floor, and equal to the request's `after_seq` when
-/// the request sets one.
+/// Returns the fork point and the start of the range of a merge into `main`.
+/// The fork point is the sequence of `source` that `fork_view`'s namespace
+/// was made at, where `source` is `main` itself, or the namespace that a
+/// rebase made `main` from. The range starts where [`merge_after_seq`] says,
+/// and that start has to be at or above the fork's own floor, and equal to
+/// the request's `after_seq` when the request sets one.
 async fn range_start<S: ObjectStore + ?Sized>(
     main: &LoadedMetadataView<'_, S>,
     fork_view: &LoadedMetadataView<'_, S>,
     request: &MergeRequest,
+    source: &NamespaceId,
 ) -> Result<(ChangeSeq, ChangeSeq)> {
     let fork_head = fork_view.head();
-    let fork_point_seq = fork_point(fork_head, &main.head().namespace_id)?;
+    let fork_point_seq = fork_point(fork_head, source)?;
     let source_namespace_id = &fork_head.namespace_id;
     let source_after_seq = merge_after_seq(
         &main.metadata_view(),
