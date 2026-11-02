@@ -183,7 +183,7 @@ impl HeapBytes for Checksum {
 
 impl HeapBytes for CompletedUploadSession {
     fn heap_bytes(&self) -> usize {
-        self.content_id.heap_bytes()
+        self.namespace_id.heap_bytes() + self.content_id.heap_bytes()
     }
 }
 

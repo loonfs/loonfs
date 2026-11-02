@@ -13,7 +13,7 @@ use futures::{future, Stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::upload_session_prefix;
 use loonfs_objectstore::layout::{upload_id_of, upload_outcome_id_of};
 use loonfs_objectstore::{ListedObject, ObjectStore};
-use loonfs_types::format::control::{UploadOutcome, UploadSessionPayload};
+use loonfs_types::format::control::{UploadOutcome, UploadOutcomePayload, UploadSessionPayload};
 use loonfs_types::{ContentId, UploadId};
 use std::pin::pin;
 
@@ -169,17 +169,22 @@ impl<S: ObjectStore> NamespaceStore<S> {
         outcome_listing: OutcomeListing,
     ) -> Result<Option<ListedUploadSession>> {
         if let OutcomeListing::Listed = outcome_listing {
-            if let Some(UploadOutcome::Completed {
-                completed_at_ms,
-                content_ref,
+            if let Some(UploadOutcomePayload {
+                namespace_id,
+                outcome:
+                    UploadOutcome::Completed {
+                        completed_at_ms,
+                        content_ref,
+                    },
+                ..
             }) = self
                 .load_upload_outcome(&self.namespace_id, &upload_id)
                 .await?
-                .map(|record| record.outcome)
             {
                 return Ok(Some(ListedUploadSession::Completed {
                     upload_id,
                     session: CompletedUploadSession {
+                        namespace_id,
                         content_id: content_ref.content_id,
                         completed_at_ms,
                     },
@@ -219,6 +224,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .map(|session| UploadSessionState { session, outcome }))
     }
 
+    /// Determines what to do with a session whose records the sweep read, by
+    /// the status of the namespace that created the session.
+    ///
+    /// An open or aborted session follows the same rules in an active
+    /// namespace and in one that's eligible for retirement, and its provider
+    /// cleanup runs even after the namespace is retired, because the records
+    /// and the content are under the family root's prefix.
     pub(super) async fn sweep_upload_session(
         &self,
         grace_window_ms: u64,
@@ -226,7 +238,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
         state: &UploadSessionState,
     ) -> Result<UploadSessionSweep> {
-        if let RetirementStatus::Retained { reclaimable_at_ms } = live.retirement_status() {
+        let Some(status) = live.find_retirement_status(&state.session.namespace_id) else {
+            return Ok(retain_undated());
+        };
+        if let RetirementStatus::Retained { reclaimable_at_ms } = status {
             return Ok(UploadSessionSweep::Retain { reclaimable_at_ms });
         }
         match &state.outcome {
@@ -249,10 +264,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 // Abort cleanup runs even when no content object was written.
                 Ok(UploadSessionSweep::Delete)
             }
+            // The pass didn't list this session as completed before the walk,
+            // so the session was completed after the pass started, in a
+            // namespace that was live then. That namespace can't be eligible
+            // for retirement by the pass's clock, unless the walk didn't find
+            // it because it's a fork installed after the walk. Its session
+            // keeps the completed-content grace of an active namespace.
             Some(UploadOutcome::Completed {
                 completed_at_ms, ..
             }) => Ok(sweep_completed_session(
-                live,
+                RetirementStatus::Active,
                 clock.request_at_ms(),
                 *completed_at_ms,
             )),
@@ -340,14 +361,15 @@ pub(super) enum UploadSessionSweep {
     Delete,
 }
 
-/// Returns whether a completed session's records are kept or deleted, using
-/// only the session's completion time.
+/// Returns whether a completed session's records are kept or deleted, from
+/// the retirement `status` of the namespace that created the session and the
+/// session's completion time.
 pub(super) fn sweep_completed_session(
-    live: &LiveSet,
+    status: RetirementStatus,
     now_ms: u64,
     completed_at_ms: u64,
 ) -> UploadSessionSweep {
-    match live.retirement_status() {
+    match status {
         RetirementStatus::Retained { reclaimable_at_ms } => {
             UploadSessionSweep::Retain { reclaimable_at_ms }
         }
@@ -368,7 +390,7 @@ fn retain_until(at_ms: u64) -> UploadSessionSweep {
 }
 
 /// A session kept for a reason no clock resolves.
-fn retain_undated() -> UploadSessionSweep {
+pub(super) fn retain_undated() -> UploadSessionSweep {
     UploadSessionSweep::Retain {
         reclaimable_at_ms: None,
     }
