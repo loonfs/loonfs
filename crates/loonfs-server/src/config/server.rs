@@ -70,9 +70,15 @@ pub struct ServerConfig {
     /// every namespace. Defaults to 8,192.
     pub max_admitted_requests: Option<NonZeroUsize>,
     /// Approximate retained bytes of the publication requests admitted and
-    /// not yet settled, across every namespace. Derived when sized, and
-    /// otherwise 64 MiB.
+    /// not yet settled, across every namespace. A merge isn't charged to it.
+    /// Derived when sized, and otherwise 64 MiB.
     pub max_admitted_bytes: Option<NonZeroUsize>,
+    /// The merge allowance, which limits the approximate retained bytes of
+    /// the one merge that the server admits at a time. A merge whose estimate
+    /// exceeds it returns `merge_too_large`. Defaults to the runtime's
+    /// [`DEFAULT_MAX_MERGE_BYTES`](loonfs::DEFAULT_MAX_MERGE_BYTES), 128 MiB,
+    /// with or without a memory limit.
+    pub max_merge_bytes: Option<NonZeroUsize>,
     /// Maximum publication batches running at once. Defaults to 8.
     pub max_concurrent_publications: Option<NonZeroUsize>,
     /// The per-namespace admission limits of the server's runtime. The
@@ -401,8 +407,8 @@ impl ServerConfig {
     }
 
     /// Builds the execution budget of the server's one runtime from its read,
-    /// fold, compaction, content write, and compaction input limits and its
-    /// admission totals, reporting to `recorder`.
+    /// fold, compaction, content write, and compaction input limits, its
+    /// admission totals, and its merge allowance, reporting to `recorder`.
     pub(crate) fn execution_budget(
         &self,
         memory: &MemorySizing,
@@ -415,6 +421,7 @@ impl ServerConfig {
             .max_compaction_input_bytes(positive(memory.compaction_input.bytes))
             .max_read_working_bytes(memory.read_working.bytes)
             .max_admitted_bytes(positive(memory.admitted.bytes))
+            .max_merge_bytes(positive(memory.merge.bytes))
             .metrics_recorder(recorder);
         if let Some(limit) = self.max_concurrent_reads {
             builder = builder.max_concurrent_reads(limit);

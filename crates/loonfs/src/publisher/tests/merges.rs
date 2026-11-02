@@ -1,7 +1,5 @@
-//! Merges in the publisher's queue: a merge's admission, each merge is
-//! published in a WAL object of its own, and a merge queued behind another
-//! merge from the same fork is checked against the state that includes the
-//! first.
+//! Merges in the publisher's queue: a merge's admission, one merge at a
+//! time, and its publication in a WAL object of its own.
 
 use super::*;
 use loonfs_test_support::stores::RecordedOperation;
@@ -13,21 +11,29 @@ use std::num::NonZeroU32;
 /// A merge under `commit_id` of the fork's commits above 3, through 7, which
 /// creates `/{name}` under an inode ID from the fork.
 fn merge(commit_id: &str, name: &str) -> CommitCandidate {
+    merge_through(commit_id, name, 3, 7)
+}
+
+/// A merge under `commit_id` of the fork's commits above `after_seq`, through
+/// `through_seq`, from a fork made at 3, which creates `/{name}` under an
+/// inode ID that the fork's commit after `after_seq` made.
+fn merge_through(commit_id: &str, name: &str, after_seq: u64, through_seq: u64) -> CommitCandidate {
     CommitCandidate::new(create_directory_request(commit_id, name)).with_merge(
         MergeRecord {
             source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
-            source_after_seq: ChangeSeq(3),
-            source_through_seq: ChangeSeq(7),
+            source_after_seq: ChangeSeq(after_seq),
+            source_through_seq: ChangeSeq(through_seq),
         },
         ChangeSeq(3),
-        BTreeMap::from([(0, InodeId::generate(ChangeSeq(4), NonZeroU32::MIN))]),
+        BTreeMap::from([(
+            0,
+            InodeId::generate(ChangeSeq(after_seq + 1), NonZeroU32::MIN),
+        )]),
     )
 }
 
 /// Checks that a merge opens a batch of its own, that nothing joins it, and
-/// that its WAL object contains the merge alone. The second merge repeats the
-/// first's range, so it's refused against the state that includes the
-/// first, and it writes no WAL object.
+/// that its WAL object contains the merge alone.
 #[tokio::test]
 async fn a_merge_is_published_alone_in_its_wal_object() {
     let temp_dir = tempdir().expect("tempdir");
@@ -55,7 +61,6 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
         CommitCandidate::new(create_directory_request("before-1", "before-1")),
         CommitCandidate::new(create_directory_request("before-2", "before-2")),
         merge("merge", "merged"),
-        merge("merge-again", "merged-again"),
         CommitCandidate::new(create_directory_request("after-1", "after-1")),
         CommitCandidate::new(create_directory_request("after-2", "after-2")),
     ] {
@@ -69,25 +74,20 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
             WorkItem::Delete(_) => panic!("expected commit batch"),
         })
         .collect::<Vec<_>>();
-    assert_eq!(batches, [2, 1, 1, 2]);
+    assert_eq!(batches, [2, 1, 2]);
 
-    let mut results = Vec::new();
+    let mut seqs = Vec::new();
     for response in responses {
-        results.push(response.await.expect("result"));
+        seqs.push(
+            response
+                .await
+                .expect("result")
+                .expect("commit")
+                .committed_seq
+                .0,
+        );
     }
-    let seqs: Vec<_> = results
-        .iter()
-        .map(|result| result.as_ref().ok().map(|commit| commit.committed_seq.0))
-        .collect();
-    assert_eq!(seqs, [Some(2), Some(3), Some(4), None, Some(5), Some(6)]);
-    assert_eq!(
-        results[3]
-            .as_ref()
-            .map(|_| ())
-            .expect_err("the same range again")
-            .code(),
-        ErrorCode::MergeRangeConflict
-    );
+    assert_eq!(seqs, [2, 3, 4, 5, 6]);
     let mut objects = Vec::new();
     for operation in store.snapshot() {
         if let RecordedOperation::Put { key, .. } = operation {
@@ -115,12 +115,14 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
     publisher.wait_for_worker().await;
 }
 
-/// Checks that the publisher admits and publishes a merge above its
-/// namespace's byte allowance, which refuses an ordinary commit of about the
-/// same weight with `commit_queue_full`, and that a merge above the whole
-/// host total fails with `merge_too_large`.
+/// Checks that the publisher admits and publishes a merge that fits the
+/// merge allowance, although the merge is above the budget's byte total and
+/// above its namespace's byte allowance, which refuses an ordinary commit of
+/// about the same weight with `commit_queue_full`. A second merge while the
+/// first is admitted gets `commit_queue_full`, and it's admitted once the
+/// first settles. A merge above the allowance fails with `merge_too_large`.
 #[tokio::test]
-async fn a_merge_is_held_to_the_host_total_and_not_the_namespace_allowance() {
+async fn a_merge_is_held_to_the_merge_allowance_and_admitted_one_at_a_time() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("main").expect("namespace");
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -134,17 +136,18 @@ async fn a_merge_is_held_to_the_host_total_and_not_the_namespace_allowance() {
             + namespace_id.as_str().len()
     };
     let merge_bytes = admission_bytes(merge("merge", "merged"));
-    let publisher_with_total = |max_admitted_bytes: usize| {
+    let publisher_with_allowance = |max_merge_bytes: usize| {
         let mut core = TestCore::unpaced();
-        core.config.publication.max_estimated_bytes_per_namespace =
-            NonZeroUsize::new(merge_bytes - 1).expect("allowance");
+        let below_the_merge = NonZeroUsize::new(merge_bytes - 1).expect("limit");
+        core.config.publication.max_estimated_bytes_per_namespace = below_the_merge;
         core.execution_budget = ExecutionBudget::builder()
-            .max_admitted_bytes(NonZeroUsize::new(max_admitted_bytes).expect("total"))
+            .max_admitted_bytes(below_the_merge)
+            .max_merge_bytes(NonZeroUsize::new(max_merge_bytes).expect("allowance"))
             .build();
         standalone_publisher_with(&namespace_id, &runtime, core)
     };
 
-    let publisher = publisher_with_total(merge_bytes);
+    let publisher = publisher_with_allowance(merge_bytes);
     assert_matches!(
         try_admit_commit(
             &publisher,
@@ -153,16 +156,25 @@ async fn a_merge_is_held_to_the_host_total_and_not_the_namespace_allowance() {
         ),
         Err(CoreError::CommitQueueFull)
     );
-    let merged = recv_commit(
-        try_admit_candidate(&publisher, &namespace_id, merge("merge", "merged"))
-            .expect("admit a merge above the namespace allowance"),
-        "merge",
+    let first = try_admit_candidate(&publisher, &namespace_id, merge("merge", "merged"))
+        .expect("admit a merge above the namespace allowance and the byte total");
+    let second = || merge_through("later", "second", 7, 9);
+    assert_matches!(
+        try_admit_candidate(&publisher, &namespace_id, second()),
+        Err(CoreError::CommitQueueFull)
+    );
+    assert!(recv_commit(first, "merge").await.merge.is_some());
+    publisher.wait_for_worker().await;
+    let next = recv_commit(
+        try_admit_candidate(&publisher, &namespace_id, second())
+            .expect("admit the second merge once the first settles"),
+        "later",
     )
     .await;
-    assert!(merged.merge.is_some());
+    assert!(next.merge.is_some());
     publisher.wait_for_worker().await;
 
-    let smaller = publisher_with_total(merge_bytes - 1);
+    let smaller = publisher_with_allowance(merge_bytes - 1);
     assert_matches!(
         try_admit_candidate(&smaller, &namespace_id, merge("merge", "merged")),
         Err(CoreError::MergeTooLarge { estimated_bytes, max_bytes })

@@ -2,7 +2,7 @@
 //! and the totals of the execution budget it shares.
 
 use super::queue::PreparedCandidate;
-use crate::execution_budget::{AdmissionChange, BudgetPermit};
+use crate::execution_budget::{AdmissionChange, AdmissionCharge, BudgetPermit};
 use crate::CoreError;
 use crate::{ExecutionBudget, PublicationPolicy};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
@@ -30,18 +30,6 @@ struct RequestWeight {
     requests: usize,
     estimated_bytes: usize,
     inline_bytes: usize,
-}
-
-/// Which of its namespace's limits an admitted request is charged to. Every
-/// request is also charged to the budget's totals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NamespaceCharge {
-    /// The namespace's request count and its byte allowance.
-    RequestAndBytes,
-    /// The namespace's request count only, for a merge. The byte allowance is
-    /// sized for request bodies, and the budget's byte total bounds a merge
-    /// instead.
-    RequestOnly,
 }
 
 impl PublicationAdmission {
@@ -92,23 +80,19 @@ impl PublicationAdmission {
         let estimated_bytes =
             estimated_admission_bytes(namespace_id, candidate.estimated_retained_bytes);
         if !candidate.candidate.is_merge() {
-            return self.charge(
-                namespace_id,
-                estimated_bytes,
-                NamespaceCharge::RequestAndBytes,
-            );
+            return self.charge(namespace_id, AdmissionCharge::Request { estimated_bytes });
         }
-        // A merge that exceeds the whole total would be refused on every
-        // retry, so it fails with an error that its caller handles by merging
-        // a smaller range of the fork's commits.
-        let max_bytes = self.budget.max_admitted_bytes();
+        // A merge that exceeds the allowance would be refused on every retry,
+        // so it fails with an error that its caller handles by merging a
+        // smaller range of the fork's commits.
+        let max_bytes = self.budget.max_merge_bytes();
         if estimated_bytes > max_bytes {
             return Err(CoreError::MergeTooLarge {
                 estimated_bytes,
                 max_bytes,
             });
         }
-        self.charge(namespace_id, estimated_bytes, NamespaceCharge::RequestOnly)
+        self.charge(namespace_id, AdmissionCharge::Merge)
     }
 
     pub(super) fn validate_candidate(candidate: &PreparedCandidate) -> Result<(), CoreError> {
@@ -131,27 +115,27 @@ impl PublicationAdmission {
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
         self.charge(
             namespace_id,
-            estimated_admission_bytes(namespace_id, estimated_request_bytes),
-            NamespaceCharge::RequestAndBytes,
+            AdmissionCharge::Request {
+                estimated_bytes: estimated_admission_bytes(namespace_id, estimated_request_bytes),
+            },
         )
     }
 
+    /// Charges one request to its namespace's limits and to the budget's
+    /// totals. A merge is charged to its namespace's request count, and to
+    /// none of the byte limits.
     fn charge(
         self: &Arc<Self>,
         namespace_id: &NamespaceId,
-        estimated_bytes: usize,
-        namespace_charge: NamespaceCharge,
+        charge: AdmissionCharge,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
-        let namespace_bytes = match namespace_charge {
-            NamespaceCharge::RequestAndBytes => estimated_bytes,
-            NamespaceCharge::RequestOnly => 0,
-        };
+        let estimated_bytes = charge.estimated_bytes();
         let change = {
             let mut namespaces = self.lock_namespaces();
             let empty = RequestWeight::default();
             let namespace = namespaces.get(namespace_id).unwrap_or(&empty);
             if namespace.requests >= self.limits.max_requests_per_namespace.get()
-                || namespace_bytes
+                || estimated_bytes
                     > self
                         .limits
                         .max_estimated_bytes_per_namespace
@@ -160,24 +144,23 @@ impl PublicationAdmission {
             {
                 return Err(CoreError::CommitQueueFull);
             }
-            let change = self.budget.charge_admission(estimated_bytes);
+            let change = self.budget.charge_admission(charge);
             if matches!(change, AdmissionChange::Admitted(_)) {
                 let namespace = namespaces.entry(namespace_id.clone()).or_default();
                 namespace.requests += 1;
-                namespace.estimated_bytes += namespace_bytes;
+                namespace.estimated_bytes += estimated_bytes;
             }
             change
         };
         // The recorder is caller code, so it runs after both locks are released.
         self.budget.report_admission(change);
-        if matches!(change, AdmissionChange::Rejected) {
+        if !matches!(change, AdmissionChange::Admitted(_)) {
             return Err(CoreError::CommitQueueFull);
         }
         Ok(Arc::new(AdmissionPermit {
             admission: Arc::clone(self),
             namespace_id: namespace_id.clone(),
-            estimated_bytes,
-            namespace_bytes,
+            charge,
             inline_bytes: AtomicUsize::new(0),
         }))
     }
@@ -197,11 +180,9 @@ fn estimated_admission_bytes(namespace_id: &NamespaceId, estimated_request_bytes
 pub(super) struct AdmissionPermit {
     admission: Arc<PublicationAdmission>,
     namespace_id: NamespaceId,
-    /// The bytes charged to the budget's total.
-    estimated_bytes: usize,
-    /// The part of `estimated_bytes` charged to the namespace's byte
-    /// allowance, which is all of it, or none for a merge.
-    namespace_bytes: usize,
+    /// What the request is charged, to its namespace's limits and to the
+    /// budget's totals alike.
+    charge: AdmissionCharge,
     inline_bytes: AtomicUsize,
 }
 
@@ -256,7 +237,7 @@ impl Drop for AdmissionPermit {
                 .unwrap_or_else(PoisonError::into_inner);
             if let Some(namespace) = namespaces.get_mut(&self.namespace_id) {
                 namespace.requests -= 1;
-                namespace.estimated_bytes -= self.namespace_bytes;
+                namespace.estimated_bytes -= self.charge.estimated_bytes();
                 namespace.inline_bytes -= self.inline_bytes.load(Ordering::Relaxed);
                 if namespace.requests == 0 {
                     namespaces.remove(&self.namespace_id);
@@ -264,7 +245,7 @@ impl Drop for AdmissionPermit {
             }
             // Refunded under this runtime's lock, as it was charged, so this
             // runtime never sees its namespace refunded while the total is not.
-            self.admission.budget.refund_admission(self.estimated_bytes)
+            self.admission.budget.refund_admission(self.charge)
         };
         self.admission.budget.report_admission(change);
     }
@@ -294,6 +275,7 @@ impl<T> AdmittedWaiter<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::{DefaultMetricsRecorder, MetricValue};
     use crate::publish::CommitCandidate;
     use crate::ExecutionBudgetStats;
     use std::assert_matches;
@@ -373,17 +355,31 @@ mod tests {
         candidate
     }
 
-    /// Checks that a merge is charged to the budget's total and counts as one
-    /// request of its namespace, but isn't held to the namespace's byte
-    /// allowance, which still refuses an ordinary commit of the same weight.
-    /// A merge's permit keeps the inline reservation calls working, and it
+    /// The value of the metric `name` that `recorder` keeps.
+    fn metric(recorder: &DefaultMetricsRecorder, name: &str) -> MetricValue {
+        recorder
+            .snapshot()
+            .by_name(name)
+            .next()
+            .unwrap_or_else(|| panic!("no `{name}` metric registered"))
+            .value
+            .clone()
+    }
+
+    /// Checks that a merge above its namespace's byte allowance and above the
+    /// budget's byte total is admitted when it fits the merge allowance,
+    /// while the namespace allowance still refuses an ordinary request above
+    /// it. The merge counts as one request, and no byte limit is charged for
+    /// it, so an ordinary request still fits the byte total beside it. The
+    /// merge's permit keeps the inline reservation calls working, and it
     /// refunds exactly what it charged.
     #[test]
-    fn a_merge_is_held_to_the_host_total_and_not_the_namespace_allowance() {
+    fn a_merge_is_held_to_the_merge_allowance_and_to_no_byte_limit() {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
         let overhead = 512 + namespace_id.as_str().len();
         let budget = ExecutionBudget::builder()
             .max_admitted_bytes(limit(4096))
+            .max_merge_bytes(limit(16384))
             .build();
         let admission = runtime_admission(
             PublicationPolicy {
@@ -401,13 +397,23 @@ mod tests {
             admission.acquire_candidate(&namespace_id, &ordinary),
             Err(CoreError::CommitQueueFull)
         ));
-        assert_eq!(admitted(&budget), (0, 0));
+        assert_eq!(budget.stats(), ExecutionBudgetStats::default());
 
         let permit = admission
-            .acquire_candidate(&namespace_id, &merge(2048))
-            .expect("a merge above the namespace allowance");
-        assert_eq!(admitted(&budget), (1, 2048 + overhead));
+            .acquire_candidate(&namespace_id, &merge(8192))
+            .expect("a merge above the namespace allowance and the byte total");
+        let merge_only = ExecutionBudgetStats {
+            admitted_requests: 1,
+            admitted_merges: 1,
+            ..ExecutionBudgetStats::default()
+        };
+        assert_eq!(budget.stats(), merge_only);
         assert_eq!(admission.namespace_usage(&namespace_id), (1, 0, 0));
+        let beside = admission
+            .acquire(&namespace_id, 0)
+            .expect("an ordinary request beside the merge");
+        assert_eq!(admitted(&budget), (2, overhead));
+        drop(beside);
         assert_eq!(permit.reserve_inline(std::iter::empty(), 0, 1024), 0);
         permit.release_inline();
         drop(permit);
@@ -415,51 +421,66 @@ mod tests {
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
-    /// Checks that a merge larger than the whole budget total fails with
-    /// `merge_too_large` and charges nothing, while a merge that fits the
-    /// total but not beside the requests already admitted gets
-    /// `commit_queue_full` and is admitted once they settle.
+    /// Checks that a merge larger than the allowance fails with
+    /// `merge_too_large` and charges nothing, and that the runtimes sharing a
+    /// budget admit one merge at a time: a second merge, from either runtime,
+    /// gets `commit_queue_full`, which the admission refusal counter doesn't
+    /// record, and it's admitted once the first settles.
     #[test]
-    fn a_merge_is_too_large_only_when_it_exceeds_the_whole_host_total() {
+    fn a_budget_admits_one_merge_at_a_time_within_the_allowance() {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
         let overhead = 512 + namespace_id.as_str().len();
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
         let budget = ExecutionBudget::builder()
-            .max_admitted_bytes(limit(4096))
+            .max_merge_bytes(limit(4096))
+            .metrics_recorder(recorder.clone())
             .build();
-        let admission = runtime_admission(PublicationPolicy::default(), &budget);
-        let held = admission
-            .acquire(&namespace_id, 0)
-            .expect("another request");
-        let charged = admitted(&budget);
+        let first_runtime = runtime_admission(PublicationPolicy::default(), &budget);
+        let second_runtime = runtime_admission(PublicationPolicy::default(), &budget);
 
-        let error = admission
+        let error = first_runtime
             .acquire_candidate(&namespace_id, &merge(4096 - overhead + 1))
             .err()
-            .expect("a merge above the total");
+            .expect("a merge above the allowance");
         assert_eq!(error.code(), loonfs_types::ErrorCode::MergeTooLarge);
         assert_matches!(
             error,
             CoreError::MergeTooLarge { estimated_bytes, max_bytes }
                 if estimated_bytes == 4097 && max_bytes == 4096
         );
-        assert!(matches!(
-            admission.acquire_candidate(&namespace_id, &merge(4096 - overhead)),
-            Err(CoreError::CommitQueueFull)
-        ));
-        assert_eq!(
-            admitted(&budget),
-            charged,
-            "a refused merge charges nothing"
-        );
-        assert_eq!(admission.namespace_usage(&namespace_id), (1, overhead, 0));
-
-        drop(held);
-        let permit = admission
-            .acquire_candidate(&namespace_id, &merge(4096 - overhead))
-            .expect("a merge of the whole total once the queue is empty");
-        assert_eq!(admitted(&budget), (1, 4096));
-        drop(permit);
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
+
+        let first = first_runtime
+            .acquire_candidate(&namespace_id, &merge(4096 - overhead))
+            .expect("a merge of the whole allowance");
+        assert_eq!(
+            metric(&recorder, "loonfs.execution_budget.admitted_merges"),
+            MetricValue::Gauge(1)
+        );
+        let charged = budget.stats();
+        for runtime in [&first_runtime, &second_runtime] {
+            assert!(matches!(
+                runtime.acquire_candidate(&namespace_id, &merge(0)),
+                Err(CoreError::CommitQueueFull)
+            ));
+        }
+        assert_eq!(budget.stats(), charged, "a refused merge charges nothing");
+        assert_eq!(
+            metric(&recorder, "loonfs.execution_budget.admission_rejections"),
+            MetricValue::Counter(0)
+        );
+
+        drop(first);
+        let second = second_runtime
+            .acquire_candidate(&namespace_id, &merge(4096 - overhead))
+            .expect("a merge once the first settles");
+        assert_eq!(budget.stats(), charged);
+        drop(second);
+        assert_eq!(budget.stats(), ExecutionBudgetStats::default());
+        assert_eq!(
+            metric(&recorder, "loonfs.execution_budget.admitted_merges"),
+            MetricValue::Gauge(0)
+        );
     }
 
     #[test]
@@ -676,6 +697,19 @@ mod tests {
         ));
         permits.clear();
         assert_eq!(admitted(budget), (0, 0));
+
+        let allowance = 128 * 1024 * 1024;
+        assert_matches!(
+            admission
+                .acquire_candidate(&namespaces[0], &merge(allowance - overhead + 1))
+                .err(),
+            Some(CoreError::MergeTooLarge { max_bytes, .. }) if max_bytes == allowance
+        );
+        drop(
+            admission
+                .acquire_candidate(&namespaces[0], &merge(allowance - overhead))
+                .expect("a merge of the default allowance"),
+        );
 
         let mut running = Vec::new();
         for _ in 0..8 {

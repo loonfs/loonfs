@@ -88,14 +88,14 @@ fixed = 128 MiB
       + 64 MiB + metadata_cache.ssd.max_segment_bytes / 4 KiB x 168 B, with a [metadata_cache.ssd] table
 headroom = 200 MiB + 20% of (memory_limit_bytes - fixed - 200 MiB)
 managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_manifest_bytes
-        - metadata_cache.max_head_bytes
+        - metadata_cache.max_head_bytes - max_merge_bytes
 ```
 
 `fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, the completed upload sessions that garbage collection keeps between passes, and the SSD tier of the metadata segment cache. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB. The SSD tier's term is its 64 MiB write queue plus its index of the blocks on disk, at 168 bytes for each block. The tier charges each block at least 4 KiB against its budget, so it keeps at most one block for each 4 KiB of `max_segment_bytes`, and the term is a bound: about 484 MiB for a 10 GiB tier, and about 4.2 GiB for a 100 GiB tier. (In a compacted namespace of 20,000 files, the average stored block was 4.1 KiB.) (See [Keeping metadata blocks on local SSD](#keeping-metadata-blocks-on-local-ssd).)
 
 The headroom covers memory that the allocator keeps after the server frees it. The pools share the other 80% of what's left after `fixed` and the 200 MiB, so the headroom is 200 MiB plus a quarter of the pools.
 
-The budgets of the manifest cache (`metadata_cache.max_manifest_bytes`) and the head cache (`metadata_cache.max_head_bytes`) aren't shares of managed memory, because the memory that manifests and namespace heads need depends on the namespaces that the server reads, not on the host. They're 32 MiB and 16 MiB unless you set them, with or without a limit. Startup fails if managed memory is below 256 MiB, or if the final pools plus `fixed` and the headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
+The budgets of the manifest cache (`metadata_cache.max_manifest_bytes`) and the head cache (`metadata_cache.max_head_bytes`) aren't shares of managed memory, because the memory that manifests and namespace heads need depends on the namespaces that the server reads, not on the host. They're 32 MiB and 16 MiB unless you set them, with or without a limit. The merge allowance (`max_merge_bytes`) isn't a share either, because its default admits the largest merge of file creates that fits one WAL object, whatever the host. It's 128 MiB unless you set it, with or without a limit (see [Resource sizing](#resource-sizing)). Startup fails if managed memory is below 256 MiB, or if the final pools plus `fixed` and the headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
 
 | Pool | Share of managed memory | Setting |
 | --- | ---: | --- |
@@ -396,13 +396,14 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | WAL tail cache | `metadata_cache.max_wal_tail_bytes` | Derived: 10%. 64 MiB without a memory limit | Cached WAL tails for reads, for any number of namespaces | Steady |
 | Completed upload sessions | None | 32 MiB | The content ID and completion time of each completed upload session, which garbage collection keeps between passes | Steady |
 | Content object cache | `metadata_cache.max_content_object_bytes` | Derived: 10%. 96 MiB without a memory limit | Verified content objects of up to 1 MiB that reads keep for later reads | Steady |
-| Publication queue | `max_admitted_bytes` | Derived: 10%. 64 MiB without a memory limit | Estimated bytes of admitted commit requests. It also sets the largest merge the server admits | Steady |
+| Publication queue | `max_admitted_bytes` | Derived: 10%. 64 MiB without a memory limit | Estimated bytes of admitted commit requests, other than a merge | Steady |
 | HTTP requests | `max_in_flight_requests` | 256 | Requests until their responses complete, excluding health and readiness probes | Concurrency |
 | Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
 | Read working memory | `max_read_working_bytes` | Derived: 20%. 256 MiB without a memory limit | Blocks retained across read, publication, fold, and pin-fold memos | Shared |
 | Compaction input | `max_compaction_input_bytes` | Derived: 10% divided by the compaction count. 64 MiB without a memory limit | Decoded blocks that one compaction keeps in memory while it runs | Per operation |
+| Merge allowance | `max_merge_bytes` | 128 MiB, with or without a memory limit | Estimated bytes of the one merge that the server admits at a time | Per operation |
 | Segment output | None | 32 MiB | Encoded segments that one fold, compaction, or maintenance step keeps in memory while it writes them | Per operation |
 | Content writes | `max_concurrent_content_writes` | 32 writes | Content object writes running at once, for the content that folds, validation, and direct downloads write and for staged uploads. Each keeps at most 16 MiB in memory, or 72 MiB on R2 | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including the folds that maintenance requests, namespace deletes, and snapshot and fork creation start | Concurrency |
@@ -426,7 +427,7 @@ Maintenance requests sent to the API don't count against `max_concurrent_mainten
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied transfer, and both default to 256 MiB. They don't reserve any memory.
 
-Without a memory limit, grep, an SSD tier, or overrides, the budgets in the table above that have a byte ceiling add up to 1,776 MiB:
+Without a memory limit, grep, an SSD tier, or overrides, the budgets in the table above that have a byte ceiling add up to 1,904 MiB:
 
 | Budget | Ceiling |
 | --- | --- |
@@ -437,13 +438,14 @@ Without a memory limit, grep, an SSD tier, or overrides, the budgets in the tabl
 | Content object cache | 96 MiB |
 | Completed upload sessions | 32 MiB |
 | Publication queue | 64 MiB |
+| Merge allowance | 128 MiB |
 | 8 uploads at 8 MiB | 64 MiB |
 | 16 downloads at 8 MiB | 128 MiB |
 | 32 content writes at 16 MiB | 512 MiB |
 | Read working memory | 256 MiB |
 | 2 fold outputs at 32 MiB | 64 MiB |
 | 2 compactions at 96 MiB | 192 MiB |
-| Total | 1,776 MiB |
+| Total | 1,904 MiB |
 
 The total leaves out:
 
@@ -464,7 +466,7 @@ The `loonfs_grep_steps_running` gauge reports the steps that have a permit, and 
 
 The server builds one `GrepPassBudget` from `[grep].max_concurrent_steps` for its grep worker. If you embed grep in a host that runs more than one worker (for example, one for each runtime), pass a clone of one budget to every worker, so the limit is one ceiling for the whole process. A worker that has its own budget adds its own steps on top of that ceiling.
 
-A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 259 MiB of managed memory, and the smallest limit that passes is 2,044 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 3,836 MiB unless you lower `max_concurrent_content_writes`. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
+A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2 GiB limit leaves about 131 MiB of managed memory, which is too little, and the smallest limit that passes is 2,204 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 3,996 MiB unless you lower `max_concurrent_content_writes`. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
 
 The server keeps a writer session open for each namespace it has written to, until background maintenance closes the session (see [Background maintenance](#background-maintenance)). One idle session uses about 3 KiB of heap, so 10,000 open sessions use about 30 MiB. A session also keeps its WAL tail in memory until a fold moves the tail into segments. The write stop (128 unfolded WAL objects) and the inline tail limit bound that tail. The server stops keeping a session when its namespace is deleted, or when a request finds that the namespace doesn't exist.
 
@@ -484,13 +486,18 @@ When the server drops a fenced session, it logs a warning with `namespace_id`, a
 
 An embedded host sets this limit with `ExecutionBudgetBuilder::max_concurrent_reads`, and read-only and writable runtimes can share the budget through `LoonFsBuilder::execution_budget`. Reads inside commits, folds, compactions, pin creation, and garbage collection call core directly, and they don't take a read slot. Grep queries and index steps take a slot for each public read they call. A caller that has a read slot doesn't wait for a grep step permit.
 
-Publication admission counts queued and active callers, including duplicate commits, conflicts, and namespace deletes. A caller that disconnects is still counted until its admitted work settles. A request over a count limit or an estimated byte limit receives `commit_queue_full`, and admitted work waits for a shared publication slot. Each namespace has its own allowance, so one busy tenant can't use up the default host budget. A [merge](../../../docs/specs/glossary.md#merge) counts as one request toward its namespace's request limit, but it isn't held to the namespace's byte allowance, which is sized for request bodies, so `max_admitted_bytes` bounds a merge instead. (This version has no route that commits a merge.) A merge whose estimate exceeds the whole total receives `merge_too_large`, so the total also sets the largest merge that the server admits. LoonFS estimates about 650 bytes for each file that a merge creates, so at the default 64 MiB, a merge can create about 100,000 files. To merge more, the caller merges the fork's commits in several smaller ranges. A merge that fits the total, but not beside the requests already admitted, receives `commit_queue_full` like any other request. A merge is the exception to the allowance: one merge can use the whole byte total while it waits and publishes, and until it finishes, requests from every namespace can receive `commit_queue_full`. The `loonfs.execution_budget.admission_rejections` counter counts the requests refused because the `max_admitted_requests` or `max_admitted_bytes` total was full. If the `loonfs.execution_budget.publications_waiting` gauge stays above zero, namespaces are waiting for a publication slot.
+Publication admission counts queued and active callers, including duplicate commits, conflicts, and namespace deletes. A caller that disconnects is still counted until its admitted work settles. A request over a count limit or an estimated byte limit receives `commit_queue_full`, and admitted work waits for a shared publication slot. Each namespace has its own allowance, so one busy tenant can't use up the default host budget. The `loonfs.execution_budget.admission_rejections` counter counts the requests refused because the `max_admitted_requests` or `max_admitted_bytes` total was full. If the `loonfs.execution_budget.publications_waiting` gauge stays above zero, namespaces are waiting for a publication slot.
+
+A [merge](../../../docs/specs/glossary.md#merge) counts as one request toward the request limits, but it isn't charged to the byte limits, which are sized for request bodies and would cut a large merge into pieces. (This version has no route that commits a merge.) Instead, the server admits one merge at a time, against a merge allowance of its own (`max_merge_bytes`) that the sizing formula reserves. A merge whose estimated bytes exceed the allowance receives `merge_too_large`, and the caller merges the fork's commits in several smaller ranges. A merge that arrives while another merge is admitted, into any namespace, receives `commit_queue_full`, and a retry is admitted once the first merge finishes. The `loonfs.execution_budget.admitted_merges` gauge reports whether a merge is admitted, and `admission_rejections` doesn't count a merge that's refused because another merge is admitted.
+
+The default allowance of 128 MiB admits the largest merge of file creates that fits one WAL object, so at the default, the WAL object bounds a merge of creates. One WAL object fits about 110,000 creates, and LoonFS estimates 650 to 900 bytes for each create, depending on the length of the file's name, so the estimate for the largest merge is 72 MB to 99 MB. A merge of other changes can reach the allowance before it fills a WAL object. For example, admission estimates about 62 KB for an update that sets 60 KB of attributes, so the default allowance admits about 2,100 such updates in one merge, a quarter of what fits one WAL object. The estimate counts the merge's operations and content references, but not the working copies that its publication makes. In a measurement of a merge of 100,000 file creates with 13-byte names, the merge's operations and references used 64 MB of heap, and the heap that the merge used peaked at about 855 MB while it was published. A merge of about 110,000 creates with 255-byte names used 96 MB, and peaked at about 1,665 MB. Size process memory for that peak if your forks merge that many files at once, or lower `max_merge_bytes` so that callers merge in smaller ranges.
 
 A commit at the write stop waits in its namespace's queue for the session's fold, for at most the write-stop wait, and it keeps its request slot while it waits. LoonFS releases the namespace's publication slot during the wait, so other namespaces keep publishing. One namespace's waiting commits can take every `max_in_flight_requests` slot, so other requests receive `server_busy` until the session's fold finishes, unless you set `max_requests_per_namespace` below `max_in_flight_requests`. The `loonfs.publisher.write_stop_waits` counter records the commits that waited, and `loonfs.publisher.write_stop_refusals` records the commits that waited for the whole write-stop wait.
 
 ```toml
 max_admitted_requests = 8192
 max_admitted_bytes = 67108864
+max_merge_bytes = 134217728
 max_concurrent_publications = 8
 
 [publication]
@@ -498,9 +505,9 @@ max_requests_per_namespace = 1024
 max_estimated_bytes_per_namespace = 8388608
 ```
 
-These are the defaults without a memory limit. With sizing, `max_admitted_bytes` is derived by default. Every value must be positive. The byte estimate counts request data, prepared proofs, and queue bookkeeping, but not allocator slack, HTTP request buffers, or the metadata and working copies that a publication loads. Size process memory for those costs, and for the separate fold and cache limits too.
+These are the defaults without a memory limit. With sizing, `max_admitted_bytes` is derived by default, and `max_merge_bytes` keeps its default. Every value must be positive. The byte estimate counts request data, prepared proofs, and queue bookkeeping, but not allocator slack, HTTP request buffers, or the metadata and working copies that a publication loads. Size process memory for those costs, and for the separate fold and cache limits too.
 
-The `[publication]` table is the runtime's `PublicationPolicy`, and an embedded host sets the per-namespace limits and the write-stop wait in `RuntimeConfig::publication`. It sets `max_admitted_requests`, `max_admitted_bytes`, and `max_concurrent_publications` on the execution budget, with the `ExecutionBudgetBuilder` methods of the same names. Runtimes that share one budget share these three limits, but each runtime keeps its own per-namespace limits.
+The `[publication]` table is the runtime's `PublicationPolicy`, and an embedded host sets the per-namespace limits and the write-stop wait in `RuntimeConfig::publication`. It sets `max_admitted_requests`, `max_admitted_bytes`, `max_merge_bytes`, and `max_concurrent_publications` on the execution budget, with the `ExecutionBudgetBuilder` methods of the same names. Runtimes that share one budget share these four limits and admit one merge at a time between them, but each runtime keeps its own per-namespace limits.
 
 A hosted server configures [inline content](../../../docs/specs/glossary.md#inline-content) (a small file's bytes, included in the commit itself) in the `[inline_content]` table, with the settings below. Inline writes are enabled by default, with a 64 KiB threshold. To disable them, set `inline_content_threshold_bytes = false`. By default, capability discovery advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation`, and it leaves out both when inline writes are disabled.
 
