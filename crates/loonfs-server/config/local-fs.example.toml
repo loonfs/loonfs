@@ -31,10 +31,11 @@ memory_limit_bytes = 4294967296
 #max_admitted_requests = 8192
 #max_concurrent_publications = 8
 
-# The merge allowance, which limits the estimated bytes of the one merge that
-# the server admits at a time. A larger merge returns `merge_too_large`.
-# Defaults to 128 MiB, with or without a memory limit.
-#max_merge_bytes = 134217728
+# The merge allowance, which limits the estimated peak memory of publishing
+# the one merge that the server admits at a time, three times the merge's
+# planned WAL bytes. A larger merge returns `merge_too_large`. Defaults to
+# 512 MiB, about 36,000 file creates, with or without a memory limit.
+#max_merge_bytes = 536870912
 
 # Minimum interval between publication starts per namespace; cold namespaces
 # publish immediately. Defaults to 200 ms.

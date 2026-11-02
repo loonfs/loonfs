@@ -52,27 +52,27 @@ fn four_gib_derives_each_pool_and_folds_unused_grep_into_segments() {
         );
         assert_eq!(
             (memory.merge.bytes, memory.merge.source),
-            (134_217_728, MemorySource::Default),
+            (536_870_912, MemorySource::Default),
             "the merge allowance isn't derived"
         );
-        assert_eq!(memory.managed, 1_855_560_090);
+        assert_eq!(memory.managed, 1_452_906_906);
         assert_eq!(
             memory.segment.bytes,
             if mode.serves() {
-                556_668_027
+                435_872_071
             } else {
-                742_224_036
+                581_162_762
             }
         );
-        assert_eq!(memory.wal_tail.bytes, 185_556_009);
-        assert_eq!(memory.content_object.bytes, 185_556_009);
+        assert_eq!(memory.wal_tail.bytes, 145_290_690);
+        assert_eq!(memory.content_object.bytes, 145_290_690);
         assert_eq!(
             memory.grep.bytes,
-            if mode.serves() { 185_556_009 } else { 0 }
+            if mode.serves() { 145_290_690 } else { 0 }
         );
-        assert_eq!(memory.read_working.bytes, 371_112_018);
-        assert_eq!(memory.admitted.bytes, 185_556_009);
-        assert_eq!(memory.compaction_input.bytes, 92_778_004);
+        assert_eq!(memory.read_working.bytes, 290_581_381);
+        assert_eq!(memory.admitted.bytes, 145_290_690);
+        assert_eq!(memory.compaction_input.bytes, 72_645_345);
         for (term, _) in memory.terms() {
             if ![memory.head.name, memory.manifest.name, memory.merge.name].contains(&term.name) {
                 assert_eq!(term.source, MemorySource::Derived);
@@ -106,7 +106,7 @@ max_segment_bytes = 67108864
         .memory;
     assert_eq!(memory.segment.bytes, 67_108_864);
     assert_eq!(memory.segment.source, MemorySource::Set);
-    assert_eq!(memory.wal_tail.bytes, 185_556_009);
+    assert_eq!(memory.wal_tail.bytes, 145_290_690);
     config.metadata_cache.max_segment_bytes = Some(4 * 1024 * MIB);
     let error = config.validate().expect_err("overrides must fit");
     assert!(error
@@ -226,15 +226,15 @@ fn insufficient_memory_names_every_term_before_startup() {
 }
 
 #[test]
-fn the_smallest_limit_that_fits_the_default_counts_is_2204_mib() {
-    let memory = memory_config(&format!("memory_limit_bytes = {}", 2204 * MIB))
+fn the_smallest_limit_that_fits_the_default_counts_is_2684_mib() {
+    let memory = memory_config(&format!("memory_limit_bytes = {}", 2684 * MIB))
         .validate()
-        .expect("2,204 MiB fits the default counts")
+        .expect("2,684 MiB fits the default counts")
         .memory;
-    assert_eq!(memory.headroom, 322_961_408);
+    assert_eq!(memory.headroom, 423_624_704);
     assert_eq!(memory.managed, 256 * MIB);
     assert_invalid_field(
-        memory_config(&format!("memory_limit_bytes = {}", 2203 * MIB))
+        memory_config(&format!("memory_limit_bytes = {}", 2683 * MIB))
             .validate()
             .expect_err("managed memory is below 256 MiB"),
         "memory_limit_bytes",
@@ -284,7 +284,7 @@ fn no_limit_or_cgroup_file_keeps_the_unsized_defaults() {
     assert_eq!(memory.grep.bytes, 268_435_456);
     assert_eq!(memory.read_working.bytes, 268_435_456);
     assert_eq!(memory.admitted.bytes, 67_108_864);
-    assert_eq!(memory.merge.bytes, 134_217_728);
+    assert_eq!(memory.merge.bytes, 536_870_912);
     assert_eq!(memory.compaction_input.bytes, 67_108_864);
     assert!(memory
         .terms()
@@ -318,7 +318,7 @@ fn cgroup_limits_accept_finite_numbers_and_skip_absent_or_unlimited_files() {
     let memory = memory_config("")
         .memory_sizing(limit)
         .expect("cgroup sizes config");
-    assert_eq!(memory.managed, 1_855_560_090);
+    assert_eq!(memory.managed, 1_452_906_906);
     assert_eq!(
         memory.limit.expect("cgroup limit").source,
         MemorySource::Derived

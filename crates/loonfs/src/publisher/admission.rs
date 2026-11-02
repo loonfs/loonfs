@@ -12,6 +12,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::oneshot;
 
+/// The estimated peak memory of publishing a merge, as a multiple of the
+/// merge's planned WAL bytes. Publication builds the commit's deltas and
+/// encodes its WAL object while the merge's operations are still in memory.
+/// In measurements of merges of file creates, the peak was 1.8 times the
+/// planned bytes with 13-byte names, and 3.1 times with 255-byte names.
+const MERGE_PEAK_PER_PLANNED_BYTE: usize = 3;
+
 /// Admits one runtime's publication requests against its per-namespace
 /// limits and the totals of its execution budget.
 ///
@@ -76,15 +83,26 @@ impl PublicationAdmission {
         namespace_id: &NamespaceId,
         candidate: &PreparedCandidate,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
+        if candidate.candidate.is_merge() {
+            self.validate_merge(candidate)?;
+            return self.charge(namespace_id, AdmissionCharge::Merge);
+        }
         Self::validate_candidate(candidate)?;
         let estimated_bytes =
             estimated_admission_bytes(namespace_id, candidate.estimated_retained_bytes);
-        if !candidate.candidate.is_merge() {
-            return self.charge(namespace_id, AdmissionCharge::Request { estimated_bytes });
-        }
-        // A merge that exceeds the allowance would be refused on every retry,
-        // so it fails with an error that its caller handles by merging a
-        // smaller range of the fork's commits.
+        self.charge(namespace_id, AdmissionCharge::Request { estimated_bytes })
+    }
+
+    /// Refuses a merge that wouldn't fit one WAL object, or whose estimated
+    /// peak exceeds the merge allowance, with `merge_too_large`. The
+    /// estimate is [`MERGE_PEAK_PER_PLANNED_BYTE`] times the merge's planned
+    /// WAL bytes. Such a merge would be refused on every retry, so its caller
+    /// merges a smaller range of the fork's commits instead.
+    pub(super) fn validate_merge(&self, candidate: &PreparedCandidate) -> Result<(), CoreError> {
+        Self::validate_candidate(candidate)?;
+        let estimated_bytes = candidate
+            .wal_record_bytes_upper_bound
+            .saturating_mul(MERGE_PEAK_PER_PLANNED_BYTE);
         let max_bytes = self.budget.max_merge_bytes();
         if estimated_bytes > max_bytes {
             return Err(CoreError::MergeTooLarge {
@@ -92,7 +110,7 @@ impl PublicationAdmission {
                 max_bytes,
             });
         }
-        self.charge(namespace_id, AdmissionCharge::Merge)
+        Ok(())
     }
 
     pub(super) fn validate_candidate(candidate: &PreparedCandidate) -> Result<(), CoreError> {
@@ -327,9 +345,10 @@ mod tests {
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
-    /// A merge under the namespace `main` whose own estimate is
-    /// `estimated_request_bytes`.
-    fn merge(estimated_request_bytes: usize) -> PreparedCandidate {
+    /// A merge under the namespace `main` whose planned WAL bytes are
+    /// `planned_bytes`, so the merge allowance is charged three times those
+    /// bytes.
+    fn merge(planned_bytes: usize) -> PreparedCandidate {
         let mut candidate = PreparedCandidate::new(
             CommitCandidate::new(super::super::tests::create_directory_request(
                 "merge", "merge",
@@ -351,7 +370,7 @@ mod tests {
             ),
         )
         .expect("prepare");
-        candidate.estimated_retained_bytes = estimated_request_bytes;
+        candidate.wal_record_bytes_upper_bound = planned_bytes;
         candidate
     }
 
@@ -366,8 +385,9 @@ mod tests {
             .clone()
     }
 
-    /// Checks that a merge above its namespace's byte allowance and above the
-    /// budget's byte total is admitted when it fits the merge allowance,
+    /// Checks that a merge whose estimated peak is above its namespace's byte
+    /// allowance and above the budget's byte total is admitted when the peak
+    /// fits the merge allowance,
     /// while the namespace allowance still refuses an ordinary request above
     /// it. The merge counts as one request, and no byte limit is charged for
     /// it, so an ordinary request still fits the byte total beside it. The
@@ -399,8 +419,10 @@ mod tests {
         ));
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
 
+        let mut large = merge(4096);
+        large.estimated_retained_bytes = 8192;
         let permit = admission
-            .acquire_candidate(&namespace_id, &merge(8192))
+            .acquire_candidate(&namespace_id, &large)
             .expect("a merge above the namespace allowance and the byte total");
         let merge_only = ExecutionBudgetStats {
             admitted_requests: 1,
@@ -421,37 +443,37 @@ mod tests {
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
-    /// Checks that a merge larger than the allowance fails with
-    /// `merge_too_large` and charges nothing, and that the runtimes sharing a
-    /// budget admit one merge at a time: a second merge, from either runtime,
-    /// gets `commit_queue_full`, which the admission refusal counter doesn't
-    /// record, and it's admitted once the first settles.
+    /// Checks that a merge whose estimated peak, three times its planned WAL
+    /// bytes, exceeds the allowance fails with `merge_too_large`, reports the
+    /// peak and the allowance, and charges nothing. Checks that the runtimes
+    /// sharing a budget admit one merge at a time. A second merge, from
+    /// either runtime, gets `commit_queue_full`, which the admission refusal
+    /// counter doesn't record, and it's admitted once the first settles.
     #[test]
     fn a_budget_admits_one_merge_at_a_time_within_the_allowance() {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
-        let overhead = 512 + namespace_id.as_str().len();
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let budget = ExecutionBudget::builder()
-            .max_merge_bytes(limit(4096))
+            .max_merge_bytes(limit(3072))
             .metrics_recorder(recorder.clone())
             .build();
         let first_runtime = runtime_admission(PublicationPolicy::default(), &budget);
         let second_runtime = runtime_admission(PublicationPolicy::default(), &budget);
 
         let error = first_runtime
-            .acquire_candidate(&namespace_id, &merge(4096 - overhead + 1))
+            .acquire_candidate(&namespace_id, &merge(1025))
             .err()
             .expect("a merge above the allowance");
         assert_eq!(error.code(), loonfs_types::ErrorCode::MergeTooLarge);
         assert_matches!(
             error,
             CoreError::MergeTooLarge { estimated_bytes, max_bytes }
-                if estimated_bytes == 4097 && max_bytes == 4096
+                if estimated_bytes == 3075 && max_bytes == 3072
         );
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
 
         let first = first_runtime
-            .acquire_candidate(&namespace_id, &merge(4096 - overhead))
+            .acquire_candidate(&namespace_id, &merge(1024))
             .expect("a merge of the whole allowance");
         assert_eq!(
             metric(&recorder, "loonfs.execution_budget.admitted_merges"),
@@ -472,7 +494,7 @@ mod tests {
 
         drop(first);
         let second = second_runtime
-            .acquire_candidate(&namespace_id, &merge(4096 - overhead))
+            .acquire_candidate(&namespace_id, &merge(1024))
             .expect("a merge once the first settles");
         assert_eq!(budget.stats(), charged);
         drop(second);
@@ -698,17 +720,17 @@ mod tests {
         permits.clear();
         assert_eq!(admitted(budget), (0, 0));
 
-        let allowance = 128 * 1024 * 1024;
+        let allowance = 512 * 1024 * 1024;
         assert_matches!(
             admission
-                .acquire_candidate(&namespaces[0], &merge(allowance - overhead + 1))
+                .acquire_candidate(&namespaces[0], &merge(allowance / 3 + 1))
                 .err(),
             Some(CoreError::MergeTooLarge { max_bytes, .. }) if max_bytes == allowance
         );
         drop(
             admission
-                .acquire_candidate(&namespaces[0], &merge(allowance - overhead))
-                .expect("a merge of the default allowance"),
+                .acquire_candidate(&namespaces[0], &merge(allowance / 3))
+                .expect("a merge within the default allowance"),
         );
 
         let mut running = Vec::new();

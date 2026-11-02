@@ -225,9 +225,9 @@ impl ServerConfig {
         });
         // The budgets of manifests and heads aren't shares of managed memory,
         // because the memory that those entries need depends on the
-        // namespaces, not on the host. Nor is the merge allowance, because its
-        // default admits the largest merge of file creates that fits one WAL
-        // object, whatever the host.
+        // namespaces, not on the host. Nor is the merge allowance, because the
+        // memory that a merge needs depends on the size of the merges that
+        // callers make, not on the host.
         let manifest = MemoryTerm::new(
             "metadata_cache.max_manifest_bytes",
             self.metadata_cache.max_manifest_bytes,

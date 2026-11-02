@@ -73,10 +73,11 @@ pub struct ServerConfig {
     /// not yet settled, across every namespace. A merge isn't charged to it.
     /// Derived when sized, and otherwise 64 MiB.
     pub max_admitted_bytes: Option<NonZeroUsize>,
-    /// The merge allowance, which limits the approximate retained bytes of
-    /// the one merge that the server admits at a time. A merge whose estimate
-    /// exceeds it returns `merge_too_large`. Defaults to the runtime's
-    /// [`DEFAULT_MAX_MERGE_BYTES`](loonfs::DEFAULT_MAX_MERGE_BYTES), 128 MiB,
+    /// The merge allowance, which limits the estimated peak memory of
+    /// publishing the one merge that the server admits at a time, three
+    /// times the merge's planned WAL bytes. A merge whose estimate exceeds it
+    /// returns `merge_too_large`. Defaults to the runtime's
+    /// [`DEFAULT_MAX_MERGE_BYTES`](loonfs::DEFAULT_MAX_MERGE_BYTES), 512 MiB,
     /// with or without a memory limit.
     pub max_merge_bytes: Option<NonZeroUsize>,
     /// Maximum publication batches running at once. Defaults to 8.

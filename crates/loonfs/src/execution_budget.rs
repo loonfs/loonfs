@@ -31,15 +31,15 @@ pub const DEFAULT_MAX_READ_WORKING_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_MAX_CONCURRENT_CONTENT_WRITES: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 const DEFAULT_MAX_ADMITTED_REQUESTS: NonZeroUsize = NonZeroUsize::new(8192).unwrap();
 const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1024).unwrap();
-/// Default merge allowance, the estimated bytes that the one merge admitted
-/// at a time may have.
+/// Default merge allowance, the estimated peak memory of publishing the one
+/// merge admitted at a time.
 ///
-/// A merge of file creates fits one WAL object up to about 110,000 creates,
-/// and admission estimates 650 to 900 bytes for each create, depending on the
-/// length of its name. So the allowance admits the largest merge of creates
-/// that fits one WAL object, about 99 MB with 255-byte names, and at the
-/// defaults the WAL object bounds such a merge.
-pub const DEFAULT_MAX_MERGE_BYTES: NonZeroUsize = NonZeroUsize::new(128 * 1024 * 1024).unwrap();
+/// Admission estimates a merge's peak as three times its planned WAL bytes.
+/// A file create plans about 4,850 bytes, so the default admits a merge of
+/// about 36,000 file creates. One WAL object fits about 110,000 creates, and
+/// an allowance of 1.5 GiB, three times the WAL object's 512 MiB, admits
+/// every merge that fits one WAL object.
+pub const DEFAULT_MAX_MERGE_BYTES: NonZeroUsize = NonZeroUsize::new(512 * 1024 * 1024).unwrap();
 
 /// Work in flight that one or more runtimes share.
 ///
@@ -53,8 +53,8 @@ pub const DEFAULT_MAX_MERGE_BYTES: NonZeroUsize = NonZeroUsize::new(128 * 1024 *
 /// work of every runtime that shares it. Publication admission never waits: a request
 /// past an admitted total fails at once with `commit_queue_full`. A merge
 /// isn't charged to the byte total. The budget admits one merge at a time,
-/// and a merge whose estimate exceeds the merge allowance fails with
-/// `merge_too_large`. Permit
+/// and a merge whose estimated peak, three times its planned WAL bytes,
+/// exceeds the merge allowance fails with `merge_too_large`. Permit
 /// waits are first come, first served, whichever runtime they belong to. No
 /// runtime has a reserved share, so an idle runtime reserves nothing. A
 /// host that wants to isolate runtimes from each other gives them separate
@@ -163,8 +163,8 @@ impl ExecutionBudget {
         self.inner.admission.refund(charge)
     }
 
-    /// Returns the merge allowance, the estimated bytes that one merge may
-    /// have.
+    /// Returns the merge allowance, the estimated peak memory that publishing
+    /// one merge may have.
     pub(crate) fn max_merge_bytes(&self) -> usize {
         self.inner.admission.max_merge_bytes.get()
     }
@@ -259,8 +259,8 @@ impl ExecutionBudgetBuilder {
         self
     }
 
-    /// Sets the merge allowance, which limits the approximate retained bytes
-    /// of one merge, estimated like [`Self::max_admitted_bytes`]. The
+    /// Sets the merge allowance, which limits the estimated peak memory of
+    /// publishing one merge, three times the merge's planned WAL bytes. The
     /// runtimes that share the budget admit one merge at a time, and a merge
     /// that arrives while one is admitted fails at once with
     /// `commit_queue_full`. A merge whose estimate exceeds the allowance
