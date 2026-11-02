@@ -53,7 +53,7 @@ pub struct MetadataCompactionReport {
 pub enum MetadataCompactionOutcome {
     /// No eligible family group was available, so nothing was published.
     NotNeeded,
-    /// The unit merged the selected window and published the next manifest.
+    /// The unit compacted the selected window and published the next manifest.
     Published {
         /// The manifest that the compaction published.
         manifest_no: ManifestNo,
@@ -68,11 +68,11 @@ pub enum MetadataCompactionOutcome {
         /// The output segments that the compaction wrote.
         output_segments: u64,
     },
-    /// The selected window lists more rows than a metadata pass merges, so
+    /// The selected window lists more rows than a metadata pass compacts, so
     /// nothing was published.
     ///
     /// [`Maintenance::compact_metadata`](crate::Maintenance::compact_metadata)
-    /// merges a window of any size, and
+    /// compacts a window of any size, and
     /// [`Maintenance::maintain_metadata_while_due`](crate::Maintenance::maintain_metadata_while_due)
     /// runs it whenever a pass reports this outcome.
     MetadataCompactionRequired,

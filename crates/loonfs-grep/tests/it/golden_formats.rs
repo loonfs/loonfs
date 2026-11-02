@@ -86,7 +86,7 @@ fn unzstd(bytes: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// An active index with a reorganization running over its segments. The
-/// reorganization merges the two level-0 segments into the level-1 segment,
+/// reorganization rewrites the two level-0 segments into the level-1 segment,
 /// so every id the reorganize state names is a segment this manifest holds.
 pub(crate) fn sample_active_manifest(
     built_through_seq: ChangeSeq,

@@ -1,5 +1,5 @@
 //! Pins the cold first-stat request shape: a fresh handle resolving a path
-//! over a manifest that carries several unmerged delta runs must not pay a
+//! over a manifest that carries several uncompacted delta runs must not pay a
 //! per-run filter fetch (the manifest's inline filter copies answer those),
 //! every metadata-segment object it does touch is small enough to load
 //! whole with a single ranged GET, and a file written in every run costs
@@ -221,7 +221,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .collect();
     assert!(
         direntry_delta_runs.len() >= RUNS,
-        "expected at least {RUNS} unmerged delta direntry runs, found {}",
+        "expected at least {RUNS} uncompacted delta direntry runs, found {}",
         direntry_delta_runs.len()
     );
     assert!(

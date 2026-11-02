@@ -1,8 +1,8 @@
-//! Metadata compaction: merging a window of one family group's runs into one
-//! run, and publishing the manifest that lists the merged run in place of
+//! Metadata compaction: rewriting a window of one family group's runs into one
+//! run, and publishing the manifest that lists the new run in place of
 //! its inputs.
 
-pub(crate) mod group_merge;
+pub(crate) mod group_compaction;
 pub(crate) mod kept_inodes;
 pub(crate) mod merge_iterator;
 pub(crate) mod plan;

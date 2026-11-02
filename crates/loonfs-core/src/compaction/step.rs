@@ -1,14 +1,14 @@
 //! Runs one metadata compaction unit.
 //!
 //! A unit selects one family group and a window of at most eight complete
-//! runs from the current manifest's descriptors (see [`super::plan`]), merges
-//! the window with [`super::group_merge`], and publishes the replacement
-//! manifest through [`super::publication`]. A base merge may apply retention,
-//! and a delta merge drops only superseded layouts. [`MetadataCompactionPolicy`]
-//! sets which runs a group merges, and when. A unit publishes under the
+//! runs from the current manifest's descriptors (see [`super::plan`]), rewrites
+//! the window into one run with [`super::group_compaction`], and publishes the replacement
+//! manifest through [`super::publication`]. A base compaction may apply retention,
+//! and a delta compaction drops only superseded layouts. [`MetadataCompactionPolicy`]
+//! sets which runs a group compacts, and when. A unit publishes under the
 //! compactor epoch that [`NamespaceEngine::claim_compactor`] claims.
 
-use super::group_merge::run_metadata_compaction;
+use super::group_compaction::run_metadata_compaction;
 use super::plan::plan_compaction;
 use super::plan::MetadataCompactionSpec;
 use super::publication::{input_segment_keys, CompactionPublication};
@@ -28,20 +28,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-/// Which runs of a family group a unit merges, and when.
+/// Which runs of a family group a unit compacts, and when.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MetadataCompactionPolicy {
-    /// Merge a tier of similar-size runs once it has
+    /// Compact a tier of similar-size runs once it has
     /// [`MetadataRunPolicy::min_compaction_runs`](crate::segment::MetadataRunPolicy::min_compaction_runs) runs, and a group's newest
     /// runs once it has [`MetadataRunPolicy::max_delta_runs`](crate::segment::MetadataRunPolicy::max_delta_runs) delta runs.
     #[default]
     SizeTiered,
-    /// Merge a group's runs whatever their sizes, for an explicit compaction
+    /// Compact a group's runs whatever their sizes, for an explicit compaction
     /// request. Input fan-in stays bounded.
     CompactImmediately,
 }
 
-/// Which windows one compaction call may merge.
+/// Which windows one compaction call may compact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionAdmission {
     /// Any window, whatever the number of rows its runs list.
@@ -58,16 +58,16 @@ pub enum CompactionUnitOutcome {
     /// No family group has eligible input.
     NotNeeded,
     /// The selected window lists more rows than the call admits, so the unit
-    /// merged nothing.
+    /// compacted nothing.
     TooLarge {
         /// The group the unit selected.
         group: MetadataFamilyGroup,
     },
-    /// The unit merged one family group's window and published the next
+    /// The unit compacted one family group's window and published the next
     /// manifest. The new run is the group's base when the window started at
     /// the group's oldest run, and a bigger delta run otherwise.
     Published {
-        /// The group this unit merged. Its families are
+        /// The group this unit compacted. Its families are
         /// [`MetadataFamilyGroup::families`].
         group: MetadataFamilyGroup,
         /// The published manifest.
@@ -94,8 +94,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// The unit plans from `basis`, a manifest that the caller already has,
     /// or from the current manifest that it loads when `basis` is `None`, and
     /// reads its input runs without the cache. `admission` determines whether
-    /// the unit may merge a window over the run policy's row budget, and the
-    /// merge checks `cancellation` between blocks. The unit publishes through
+    /// the unit may compact a window over the run policy's row budget, and the
+    /// compaction checks `cancellation` between blocks. The unit publishes through
     /// `finalize_metadata_compaction`, starting from the
     /// manifest it planned from, and finalization retries a lost put over the
     /// manifest that won while the unit's input segments are unchanged. The
@@ -134,7 +134,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             return Ok(CompactionUnitOutcome::Fenced);
         }
         ensure_namespace_live(&payload.namespace_id, payload.status)?;
-        // The unit reads its input runs without the cache, and the merge inserts
+        // The unit reads its input runs without the cache, and the compaction inserts
         // its output into the cache.
         let segments = metadata_basis_from_manifest(&self.namespace.store, None, current).segments;
         let Some(spec) = plan_compaction(
@@ -159,7 +159,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         }
         // What the unit is about to read, recorded before it reads anything.
         // Finalization compares the manifest against this, so the run it
-        // publishes stands in for exactly the segments it merged.
+        // publishes stands in for exactly the segments it compacted.
         let input_keys = input_segment_keys(&segments.scan_runs, &spec)
             .expect("a plan should list runs of the manifest it was made from");
         tracing::debug!(
@@ -181,14 +181,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         )
         .await?
         {
-            Ok(merged) => {
+            Ok(compacted) => {
                 drop(segments);
                 self.namespace
                     .finalize_metadata_compaction(
                         Some(basis),
                         &spec,
                         &input_keys,
-                        merged,
+                        compacted,
                         cancellation,
                         &CompactionPublication {
                             compactor_epoch,

@@ -7,7 +7,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
 
 /// Operator-facing work budgets shared by hosts that run grep steps.
-/// Segment layout and merge policy remain engine defaults.
+/// Segment layout and reorganization policy remain engine defaults.
 ///
 /// Project-wide, zero may disable an explicitly documented cache. Work
 /// budgets instead reject zero at their construction boundaries.

@@ -34,7 +34,7 @@ use super::retention::RetentionTarget;
 use super::{fold, load};
 use crate::block_cache::ObjectStoreScope;
 use crate::changes::list_changes_after;
-use crate::compaction::group_merge::run_metadata_compaction;
+use crate::compaction::group_compaction::run_metadata_compaction;
 use crate::compaction::merge_iterator::locality_of;
 use crate::compaction::plan;
 use crate::compaction::plan::MetadataCompactionSpec;
@@ -326,22 +326,22 @@ async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
     .0
 }
 
-fn merge_rows_with_retention(
+fn compact_rows_with_retention(
     group: MetadataFamilyGroup,
     rows_by_family: &mut BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
     floor_seq: ChangeSeq,
     acknowledged_floor_seq: ChangeSeq,
 ) -> crate::error::Result<()> {
     for cluster in retention_clusters(group) {
-        // The stream a merge sees: the cluster's rows by locality, then family,
+        // The stream a compaction sees: the cluster's rows by locality, then family,
         // then row key.
-        let mut merged: Vec<(ApiMetadataRowFamily, String, MetadataRow)> = Vec::new();
+        let mut stream: Vec<(ApiMetadataRowFamily, String, MetadataRow)> = Vec::new();
         for family in cluster.families {
             for row in rows_by_family.get(family).map_or(&[][..], Vec::as_slice) {
-                merged.push((*family, row.row_key_for_family(*family), row.clone()));
+                stream.push((*family, row.row_key_for_family(*family), row.clone()));
             }
         }
-        merged.sort_by(|left, right| {
+        stream.sort_by(|left, right| {
             locality_of(left.0, &left.1, cluster.locality)
                 .cmp(locality_of(right.0, &right.1, cluster.locality))
                 .then(left.0.cmp(&right.0))
@@ -355,7 +355,7 @@ fn merge_rows_with_retention(
             .collect();
         let mut operator = cluster.rule.operator(acknowledged_floor_seq);
         let mut locality: Option<String> = None;
-        for (family, row_key, row) in merged {
+        for (family, row_key, row) in stream {
             let row_locality = locality_of(family, &row_key, cluster.locality);
             if locality.as_deref() != Some(row_locality) {
                 operator.close_group();
@@ -418,8 +418,8 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
 /// Runs a unit over a plan made earlier, against the current manifest, the
 /// way `NamespaceEngine::compact_metadata_unit` runs the plan it makes.
 ///
-/// For a test that has to do something between the plan and the merge, which
-/// stands for other publications during a long merge.
+/// For a test that has to do something between the plan and the compaction, which
+/// stands for other publications during a long compaction.
 async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -453,7 +453,7 @@ async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
     let Some(input_keys) = input_segment_keys(&segments.scan_runs, spec) else {
         return CompactionUnitOutcome::Abandoned;
     };
-    let merged = match run_metadata_compaction(
+    let compacted = match run_metadata_compaction(
         &segments,
         &crate::cache::MetadataSegmentCache::unshared(0),
         namespace_id,
@@ -462,9 +462,9 @@ async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
         cancellation,
     )
     .await
-    .expect("merge the planned window")
+    .expect("compact the planned window")
     {
-        Ok(merged) => merged,
+        Ok(compacted) => compacted,
         Err(stopped) => return stopped,
     };
     drop(segments);
@@ -474,7 +474,7 @@ async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
             None,
             spec,
             &input_keys,
-            merged,
+            compacted,
             cancellation,
             &CompactionPublication {
                 compactor_epoch: loonfs_types::CompactorEpoch(0),
@@ -726,8 +726,8 @@ fn group_runs(
 
 /// The base-tier runs one family group holds right now.
 ///
-/// A group holds at most one: only a merge that starts at the group's oldest
-/// run writes a base run, and such a merge always replaces the one that was
+/// A group holds at most one: only a compaction that starts at the group's oldest
+/// run writes a base run, and such a compaction always replaces the one that was
 /// there. Manifest loading rejects multiple base runs for a group.
 fn group_base_runs(
     manifest: &NamespaceManifestEnvelope,

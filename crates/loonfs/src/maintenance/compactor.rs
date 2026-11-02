@@ -471,7 +471,7 @@ impl Compactor {
     /// while the position's last check is within the revalidation bound, and
     /// from the current manifest otherwise. The unit waits for a compaction
     /// permit from the runtime's execution budget, and `cancellation` ends
-    /// that wait or stops the merge at its next block.
+    /// that wait or stops the compaction at its next block.
     pub(crate) async fn compact_once(
         &self,
         namespace_id: &NamespaceId,

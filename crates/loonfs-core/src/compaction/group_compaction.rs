@@ -1,11 +1,11 @@
-//! The merge engine of one metadata compaction unit.
+//! The engine of one metadata compaction unit.
 //!
-//! [`GroupMerge`] merges runs in row-key order, applies retention rules, and
+//! [`GroupCompaction`] reads the window's runs in row-key order, applies retention rules, and
 //! writes bounded output segments. It buffers only input blocks, retention
 //! state, one segment builder per family, and a bounded wave of encoded outputs.
-//! Only base merges may remove rows below the retention floor, and only base
-//! merges remove the rows of inodes that an expired deletion hides. Every
-//! merge drops superseded layout rows.
+//! Only base compactions may remove rows below the retention floor, and only base
+//! compactions remove the rows of inodes that an expired deletion hides. Every
+//! compaction drops superseded layout rows.
 
 use super::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use super::merge_iterator::{
@@ -13,7 +13,7 @@ use super::merge_iterator::{
     MetadataSegmentRowIterator,
 };
 use super::plan::MetadataCompactionSpec;
-use super::plan::{group_run_descriptors, MergePlacement};
+use super::plan::{group_run_descriptors, CompactionPlacement};
 use super::retention::retention_clusters;
 use super::retention::RetentionCluster;
 use super::retention::{KeptRow, RetentionRule};
@@ -37,19 +37,19 @@ use std::collections::BTreeMap;
 /// segment.
 const PROGRESS_ROW_INTERVAL: u64 = 1_000_000;
 
-/// What one finished merge built, kept in memory until the caller publishes
+/// What one finished group compaction built, kept in memory until the caller publishes
 /// it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct MetadataMergeReport {
-    /// The output run's segment descriptors, naming the object keys the merge
+pub(crate) struct GroupCompactionReport {
+    /// The output run's segment descriptors, naming the object keys the compaction
     /// wrote them to.
     pub(crate) output_segments: Vec<MetadataSegmentRef>,
     pub(crate) rows_read: u64,
     pub(crate) rows_written: u64,
     pub(super) input_bytes: u64,
     pub(super) output_bytes: u64,
-    /// The most decoded input blocks the merge's iterators kept at once,
-    /// which bounds the merge's memory, so tests assert it doesn't follow the
+    /// The most decoded input blocks the compaction's iterators kept at once,
+    /// which bounds the compaction's memory, so tests assert it doesn't follow the
     /// size of the group. A retention operator decides each row as it
     /// arrives and keeps none.
     pub(crate) peak_resident_blocks: usize,
@@ -64,14 +64,14 @@ pub(crate) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     run_policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
-) -> Result<std::result::Result<MetadataMergeReport, CompactionUnitOutcome>> {
+) -> Result<std::result::Result<GroupCompactionReport, CompactionUnitOutcome>> {
     let input_runs = resolve_input_runs(segments, spec)?;
     let kept_inodes =
         match load_kept_inode_filter(segments, namespace_id, spec, cancellation).await? {
             Ok(kept_inodes) => kept_inodes,
             Err(stopped) => return Ok(Err(stopped)),
         };
-    let merge = GroupMerge::new(
+    let compaction = GroupCompaction::new(
         segments,
         output_cache,
         namespace_id,
@@ -80,19 +80,19 @@ pub(crate) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
         input_runs,
         kept_inodes,
     );
-    merge.run(&MergeControl { cancellation }).await
+    compaction.run(&CompactionControl { cancellation }).await
 }
 
-/// Merging one family group: the shared engine, whatever is driving it.
-struct GroupMerge<'a, S: ObjectStore + ?Sized> {
+/// Compacting one family group: the shared engine, whatever is driving it.
+struct GroupCompaction<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
-    /// The cache that receives the segments the merge writes. The merge
+    /// The cache that receives the segments the compaction writes. The compaction
     /// reads its input without any cache.
     output_cache: &'a MetadataSegmentCache,
     namespace_id: &'a NamespaceId,
     group: MetadataFamilyGroup,
     /// Where the output stands in the group and whether rows may be dropped.
-    placement: MergePlacement,
+    placement: CompactionPlacement,
     frozen_floor_seq: ChangeSeq,
     /// The basis manifest's acknowledged floor, at or below which a listed
     /// deletion that no undelete cancelled has expired.
@@ -103,30 +103,30 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     output_run_no: RunNo,
     chain_filter: ChainFilter,
     kept_inodes: KeptInodeFilter,
-    result: MetadataMergeReport,
+    result: GroupCompactionReport,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
-    /// The last input row key seen in each family, which is what lets the merge
+    /// The last input row key seen in each family, which is what lets the compaction
     /// refuse a family that contains one row key twice. One string per family.
     last_input_key_by_family: BTreeMap<MetadataRowFamily, String>,
-    /// Progress state for an unbounded background merge. `None` for a merge
+    /// Progress state for an unbounded background compaction. `None` for a compaction
     /// short enough to have nothing to report.
     progress: ProgressReporter,
 }
 
-/// Whether a layout merge drops the layout rows of chains no revision names.
+/// Whether a layout compaction drops the layout rows of chains no revision names.
 enum ChainFilter {
-    /// The merge isn't a layout merge that may drop rows below the floor.
+    /// The compaction isn't a layout compaction that may drop rows below the floor.
     NotNeeded,
     /// The content IDs the revisions name, which a kept layout row matches.
     Loaded(BloomFilter),
 }
 
-struct MergeControl<'a> {
+struct CompactionControl<'a> {
     cancellation: &'a MetadataCompactionCancellation,
 }
 
-impl MergeControl<'_> {
+impl CompactionControl<'_> {
     fn cancellation(&self) -> Option<CompactionUnitOutcome> {
         self.cancellation
             .is_cancelled()
@@ -148,7 +148,7 @@ impl ProgressReporter {
     }
 }
 
-impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
+impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
     fn new(
         basis: &'a VerifiedMetadataSegments<'_, S>,
         output_cache: &'a MetadataSegmentCache,
@@ -178,9 +178,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             frozen_floor_seq: spec.frozen_floor_seq(),
             run_policy,
             input_runs,
-            result: MetadataMergeReport {
+            result: GroupCompactionReport {
                 input_bytes,
-                ..MetadataMergeReport::default()
+                ..GroupCompactionReport::default()
             },
             canonical_digest: RowDigest::default(),
             index_digest: RowDigest::default(),
@@ -189,11 +189,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         }
     }
 
-    /// Merges every cluster of the group, in order.
+    /// Compacts every cluster of the group, in order.
     async fn run(
         mut self,
-        control: &MergeControl<'_>,
-    ) -> Result<std::result::Result<MetadataMergeReport, CompactionUnitOutcome>> {
+        control: &CompactionControl<'_>,
+    ) -> Result<std::result::Result<GroupCompactionReport, CompactionUnitOutcome>> {
         if let Some(stop) = self.load_chain_filter(control).await? {
             return Ok(Err(stop));
         }
@@ -216,7 +216,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
 
     async fn load_chain_filter(
         &mut self,
-        control: &MergeControl<'_>,
+        control: &CompactionControl<'_>,
     ) -> Result<Option<CompactionUnitOutcome>> {
         if self.group != MetadataFamilyGroup::ContentLayouts
             || !self.placement.may_drop_rows_below_the_retention_floor()
@@ -292,13 +292,13 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 std::cmp::Ordering::Equal => {
                     return Err(CoreError::NamespaceCorrupt(format!(
                         "metadata family `{family:?}` contains duplicate row key `{row_key}`; \
-                         refusing to merge it into a run"
+                         refusing to compact it into a run"
                     )));
                 }
                 std::cmp::Ordering::Less => {
                     return Err(CoreError::NamespaceCorrupt(format!(
                         "metadata family `{family:?}` row key went backwards: `{row_key}` \
-                         follows `{previous}`; refusing to merge it into a run"
+                         follows `{previous}`; refusing to compact it into a run"
                     )));
                 }
             }
@@ -318,11 +318,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         }
     }
 
-    /// Merges one cluster end to end.
+    /// Compacts one cluster end to end.
     async fn run_cluster(
         &mut self,
         cluster: &RetentionCluster,
-        control: &MergeControl<'_>,
+        control: &CompactionControl<'_>,
         puts: &mut MetadataSegmentPuts<'_, S>,
     ) -> Result<Option<CompactionUnitOutcome>> {
         // One iterator per input run and family. The planner caps run fan-in;
@@ -419,7 +419,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     ///
     /// A unit publishes nothing until it's finished, so without this an
     /// operator watching a big namespace would see nothing until the unit
-    /// publishes. The counters are the merge's own, so nothing extra is
+    /// publishes. The counters are the compaction's own, so nothing extra is
     /// measured.
     fn report_progress(&mut self) {
         let progress = &mut self.progress;
@@ -439,7 +439,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         );
     }
 
-    /// Fills every iterator that has run out of rows and records what the merge
+    /// Fills every iterator that has run out of rows and records what the compaction
     /// then contains.
     async fn refill(&mut self, iterators: &mut [MetadataSegmentRowIterator]) -> Result<()> {
         let resident = refill_iterators(
@@ -463,7 +463,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         self.result.rows_written += 1;
         let writer = writers
             .get_mut(&family)
-            .expect("a cluster should write only the families it merges");
+            .expect("a cluster should write only the families it compacts");
         // The slot index's summary rows have no copy in the child index, so
         // the parity digest covers binding events alone.
         let summary_row = matches!(
@@ -486,16 +486,16 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     /// rows as its canonical family, apart from the canonical family's rows
     /// that the index doesn't store (the slot index's summary rows).
     ///
-    /// This is the only index-parity check a merge makes, whichever path is
+    /// This is the only index-parity check a compaction makes, whichever path is
     /// driving it. Comparing the two families outright is not available to a
-    /// merge that never keeps them together: the reverse bind index is keyed by child,
+    /// compaction that never keeps them together: the reverse bind index is keyed by child,
     /// so no grouping ever contains a bind row and the reverse row that indexes
     /// it, and the two are judged in different passes. The digests stand in —
     /// each pass folds the rows it wrote into one, order does not matter, and
-    /// the two agree at the end exactly when the merge wrote the two families
+    /// the two agree at the end exactly when the compaction wrote the two families
     /// the same rows.
     ///
-    /// The check covers what the merge wrote rather than what it read, which is
+    /// The check covers what the compaction wrote rather than what it read, which is
     /// the stronger claim: it says the two families dropped in lockstep, not
     /// only that their inputs matched.
     fn refuse_a_run_whose_index_disagrees(&self) -> Result<()> {
@@ -506,7 +506,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             return Ok(());
         }
         Err(CoreError::NamespaceCorrupt(format!(
-            "a metadata merge of {:?} wrote {} `{canonical:?}` rows digesting to `{}` and \
+            "a metadata compaction of {:?} wrote {} `{canonical:?}` rows digesting to `{}` and \
              {} `{index:?}` rows digesting to `{}`; the two families must hold the same rows, so \
              the run it built is not publishable",
             self.group.families(),
@@ -524,7 +524,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
 /// rows and not on the order they were written in — which is the point,
 /// because the two families of an index pair are written in different orders
 /// and, for the bind pair, in different passes. This is corruption detection,
-/// not a signature: what it has to catch is a merge that wrote a secondary
+/// not a signature: what it has to catch is a compaction that wrote a secondary
 /// index rows its canonical family does not contain, including a row differing in one
 /// field. Nothing durable stores it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

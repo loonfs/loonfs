@@ -751,7 +751,7 @@ async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_re
         ..Default::default()
     };
     // Each revision lands in its own run, so the compaction below is a base
-    // merge that applies the floor; a lone base run is never rewritten.
+    // compaction that applies the floor; a lone base run is never rewritten.
     for body in ["draft one", "draft two"] {
         fs.put_file_with_options(
             &namespace_id,

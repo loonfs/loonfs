@@ -1907,7 +1907,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_DELTA_RUNS.get());
     assert_eq!(appended.manifest.payload().base_seq(), ChangeSeq(0));
 
-    // Compaction merges one family group per unit, each publishing its
+    // Compaction rewrites one family group per unit, each publishing its
     // own manifest — the manifest chain is the progress record.
     let mut units = 0usize;
     let mut last_manifest_no = None;
@@ -1946,7 +1946,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     }
     assert!(
         units >= 2,
-        "several family groups should merge, got {units}"
+        "several family groups should be compacted, got {units}"
     );
 
     let drained = load_manifest_materialization_for_inspection(
@@ -1970,10 +1970,10 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     ));
 }
 
-/// Checks that a unit merges at most its run budget, that a unit within the
+/// Checks that a unit compacts at most its run budget, that a unit within the
 /// row budget plans from descriptors and reads no segment when its window is
 /// too large, and that it reads only the selected runs' segments when it
-/// merges.
+/// compacts.
 #[tokio::test]
 async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2199,8 +2199,8 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         &bounded.metadata_state,
         &unbounded.metadata_state
     ));
-    // One unbounded unit merges each group's tier of six runs whole. Units of
-    // two runs merge the tier's oldest runs into the base until the runs left
+    // One unbounded unit compacts each group's tier of six runs whole. Units of
+    // two runs compact the tier's oldest runs into the base until the runs left
     // are fewer than a tier, and those wait for later folds.
     assert!(delta_runs(&unbounded.manifest).is_empty());
     assert_eq!(
@@ -2310,12 +2310,12 @@ async fn whole_run_compaction_rewrites_base_segments() {
     );
     assert!(delta_runs(&compacted_materialized.manifest).is_empty());
     // Every family group rebuilds on its own and takes a run number of its
-    // own, so a fully merged manifest holds one base run per group that has
+    // own, so a fully compacted manifest holds one base run per group that has
     // rows, and nothing else.
     for (families, base_runs) in base_runs_per_family_group(&compacted_materialized.manifest) {
         assert!(
             base_runs.len() <= 1,
-            "{families:?} holds base runs {base_runs:?} after a full merge"
+            "{families:?} holds base runs {base_runs:?} after a full compaction"
         );
     }
     assert!(!compacted_run_keys.is_empty());
@@ -2466,7 +2466,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
 
     // A fresh sequence of steps reads the live manifest and finishes the
     // job, including the delta the interleaved checkpoint added.
-    let mut merged_groups = vec![first_group];
+    let mut compacted_groups = vec![first_group];
     loop {
         let report = {
             let mut fixture = crate::test_support::NamespaceFixture::new(
@@ -2489,13 +2489,13 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         .expect("resumed unit");
         match report {
             super::CompactionUnitOutcome::Published { group, .. } => {
-                merged_groups.push(group);
+                compacted_groups.push(group);
             }
             super::CompactionUnitOutcome::NotNeeded => break,
             other => panic!("no concurrent publisher exists in this test, got {other:?}"),
         }
     }
-    assert!(merged_groups.len() >= 2);
+    assert!(compacted_groups.len() >= 2);
 
     let drained = load_manifest_materialization_for_inspection(
         &store,
@@ -2642,13 +2642,13 @@ async fn over_budget_compaction_aborts_without_publishing() {
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
         .await
-        .expect("publish a delta run to merge");
+        .expect("publish a delta run to compact");
     let manifest_before = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
         .expect("read manifest");
 
-    let merge_everything = MetadataRunPolicy {
+    let compact_everything = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
@@ -2658,7 +2658,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
             &namespace_id,
             &crate::test_support::writer_at("test-writer", 0),
         );
-        fixture.namespace.run_policy = merge_everything;
+        fixture.namespace.run_policy = compact_everything;
         fixture.namespace.timer = Arc::new(ManualClock::stepping(20 * 60 * 1000));
         fixture
     }
@@ -2690,7 +2690,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
             &namespace_id,
             &crate::test_support::writer_at("test-writer", 0),
         );
-        fixture.namespace.run_policy = merge_everything;
+        fixture.namespace.run_policy = compact_everything;
         fixture
     }
     .engine()
@@ -2702,7 +2702,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
-    .expect("in-budget retry merges the unit");
+    .expect("in-budget retry compacts the unit");
     assert_matches!(report, super::CompactionUnitOutcome::Published { .. });
 }
 
@@ -2726,7 +2726,7 @@ async fn plan_window<S: ObjectStore + ?Sized>(
             MetadataCompactionPolicy::default(),
             policy,
         )
-        .expect("a family group with delta rows to merge")
+        .expect("a family group with delta rows to compact")
     });
     let spec = super::plan::plan_group(
         segments.manifest().payload(),
@@ -2791,8 +2791,8 @@ fn group_segment_object_keys(
 }
 
 /// A per-step row budget one row short of what the group's base run needs,
-/// with the trigger forced so a single delta run still merges.
-fn policy_that_cannot_merge_the_base(base_rows: u64) -> MetadataRunPolicy {
+/// with the trigger forced so a single delta run is still compacted.
+fn policy_that_cannot_compact_the_base(base_rows: u64) -> MetadataRunPolicy {
     let row_budget = usize::try_from(base_rows).expect("test row counts are small") - 1;
     MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
@@ -2844,7 +2844,7 @@ async fn a_base_over_the_row_budget_is_rebuilt_whole_by_a_unit_of_any_size() {
     let base_rows = group_run_rows(&base, group.families());
     let base_segments = group_segment_object_keys(&base, group.families());
     assert!(base_rows > 1, "the base run must hold rows in this group");
-    let policy = policy_that_cannot_merge_the_base(base_rows);
+    let policy = policy_that_cannot_compact_the_base(base_rows);
 
     let (_, spec) = plan_window(&store, &namespace_id, policy, None).await;
     assert_eq!(
@@ -2870,7 +2870,7 @@ async fn a_base_over_the_row_budget_is_rebuilt_whole_by_a_unit_of_any_size() {
             crate::compaction::CompactionAdmission::AnySize
         )
         .await,
-        super::CompactionUnitOutcome::Published { group: merged, .. } if merged == group
+        super::CompactionUnitOutcome::Published { group: compacted, .. } if compacted == group
     );
 
     let after = load_manifest_materialization_for_inspection(
@@ -2905,7 +2905,7 @@ async fn a_base_over_the_row_budget_is_rebuilt_whole_by_a_unit_of_any_size() {
 }
 
 #[tokio::test]
-async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
+async fn a_compaction_above_the_base_keeps_the_rows_that_shadow_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2986,9 +2986,9 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         current_manifest_no(&store, &namespace_id).await,
     )
     .await
-    .expect("load the manifest before the merge");
+    .expect("load the manifest before the compaction");
     // The base is more than four times the size of the delta runs, so their
-    // tier merges without it.
+    // tier is compacted without it.
     let policy = MetadataRunPolicy::default();
     let (group, spec) = plan_window(
         &store,
@@ -3014,10 +3014,10 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         .expect("the window holds runs");
     assert_eq!(
         spec.placement(),
-        super::plan::MergePlacement::Delta {
+        super::plan::CompactionPlacement::Delta {
             output_seq: newest_input
         },
-        "a merge above the base writes a delta run at its newest input's sequence"
+        "a compaction above the base writes a delta run at its newest input's sequence"
     );
     assert!(input_runs.len() > 1);
     let base_before = group_base_runs(&before.manifest, group.families());
@@ -3029,30 +3029,30 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         current_manifest_no(&store, &namespace_id).await,
     )
     .await
-    .expect("load the manifest after the merge");
-    // The merge wrote a delta run, not a second base run: the group's base is
-    // exactly the one it was, and the merged rows sit at the identity of the
+    .expect("load the manifest after the compaction");
+    // The compaction wrote a delta run, not a second base run: the group's base is
+    // exactly the one it was, and the compacted rows sit at the identity of the
     // newest run the window held, which is where that run stood.
     assert_eq!(
         group_base_runs(&after.manifest, group.families()),
         base_before,
-        "a merge above the base must not mint a base run"
+        "a compaction above the base must not mint a base run"
     );
-    let merged_delta_runs = group_delta_runs(&after.manifest, group.families());
-    let [merged_delta] = &merged_delta_runs[..] else {
-        panic!("the merged delta runs must leave exactly one delta run");
+    let compacted_delta_runs = group_delta_runs(&after.manifest, group.families());
+    let [compacted_delta] = &compacted_delta_runs[..] else {
+        panic!("the compacted delta runs must leave exactly one delta run");
     };
     assert_eq!(
-        (merged_delta.run_seq, merged_delta.tier),
+        (compacted_delta.run_seq, compacted_delta.tier),
         (newest_input, RunTier::Delta),
-        "the merged delta run must stand where the newest input run stood"
+        "the compacted delta run must stand where the newest input run stood"
     );
-    // A merge that skipped older runs drops nothing, so the row set is
+    // A compaction that skipped older runs drops nothing, so the row set is
     // exactly what it was: the cancelling row still shadows the base's
     // binding and the deleted file stays deleted.
     assert!(
         metadata_states_equivalent(&before.metadata_state, &after.metadata_state),
-        "a merge above the base must be a pure rewrite"
+        "a compaction above the base must be a pure rewrite"
     );
     assert!(
         after
@@ -3060,7 +3060,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
             .direntry_binds()
             .iter()
             .any(|binding| !binding.is_bound()),
-        "the cancelling row must survive the merge"
+        "the cancelling row must survive the compaction"
     );
     let projection = load_current_projection(&store, &namespace_id)
         .await
@@ -3080,7 +3080,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    // Small segments so the merged base is many segments rather than one, and
+    // Small segments so the compacted base is many segments rather than one, and
     // a row budget the groups outgrow within a couple of cycles.
     let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
@@ -3144,10 +3144,10 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
             )
             .await
             .expect("load the current manifest");
-            for (merged, base_runs) in base_runs_per_family_group(&current.manifest) {
+            for (families, base_runs) in base_runs_per_family_group(&current.manifest) {
                 assert!(
                     base_runs.len() <= 1,
-                    "cycle {cycle}: {merged:?} holds base runs {base_runs:?}"
+                    "cycle {cycle}: {families:?} holds base runs {base_runs:?}"
                 );
             }
             assert_eq!(
@@ -3161,7 +3161,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                     break;
                 }
                 // The group's window no longer fits the row budget, so a
-                // unit that admits any size merges it, as a metadata run's
+                // unit that admits any size compacts it, as a metadata run's
                 // caller does after a window that's too large.
                 super::CompactionUnitOutcome::TooLarge { .. } => {
                     assert_matches!(

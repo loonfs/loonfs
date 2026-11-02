@@ -4170,7 +4170,7 @@
         "description": "Whether metadata maintenance is caught up, and the compaction units that the job published.",
         "properties": {
           "compaction_units": {
-            "description": "The compaction units that this run published. A unit merges one family group's window.",
+            "description": "The compaction units that this run published. A unit compacts one family group's window.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"

@@ -14,7 +14,7 @@
 //! The crate has two nouns. A [`LoonFs`] is the runtime: it owns the store
 //! client and the read budgets, and reads through a [`MetadataCache`] that
 //! several runtimes may share. A writable runtime runs its publications,
-//! folds, and merges under an [`ExecutionBudget`] that several runtimes may
+//! folds, and compactions under an [`ExecutionBudget`] that several runtimes may
 //! share too. A [`Namespace`] handle acts on one namespace, and its methods
 //! take no namespace id. Both have one of two modes, [`ReadOnly`] or
 //! [`Writable`]. A writable runtime also creates and forks namespaces, opens

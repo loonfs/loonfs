@@ -67,7 +67,7 @@ fn four_gib_derives_each_pool_and_folds_unused_grep_into_segments() {
         );
         assert_eq!(memory.read_working.bytes, 397_955_563);
         assert_eq!(memory.admitted.bytes, 198_977_781);
-        assert_eq!(memory.merge_input.bytes, 99_488_890);
+        assert_eq!(memory.compaction_input.bytes, 99_488_890);
         for (term, _) in memory.terms() {
             if ![memory.head.name, memory.manifest.name].contains(&term.name) {
                 assert_eq!(term.source, MemorySource::Derived);
@@ -118,7 +118,7 @@ max_concurrent_downloads = 4
 max_concurrent_compactions = 4
 max_concurrent_content_writes = 8
 max_read_working_bytes = 0
-max_merge_input_bytes = 67108864
+max_compaction_input_bytes = 67108864
 max_admitted_bytes = 8388608
 [metadata_cache]
 max_segment_bytes = 67108864
@@ -166,9 +166,11 @@ max_cache_bytes = 0
         .terms()
         .iter()
         .all(|(term, _)| term.source == MemorySource::Set));
-    config.max_merge_input_bytes = Some(1024 * MIB);
+    config.max_compaction_input_bytes = Some(1024 * MIB);
     assert_invalid_field(
-        config.validate().expect_err("all four merges must fit"),
+        config
+            .validate()
+            .expect_err("all four compactions must fit"),
         "memory_limit_bytes",
     );
 }
@@ -196,7 +198,7 @@ const EVERY_MEMORY_TERM: [&str; 23] = [
     "grep.max_cache_bytes",
     "max_read_working_bytes",
     "max_admitted_bytes",
-    "max_merge_input_bytes",
+    "max_compaction_input_bytes",
     "total",
 ];
 
@@ -268,7 +270,7 @@ fn no_limit_or_cgroup_file_keeps_the_unsized_defaults() {
     assert_eq!(memory.grep.bytes, 268_435_456);
     assert_eq!(memory.read_working.bytes, 268_435_456);
     assert_eq!(memory.admitted.bytes, 67_108_864);
-    assert_eq!(memory.merge_input.bytes, 67_108_864);
+    assert_eq!(memory.compaction_input.bytes, 67_108_864);
     assert!(memory
         .terms()
         .iter()

@@ -277,9 +277,9 @@ pub(super) struct RuntimeHandles {
 ///
 /// The runtime reads through one metadata cache built from the
 /// `[metadata_cache]` table, with an SSD tier if the table has an `ssd`
-/// table, and runs its publications, folds, and merges
-/// under one execution budget built from the fold, compaction, and merge
-/// input limits and the `[publication]` totals. The execution budget reports
+/// table, and runs its publications, folds, and compactions
+/// under one execution budget built from the fold and compaction limits, the
+/// compaction input limit, and the `[publication]` totals. The execution budget reports
 /// to the recorder, and a scrape of `/metrics` reads the cache's counters
 /// from its stats. An optional JSONL recorder receives the same object-store
 /// samples.

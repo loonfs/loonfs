@@ -252,9 +252,9 @@ fn validate_segment_key_ranges(
 /// index also stores a summary row for each revision of a bound file, so a
 /// run's slot index has at least as many rows as its child index. A
 /// descriptor doesn't say how many of its rows are summary rows, so the
-/// check is an inequality. A merge compares the binding events themselves
+/// check is an inequality. A compaction compares the binding events themselves
 /// with digests
-/// (`crate::compaction::group_merge::GroupMerge::refuse_a_run_whose_index_disagrees`).
+/// (`crate::compaction::group_compaction::GroupCompaction::refuse_a_run_whose_index_disagrees`).
 /// Each commit has one commit row and one receipt, so those counts are
 /// equal.
 fn validate_run_index_parity(
@@ -356,7 +356,7 @@ fn validate_one_base_run_per_family_group(
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
-                "family group {:?} holds base-tier runs `{}` and `{}`; a group holds at most one base run, because a merge writes one only when it starts at the group's oldest run and then replaces it",
+                "family group {:?} holds base-tier runs `{}` and `{}`; a group holds at most one base run, because a compaction writes one only when it starts at the group's oldest run and then replaces it",
                 group.families(), first.run_no, second.run_no
             ),
         });
@@ -388,9 +388,9 @@ pub(crate) fn validate_manifest_row_seq_range<'a>(
 /// have no copy in the reverse index.
 ///
 /// Only the test-only inspection materialization keeps a whole family, so only
-/// it can afford this. A merge never keeps a whole family and checks parity by digesting
+/// it can afford this. A compaction never keeps a whole family and checks parity by digesting
 /// the rows it writes instead
-/// (`crate::compaction::group_merge::GroupMerge::refuse_a_run_whose_index_disagrees`).
+/// (`crate::compaction::group_compaction::GroupCompaction::refuse_a_run_whose_index_disagrees`).
 #[cfg(test)]
 pub(super) fn validate_direntry_child_bind_index(
     object_key: &str,

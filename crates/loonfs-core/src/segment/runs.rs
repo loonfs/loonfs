@@ -38,22 +38,22 @@ pub struct MetadataRunManifest {
 /// keep while it works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataRunPolicy {
-    /// Delta runs at which a family group merges its newest runs, even when
+    /// Delta runs at which a family group compacts its newest runs, even when
     /// no size tier is ready.
     pub max_delta_runs: NonZeroUsize,
-    /// Runs of similar size that a family group needs before they merge.
+    /// Runs of similar size that a family group needs before they're compacted.
     /// A minimum of one acts as two.
     pub min_compaction_runs: NonZeroUsize,
     pub max_rows_per_segment: NonZeroUsize,
     /// Decoded data-byte target; the last row may cross it.
     pub target_segment_bytes: NonZeroUsize,
-    /// Complete logical runs one compaction unit may merge, up to eight.
+    /// Complete logical runs one compaction unit may compact, up to eight.
     pub max_input_runs_per_step: NonZeroUsize,
     /// Rows, by its runs' descriptor counts, that a window may list when the
     /// call admits only windows within this budget (a `metadata` pass). A
     /// larger window waits for a unit that admits any size.
     pub max_decoded_input_rows_per_step: NonZeroUsize,
-    /// Decoded data-block bytes one merge keeps in memory across its open
+    /// Decoded data-block bytes one compaction keeps in memory across its open
     /// inputs, though each input always keeps one whole block.
     pub max_decoded_input_bytes_per_step: NonZeroUsize,
 }
@@ -139,8 +139,8 @@ pub(crate) fn runs_in_materialization_order(
     runs
 }
 
-/// Orders candidate runs for merging: base before delta, then oldest first.
-pub(crate) fn runs_in_merge_order(
+/// Orders candidate runs for compaction: base before delta, then oldest first.
+pub(crate) fn runs_in_compaction_order(
     mut runs: Vec<&MetadataRunManifest>,
 ) -> Vec<&MetadataRunManifest> {
     runs.sort_by(|left, right| {

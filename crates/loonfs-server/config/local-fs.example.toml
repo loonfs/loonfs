@@ -16,7 +16,7 @@ memory_limit_bytes = 4294967296
 #max_concurrent_folds = 2
 
 # Maximum compaction units this server runs at once. Each holds up to
-# max_merge_input_bytes of decoded input. Defaults to 2.
+# max_compaction_input_bytes of decoded input. Defaults to 2.
 #max_concurrent_compactions = 2
 
 # Maximum content object writes this server runs at once, including the
@@ -174,7 +174,7 @@ memory_limit_bytes = 4294967296
 # many steps of `max_content_bytes_per_step`, whatever
 # `max_concurrent_maintenance` is. Must be greater than zero. Defaults to 2.
 #max_concurrent_steps = 2
-# Segment layout and merge policy use engine defaults.
+# Segment layout and reorganization policy use engine defaults.
 
 # Requests authenticate with this bearer token. A non-loopback bind refuses
 # to load without an [auth] table or LOONFS_AUTH_TOKEN. `kind = "open"` serves

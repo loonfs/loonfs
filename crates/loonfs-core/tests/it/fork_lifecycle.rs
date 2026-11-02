@@ -854,7 +854,7 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
         .expect("bootstrap source");
     // Each file is folded into a run of its own, so the fork inherits more
     // than one run of the inode and revision groups, and its compaction of
-    // those groups has a window to merge.
+    // those groups has a window to compact.
     let source = namespace_engine(&store, &source_namespace_id, &context);
     for (path, commit) in [("/old/a.txt", "seed-old"), ("/kept.txt", "seed-kept")] {
         NamespaceFixture::new(&store, &source_namespace_id, &context)

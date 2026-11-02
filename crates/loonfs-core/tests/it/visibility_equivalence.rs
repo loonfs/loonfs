@@ -957,7 +957,7 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
             let inode_rows = harness.inode_rows().await;
             // The low bits of an inode ID are random, so the kept inode
             // filter could keep one of the four rows by a false positive. The
-            // inodes group merges with a seed whose filter keeps none of
+            // inodes group is compacted with a seed whose filter keeps none of
             // them, and the engine then compacts the other groups.
             compact_groups_without_false_positives(
                 harness.store.as_ref(),

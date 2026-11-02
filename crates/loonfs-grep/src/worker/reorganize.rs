@@ -1,9 +1,9 @@
-//! Grep index reorganization: bounded merges of index runs into a run at the
+//! Grep index reorganization: bounded rewrites of index runs into a run at the
 //! next level.
 //!
-//! Reorganization publishes bounded merges like metadata reorganization.
+//! Reorganization publishes bounded rewrites like metadata compaction.
 //! Grep uses delta, mid, and base levels because each file contributes to
-//! many gram posting lists. The mid level absorbs frequent delta merges
+//! many gram posting lists. The mid level absorbs frequent delta reorganizations
 //! without rewriting most of the base on every step.
 
 use super::build::gram_postings_rows;
@@ -40,9 +40,9 @@ enum ReorganizePlan {
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Runs one partitioned delta-to-mid or mid-plus-base reorganize step.
     ///
-    /// A step that has runs to merge waits for a step permit before it reads
+    /// A step that has runs to reorganize waits for a step permit before it reads
     /// index segments, and keeps it until it publishes. A step with nothing
-    /// to merge takes no permit.
+    /// to reorganize takes no permit.
     pub async fn reorganize_step(
         &self,
         namespace_id: &NamespaceId,

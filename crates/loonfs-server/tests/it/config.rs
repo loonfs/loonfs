@@ -591,7 +591,7 @@ root = "/tmp/loonfs-server"
         "gc_interval_ms",
         "full_sweep_interval_ms",
         "idle_session_close_after_ms",
-        "max_merge_input_bytes",
+        "max_compaction_input_bytes",
     ] {
         let path = write_config(&format!(
             r#"
@@ -654,6 +654,26 @@ root = "/tmp/loonfs-server"
     );
     let error = load_server_config(&path).expect_err("zero grep bound must be rejected");
     assert_invalid_field(error, "grep");
+}
+
+#[test]
+fn the_old_compaction_input_key_still_sets_the_compaction_input_limit() {
+    let path = write_config(
+        r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+max_merge_input_bytes = 33554432
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#,
+    );
+    let loaded = load_server_config(&path).expect("the old key is an alias");
+    assert_eq!(
+        loaded.config().max_compaction_input_bytes,
+        Some(32 * 1024 * 1024)
+    );
 }
 
 #[test]

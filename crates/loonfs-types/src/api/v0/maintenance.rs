@@ -166,7 +166,7 @@ pub struct MetadataMaintenanceResponse {
     pub namespace_id: NamespaceId,
     /// Whether work is still due when the run returns.
     pub outcome: MetadataMaintenanceOutcome,
-    /// The compaction units that this run published. A unit merges one family group's window.
+    /// The compaction units that this run published. A unit compacts one family group's window.
     pub compaction_units: u64,
 }
 

@@ -1306,7 +1306,7 @@ A subject that imports a bare reference MUST be an administrator of the source n
 
 This section describes how much history a namespace keeps, and how compaction rewrites metadata without changing what's visible.
 
-Every commit adds metadata rows, and without a limit, old revisions, bindings, and receipts would build up indefinitely. The "retention floor" sets how far back history is guaranteed, and "compaction" merges metadata runs and removes the rows that the floor no longer requires. Neither operation publishes new filesystem changes, and compaction preserves every retained view.
+Every commit adds metadata rows, and without a limit, old revisions, bindings, and receipts would build up indefinitely. The "retention floor" sets how far back history is guaranteed, and "compaction" rewrites a window of metadata runs into one run and removes the rows that the floor no longer requires. Neither operation publishes new filesystem changes, and compaction preserves every retained view.
 
 ### 10.1 Advancing the retention floor
 
@@ -1366,7 +1366,7 @@ Why is the acknowledged floor never above the retention floor? A WAL object's ba
 
 Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group, because they MUST stay consistent with each other. The `commits`, `commit_receipts`, and `lands` families form another group, and each of the other seven groups contains one family. [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists the groups.
 
-A compaction merges a contiguous window of at most eight of a group's runs. The window either includes the group's oldest run or starts above it, and it can't skip a run in the middle.
+A compaction rewrites a contiguous window of at most eight of a group's runs into one run. The window either includes the group's oldest run or starts above it, and it can't skip a run in the middle.
 
 ```text
 oldest                                       newest
@@ -1382,31 +1382,31 @@ oldest                                       newest
 
 A group has at most one base run. Base runs are ordered before delta runs, whatever their sequence stamps, and a compaction that skips the oldest run stays at its position in the group.
 
-A delta-only compaction MUST merge at least two runs. Once a group has only one delta run above a much larger base, a delta-only compaction can't reduce the run count any further, so the next compaction of the group includes the base.
+A delta-only compaction MUST rewrite at least two runs. Once a group has only one delta run above a much larger base, a delta-only compaction can't reduce the run count any further, so the next compaction of the group includes the base.
 
 LoonFS chooses a group's window by size tier. A "size tier" is a contiguous set of a group's runs whose sizes are close to each other, measured as the stored bytes of the group's segments in each run. To choose a window, LoonFS:
 
 1. Lists the group's runs from newest to oldest, with the base last.
 2. Starts a tier at the newest run, and adds each next older run while that run is at most four times the size of the smallest run already in the tier.
-3. Merges the tier if it has at least four runs. A tier of more than eight runs merges its oldest eight, and the newer runs wait for a later compaction.
+3. Compacts the tier if it has at least four runs. If the tier has more than eight runs, LoonFS compacts its oldest eight, and the newer runs wait for a later compaction.
 4. Otherwise starts a new tier at the next older run, and repeats step 2, until no older run is left.
-5. If no tier has four runs, and the group has at least eight delta runs, merges a window of the group's newest runs. The window starts with the group's two newest runs, and adds each next older run while that run is at most four times the total size of the runs already in the window, up to eight runs.
+5. If no tier has four runs, and the group has at least eight delta runs, compacts a window of the group's newest runs. The window starts with the group's two newest runs, and adds each next older run while that run is at most four times the total size of the runs already in the window, up to eight runs.
 
-For example, suppose a group's runs, from oldest to newest, are a 300 MiB base and delta runs of 90, 100, 110, and 2 MiB. The tier that starts at the 2 MiB run stops before the 110 MiB run, because 110 is more than four times 2. The tier that starts at the 110 MiB run adds the 100 and 90 MiB runs, and then the base, because 300 is at most four times 90. That tier has four runs, so the compaction merges them into a new base, and the 2 MiB run waits until later runs of a similar size make a tier with it.
+For example, suppose a group's runs, from oldest to newest, are a 300 MiB base and delta runs of 90, 100, 110, and 2 MiB. The tier that starts at the 2 MiB run stops before the 110 MiB run, because 110 is more than four times 2. The tier that starts at the 110 MiB run adds the 100 and 90 MiB runs, and then the base, because 300 is at most four times 90. That tier has four runs, so the compaction rewrites them into a new base, and the 2 MiB run waits until later runs of a similar size make a tier with it.
 
 As an example of step 5, suppose a group has eight delta runs but no tier of four runs, and its newest runs, from oldest to newest, are 400, 40, 2, 1, and 1 MiB. The window starts with the two 1 MiB runs, adds the 2 MiB run, and stops before the 40 MiB run, because 40 is more than four times the window's 4 MiB total. The 40 MiB run joins a window only once the runs above it total at least 10 MiB. If the newest runs were 400, 40, 30, and 1 MiB instead, the window would start with the 1 and 30 MiB runs and add the 40 MiB run, because 40 is at most four times the window's 31 MiB total. The window would then stop before the 400 MiB run, because 400 is more than four times the new 71 MiB total.
 
-An explicit compaction request merges a group's runs whatever their sizes. If the group has more than eight runs, the request merges its oldest eight, unless the oldest run is more than four times the size of the smallest of the next seven. In that case, it merges the eight runs above the oldest one first, so the oldest run is rewritten once, by the compaction that finishes the group.
+An explicit compaction request compacts a group's runs whatever their sizes. If the group has more than eight runs, the request compacts its oldest eight, unless the oldest run is more than four times the size of the smallest of the next seven. In that case, it compacts the eight runs above the oldest one first, so the oldest run is rewritten once, by the compaction that finishes the group.
 
-(The tier size of four runs, the size ratio of four, and the limit of eight delta runs are implementation defaults, not format requirements. A compaction can merge any window that follows the earlier rules in this section.)
+(The tier size of four runs, the size ratio of four, and the limit of eight delta runs are implementation defaults, not format requirements. A compaction can rewrite any window that follows the earlier rules in this section.)
 
 Why can't a compaction above the oldest run drop rows? An excluded older run might contain rows that a row in the window supersedes, such as an older binding version below an unbound one, or a listed deletion whose removal row is in the window. Dropping rows in the window could make those older rows visible again.
 
-Why merge by size tier? A merge rewrites every byte of its input, so merging a small new run into a large one rewrites the large run for little new data. A tier merges runs of similar size, so a byte is rewritten about once each time the size of the run that contains it grows four times, and each merge of at least four runs removes at least three runs from the group. A new run that doesn't fit a tier waits. For example, if a fold publishes while a compaction of the group runs, the compaction publishes its new base over the fold's manifest, and the group is left with that base and the fold's run. Two runs aren't a tier, so the fold's run waits for later folds instead of making the group rewrite its base again.
+Why compact by size tier? A compaction rewrites every byte of its input, so compacting a small new run together with a large one rewrites the large run for little new data. A tier contains runs of similar size, so a byte is rewritten about once each time the size of the run that contains it grows four times, and each compaction of at least four runs removes at least three runs from the group. A new run that doesn't fit a tier waits. For example, if a fold publishes while a compaction of the group runs, the compaction publishes its new base over the fold's manifest, and the group is left with that base and the fold's run. Two runs aren't a tier, so the fold's run waits for later folds instead of making the group rewrite its base again.
 
 Why is there a limit of eight delta runs? A read of a key checks every run of the key's group that might contain it. If a group's runs never make a tier of four (for example, if each run is more than four times the size of the next newer one), the limit keeps the number of runs a read checks bounded.
 
-Why does the window at the delta run limit follow the size ratio instead of taking a set number of runs? A merge rewrites every byte of its input, so a merge that adds a few small runs to a large run rewrites the whole large run. If the window took a set number of runs, a group that keeps receiving small runs would rewrite the large run at every merge. Beyond the two newest runs, an older run joins the window only when the runs already in the window total at least a quarter of the older run's size, so every merge that rewrites the run reads an input at least a quarter larger than the run. That bound makes the number of times a byte is rewritten grow with the group's size, not with the number of small runs that arrive. The window always includes the two newest runs, because merging one run wouldn't reduce the group's run count.
+Why does the window at the delta run limit follow the size ratio instead of taking a set number of runs? A compaction rewrites every byte of its input, so a compaction that adds a few small runs to a large run rewrites the whole large run. If the window took a set number of runs, a group that keeps receiving small runs would rewrite the large run at every compaction. Beyond the two newest runs, an older run joins the window only when the runs already in the window total at least a quarter of the older run's size, so every compaction that rewrites the run reads an input at least a quarter larger than the run. That bound makes the number of times a byte is rewritten grow with the group's size, not with the number of small runs that arrive. The window always includes the two newest runs, because compacting one run wouldn't reduce the group's run count.
 
 ### 10.3 Row retention during a base compaction
 
@@ -1426,16 +1426,16 @@ These rules apply only when the selected inputs include the group's oldest run. 
 
 Summary rows are versions of their edge for retention. The slot index keeps an edge's newest summary row at or below the floor next to the edge's newest binding event at or below it, and the child index keeps the same binding event. An unbound binding version acts as a tombstone, and it MUST stay while it hides older versions of its edge. Only a bottom-anchored compaction can drop it, and that compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every row, including unbound versions at or below the floor, except superseded layout rows, which it can drop because the longest layout covers every shorter prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
 
-A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row in its basis refers to. It checks each chain against a Bloom filter, which can err only toward keeping a row, and a later compaction drops what the filter kept. Every compaction scans the basis's revisions once before it merges layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID, up to `MAX_BLOOM_FILTER_BYTES` (64 MiB), and its expected count is the sum of the revision segments' `row_count`. Above that size, the filter has fewer bits per ID and uses fewer hash positions, so it reports more false positives, and a later compaction drops more of what it kept.
+A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row in its basis refers to. It checks each chain against a Bloom filter, which can err only toward keeping a row, and a later compaction drops what the filter kept. Every compaction scans the basis's revisions once before it rewrites layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID, up to `MAX_BLOOM_FILTER_BYTES` (64 MiB), and its expected count is the sum of the revision segments' `row_count`. Above that size, the filter has fewer bits per ID and uses fewer hash positions, so it reports more false positives, and a later compaction drops more of what it kept.
 
 A deletion has expired in a compaction's [metadata basis](#41-resolving-the-metadata-basis) when its latest tombstone event in that basis is `set` and its deletion sequence is at or below the basis manifest's `acknowledged_floor_seq` (see [Advancing the retention floor](#101-advancing-the-retention-floor)). An expired deletion hides its root and every descendant of the root, and a bottom-anchored compaction of the `inodes`, `revisions`, `attributes`, or `access` group, or of the bindings group, removes every row of those inodes. It tests a binding row by the edge's parent, so it removes every version of an edge whose parent is hidden. The root's own edge has a visible parent, and the binding rule above drops that edge, because its newest version at or below the floor is unbound. The other families don't need a rule of their own: `tombstones` keeps the deletion's events, `active_deletions` removes the root's `listed` row, and the revision filter drops the chains of the removed revisions.
 
-Before such a compaction merges, it builds a "kept inode filter", which is a Bloom filter of every inode that's visible or under a recoverable deletion in the basis. To build the filter, the compaction:
+Before such a compaction rewrites its window, it builds a "kept inode filter", which is a Bloom filter of every inode that's visible or under a recoverable deletion in the basis. To build the filter, the compaction:
 
 1. Walks the basis's directory tree from the root inode, depth first, with one cursor for each directory between the root and the directory that it's reading. It reads each directory's children from `direntry_binds`, and it inserts and follows the child of each edge whose first row, which is its newest version, is bound.
 2. Walks the subtree of every recoverable deletion the same way, starting at the deletion's root. It reads those roots from the `listed` rows in `active_deletions` that have no `removed` row and whose deletion sequence is above the acknowledged floor.
 
-Deleting an item unbinds it, so the first walk doesn't reach a deleted subtree. An expired deletion isn't a starting point for the second walk, and its root is unbound, so neither walk reaches the inodes that the deletion hides. A deletion inside another deletion is the older of the two (see [File and subtree deletion](#16-file-and-subtree-deletion)), so no recoverable deletion is inside an expired one, and the two walks reach every ancestor through which the rights on an item under a recoverable deletion are evaluated. The merge removes a row whose inode isn't in the filter, and it applies the rules in the table to a row whose inode is in the filter. The two binding indexes are merged in one compaction against the same filter, so the compaction keeps or removes each binding event the same way in both indexes. The walk reads the slot-index rows of every directory it reaches, so each of these compactions reads the bindings of the visible and recoverable tree once more.
+Deleting an item unbinds it, so the first walk doesn't reach a deleted subtree. An expired deletion isn't a starting point for the second walk, and its root is unbound, so neither walk reaches the inodes that the deletion hides. A deletion inside another deletion is the older of the two (see [File and subtree deletion](#16-file-and-subtree-deletion)), so no recoverable deletion is inside an expired one, and the two walks reach every ancestor through which the rights on an item under a recoverable deletion are evaluated. The compaction removes a row whose inode isn't in the filter, and it applies the rules in the table to a row whose inode is in the filter. The two binding indexes are rewritten in one compaction against the same filter, so the compaction keeps or removes each binding event the same way in both indexes. The walk reads the slot-index rows of every directory it reaches, so each of these compactions reads the bindings of the visible and recoverable tree once more.
 
 The kept inode filter follows the layout filter's rules: two xxh64 hashes, a seed from the output run number, 10 bits per expected inode up to `MAX_BLOOM_FILTER_BYTES`, and an expected count that is the sum of the basis's `inodes` segments' `row_count`. A false positive keeps a hidden inode's rows for one compaction, and the next compaction of the group has a different output run number, so it removes them. If the walk would need more than `MAX_KEPT_INODE_WALK_DEPTH` (4,096) cursors at once, the compaction keeps every row that it would have tested, removes no hidden rows, and logs that choice. A delta-only compaction doesn't build the filter, and it removes none of these rows. A base compaction over a manifest whose `acknowledged_floor_seq` is 0 doesn't build the filter either, and it keeps every row, because no deletion in its basis has expired.
 
@@ -1445,7 +1445,7 @@ Why can a base compaction remove every row of a hidden inode, and not just the o
 
 Why does the compaction find hidden inodes by walking the tree, and not by a flag on each row? A tombstone on a directory is one row that hides the whole subtree, so no row below the directory records that it's hidden, and a flag on every row would turn one deletion into a write for every descendant. The visible tree and a hidden subtree can each have more inodes than fit in memory, so the compaction uses a filter whose size is set before the walk starts, and which can err only toward keeping a row.
 
-Each binding event appears in both indexes, both indexes group their rows by edge, and the rule judges binding events apart from summary rows, so compaction keeps or removes each binding event in both indexes the same way. The merge's row digests cover the binding events of both indexes and verify that they agree, a manifest's row counts verify that each run's slot index has at least as many rows as its child index, and every event above the floor stays.
+Each binding event appears in both indexes, both indexes group their rows by edge, and the rule judges binding events apart from summary rows, so compaction keeps or removes each binding event in both indexes the same way. The compaction's row digests cover the binding events of both indexes and verify that they agree, a manifest's row counts verify that each run's slot index has at least as many rows as its child index, and every event above the floor stays.
 
 A binding row's position comes from the delta that published it, so a later bind doesn't depend on an earlier unbound value. Attribute and access revisions keep a cleared floor state, because the next update is validated against its revision number.
 
@@ -1459,7 +1459,7 @@ Compaction MUST preserve the visible metadata at every retained sequence. It pub
 
 ### 10.4 Streaming compaction
 
-A compaction streams: it merges the selected runs without keeping every row in memory. It writes completed segments under the namespace's normal `segments/` prefix, with new IDs, and then it publishes references to that output in the next manifest. Readers keep using the previous manifest until the publication succeeds.
+A compaction streams: it rewrites the selected runs without keeping every row in memory. It writes completed segments under the namespace's normal `segments/` prefix, with new IDs, and then it publishes references to that output in the next manifest. Readers keep using the previous manifest until the publication succeeds.
 
 A runtime claims the namespace's compactor epoch before its first compaction after it opens the namespace. Claiming publishes a manifest with `compactor_epoch + 1` and no other changes, and concurrent family groups in that runtime share the claim. Compaction publications MUST match the current epoch, so a newer claim fences older compactors. A compaction also checks the epoch of the manifest it plans from before it reads a segment.
 
@@ -2469,7 +2469,7 @@ These are defaults for the reference producer and runtime. A target size can be 
 | Target decoded segment size | 8 MiB |
 | Maximum compaction input runs | 8 |
 | Maximum compaction input rows in one metadata maintenance pass | 131,072 |
-| Maximum decoded input one merge keeps in memory | 64 MiB |
+| Maximum decoded input one compaction keeps in memory | 64 MiB |
 | Automatic WAL-fold threshold | 32 WAL objects |
 | Idle WAL-fold period | 15 minutes |
 | Unfolded-tail write stop (new commits wait for a fold) | 128 WAL objects |
@@ -2551,7 +2551,7 @@ Grep segments follow list order, and each descriptor has a positive row count. T
 Grep uses a numeric `level` instead of the core's base and delta tiers:
 
 - Level 0 is delta output.
-- Level 1 is an intermediate merge.
+- Level 1 is intermediate reorganization output.
 - Level 2 is the base.
 
 In-progress reorganization records the output level and run number, so resumed steps continue the same run. Every descriptor and in-progress output run number MUST be below `next_run_no`.

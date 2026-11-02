@@ -115,7 +115,7 @@ An expired snapshot still protects its manifest until garbage collection deletes
 | Operation | What it does |
 | --- | --- |
 | Fold | Moves committed records from the WAL into new metadata segments, and publishes the next manifest. |
-| Compaction | Merges metadata runs and drops rows that are no longer needed, without changing any retained view. |
+| Compaction | Rewrites metadata runs into fewer runs and drops rows that are no longer needed, without changing any retained view. |
 | Retention advance | Moves the [retention floor](glossary.md#retention-floor) forward, after checking that the current manifest's segments exist. Compaction can then remove history at or below the floor. |
 | Garbage collection | Deletes objects that nothing references anymore, once they're old enough. Each pass starts from a fresh list of what's still referenced. |
 

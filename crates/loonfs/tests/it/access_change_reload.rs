@@ -166,7 +166,7 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
             .await
             .expect("fold");
         // The folds after this compaction write the runs that a test's
-        // compaction merges.
+        // compaction rewrites.
         if claim_compactor && index == 4 {
             fixture.compact().await;
         }

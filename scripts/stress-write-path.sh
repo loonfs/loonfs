@@ -71,8 +71,8 @@ runtime|publisher::tests::inline_writer::the_fold_trigger_waits_for_the_reloaded
 runtime|publisher::tests::session_compaction::a_session_streaming_compaction_survives_its_own_next_fold
 runtime|publisher::tests::session_compaction::closing_a_session_cancels_its_compaction_and_returns
 runtime|publisher::tests::session_compaction::shutdown_drains_session_compactions
-runtime|publisher::tests::session_compaction::a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit
-runtime|publisher::tests::session_compaction::closing_a_session_does_not_wait_for_another_sessions_merge
+runtime|publisher::tests::session_compaction::a_runtime_runs_no_more_compactions_at_once_than_its_compaction_limit
+runtime|publisher::tests::session_compaction::closing_a_session_does_not_wait_for_another_sessions_compaction
 core|manifest::tests::fold_races::a_fold_that_loses_to_a_compaction_reads_no_wal_object
 core|manifest::tests::fold_races::a_fold_that_loses_to_a_fold_still_takes_the_cold_path
 core|manifest::tests::fold_races::a_fold_survives_repeated_compaction_publications

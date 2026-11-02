@@ -37,7 +37,7 @@ pub(crate) enum RetentionRule {
 }
 
 impl RetentionRule {
-    /// The operator that applies the rule in a merge whose basis manifest
+    /// The operator that applies the rule in a compaction whose basis manifest
     /// has `acknowledged_floor_seq` as its acknowledged floor.
     pub(crate) fn operator(self, acknowledged_floor_seq: ChangeSeq) -> RetentionOperator {
         match self {
@@ -54,7 +54,7 @@ impl RetentionRule {
     }
 }
 
-/// The state one cluster's rule keeps while a merge streams through it.
+/// The state one cluster's rule keeps while a compaction streams through it.
 #[derive(Debug)]
 pub(crate) enum RetentionOperator {
     KeepEveryRow,
@@ -115,7 +115,7 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
 /// at or below the floor is the inode's state at the floor, including a cleared
 /// state, and the floor keeps no older history. The operator keeps a
 /// recoverably deleted inode's rows like any other inode's, so an undelete
-/// restores the prior state, and a base merge removes the rows of an inode
+/// restores the prior state, and a base compaction removes the rows of an inode
 /// that an expired deletion hides before they reach the operator. The
 /// operator processes this order without retaining the complete history.
 #[derive(Debug, Default)]
@@ -345,7 +345,7 @@ impl BindingRetention {
     }
 }
 
-/// One set of families the engine merges and judges together, and how it
+/// One set of families the engine compacts and judges together, and how it
 /// groups their rows while doing it.
 pub(crate) struct RetentionCluster {
     pub(crate) families: &'static [MetadataRowFamily],
@@ -590,7 +590,7 @@ mod tests {
     }
 
     /// Runs `rows` through the retention rule of `family`'s cluster in key
-    /// order, as a base merge does, and returns the rows it keeps.
+    /// order, as a base compaction does, and returns the rows it keeps.
     fn retained(
         group: MetadataFamilyGroup,
         family: MetadataRowFamily,
@@ -606,7 +606,7 @@ mod tests {
         let cluster = retention_clusters(group)
             .iter()
             .find(|cluster| cluster.families.contains(&family))
-            .expect("a cluster merges the family");
+            .expect("a cluster compacts the family");
         let mut operator = cluster.rule.operator(ChangeSeq(0));
         let mut locality: Option<String> = None;
         let mut kept = Vec::new();

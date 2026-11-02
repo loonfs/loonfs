@@ -29,7 +29,7 @@ fn access_record(
 }
 
 #[test]
-fn the_merge_keeps_a_latest_empty_revision() {
+fn the_compaction_keeps_a_latest_empty_revision() {
     let cleared = AccessRevisionRecord {
         boundary: false,
         grants: AccessGrants::default(),
@@ -43,13 +43,13 @@ fn the_merge_keeps_a_latest_empty_revision() {
         manifest_rows_for_family(&builder.build(), ApiMetadataRowFamily::Access),
     )]);
 
-    merge_rows_with_retention(
+    compact_rows_with_retention(
         MetadataFamilyGroup::Access,
         &mut rows_by_family,
         ChangeSeq(9),
         ChangeSeq(0),
     )
-    .expect("merge access");
+    .expect("compact access");
 
     assert_eq!(
         rows_by_family.remove(&ApiMetadataRowFamily::Access),

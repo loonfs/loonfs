@@ -1,9 +1,9 @@
 //! Base compactions whose kept inode filter is seeded by the test, so that an
 //! assertion about removed rows doesn't depend on a filter false positive.
 
-use crate::compaction::group_merge::run_metadata_compaction;
+use crate::compaction::group_compaction::run_metadata_compaction;
 use crate::compaction::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
-use crate::compaction::plan::{group_run_descriptors, MergePlacement, MetadataCompactionSpec};
+use crate::compaction::plan::{group_run_descriptors, CompactionPlacement, MetadataCompactionSpec};
 use crate::compaction::publication::{input_segment_keys, CompactionPublication};
 use crate::compaction::{CompactionUnitOutcome, MetadataCompactionCancellation};
 use crate::manifest::metadata_basis_from_manifest;
@@ -20,12 +20,12 @@ use loonfs_types::{
 use std::assert_matches;
 use std::sync::Arc;
 
-/// Merges every run of each of `groups` into one base run, with each merge's
+/// Compacts every run of each of `groups` into one base run, with each compaction's
 /// kept inode filter seeded so that it keeps no row that `hidden` inodes own.
 ///
 /// The low bits of an inode ID are random, so a filter seeded by the next run
 /// number could keep a hidden inode's row by a false positive. Choosing the
-/// seed makes every merge remove every hidden row, so an assertion after it
+/// seed makes every compaction remove every hidden row, so an assertion after it
 /// doesn't depend on the IDs that a run of the test drew.
 pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
     store: &S,
@@ -34,9 +34,9 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
     hidden: &[InodeId],
 ) {
     for &group in groups {
-        // Each merge takes at most `MAX_COMPACTION_INPUT_RUNS` runs, so a
-        // group with more runs needs more than one merge.
-        let mut merged_every_run = false;
+        // Each compaction takes at most `MAX_COMPACTION_INPUT_RUNS` runs, so a
+        // group with more runs needs more than one compaction.
+        let mut compacted_every_run = false;
         for _ in 0..8 {
             let current = super::namespace_store(store, namespace_id)
                 .load_current_manifest()
@@ -48,7 +48,7 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
                 .filter(|run| group_run_descriptors(run, group).next().is_some())
                 .collect::<Vec<_>>();
             runs.sort_by_key(|run| (run.tier != RunTier::Base, run.run_seq));
-            merged_every_run = runs.len() <= crate::limits::MAX_COMPACTION_INPUT_RUNS;
+            compacted_every_run = runs.len() <= crate::limits::MAX_COMPACTION_INPUT_RUNS;
             if runs.is_empty() {
                 break;
             }
@@ -60,7 +60,7 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
                     .flat_map(|run| group_run_descriptors(run, group))
                     .map(|descriptor| descriptor.row_count)
                     .sum(),
-                MergePlacement::Base {
+                CompactionPlacement::Base {
                     output_seq: payload.head_seq,
                 },
                 payload.retention_floor_seq,
@@ -79,11 +79,14 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
             }
             let seed = seed.expect("a seed whose kept inode filter keeps no hidden row");
             compact_with_seed(store, namespace_id, &spec, seed).await;
-            if merged_every_run {
+            if compacted_every_run {
                 break;
             }
         }
-        assert!(merged_every_run, "{group:?} merges into one base run");
+        assert!(
+            compacted_every_run,
+            "{group:?} is compacted into one base run"
+        );
     }
 }
 
@@ -111,7 +114,7 @@ pub(crate) fn seeded_manifest(
     Arc::new(encode_manifest(payload).into_envelope())
 }
 
-/// Merges `spec` over the current manifest with its kept inode filter seeded
+/// Compacts `spec`'s window over the current manifest with its kept inode filter seeded
 /// by `seed`, and publishes the output.
 pub(crate) async fn compact_with_seed<S: ObjectStore + ?Sized>(
     store: &S,
@@ -127,7 +130,7 @@ pub(crate) async fn compact_with_seed<S: ObjectStore + ?Sized>(
     basis.manifest = seeded_manifest(&current, seed);
     let input_keys = input_segment_keys(&basis.scan_runs, spec).expect("the spec's runs");
     let cancellation = MetadataCompactionCancellation::default();
-    let merged = run_metadata_compaction(
+    let compacted = run_metadata_compaction(
         &basis,
         &crate::cache::MetadataSegmentCache::unshared(0),
         namespace_id,
@@ -136,7 +139,7 @@ pub(crate) async fn compact_with_seed<S: ObjectStore + ?Sized>(
         &cancellation,
     )
     .await
-    .expect("merge")
+    .expect("compact")
     .expect("not cancelled");
     drop(basis);
     let timer = super::std_timer();
@@ -145,7 +148,7 @@ pub(crate) async fn compact_with_seed<S: ObjectStore + ?Sized>(
             None,
             spec,
             &input_keys,
-            merged,
+            compacted,
             &cancellation,
             &CompactionPublication {
                 compactor_epoch: loonfs_types::CompactorEpoch(0),
@@ -154,7 +157,7 @@ pub(crate) async fn compact_with_seed<S: ObjectStore + ?Sized>(
             },
         )
         .await
-        .expect("publish the merge");
+        .expect("publish the compaction");
     assert_matches!(outcome, CompactionUnitOutcome::Published { .. });
 }
 
@@ -178,7 +181,7 @@ pub(crate) async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
             MetadataFamilyGroup::Inodes,
             vec![RunNo(0)],
             0,
-            MergePlacement::Base {
+            CompactionPlacement::Base {
                 output_seq: current.payload().head_seq,
             },
             ChangeSeq(0),

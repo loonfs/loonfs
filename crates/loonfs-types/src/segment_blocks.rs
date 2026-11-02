@@ -14,10 +14,10 @@ use xxhash_rust::xxh64::xxh64;
 
 /// Target uncompressed size of one data block.
 pub const DEFAULT_TARGET_BLOCK_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024).unwrap();
-/// Number of delta runs at which a merge is due, whatever the runs' sizes.
+/// Number of delta runs at which a compaction is due, whatever the runs' sizes.
 pub const DEFAULT_MAX_DELTA_RUNS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 /// Number of similar-size metadata runs in one family group that makes a
-/// merge due.
+/// compaction due.
 pub const DEFAULT_MIN_COMPACTION_RUNS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 /// Target number of rows in one immutable segment.
 pub const DEFAULT_MAX_ROWS_PER_SEGMENT: NonZeroUsize = NonZeroUsize::new(65_536).unwrap();
@@ -27,8 +27,8 @@ pub const DEFAULT_MAX_ROWS_PER_SEGMENT: NonZeroUsize = NonZeroUsize::new(65_536)
 pub const DEFAULT_TARGET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum number of runs read by one compaction unit.
 pub const DEFAULT_MAX_COMPACTION_INPUT_RUNS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
-// A merge above a group's oldest run needs two runs, and a group at the delta
-// run limit has enough delta runs for one unit to merge the minimum.
+// A compaction above a group's oldest run needs two runs, and a group at the delta
+// run limit has enough delta runs for one unit to compact the minimum.
 const _: () = assert!(
     2 <= DEFAULT_MIN_COMPACTION_RUNS.get()
         && DEFAULT_MIN_COMPACTION_RUNS.get() <= DEFAULT_MAX_DELTA_RUNS.get()
@@ -37,7 +37,7 @@ const _: () = assert!(
 /// Maximum number of rows that one bounded maintenance step reads, such as the
 /// compaction unit of one metadata maintenance pass.
 pub const DEFAULT_MAX_COMPACTION_INPUT_ROWS: NonZeroUsize = NonZeroUsize::new(131_072).unwrap();
-/// Maximum decoded input that one build or merge keeps in memory at once.
+/// Maximum decoded input that one build or compaction keeps in memory at once.
 pub const DEFAULT_MAX_COMPACTION_INPUT_BYTES: NonZeroUsize =
     NonZeroUsize::new(64 * 1024 * 1024).unwrap();
 /// Maximum stored filter size embedded in a segment descriptor.

@@ -35,20 +35,20 @@ use std::ops::ControlFlow;
 /// `active_deletions`.
 const KEPT_INODE_SCAN_ROWS: usize = DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 
-/// The inodes whose rows a base merge keeps.
+/// The inodes whose rows a base compaction keeps.
 pub(crate) enum KeptInodeFilter {
-    /// The merge keeps every row, because it isn't a base merge of a group
+    /// The compaction keeps every row, because it isn't a base compaction of a group
     /// that stores rows by inode, because the basis manifest's acknowledged
     /// floor is 0, or because the walk would exceed its depth limit.
     EveryInode,
     /// The inodes that the walk reached. The filter can also match an inode
     /// that the walk didn't reach, which keeps that inode's rows for one
-    /// merge.
+    /// compaction.
     Reached(BloomFilter),
 }
 
 impl KeptInodeFilter {
-    /// Whether the merge keeps `row` and judges it under its family's
+    /// Whether the compaction keeps `row` and judges it under its family's
     /// retention rule, rather than removing it because an expired deletion
     /// hides its inode.
     pub(crate) fn keeps(&self, row: &MetadataRow) -> bool {
@@ -79,7 +79,7 @@ fn filter_key(inode_id: InodeId) -> [u8; 16] {
     inode_id.to_be_bytes()
 }
 
-/// Whether a base merge of `group` removes the rows of hidden inodes.
+/// Whether a base compaction of `group` removes the rows of hidden inodes.
 fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
     match group {
         MetadataFamilyGroup::Inodes
@@ -94,7 +94,7 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
     }
 }
 
-/// Builds the kept inode filter for the merge that `spec` plans over `basis`,
+/// Builds the kept inode filter for the compaction that `spec` plans over `basis`,
 /// or returns the outcome that stopped the walk.
 ///
 /// A basis whose manifest has an acknowledged floor of 0 keeps every row
@@ -251,7 +251,7 @@ impl ListedDeletions {
 }
 
 struct KeptInodeWalk<'a, 'c, S: ObjectStore + ?Sized> {
-    /// The basis, with a block memo that the walk drops before the merge
+    /// The basis, with a block memo that the walk drops before the compaction
     /// reads its input.
     segments: VerifiedMetadataSegments<'a, S>,
     filter: BloomFilter,

@@ -1,4 +1,4 @@
-//! Plans one metadata compaction unit: the family group it merges, the
+//! Plans one metadata compaction unit: the family group it compacts, the
 //! window of runs, and the tier and sequence of the output run.
 
 use super::step::MetadataCompactionPolicy;
@@ -6,7 +6,7 @@ use crate::limits::MAX_COMPACTION_INPUT_RUNS;
 use crate::namespace::control::LoadedManifest;
 use crate::segment::index_block_load::segment_object_bytes;
 use crate::segment::runs::{
-    runs_in_merge_order, runs_newest_first, MetadataFamilyGroup, MetadataRunManifest,
+    runs_in_compaction_order, runs_newest_first, MetadataFamilyGroup, MetadataRunManifest,
     MetadataRunPolicy,
 };
 use loonfs_types::format::manifest::{
@@ -15,7 +15,7 @@ use loonfs_types::format::manifest::{
 use loonfs_types::{ChangeSeq, MetadataCompactionId, RunNo};
 use std::num::NonZeroUsize;
 
-/// The size ratio within which a run joins a merge window.
+/// The size ratio within which a run joins a compaction window.
 ///
 /// A run joins a size tier when its stored bytes are at most this many times
 /// the smallest run already in the tier. At the delta run limit, a run older
@@ -40,7 +40,7 @@ pub(crate) struct MetadataCompactionSpec {
     /// unit reports it is about to read. The rows it writes are fewer by
     /// whatever the floor lets go.
     input_rows: u64,
-    pub(crate) placement: MergePlacement,
+    pub(crate) placement: CompactionPlacement,
     frozen_floor_seq: ChangeSeq,
 }
 
@@ -49,7 +49,7 @@ impl MetadataCompactionSpec {
         group: MetadataFamilyGroup,
         inputs: Vec<RunNo>,
         input_rows: u64,
-        placement: MergePlacement,
+        placement: CompactionPlacement,
         frozen_floor_seq: ChangeSeq,
     ) -> Self {
         assert!(
@@ -98,7 +98,7 @@ impl MetadataCompactionSpec {
         self.frozen_floor_seq
     }
 
-    pub(crate) fn placement(&self) -> MergePlacement {
+    pub(crate) fn placement(&self) -> CompactionPlacement {
         self.placement
     }
 
@@ -113,8 +113,8 @@ impl MetadataCompactionSpec {
 
 /// Plans the compaction unit that a manifest warrants, from its descriptors.
 ///
-/// The plan merges the window of the family group with the most delta rows,
-/// among the groups that have a window to merge. A window has at most eight
+/// The plan compacts the window of the family group with the most delta rows,
+/// among the groups that have a window to compact. A window has at most eight
 /// complete runs, and its sizes come from the manifest's block handles, so
 /// planning reads no data.
 pub(crate) fn plan_compaction(
@@ -127,7 +127,7 @@ pub(crate) fn plan_compaction(
     plan_group(payload, runs, group, run_policy, compaction_policy)
 }
 
-/// Plans a unit over `group`'s window, if the group has one to merge.
+/// Plans a unit over `group`'s window, if the group has one to compact.
 pub(crate) fn plan_group(
     payload: &NamespaceManifestPayload,
     runs: &[MetadataRunManifest],
@@ -136,7 +136,7 @@ pub(crate) fn plan_group(
     compaction_policy: MetadataCompactionPolicy,
 ) -> Option<MetadataCompactionSpec> {
     let candidates = group_candidates(runs, group);
-    let range = select_merge_window(&candidates, group, run_policy, compaction_policy)?;
+    let range = select_compaction_window(&candidates, group, run_policy, compaction_policy)?;
     let bottom_anchored = range.start == 0;
     let selected = candidates[range]
         .iter()
@@ -150,7 +150,7 @@ pub(crate) fn plan_group(
             .flat_map(|run| group_run_descriptors(run, group))
             .map(|descriptor| descriptor.row_count)
             .sum(),
-        merge_placement(bottom_anchored, &selected, payload.head_seq),
+        compaction_placement(bottom_anchored, &selected, payload.head_seq),
         payload.retention_floor_seq,
     ))
 }
@@ -171,18 +171,18 @@ pub fn metadata_compaction_due(
     .is_some()
 }
 
-/// Determines a merge's output level, sequence, and retention behavior.
+/// Determines a compaction's output level, sequence, and retention behavior.
 ///
-/// A merge that includes the group's oldest run writes a base-tier run at the
+/// A compaction that includes the group's oldest run writes a base-tier run at the
 /// manifest head. Its input includes the previous base run and all older rows
 /// needed by retention rules, so it may remove rows below the retention floor.
 /// Replacing the previous base leaves the group with at most one base run.
 ///
-/// A merge that starts above the base writes a delta-tier run and preserves
+/// A compaction that starts above the base writes a delta-tier run and preserves
 /// every input row. The output uses its newest input sequence so it remains in
 /// the same position relative to runs outside the selected window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MergePlacement {
+pub(crate) enum CompactionPlacement {
     /// The window includes the group's oldest run. The output is the base run,
     /// and retention may remove related row pairs because both the older row
     /// and its newer cancellation row are included (format spec,
@@ -193,7 +193,7 @@ pub(crate) enum MergePlacement {
     Delta { output_seq: ChangeSeq },
 }
 
-impl MergePlacement {
+impl CompactionPlacement {
     pub(super) fn output_seq(self) -> ChangeSeq {
         match self {
             Self::Base { output_seq } | Self::Delta { output_seq } => output_seq,
@@ -213,22 +213,22 @@ impl MergePlacement {
 }
 
 /// Where the output of the selected window stands.
-fn merge_placement(
+fn compaction_placement(
     bottom_anchored: bool,
     runs: &[MetadataRunManifest],
     head_seq: ChangeSeq,
-) -> MergePlacement {
+) -> CompactionPlacement {
     if bottom_anchored {
-        return MergePlacement::Base {
+        return CompactionPlacement::Base {
             output_seq: head_seq,
         };
     }
-    MergePlacement::Delta {
+    CompactionPlacement::Delta {
         output_seq: runs
             .iter()
             .map(|run| run.run_seq)
             .max()
-            .expect("a delta merge window should hold at least one run"),
+            .expect("a delta compaction window should hold at least one run"),
     }
 }
 
@@ -236,14 +236,14 @@ fn group_candidates(
     runs: &[MetadataRunManifest],
     group: MetadataFamilyGroup,
 ) -> Vec<&MetadataRunManifest> {
-    runs_in_merge_order(
+    runs_in_compaction_order(
         runs.iter()
             .filter(|run| run_has_group_rows(run, group))
             .collect(),
     )
 }
 
-/// Returns the run fan-in one unit may merge: the policy's knob, capped by
+/// Returns the run fan-in one unit may compact: the policy's knob, capped by
 /// the ceiling.
 fn effective_max_input_runs(run_policy: MetadataRunPolicy) -> usize {
     run_policy
@@ -252,18 +252,18 @@ fn effective_max_input_runs(run_policy: MetadataRunPolicy) -> usize {
         .min(MAX_COMPACTION_INPUT_RUNS)
 }
 
-/// Returns the runs a size tier needs before it merges. A merge above the
+/// Returns the runs a size tier needs before it's compacted. A compaction above the
 /// group's oldest run needs at least two runs (format spec, "Compaction
 /// windows"), so a minimum of one acts as two.
 fn effective_min_compaction_runs(run_policy: MetadataRunPolicy) -> usize {
     run_policy.min_compaction_runs.get().max(2)
 }
 
-/// Selects the contiguous window of `candidates`, which are in merge order,
-/// that a unit merges for `group`, or `None` when the group has nothing due.
+/// Selects the contiguous window of `candidates`, which are in compaction order,
+/// that a unit compacts for `group`, or `None` when the group has nothing due.
 /// Sizes come from the manifest's block handles, so planning needs no data
 /// reads.
-fn select_merge_window(
+fn select_compaction_window(
     candidates: &[&MetadataRunManifest],
     group: MetadataFamilyGroup,
     run_policy: MetadataRunPolicy,
@@ -297,13 +297,13 @@ fn select_merge_window(
     window_is_valid(candidates, &window).then_some(window)
 }
 
-/// Returns the window that merges a group's runs whatever their sizes.
+/// Returns the window that compacts a group's runs whatever their sizes.
 ///
-/// A group that fits in one unit merges whole. A larger group merges its
+/// A group that fits in one unit is compacted whole. A larger group compacts its
 /// oldest `max_runs` runs, unless the oldest run is too large to join a tier
-/// with the runs above it. Then the unit merges the runs above it first, so
+/// with the runs above it. Then the unit compacts the runs above it first, so
 /// the large run is rewritten once, by the unit that finishes the group.
-/// `stored_bytes` lists the runs in merge order, oldest first.
+/// `stored_bytes` lists the runs in compaction order, oldest first.
 fn immediate_window(stored_bytes: &[u64], max_runs: usize) -> std::ops::Range<usize> {
     let runs = stored_bytes.len();
     if runs <= max_runs {
@@ -324,9 +324,9 @@ fn immediate_window(stored_bytes: &[u64], max_runs: usize) -> std::ops::Range<us
 ///
 /// A tier starts at one run and grows toward older runs while the next older
 /// run's stored bytes are at most [`COMPACTION_SIZE_RATIO`] times the smallest
-/// run already in it, so the largest tier the ratio allows is merged. A tier
-/// longer than `max_runs` merges its oldest runs, and the newer ones wait for
-/// the next unit. `stored_bytes` lists the runs in merge order, oldest first.
+/// run already in it, so the largest tier the ratio allows is compacted. A tier
+/// longer than `max_runs` compacts its oldest runs, and the newer ones wait for
+/// the next unit. `stored_bytes` lists the runs in compaction order, oldest first.
 fn tiered_window(
     stored_bytes: &[u64],
     min_runs: usize,
@@ -344,15 +344,15 @@ fn tiered_window(
     })
 }
 
-/// Returns the window a group merges once the group has `max_delta_runs`
+/// Returns the window a group compacts once the group has `max_delta_runs`
 /// delta runs and no size tier is ready, so the number of runs a read checks
 /// stays bounded.
 ///
-/// The window starts with the two newest runs, because merging one run
+/// The window starts with the two newest runs, because compacting one run
 /// wouldn't reduce the group's run count. It grows toward older runs while
 /// the next older run's stored bytes are at most [`COMPACTION_SIZE_RATIO`]
 /// times the total stored bytes of the runs already in it, up to `max_runs`.
-/// `stored_bytes` lists the runs in merge order, oldest first.
+/// `stored_bytes` lists the runs in compaction order, oldest first.
 fn capped_window(
     candidates: &[&MetadataRunManifest],
     stored_bytes: &[u64],
@@ -380,8 +380,8 @@ fn capped_window(
     Some(start..end)
 }
 
-/// Checks that a window merges at least two runs, or promotes the group's
-/// oldest run from a delta to the base. A one-run merge of anything else
+/// Checks that a window compacts at least two runs, or promotes the group's
+/// oldest run from a delta to the base. A one-run compaction of anything else
 /// would rewrite the run without changing the group.
 fn window_is_valid(candidates: &[&MetadataRunManifest], window: &std::ops::Range<usize>) -> bool {
     match window.len() {
@@ -412,7 +412,7 @@ pub(crate) fn select_family_group(
     run_policy: MetadataRunPolicy,
 ) -> Option<MetadataFamilyGroup> {
     ranked_family_groups(payload).into_iter().find(|group| {
-        select_merge_window(
+        select_compaction_window(
             &group_candidates(runs, *group),
             *group,
             run_policy,
@@ -457,7 +457,7 @@ mod planning_tests {
     const MIB: u64 = 1024 * 1024;
 
     /// A manifest whose only group, the inodes, has one run of each size in
-    /// MiB, in merge order: a base, then delta runs from oldest to newest.
+    /// MiB, in compaction order: a base, then delta runs from oldest to newest.
     ///
     /// The planner only reads descriptors, so the runs share the fixture's
     /// descriptor and differ only in the stored length its index block
@@ -494,7 +494,7 @@ mod planning_tests {
         payload
     }
 
-    /// The positions, in merge order, of the runs the planner merges.
+    /// The positions, in compaction order, of the runs the planner compacts.
     fn planned(
         payload: &NamespaceManifestPayload,
         policy: MetadataRunPolicy,
@@ -599,7 +599,7 @@ mod planning_tests {
     }
 
     #[test]
-    fn the_planner_merges_the_largest_tier_the_ratio_allows() {
+    fn the_planner_compacts_the_largest_tier_the_ratio_allows() {
         let tier = min_compaction_runs() as u64;
         // Every delta run, not just the first `tier` of them.
         assert_eq!(tiered(&[1024, 1, 1, 1, 1, 1, 1]), Some(1..7));
@@ -612,12 +612,12 @@ mod planning_tests {
         assert_eq!(tiered(&[4096, 256, 64, 64, 64]), Some(1..5));
         assert_eq!(tiered(&[1024, 255, 255, 255, 255]), Some(1..5));
         assert_eq!(tiered(&[1024, 256, 256, 256, 256]), Some(0..5));
-        // A small newest run doesn't keep an older tier from merging.
+        // A small newest run doesn't keep an older tier from being compacted.
         assert_eq!(tiered(&[1024, 16, 16, 16, 16, 1]), Some(1..1 + tier));
     }
 
     #[test]
-    fn a_group_at_the_delta_run_limit_merges_its_newest_runs_when_no_tier_is_ready() {
+    fn a_group_at_the_delta_run_limit_compacts_its_newest_runs_when_no_tier_is_ready() {
         let policy = MetadataRunPolicy::default();
         let limit = policy.max_delta_runs.get();
         // Each run is five times the next newer one, so no two runs form a tier.
@@ -632,7 +632,7 @@ mod planning_tests {
         assert_eq!(tiered(&sizes), Some(runs - 2..runs));
     }
 
-    /// The window the planner merges for a group at the delta run limit, with
+    /// The window the planner compacts for a group at the delta run limit, with
     /// a tier minimum above the group's run count so that no size tier is due.
     fn capped(sizes_mib: &[u64]) -> Option<Range<u64>> {
         let policy = MetadataRunPolicy {
@@ -653,9 +653,9 @@ mod planning_tests {
     fn a_capped_window_takes_the_two_newest_runs_and_each_older_run_within_the_ratio() {
         for (sizes, expected) in [
             // An earlier output more than four times the small runs above it
-            // stays out of their merge.
+            // stays out of their compaction.
             (vec![50_000, 12_000, 8, 8, 8], 2..5),
-            // The two newest runs merge whatever their sizes, so the output
+            // The two newest runs are compacted whatever their sizes, so the output
             // joins one small run.
             (vec![50_000, 12_000, 8], 1..3),
             // After the two newest runs, the window keeps growing while the
@@ -672,7 +672,7 @@ mod planning_tests {
             assert_eq!(capped(&sizes), Some(expected), "{sizes:?}");
         }
         // The window keeps its newest runs when more are within the ratio
-        // than one unit merges.
+        // than one unit compacts.
         let fan_in = MAX_COMPACTION_INPUT_RUNS as u64;
         let mut sizes = vec![50_000];
         sizes.extend([1; 10]);
@@ -680,7 +680,7 @@ mod planning_tests {
     }
 
     #[test]
-    fn a_backlog_is_merged_in_contiguous_windows_with_bounded_fan_in() {
+    fn a_backlog_is_compacted_in_contiguous_windows_with_bounded_fan_in() {
         let fan_in = MAX_COMPACTION_INPUT_RUNS as u64;
         assert_eq!(tiered(&[1; 100]), Some(0..fan_in));
         let mut sizes = vec![4096];
@@ -689,17 +689,17 @@ mod planning_tests {
     }
 
     #[test]
-    fn immediate_compaction_merges_deltas_before_rewriting_a_large_base() {
+    fn immediate_compaction_compacts_deltas_before_rewriting_a_large_base() {
         let fan_in = MAX_COMPACTION_INPUT_RUNS;
         for delta_runs in [12, 20] {
             let mut sizes = vec![4096];
             sizes.extend(vec![1; delta_runs]);
             while sizes.len() > fan_in {
-                let selected = immediate(&sizes).expect("delta merge");
+                let selected = immediate(&sizes).expect("delta compaction");
                 assert_eq!(selected, 1..1 + fan_in as u64);
                 let selected = 1..1 + fan_in;
-                let merged_size = sizes[selected.clone()].iter().sum();
-                sizes.splice(selected, [merged_size]);
+                let compacted_size = sizes[selected.clone()].iter().sum();
+                sizes.splice(selected, [compacted_size]);
             }
             assert_eq!(immediate(&sizes), Some(0..sizes.len() as u64));
         }

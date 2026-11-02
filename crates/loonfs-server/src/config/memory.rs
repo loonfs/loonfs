@@ -96,7 +96,7 @@ pub(crate) struct MemorySizing {
     pub(crate) grep: MemoryTerm,
     pub(super) read_working: MemoryTerm,
     pub(super) admitted: MemoryTerm,
-    pub(super) merge_input: MemoryTerm,
+    pub(super) compaction_input: MemoryTerm,
     compactions: usize,
     serves_grep: bool,
 }
@@ -112,7 +112,7 @@ impl MemorySizing {
             (&self.grep, usize::from(self.serves_grep)),
             (&self.read_working, 1),
             (&self.admitted, 1),
-            (&self.merge_input, self.compactions),
+            (&self.compaction_input, self.compactions),
         ]
     }
 
@@ -292,9 +292,9 @@ impl ServerConfig {
                 share(10),
                 64 * MIB,
             ),
-            merge_input: MemoryTerm::new(
-                "max_merge_input_bytes",
-                self.max_merge_input_bytes,
+            compaction_input: MemoryTerm::new(
+                "max_compaction_input_bytes",
+                self.max_compaction_input_bytes,
                 share(10).map(|bytes| bytes / compactions),
                 loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES.get(),
             ),
@@ -303,8 +303,8 @@ impl ServerConfig {
         };
         memory.validate()?;
         validate_positive(
-            "max_merge_input_bytes",
-            memory.merge_input.bytes as u64,
+            "max_compaction_input_bytes",
+            memory.compaction_input.bytes as u64,
             None,
         )?;
         Ok(memory)
