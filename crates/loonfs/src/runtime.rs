@@ -431,48 +431,73 @@ impl LoonFs<Writable> {
                 self.namespace(source_namespace_id)
                     .ensure_administrator()
                     .await?;
-                let result = {
-                    let _permit = match options.snapshot_id {
-                        Some(_) => None,
-                        None => Some(self.core.fold_permit().await),
-                    };
-                    self.engine(source_namespace_id)
-                        .fork_namespace(new_namespace_id, actor, options.snapshot_id.as_ref())
-                        .await
-                }
-                .map_err(Error::from);
-                if let Some(published) = result
-                    .as_ref()
-                    .ok()
-                    .and_then(|report| report.published.as_ref())
-                {
-                    self.mode
-                        .publisher
-                        .raise_hint(source_namespace_id, published.manifest.manifest_no)
-                        .await;
-                }
-                // The runtime drops its view of the source after a fork, as it does
-                // after a creation or a deletion (see the read freshness design
-                // note), so the source's publisher drops its position instead of
-                // moving onto the fork's fold.
-                let result = self
-                    .mode
-                    .publisher
-                    .finish_namespace_mutation(source_namespace_id, result, |_| {
-                        NamespaceChange::Unknown
-                    })
-                    .await
-                    .map(|report| report.response);
-                if result.is_ok() {
-                    self.mode
-                        .publisher
-                        .invalidate_namespace(new_namespace_id, NamespaceChange::Unknown)
-                        .await;
-                }
-                result
+                let engine = self.engine(source_namespace_id);
+                let snapshot_id = options.snapshot_id.as_ref();
+                self.install_fork(
+                    source_namespace_id,
+                    new_namespace_id,
+                    snapshot_id.is_none(),
+                    async move {
+                        engine
+                            .fork_namespace(new_namespace_id, actor, snapshot_id)
+                            .await
+                    },
+                )
+                .await
             },
         )
         .await
+    }
+
+    /// Installs the fork of `source_namespace_id` into `new_namespace_id`
+    /// that `fork` makes, under a fold permit from the runtime's execution
+    /// budget when `fold` says that the fork folds the source's WAL tail,
+    /// and moves this runtime's views of both namespaces past the fork.
+    pub(crate) async fn install_fork(
+        &self,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
+        fold: bool,
+        fork: impl std::future::Future<
+            Output = loonfs_core::Result<loonfs_core::PublicationReport<crate::NamespaceMetadata>>,
+        >,
+    ) -> Result<crate::NamespaceMetadata> {
+        let result = {
+            let _permit = if fold {
+                Some(self.core.fold_permit().await)
+            } else {
+                None
+            };
+            fork.await
+        }
+        .map_err(Error::from);
+        if let Some(published) = result
+            .as_ref()
+            .ok()
+            .and_then(|report| report.published.as_ref())
+        {
+            self.mode
+                .publisher
+                .raise_hint(source_namespace_id, published.manifest.manifest_no)
+                .await;
+        }
+        // The runtime drops its view of the source after a fork, as it does
+        // after a creation or a deletion (see the read freshness design
+        // note), so the source's publisher drops its position instead of
+        // moving onto the fork's fold.
+        let result = self
+            .mode
+            .publisher
+            .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unknown)
+            .await
+            .map(|report| report.response);
+        if result.is_ok() {
+            self.mode
+                .publisher
+                .invalidate_namespace(new_namespace_id, NamespaceChange::Unknown)
+                .await;
+        }
+        result
     }
 }
 

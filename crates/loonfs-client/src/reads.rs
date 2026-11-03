@@ -595,11 +595,11 @@ impl Client {
     }
 
     /// Streams one retained file revision by inode identity through the
-    /// server, at the consistency that `options` sets.
+    /// server, at the consistency or the pin that `options` sets.
     ///
     /// See [`Self::read_file_stream_with_options`] for when the bytes are
-    /// verified. A snapshot captures one revision of each file, so options
-    /// that read a snapshot return `invalid_request`.
+    /// verified. Options that read a snapshot, or one of the namespace's fork
+    /// pins, read the revision that the pinned manifest keeps.
     pub async fn read_file_revision_stream_by_inode_with_options(
         &self,
         namespace_id: &NamespaceId,

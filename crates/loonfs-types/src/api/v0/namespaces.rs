@@ -112,6 +112,25 @@ pub struct NamespaceForkBasis {
     pub source_namespace_id: NamespaceId,
     /// The source namespace's sequence that the fork captured.
     pub source_head_seq: ChangeSeq,
+    /// The fork pin that keeps the source's state at `source_head_seq` readable. A read of the
+    /// source namespace accepts it as `snapshot_id`.
+    pub source_pin_id: PinId,
+    /// The fork whose unmerged commits a rebase replays into this namespace. Only a namespace that
+    /// a rebase created has this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub rebased_from: Option<NamespaceRebasedFrom>,
+}
+
+/// The fork whose unmerged commits a rebase replays into the namespace that the rebase created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NamespaceRebasedFrom {
+    /// The fork whose commits the namespace's replay commits apply.
+    pub source_namespace_id: NamespaceId,
+    /// The fork sequence that the fork's next merge would have started after when the rebase
+    /// created the namespace. The namespace's first replay commit starts after it.
+    pub resume_after_seq: ChangeSeq,
 }
 
 /// A namespace's state and the storage details that maintenance uses.

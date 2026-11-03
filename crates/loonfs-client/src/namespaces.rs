@@ -1,5 +1,5 @@
-//! Namespace lifecycle: creating, reading, deleting, forking, and merging
-//! namespaces.
+//! Namespace lifecycle: creating, reading, deleting, forking, merging, and
+//! rebasing namespaces.
 
 use crate::operations::{self};
 use crate::transport::QueryBuilder;
@@ -9,7 +9,8 @@ use loonfs_types::options::{
 };
 use loonfs_types::{
     headers, ActorId, Commit, CommitId, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
-    ForkNamespaceRequest, MergeForkRequest, NamespaceId, NamespaceMetadata,
+    ForkNamespaceRequest, MergeForkRequest, NamespaceId, NamespaceMetadata, RebaseForkRequest,
+    RebaseForkResponse,
 };
 
 impl Client {
@@ -171,6 +172,57 @@ impl Client {
                 .header(headers::ACTOR, actor.as_str())
                 .json(&MergeForkRequest {
                     source_namespace_id: source_namespace_id.clone(),
+                    through_seq: options.through_seq,
+                    commit_id: options.commit_id.clone().unwrap_or_else(CommitId::generate),
+                    message: options.message.clone(),
+                })?,
+        )
+        .await
+    }
+
+    /// Rebases the fork `source_namespace_id` of `namespace_id`: replays
+    /// its unmerged commits, through the fork's head, into
+    /// `new_namespace_id`, a new fork of `namespace_id` that the first
+    /// rebase creates.
+    pub async fn rebase_fork(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
+        actor: &ActorId,
+    ) -> Result<RebaseForkResponse> {
+        self.rebase_fork_with_options(
+            namespace_id,
+            source_namespace_id,
+            new_namespace_id,
+            actor,
+            &MergeForkOptions::default(),
+        )
+        .await
+    }
+
+    /// Rebases the fork `source_namespace_id` of `namespace_id` into
+    /// `new_namespace_id`, through `options.through_seq` or the fork's head,
+    /// under `options.commit_id` or a generated commit ID. The response's
+    /// conflict report is absent when the commit ID identifies a replay
+    /// commit that an earlier request committed.
+    pub async fn rebase_fork_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
+        actor: &ActorId,
+        options: &MergeForkOptions,
+    ) -> Result<RebaseForkResponse> {
+        let url = self.namespace_url(namespace_id, "/rebases");
+        // The request's commit ID resolves an ambiguous resend through the
+        // replay commit's durable receipt.
+        self.send_json(
+            self.request(operations::REBASE_FORK, &url)
+                .header(headers::ACTOR, actor.as_str())
+                .json(&RebaseForkRequest {
+                    source_namespace_id: source_namespace_id.clone(),
+                    new_namespace_id: new_namespace_id.clone(),
                     through_seq: options.through_seq,
                     commit_id: options.commit_id.clone().unwrap_or_else(CommitId::generate),
                     message: options.message.clone(),

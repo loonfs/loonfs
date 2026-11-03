@@ -1262,6 +1262,7 @@ fn a_manifest_whose_acknowledged_floor_breaks_its_bounds_fails_to_load() {
             payload_checksum: loonfs_types::sha256_digest(b"source"),
         },
         source_pin_id: PinId::parse("pin_00000000000000000004-0000000000000005").expect("pin id"),
+        rebased_from: None,
     };
     for (manifest, expected) in [
         (

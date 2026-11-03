@@ -689,6 +689,7 @@ mod tests {
                             "pin_00000000000000000001-0000000000000001",
                         )
                         .expect("checkpoint"),
+                        rebased_from: None,
                     })
                 }
                 4 => successor.family_root_id = NamespaceId::parse("another").expect("namespace"),
@@ -811,6 +812,7 @@ mod tests {
                 },
                 source_pin_id: crate::PinId::parse("pin_00000000000000000002-0000000000000003")
                     .expect("pin"),
+                rebased_from: None,
             }),
             head_seq: ChangeSeq(3),
             retention_floor_seq: ChangeSeq(3),

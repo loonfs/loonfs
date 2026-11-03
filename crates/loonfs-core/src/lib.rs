@@ -216,7 +216,7 @@ pub use manifest::{
     next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail, ManifestLoadError,
     PublicationReport, PublishedManifest, RetentionTarget,
 };
-pub use merge::{MergeAllowance, MergePlan, MergeRequest};
+pub use merge::{MergeAllowance, MergePlan, MergeRequest, ReplayPlan};
 pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{

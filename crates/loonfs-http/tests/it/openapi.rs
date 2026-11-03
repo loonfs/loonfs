@@ -2254,7 +2254,8 @@ fn actor_headers_are_global_and_only_attributed_operations_require_them() {
             "create_commit",
             "create_namespace",
             "fork_namespace",
-            "merge_fork"
+            "merge_fork",
+            "rebase_fork"
         ])
     );
 }

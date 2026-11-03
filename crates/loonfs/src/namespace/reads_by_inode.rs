@@ -256,7 +256,6 @@ impl<M: crate::Mode> Namespace<M> {
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let permit = self.core.read_permit().await;
-        ensure_revision_read_at(&options.at, revision_no)?;
         self.read_at(
             &options.at,
             &permit,
@@ -266,7 +265,7 @@ impl<M: crate::Mode> Namespace<M> {
                     .await
             },
             |view, permit| async move {
-                view.read_file_stream_by_inode_with_permit(inode_id, options, permit)
+                view.read_file_stream_by_inode_with_permit(inode_id, revision_no, options, permit)
                     .await
             },
         )

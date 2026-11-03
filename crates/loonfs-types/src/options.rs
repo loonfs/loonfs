@@ -107,7 +107,8 @@ pub enum ReadAt {
     /// The live head, confirmed as the consistency asks, or as the runtime's
     /// default consistency when it's `None`.
     Live(Option<Consistency>),
-    /// The state that this snapshot captured.
+    /// The state that this snapshot, or this fork pin of the namespace,
+    /// captured.
     Snapshot(PinId),
 }
 

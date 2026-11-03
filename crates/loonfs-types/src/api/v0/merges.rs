@@ -1,7 +1,10 @@
-//! Merging a fork into a namespace: the request, and the conflict that a
-//! refused merge reports.
+//! Merging a fork into a namespace, and rebasing a fork: the requests, the
+//! conflict that a refused merge reports, and a rebase's conflict report.
 
-use crate::{AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, NamespaceId, RevisionNo};
+use crate::{
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, NamespaceId, NamespaceMetadata,
+    RevisionNo,
+};
 use serde::{Deserialize, Serialize};
 
 /// A request to merge a fork's commits into a namespace.
@@ -25,6 +28,46 @@ pub struct MergeForkRequest {
     pub message: Option<String>,
 }
 
+/// A request to rebase a fork: to replay its unmerged commits into a new fork of the namespace
+/// that it was forked from, as one replay commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RebaseForkRequest {
+    /// The fork whose unmerged commits the rebase replays. It has to be a fork of the namespace
+    /// that the request names in its path.
+    pub source_namespace_id: NamespaceId,
+    /// The new fork that the replay commit commits into. The first rebase of the fork creates it
+    /// from the namespace's head, and a later rebase continues into it.
+    pub new_namespace_id: NamespaceId,
+    /// The fork sequence that the replay commit replays the fork's commits through. Without it,
+    /// the replay commit replays them through the fork's head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub through_seq: Option<ChangeSeq>,
+    /// The caller's idempotency key for the replay commit.
+    pub commit_id: CommitId,
+    /// An annotation from the caller. The message is part of the replay commit's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub message: Option<String>,
+}
+
+/// The result of a rebase: the new fork, and the changes that the replay commit left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RebaseForkResponse {
+    /// The new fork after the replay commit.
+    pub namespace: NamespaceMetadata,
+    /// The replay commit's conflict report, with one entry for each inode whose change the replay
+    /// commit didn't apply. It's absent when the request's commit ID identifies a replay commit
+    /// that an earlier request committed, because only the response that committed the replay
+    /// commit has its report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub conflicts: Option<Vec<MergeConflict>>,
+}
+
 /// One inode whose change a merge can't apply, because the namespace being merged into changed
 /// the inode after the fork point, hides it, or has the name that the change needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +89,9 @@ pub struct MergeConflict {
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub ours: Option<MergeConflictVersion>,
     /// The merged-into namespace's current version. It's absent when that namespace deleted or
-    /// hides the inode. For a `name` conflict, it's the inode that has the name there.
+    /// hides the inode. For a `name` conflict, it's the inode that has the name there. For a
+    /// `dependency` conflict, it's the fork's version of the inode whose change was skipped (the
+    /// directory, or the moved inode), so its path is the `ours` path of that inode's own entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub theirs: Option<MergeConflictVersion>,
@@ -78,6 +123,10 @@ pub enum MergeConflictKind {
     Name,
     /// Something below a directory that the fork deleted or moved changed after the fork point.
     Subtree,
+    /// The change depends on a change that a rebase's replay commit skipped: a create, an
+    /// undelete, or a move into a directory whose create or undelete was skipped, or the delete of
+    /// a directory that still contains an inode whose move out of it was skipped.
+    Dependency,
     /// A kind from a newer server. It serializes as `unknown`.
     #[serde(other)]
     Unknown,

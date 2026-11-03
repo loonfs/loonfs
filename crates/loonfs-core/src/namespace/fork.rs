@@ -4,14 +4,25 @@
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::manifest::{load_namespace_manifest_envelope, PublicationReport};
+use crate::merge::merge_after_seq;
+use crate::metadata::MetadataView;
+use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use crate::pin::ensure_unexpired;
 use crate::pin::record::write_pin;
+use crate::pin::{ensure_unexpired, load_pin_basis};
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ForkBasis, PinOwner, PinPayload};
+use loonfs_types::format::control::{ForkBasis, PinOwner, PinPayload, RebasedFrom};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{NamespaceId, NamespaceMetadata, PinId};
+use loonfs_types::{ChangeSeq, NamespaceId, NamespaceMetadata, PinId};
+
+/// The fork whose commits a rebase replays into the new fork that it
+/// creates, and the sequence of the forked namespace that the fork was made
+/// at.
+struct Rebase<'a> {
+    source_namespace_id: &'a NamespaceId,
+    fork_point_seq: ChangeSeq,
+}
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates a new namespace at this namespace's current head or an unexpired snapshot.
@@ -25,6 +36,42 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
         snapshot_id: Option<&PinId>,
+    ) -> Result<PublicationReport<NamespaceMetadata>> {
+        self.install_fork(new_namespace_id, actor_id, snapshot_id, None)
+            .await
+    }
+
+    /// Creates a new namespace at this namespace's current head for a rebase
+    /// of `source_namespace_id`, a fork of this namespace made at
+    /// `fork_point_seq`, as [`Self::fork_namespace`] does
+    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
+    ///
+    /// The new fork's fork basis records `rebased_from`, with the fork
+    /// sequence that the fork's next merge into this namespace would start
+    /// after, read through the new fork's pin. A fork point below the pinned
+    /// manifest's retention floor returns `rebootstrap_required`, and the
+    /// call then deletes the pin and creates no namespace.
+    pub async fn fork_namespace_for_rebase(
+        &self,
+        new_namespace_id: &NamespaceId,
+        actor_id: &loonfs_types::ActorId,
+        source_namespace_id: &NamespaceId,
+        fork_point_seq: ChangeSeq,
+    ) -> Result<PublicationReport<NamespaceMetadata>> {
+        let rebase = Rebase {
+            source_namespace_id,
+            fork_point_seq,
+        };
+        self.install_fork(new_namespace_id, actor_id, None, Some(rebase))
+            .await
+    }
+
+    async fn install_fork(
+        &self,
+        new_namespace_id: &NamespaceId,
+        actor_id: &loonfs_types::ActorId,
+        snapshot_id: Option<&PinId>,
+        rebase: Option<Rebase<'_>>,
     ) -> Result<PublicationReport<NamespaceMetadata>> {
         let clock = self.namespace.start_clock();
         let target = self.namespace.with_namespace(new_namespace_id.clone());
@@ -57,9 +104,22 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &source_record.manifest(),
             &source_manifest,
         )?;
+        let rebased_from = match rebase {
+            Some(rebase) => match self.namespace.rebased_from(&source_record, rebase).await {
+                Ok(rebased_from) => Some(rebased_from),
+                Err(error) => {
+                    self.namespace
+                        .delete_failed_pin(&source_record.pin_id, &error)
+                        .await;
+                    return Err(error);
+                }
+            },
+            None => None,
+        };
         let fork_basis = ForkBasis {
             manifest: source_record.manifest(),
             source_pin_id: source_record.pin_id.clone(),
+            rebased_from,
         };
         let manifest = NamespaceManifestPayload::initial_fork(
             new_namespace_id.clone(),
@@ -99,6 +159,32 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
+    /// Returns the `rebased_from` of a rebase's new fork whose fork pin is
+    /// `record`, with the fork sequence that the next merge of `rebase`'s
+    /// fork into this namespace starts after in the pinned manifest (see
+    /// [`merge_after_seq`]), or `rebootstrap_required` when the fork point is
+    /// below the pinned manifest's retention floor.
+    ///
+    /// The pin keeps the manifest that the new fork starts from, so the
+    /// floor check and the merge index read describe exactly the history that
+    /// the new fork inherits.
+    async fn rebased_from(&self, record: &PinPayload, rebase: Rebase<'_>) -> Result<RebasedFrom> {
+        let pinned = load_pin_basis(&self.store, &self.segment_cache, record.clone()).await?;
+        let head = NamespaceReadState::from(pinned.segments.manifest().payload());
+        let view = MetadataView::over_manifest_segments(&pinned.segments, pinned.manifest.head_seq);
+        let resume_after_seq = merge_after_seq(
+            &view,
+            &head,
+            rebase.source_namespace_id,
+            rebase.fork_point_seq,
+        )
+        .await?;
+        Ok(RebasedFrom {
+            source_namespace_id: rebase.source_namespace_id.clone(),
+            resume_after_seq,
+        })
+    }
+
     async fn create_snapshot_fork_pin(
         &self,
         snapshot_id: &PinId,

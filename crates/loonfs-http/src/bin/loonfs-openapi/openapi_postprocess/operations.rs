@@ -327,6 +327,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "rebase_fork",
+        SdkName {
+            group: &["namespaces"],
+            method: "rebase",
+            request: None,
+        },
+    ),
+    (
         "run_maintenance",
         SdkName {
             group: &["maintenance", "runs"],

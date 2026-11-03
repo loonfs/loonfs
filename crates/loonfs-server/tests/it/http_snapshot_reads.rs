@@ -7,7 +7,9 @@ use loonfs_client::{DownloadOptions, NamespacePath, ReadAt, ReadFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::ListChangesResponse;
-use loonfs_types::{ChangeSeq, ErrorResponse, ListPathEntriesResponse, PathEntry, Snapshot};
+use loonfs_types::{
+    ChangeSeq, ErrorCode, ErrorResponse, ListPathEntriesResponse, PathEntry, RevisionNo, Snapshot,
+};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 use std::io::Read as _;
@@ -354,8 +356,12 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     harness.server.abort();
 }
 
+/// Checks that by-inode reads through a snapshot, and revision reads through
+/// a snapshot or a fork pin, serve the revision that the pinned manifest
+/// keeps after a later put, and that a revision committed after the pin
+/// isn't found through it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn snapshot_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
+async fn pinned_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_snapshot_server(temp_dir.path(), "snapshot-inode-reads").await;
     let namespace = namespace_id("snapshot-inode-reads");
@@ -382,6 +388,19 @@ async fn snapshot_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
         "inode-reads",
         10_000,
     );
+    let fork = harness
+        .client
+        .fork_namespace(
+            &namespace,
+            &namespace_id("snapshot-inode-reads-fork"),
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("fork namespace");
+    let fork_pin_id = fork
+        .fork_basis
+        .expect("a fork has a fork basis")
+        .source_pin_id;
     harness
         .client
         .put_file_with_options(
@@ -422,6 +441,32 @@ async fn snapshot_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
             .expect("current read by inode"),
         b"current bytes"
     );
+    for pin_id in [&snapshot.snapshot_id, &fork_pin_id] {
+        let pinned = ReadFileOptions {
+            at: ReadAt::Snapshot(pin_id.clone()),
+        };
+        let read_revision = |revision_no| {
+            harness
+                .client
+                .read_file_revision_stream_by_inode_with_options(
+                    &namespace,
+                    inode_id,
+                    RevisionNo(revision_no),
+                    &pinned,
+                )
+        };
+        let mut stream = read_revision(1).await.expect("pinned revision read");
+        let mut streamed = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            streamed.extend_from_slice(&chunk.expect("content chunk"));
+        }
+        assert_eq!(streamed, b"captured bytes", "{pin_id}");
+        let error = read_revision(2)
+            .await
+            .map(drop)
+            .expect_err("the pin predates revision 2");
+        assert_eq!(error.code(), Some(ErrorCode::RevisionNotFound), "{pin_id}");
+    }
 
     harness.server.abort();
 }
@@ -709,14 +754,6 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
                 serde_json::json!({"path": "/keep.txt", "revision_no": 1, "snapshot_id": live.snapshot_id}),
             ),
             "/revision_no",
-        ),
-        (
-            get_bytes(&format!(
-                "{}/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/1/content?snapshot_id={}",
-                harness.server_url, live.snapshot_id
-            ))
-            .map(|_| serde_json::Value::Null),
-            "snapshot_id",
         ),
         (
             post_json::<serde_json::Value>(

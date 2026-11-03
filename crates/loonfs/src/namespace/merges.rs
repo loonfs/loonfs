@@ -20,20 +20,33 @@ use std::sync::Arc;
 /// a plan and its commit.
 const MAX_MERGE_PLANS: usize = 4;
 
-/// A merge request at one view of the namespace that it merges into.
-pub(crate) enum PlannedMerge {
+/// A merge request, or a rebase's replay commit request, at one view of the
+/// namespace that it commits into.
+pub(crate) enum PlannedMerge<R = ()> {
     /// The namespace committed a merge under the request's commit ID.
     Committed(Commit),
     /// The commit that makes the merge.
-    Candidate(Box<PlannedCommit>),
+    Candidate(Box<PlannedCommit<R>>),
 }
 
-/// The commit that makes a merge, the merge slot that the merge keeps, and
-/// the merge's record, whose range a later plan of the request applies.
-pub(crate) struct PlannedCommit {
+/// The commit that makes a merge, the merge slot that the merge keeps, the
+/// merge's record, whose range a later plan of the request applies, and
+/// what the plan reports with the commit: nothing for a merge, which refuses
+/// a conflict, and the conflict report for a replay commit.
+pub(crate) struct PlannedCommit<R = ()> {
     pub(crate) candidate: CommitCandidate,
     pub(crate) slot: MergeSlot,
     pub(crate) record: MergeRecord,
+    pub(crate) report: R,
+}
+
+/// How the commit of a merge, or of a replay commit, ended.
+pub(crate) enum MergeOutcome<R = ()> {
+    /// The namespace had committed a merge under the request's commit ID
+    /// before this request committed one.
+    Found(Commit),
+    /// This request committed the merge, from a plan that reported `report`.
+    Committed { commit: Commit, report: R },
 }
 
 impl Namespace<Writable> {
@@ -91,7 +104,7 @@ impl Namespace<Writable> {
                     message: options.message.clone(),
                 };
                 let planned = self.plan_merge(&request, None).await?;
-                let commit = self
+                let (MergeOutcome::Found(commit) | MergeOutcome::Committed { commit, .. }) = self
                     .commit_merge(&request, planned, |request, slot| {
                         Box::pin(async move { self.plan_merge(&request, Some(slot)).await })
                     })
@@ -160,29 +173,31 @@ impl Namespace<Writable> {
             candidate: plan.into_candidate()?,
             slot,
             record,
+            report: (),
         })))
     }
 
-    /// Commits the merge that `planned` found or planned, and calls
-    /// `replan` when the commit fails because this namespace changed after
-    /// the plan (see [`is_stale_plan`]), up to [`MAX_MERGE_PLANS`] plans in
-    /// all. A later plan applies the first
+    /// Commits the merge, or the replay commit, that `planned` found or
+    /// planned, and calls `replan` when the commit fails because this
+    /// namespace changed after the plan (see [`is_stale_plan`]), up to
+    /// [`MAX_MERGE_PLANS`] plans in all. A later plan applies the first
     /// plan's range, so it never merges a longer range, and a merge of the
     /// fork that committed in between returns `merge_range_conflict`.
-    pub(crate) async fn commit_merge<'a>(
+    pub(crate) async fn commit_merge<'a, R>(
         &'a self,
         request: &MergeRequest,
-        mut planned: PlannedMerge,
-        mut replan: impl FnMut(MergeRequest, MergeSlot) -> BoxFuture<'a, Result<PlannedMerge>>,
-    ) -> Result<Commit> {
+        mut planned: PlannedMerge<R>,
+        mut replan: impl FnMut(MergeRequest, MergeSlot) -> BoxFuture<'a, Result<PlannedMerge<R>>>,
+    ) -> Result<MergeOutcome<R>> {
         let mut plans = 1;
         loop {
             let PlannedCommit {
                 candidate,
                 slot,
                 record,
+                report,
             } = match planned {
-                PlannedMerge::Committed(commit) => return Ok(commit),
+                PlannedMerge::Committed(commit) => return Ok(MergeOutcome::Found(commit)),
                 PlannedMerge::Candidate(planned) => *planned,
             };
             match self.submit_merge(candidate, &slot).await {
@@ -195,7 +210,7 @@ impl Namespace<Writable> {
                     };
                     planned = replan(request, slot).await?;
                 }
-                result => return result,
+                result => return result.map(|commit| MergeOutcome::Committed { commit, report }),
             }
         }
     }
@@ -275,7 +290,7 @@ impl Namespace<Writable> {
     }
 
     /// Returns a maintenance value that folds as this runtime's writer.
-    fn maintenance(&self) -> Maintenance {
+    pub(super) fn maintenance(&self) -> Maintenance {
         Maintenance::new(
             self.core.clone(),
             self.mode.publisher.clone(),
@@ -321,7 +336,7 @@ fn is_stale_plan(code: ErrorCode) -> bool {
 /// request's field and not a namespace that the caller's session writes.
 /// Every other error, including one about the namespace that the merge
 /// commits into, stays as it is.
-fn missing_fork(source_namespace_id: &NamespaceId, error: Error) -> Error {
+pub(super) fn missing_fork(source_namespace_id: &NamespaceId, error: Error) -> Error {
     let message = match &error {
         Error::Core(CoreError::NamespaceNotFound { namespace_id })
             if namespace_id == source_namespace_id =>

@@ -3368,7 +3368,7 @@
           },
           "theirs": {
             "$ref": "#/components/schemas/MergeConflictVersion",
-            "description": "The merged-into namespace's current version. It's absent when that namespace deleted or\nhides the inode. For a `name` conflict, it's the inode that has the name there."
+            "description": "The merged-into namespace's current version. It's absent when that namespace deleted or\nhides the inode. For a `name` conflict, it's the inode that has the name there. For a\n`dependency` conflict, it's the fork's version of the inode whose change was skipped (the\ndirectory, or the moved inode), so its path is the `ours` path of that inode's own entry."
           }
         },
         "required": [
@@ -3386,7 +3386,8 @@
           "access",
           "visibility",
           "name",
-          "subtree"
+          "subtree",
+          "dependency"
         ],
         "type": "string"
       },
@@ -3627,6 +3628,10 @@
       "NamespaceForkBasis": {
         "description": "The source namespace and sequence that a forked namespace started from.",
         "properties": {
+          "rebased_from": {
+            "$ref": "#/components/schemas/NamespaceRebasedFrom",
+            "description": "The fork whose unmerged commits a rebase replays into this namespace. Only a namespace that\na rebase created has this field."
+          },
           "source_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "The source namespace's sequence that the fork captured."
@@ -3634,11 +3639,16 @@
           "source_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace that the fork was taken from."
+          },
+          "source_pin_id": {
+            "$ref": "#/components/schemas/PinId",
+            "description": "The fork pin that keeps the source's state at `source_head_seq` readable. A read of the\nsource namespace accepts it as `snapshot_id`."
           }
         },
         "required": [
           "source_namespace_id",
-          "source_head_seq"
+          "source_head_seq",
+          "source_pin_id"
         ],
         "type": "object"
       },
@@ -3700,6 +3710,24 @@
           "family_root_id",
           "head_seq",
           "retention_floor_seq"
+        ],
+        "type": "object"
+      },
+      "NamespaceRebasedFrom": {
+        "description": "The fork whose unmerged commits a rebase replays into the namespace that the rebase created.",
+        "properties": {
+          "resume_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork sequence that the fork's next merge would have started after when the rebase\ncreated the namespace. The namespace's first replay commit starts after it."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose commits the namespace's replay commits apply."
+          }
+        },
+        "required": [
+          "source_namespace_id",
+          "resume_after_seq"
         ],
         "type": "object"
       },
@@ -3993,6 +4021,58 @@
           "strong"
         ],
         "type": "string"
+      },
+      "RebaseForkRequest": {
+        "additionalProperties": false,
+        "description": "A request to rebase a fork: to replay its unmerged commits into a new fork of the namespace\nthat it was forked from, as one replay commit.",
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "The caller's idempotency key for the replay commit."
+          },
+          "message": {
+            "description": "An annotation from the caller. The message is part of the replay commit's identity.",
+            "type": "string"
+          },
+          "new_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The new fork that the replay commit commits into. The first rebase of the fork creates it\nfrom the namespace's head, and a later rebase continues into it."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose unmerged commits the rebase replays. It has to be a fork of the namespace\nthat the request names in its path."
+          },
+          "through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork sequence that the replay commit replays the fork's commits through. Without it,\nthe replay commit replays them through the fork's head."
+          }
+        },
+        "required": [
+          "source_namespace_id",
+          "new_namespace_id",
+          "commit_id"
+        ],
+        "type": "object"
+      },
+      "RebaseForkResponse": {
+        "description": "The result of a rebase: the new fork, and the changes that the replay commit left out.",
+        "properties": {
+          "conflicts": {
+            "description": "The replay commit's conflict report, with one entry for each inode whose change the replay\ncommit didn't apply. It's absent when the request's commit ID identifies a replay commit\nthat an earlier request committed, because only the response that committed the replay\ncommit has its report.",
+            "items": {
+              "$ref": "#/components/schemas/MergeConflict"
+            },
+            "type": "array"
+          },
+          "namespace": {
+            "$ref": "#/components/schemas/NamespaceMetadata",
+            "description": "The new fork after the replay commit."
+          }
+        },
+        "required": [
+          "namespace"
+        ],
+        "type": "object"
       },
       "RetainedCandidates": {
         "description": "The candidates that one garbage collection pass inspected but didn't delete, counted by reason.",
@@ -6209,7 +6289,7 @@
                 }
               }
             },
-            "description": "Namespace or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -6706,7 +6786,7 @@
                 }
               }
             },
-            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -6818,7 +6898,7 @@
                 }
               }
             },
-            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -7000,7 +7080,7 @@
                 }
               }
             },
-            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -7136,7 +7216,7 @@
                 }
               }
             },
-            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -7841,7 +7921,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "410": {
             "content": {
@@ -8006,7 +8086,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -8195,7 +8275,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -8328,7 +8408,7 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -8538,7 +8618,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content": {
       "get": {
-        "description": "Reads and verifies one retained file revision by inode ID and revision number. A `Range` header asks for one byte range of the revision instead.",
+        "description": "Reads and verifies one retained file revision by inode ID and revision number, at the live head or in the state that a snapshot or a fork pin keeps. A `Range` header asks for one byte range of the revision instead.",
         "operationId": "get_file_revision_content_by_inode",
         "parameters": [
           {
@@ -8571,7 +8651,16 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default, unless the server's `consistency` setting is `strong`) reads at the head that\nthe server confirmed last while that confirmation is younger than the maximum staleness, and\n`strong` confirms the head before the read.",
+            "description": "A snapshot, or one of the namespace's fork pins, whose pinned state to find the revision\nin. The pinned manifest keeps the revision after the namespace's retention floor passes it.",
+            "in": "query",
+            "name": "snapshot_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PinId"
+            }
+          },
+          {
+            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default, unless the server's `consistency` setting is `strong`) reads at the head that\nthe server confirmed last while that confirmation is younger than the maximum staleness, and\n`strong` confirms the head before the read. It can't be combined with `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
@@ -8662,7 +8751,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, revision number, consistency, or `Range` header, or a snapshot_id, which can't be combined with a revision"
+            "description": "Invalid inode ID, revision number, snapshot ID, consistency, or `Range` header"
           },
           "401": {
             "content": {
@@ -8682,7 +8771,7 @@
                 }
               }
             },
-            "description": "Namespace, inode, or revision not found"
+            "description": "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -9009,6 +9098,138 @@
           "namespaces"
         ],
         "x-fern-sdk-method-name": "merge",
+        "x-loonfs-actor": "required",
+        "x-loonfs-retry": "replayable"
+      }
+    },
+    "/v0/namespaces/{namespace_id}/rebases": {
+      "post": {
+        "description": "Replays a fork's unmerged commits into a new fork of the namespace as one replay commit, which applies the changes that don't conflict with the namespace and reports the ones that do. The first rebase of a fork creates the new fork from the namespace's head, and a later rebase continues into it. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
+        "operationId": "rebase_fork",
+        "parameters": [
+          {
+            "description": "The namespace that the fork was forked from.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RebaseForkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RebaseForkResponse"
+                }
+              }
+            },
+            "description": "Fork rebased"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request, the source isn't a fork of this namespace, or the new namespace isn't a rebase of the fork"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Range conflict, or history below a retention floor"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The replay commit is too large, or the JSON body exceeds the 2 MiB limit"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Merges are disabled"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Rebase a fork",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-sdk-group-name": [
+          "namespaces"
+        ],
+        "x-fern-sdk-method-name": "rebase",
         "x-loonfs-actor": "required",
         "x-loonfs-retry": "replayable"
       }

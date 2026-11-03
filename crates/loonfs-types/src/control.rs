@@ -213,6 +213,25 @@ pub struct ForkBasis {
     pub manifest: ManifestRef,
     /// Source pin that keeps the basis for as long as the target lives.
     pub source_pin_id: PinId,
+    /// The fork whose commits a rebase replays into the target, which only a
+    /// rebase's new fork records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebased_from: Option<RebasedFrom>,
+}
+
+/// The fork whose unmerged commits a rebase replays into a new fork of that
+/// fork's source, recorded in the new fork's fork basis.
+///
+/// See [Merges](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#merges).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebasedFrom {
+    /// The fork whose commits the new fork's replay commits apply.
+    pub source_namespace_id: NamespaceId,
+    /// The fork sequence that the fork's next merge into its source would
+    /// have started after when the rebase made the new fork. The new fork's
+    /// first replay commit starts after it.
+    pub resume_after_seq: ChangeSeq,
 }
 
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";

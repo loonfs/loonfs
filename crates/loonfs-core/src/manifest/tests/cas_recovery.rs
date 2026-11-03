@@ -136,6 +136,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                 payload.fork_basis = Some(ForkBasis {
                     manifest: current.manifest(),
                     source_pin_id: PinId::generate(ManifestNo(1)),
+                    rebased_from: None,
                 });
             } else {
                 payload.manifest_no = ManifestNo(2);

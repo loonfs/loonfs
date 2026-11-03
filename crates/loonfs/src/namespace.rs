@@ -18,6 +18,7 @@ mod lifecycle;
 mod merges;
 mod reads;
 mod reads_by_inode;
+mod rebases;
 mod revisions;
 mod snapshots;
 mod uploads;

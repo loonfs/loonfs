@@ -7,7 +7,8 @@ use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, MergeIntent};
 use crate::commit::{AppendedContent, CommitFingerprint, CommitPlan, CommitValidationSession};
-use crate::error::{CoreError, MergeHistory, Result};
+use crate::error::{CoreError, Result};
+use crate::merge::merge_after_seq;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::tail_content::{cut_layout, materialize_content_layout, ContentWrites};
@@ -83,7 +84,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         let base_view = self.base_view.with_durable_cache(&self.durable_cache);
         let pre_state = base_view.with_overlay(None, &self.accepted_rows, self.head.seq);
         if let Some(merge) = candidate.merge() {
-            ensure_merge_is_admissible(&pre_state, merge).await?;
+            ensure_merge_is_admissible(&pre_state, &self.head, merge).await?;
         }
         self.planning_view(authorizer, pre_state)
             .evaluate_preconditions(&candidate.intent().preconditions, self.head.seq)
@@ -342,10 +343,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
     }
 }
 
-/// Requires a merge's fork point to be at or above the retention floor of
-/// `view`, and the merge to start where the newest merge from its fork in
-/// `view` stopped, or at the fork point when `view` has no merge from the
-/// fork, so that a fork's commits are applied once and in order.
+/// Requires a merge into the namespace at `head` and `view` to pass the floor
+/// rule and to start where [`merge_after_seq`] says, so that a fork's commits
+/// are applied once and in order.
 ///
 /// The floor check runs first because the range check depends on it. A base
 /// compaction removes the merge index rows below the floor, so if the fork
@@ -353,22 +353,12 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
 /// range check would expect the next merge to start at the fork point.
 async fn ensure_merge_is_admissible<S: ObjectStore + ?Sized>(
     view: &MetadataView<'_, '_, S>,
+    head: &NamespaceReadState,
     merge: &MergeIntent,
 ) -> Result<()> {
-    let retention_floor_seq = view.retention_floor_seq();
-    if merge.fork_point_seq < retention_floor_seq {
-        return Err(CoreError::MergeRebootstrapRequired {
-            below: MergeHistory::ForkPoint {
-                fork_point_seq: merge.fork_point_seq,
-            },
-            retention_floor_seq,
-        });
-    }
     let source_namespace_id = &merge.record.source_namespace_id;
-    let expected_after_seq = view
-        .newest_merge(source_namespace_id)
-        .await?
-        .map_or(merge.fork_point_seq, |previous| previous.source_through_seq);
+    let expected_after_seq =
+        merge_after_seq(view, head, source_namespace_id, merge.fork_point_seq).await?;
     if merge.record.source_after_seq != expected_after_seq {
         return Err(CoreError::MergeRangeConflict {
             source_namespace_id: source_namespace_id.clone(),

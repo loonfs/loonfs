@@ -468,20 +468,23 @@ impl ReadView {
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let permit = self.core.read_permit().await;
-        self.read_file_stream_by_inode_with_permit(inode_id, options, &permit)
+        self.read_file_stream_by_inode_with_permit(inode_id, None, options, &permit)
             .await
     }
 
+    /// Streams the current revision of a file inode that this view selects,
+    /// or its revision `revision_no` in this view.
     pub(crate) async fn read_file_stream_by_inode_with_permit(
         &self,
         inode_id: InodeId,
+        revision_no: Option<RevisionNo>,
         options: &ReadFileStreamOptions,
         _permit: &BudgetPermit<'_>,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         self.ensure_read_at(&options.at)?;
         self.read(
             self.pinned
-                .read_file_stream_by_inode(inode_id, None, options),
+                .read_file_stream_by_inode(inode_id, revision_no, options),
         )
         .await
     }

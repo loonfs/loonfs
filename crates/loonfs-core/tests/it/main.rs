@@ -19,6 +19,7 @@ mod manifest_statistics;
 mod merge_planning;
 mod namespace_listing;
 mod path_intents;
+mod rebase_planning;
 mod tree_listing;
 mod upload_sessions;
 mod visibility_equivalence;

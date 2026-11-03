@@ -104,8 +104,9 @@ impl<M: crate::Mode> Namespace<M> {
         .await
     }
 
-    /// Captures the namespace state an unexpired snapshot preserves. A
-    /// missing or expired snapshot returns `snapshot_not_found`.
+    /// Captures the namespace state an unexpired snapshot, or one of the
+    /// namespace's fork pins, preserves. A missing pin or an expired snapshot
+    /// returns `snapshot_not_found`.
     pub async fn read_view_at_snapshot(&self, snapshot_id: &PinId) -> Result<ReadView> {
         let span = operation_span!(
             self.core,

@@ -3,7 +3,7 @@
 use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
-use super::handlers_filesystem::{reject_snapshot_with_revision, LivePageQuery};
+use super::handlers_filesystem::LivePageQuery;
 use super::query_params::{
     checked_cursor, checked_list_cursor, effective_page_limit, invalid_path_id_error,
     live_consistency, read_at,
@@ -13,8 +13,7 @@ use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
 use loonfs::{
-    ListFileRevisionsOptions, ListOptions, ReadAt, ReadConsistency, ReadFileStreamOptions,
-    StatOptions,
+    ListFileRevisionsOptions, ListOptions, ReadConsistency, ReadFileStreamOptions, StatOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
@@ -57,20 +56,19 @@ pub(super) struct InodeContentQuery {
     max_staleness_ms: Option<u64>,
 }
 
-/// The query of a revision content read by inode. The route takes `snapshot_id` only to refuse a
-/// snapshot with the same error that the path routes return.
+/// The query of a revision content read by inode.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct InodeRevisionContentQuery {
-    /// A snapshot, which a revision read refuses.
-    #[cfg_attr(feature = "openapi", param(ignore))]
+    /// A snapshot, or one of the namespace's fork pins, whose pinned state to find the revision
+    /// in. The pinned manifest keeps the revision after the namespace's retention floor passes it.
     snapshot_id: Option<PinId>,
     /// How recently the read confirms the namespace head that it finds the revision in. `eventual`
     /// (the default, unless the server's `consistency` setting is `strong`) reads at the head that
     /// the server confirmed last while that confirmation is younger than the maximum staleness, and
-    /// `strong` confirms the head before the read.
+    /// `strong` confirms the head before the read. It can't be combined with `snapshot_id`.
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
@@ -120,7 +118,7 @@ pub(super) struct StatInodeQuery {
             (status = 200, description = "Path entry for the inode", body = loonfs_types::PathEntry),
             (status = 400, description = "Invalid inode ID, include_attributes, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -205,7 +203,7 @@ pub(super) struct ListInodeChildrenQuery {
             (status = 200, description = "One page of directory children", body = loonfs_types::ListInodeChildrenResponse),
             (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, recursive, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a directory", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -312,7 +310,7 @@ pub(super) async fn list_file_revisions_by_inode(
             (status = 206, description = "The requested range of the file's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.", body = Vec<u8>, content_type = "application/octet-stream", headers(("Content-Range" = String, description = "The returned range and the file's size, as `bytes start-end/size`."), ("Accept-Ranges" = String, description = "`bytes`."))),
             (status = 400, description = "Invalid inode ID, snapshot ID, consistency, or `Range` header", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot, or of a fork pin, returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
@@ -354,7 +352,7 @@ pub(super) async fn get_file_content_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
         summary = "Read file revision by inode",
-        description = "Reads and verifies one retained file revision by inode ID and revision number. A `Range` header asks for one byte range of the revision instead.",
+        description = "Reads and verifies one retained file revision by inode ID and revision number, at the live head or in the state that a snapshot or a fork pin keeps. A `Range` header asks for one byte range of the revision instead.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
@@ -365,9 +363,9 @@ pub(super) async fn get_file_content_by_inode(
         responses(
             (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream", headers(("Accept-Ranges" = String, description = "`bytes`, because the route accepts a `Range` header."))),
             (status = 206, description = "The requested range of the revision's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.", body = Vec<u8>, content_type = "application/octet-stream", headers(("Content-Range" = String, description = "The returned range and the file's size, as `bytes start-end/size`."), ("Accept-Ranges" = String, description = "`bytes`."))),
-            (status = 400, description = "Invalid inode ID, revision number, consistency, or `Range` header, or a snapshot_id, which can't be combined with a revision", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, revision number, snapshot ID, consistency, or `Range` header", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
+            (status = 404, description = "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
@@ -388,10 +386,9 @@ pub(super) async fn get_file_revision_content_by_inode(
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = path.revision_no;
-    reject_snapshot_with_revision(query.snapshot_id.as_ref(), Some(revision_no), "snapshot_id")?;
     let options = ReadFileStreamOptions {
         range: range.stream_range(),
-        at: ReadAt::Live(live_consistency(query.consistency, query.max_staleness_ms)?),
+        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
         ..ReadFileStreamOptions::default()
     };
     let permit = acquire_download_permit(&state)?;
