@@ -33,7 +33,9 @@ pub enum GrepPublishOutcome {
 /// that the change builds on.
 pub(super) struct PendingEntry {
     pub(super) basis: ExtensionBasis,
-    /// The entry that the basis lists, or `None` when grep was never enabled.
+    /// The entry that the basis lists, or `None` when grep was never enabled
+    /// or when a disable replaces an invalid entry (see
+    /// [`Self::for_disable`]).
     published: Option<GrepEntry>,
     /// The entry after the steps since the basis, which the next step starts
     /// from. Its runs that the change wrote have provisional numbers, from
@@ -58,37 +60,60 @@ impl PendingEntry {
     /// from its source (see [`GrepEntry::without_inherited_reorganize`]), so
     /// the fork's first change publishes the entry without it.
     fn new(basis: ExtensionBasis) -> Result<Self> {
+        match decode_published(&basis) {
+            Ok(published) => Ok(Self::from_published(basis, published)),
+            Err(error) => Err(invalid_entry(&basis, error)),
+        }
+    }
+
+    /// Starts a disable's change from `basis` like [`Self::new`], except that
+    /// when [`Self::new`] would reject a grep entry of this build's version
+    /// ([`GREP_ENTRY_VERSION`](crate::entry::GREP_ENTRY_VERSION)), the
+    /// change's entry is the disabled entry instead.
+    ///
+    /// That change records no published entry, so publishing it replaces the
+    /// invalid entry with the disabled entry. For an entry of another
+    /// version, this returns [`GrepError::UnsupportedVersion`].
+    fn for_disable(basis: ExtensionBasis) -> Result<Self> {
+        match decode_published(&basis) {
+            Ok(published) => Ok(Self::from_published(basis, published)),
+            Err(error @ GrepEntryError::UnsupportedVersion { .. }) => {
+                Err(invalid_entry(&basis, error))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    namespace_id = %basis.manifest().namespace_id,
+                    manifest_no = %basis.manifest().manifest_no,
+                    %error,
+                    "disabling grep replaces an invalid grep entry"
+                );
+                Ok(Self {
+                    entry: Some(GrepEntry::disabled()),
+                    ..Self::from_published(basis, None)
+                })
+            }
+        }
+    }
+
+    /// Starts a change from `basis`, whose grep entry is `published`.
+    fn from_published(basis: ExtensionBasis, published: Option<GrepEntry>) -> Self {
         let next_run_no = basis.manifest().next_run_no;
-        let published = basis
-            .find_entry(&grep_extension_name())
-            .map(|entry| -> std::result::Result<GrepEntry, GrepEntryError> {
-                let entry = GrepEntry::decode(entry)?;
-                entry.ensure_reorganize_allocated(next_run_no)?;
-                Ok(entry)
-            })
-            .transpose()
-            .map_err(|error| GrepError::IndexCorrupt {
-                message: format!(
-                    "the grep entry of manifest {} is invalid: {error}",
-                    basis.manifest().manifest_no
-                ),
-            })?;
         let namespace_id = &basis.manifest().namespace_id;
         let entry = published
             .clone()
             .map(|entry| entry.without_inherited_reorganize(namespace_id));
-        Ok(Self {
+        Self {
             basis,
             entry,
             published,
             next_run_no,
             released_pins: Vec::new(),
             created_pins: Vec::new(),
-        })
+        }
     }
 
     /// Returns the entry that the basis lists, or `None` when grep was never
-    /// enabled.
+    /// enabled or when disabling replaces an entry that grep rejects.
     pub(super) fn published(&self) -> Option<&GrepEntry> {
         self.published.as_ref()
     }
@@ -163,6 +188,31 @@ impl PendingEntry {
     }
 }
 
+/// Decodes the grep entry that `basis` lists, and checks that its
+/// reorganization's run is allocated.
+fn decode_published(
+    basis: &ExtensionBasis,
+) -> std::result::Result<Option<GrepEntry>, GrepEntryError> {
+    let next_run_no = basis.manifest().next_run_no;
+    basis
+        .find_entry(&grep_extension_name())
+        .map(|entry| {
+            let entry = GrepEntry::decode(entry)?;
+            entry.ensure_reorganize_allocated(next_run_no)?;
+            Ok(entry)
+        })
+        .transpose()
+}
+
+/// Returns the error for the invalid grep entry of `basis`, where `error`
+/// says why the entry is invalid.
+fn invalid_entry(basis: &ExtensionBasis, error: GrepEntryError) -> GrepError {
+    GrepError::invalid_entry(
+        format_args!("manifest {}", basis.manifest().manifest_no),
+        error,
+    )
+}
+
 /// A run of grep's bounded steps over one namespace, whose changes to grep's
 /// entry are kept in memory and published together in a manifest of their own
 /// ([Grep extension format](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#appendix-d-grep-extension-format)).
@@ -221,13 +271,29 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     /// Returns the pending change, which starts from the current manifest
     /// when nothing is pending.
     pub(super) async fn pending(&mut self) -> Result<&mut PendingEntry> {
+        self.pending_from(PendingEntry::new).await
+    }
+
+    /// Returns a disable's pending change, which starts from the current
+    /// manifest when nothing is pending, and replaces that manifest's grep
+    /// entry when the entry is invalid (see [`PendingEntry::for_disable`]).
+    pub(super) async fn pending_for_disable(&mut self) -> Result<&mut PendingEntry> {
+        self.pending_from(PendingEntry::for_disable).await
+    }
+
+    /// Returns the pending change, and when nothing is pending, starts one
+    /// from the current manifest with `start`.
+    async fn pending_from(
+        &mut self,
+        start: fn(ExtensionBasis) -> Result<PendingEntry>,
+    ) -> Result<&mut PendingEntry> {
         if self.pending.is_none() {
             let basis = self
                 .worker
                 .maintenance
                 .load_extension_basis(&self.namespace_id)
                 .await?;
-            self.pending = Some(PendingEntry::new(basis)?);
+            self.pending = Some(start(basis)?);
         }
         Ok(self
             .pending

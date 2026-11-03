@@ -978,7 +978,11 @@ async fn grep_error_unreadable_entries_and_segments_are_index_corrupt_and_core_r
 
     let harness = start_grep_error_server(store, temp_dir.path(), "index-corrupt-server").await;
     let client = &harness.client;
-    for namespace_id in [newer_version, unknown_member, corrupt_segment] {
+    for (namespace_id, message_fragment) in [
+        (newer_version, "with a build that reads version `3`"),
+        (unknown_member, "disable and re-enable grep to rebuild it"),
+        (corrupt_segment, "disable and re-enable grep to rebuild it"),
+    ] {
         let result = client
             .grep(&namespace_id, &grep_error_request())
             .page()
@@ -989,7 +993,7 @@ async fn grep_error_unreadable_entries_and_segments_are_index_corrupt_and_core_r
             result,
             500,
             ErrorCode::IndexCorrupt,
-            "disable and re-enable grep to rebuild it",
+            message_fragment,
         )
         .await;
     }

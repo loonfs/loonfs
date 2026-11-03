@@ -246,6 +246,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 
     /// Enables grep by pinning a snapshot and publishing a backfilling entry.
     /// Enabling an enabled index changes nothing.
+    ///
+    /// If grep's entry is invalid, enabling returns
+    /// [`GrepError::IndexCorrupt`], whose message says to disable grep first
+    /// (see [`Self::disable`]). If the entry has another version, enabling
+    /// returns [`GrepError::UnsupportedVersion`].
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
         let mut steps = self.steps(namespace_id, 0);
         let pending = steps.pending().await?;
@@ -278,21 +283,28 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Disables grep by publishing an entry that lists no segments. The
     /// segments become garbage-collection candidates and are never deleted
     /// synchronously.
+    ///
+    /// An invalid entry of this build's version (one that doesn't decode or
+    /// fails validation) is replaced the same way, so grep can be enabled
+    /// again. Disabling can't read which backfill pin such an entry refers
+    /// to, so it doesn't delete the pin, and garbage collection removes the
+    /// pin after the pin expires. If the entry has another version, disabling
+    /// returns [`GrepError::UnsupportedVersion`] and leaves the entry in
+    /// place, so a build never discards an index that it can't read.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         let mut steps = self.steps(namespace_id, 0);
-        let pending = steps.pending().await?;
-        let Some(entry) = pending.enabled_entry() else {
-            return Ok(GrepDisableOutcome::NotEnabled);
-        };
-        if let Some(pin_id) = entry.status().backfill_pin_id().cloned() {
-            pending.record_released_pin(pin_id);
+        let pending = steps.pending_for_disable().await?;
+        if let Some(entry) = pending.enabled_entry() {
+            if let Some(pin_id) = entry.status().backfill_pin_id().cloned() {
+                pending.record_released_pin(pin_id);
+            }
+            pending.set_entry(GrepEntry::disabled());
         }
-        pending.set_entry(GrepEntry::disabled());
+        // Nothing is pending when grep is disabled or was never enabled.
         Ok(match steps.publish().await? {
             GrepPublishOutcome::Superseded => GrepDisableOutcome::Superseded,
-            GrepPublishOutcome::Published | GrepPublishOutcome::NothingPending => {
-                GrepDisableOutcome::Disabled
-            }
+            GrepPublishOutcome::Published => GrepDisableOutcome::Disabled,
+            GrepPublishOutcome::NothingPending => GrepDisableOutcome::NotEnabled,
         })
     }
 
