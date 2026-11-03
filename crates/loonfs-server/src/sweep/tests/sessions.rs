@@ -12,7 +12,8 @@ use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
+    write_keys, BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation,
+    RecordingStore,
 };
 use loonfs_test_support::test_actor;
 use loonfs_types::ChecksumAlgorithm;
@@ -471,13 +472,14 @@ async fn ticks_finish_more_than_sixteen_metadata_units_without_another_publish()
     server.runtime.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a session whose compactor another runtime has claimed runs
-/// one compaction unit from its own position, which doesn't show the claim.
-/// The unit reads its inputs and writes its outputs, and then its manifest
-/// put fails. The session waits for the metadata retry interval before it
-/// tries again.
+/// Checks that a session whose compactor another runtime has claimed finds
+/// the claim before it plans a compaction unit. Its position doesn't show
+/// the claim, so one HEAD finds the manifest after the position's manifest,
+/// and the session loads the current manifest, finds the newer compactor
+/// epoch, and stops without writing a segment or a manifest. The session
+/// waits for the metadata retry interval before it tries again.
 #[tokio::test]
-async fn a_fenced_compactor_costs_one_unit_and_waits_for_the_retry_interval() {
+async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -514,6 +516,13 @@ async fn a_fenced_compactor_costs_one_unit_and_waits_for_the_retry_interval() {
         .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("claim compactor");
+    let position_manifest_no = server
+        .maintenance
+        .diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics")
+        .current_manifest_no
+        .expect("manifest");
     let other = loonfs::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
@@ -538,15 +547,31 @@ async fn a_fenced_compactor_costs_one_unit_and_waits_for_the_retry_interval() {
         .current_manifest_no;
     store.reset();
     server.tick_after(config.tick_interval_ms).await;
-    let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id);
-    let manifest_puts = store
-        .take()
-        .into_iter()
-        .filter(|operation| {
-            matches!(operation, RecordedOperation::Put { key, .. } if key.starts_with(&manifests))
-        })
+    let operations = store.take();
+    let successor = loonfs_objectstore::keys::metadata_manifest_object(
+        &namespace_id,
+        &position_manifest_no.successor().expect("the next manifest"),
+    );
+    let successor_heads = operations
+        .iter()
+        .filter(
+            |operation| matches!(operation, RecordedOperation::Head { key } if *key == successor),
+        )
         .count();
-    assert_eq!(manifest_puts, 1, "the unit's one manifest put fails");
+    assert_eq!(
+        successor_heads, 1,
+        "one HEAD finds the claim above the position: {operations:#?}"
+    );
+    assert_eq!(
+        write_keys(&operations, &KeyPredicate::any()),
+        Vec::<String>::new(),
+        "the session writes no segment and no manifest"
+    );
+    assert_eq!(
+        operations.len(),
+        6,
+        "the position's manifest, the HEAD, and a load of the current manifest: {operations:#?}"
+    );
     assert_eq!(
         server
             .maintenance

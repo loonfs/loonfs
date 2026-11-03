@@ -15,10 +15,11 @@ use crate::{
     WriterState,
 };
 use loonfs_core::control::NamespaceStorageDiagnostics;
-use loonfs_core::control::{LoadedManifest, NamespaceReadAnchor, PublicationBasis};
+use loonfs_core::control::{NamespaceReadAnchor, PublicationBasis};
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::{CoreError, MetadataCompactionCancellation, Phase};
 use loonfs_types::{CompactorEpoch, WriterId};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -56,6 +57,32 @@ impl TailFold {
     pub(super) fn from_options(options: &MaintainMetadataOptions) -> Self {
         Self::WhenDue {
             max_wal_tail_objects: options.max_wal_tail_objects.get(),
+        }
+    }
+}
+
+/// The manifest that a compaction unit plans from, and where the caller read
+/// it.
+pub(crate) enum PlanningBasis {
+    /// The current manifest, loaded from the store after anything the caller
+    /// published.
+    Loaded(PublicationBasis),
+    /// The manifest of this runtime's writer position, which doesn't show a
+    /// publication by another process, such as that process's compactor
+    /// claim.
+    Position(PublicationBasis),
+}
+
+impl PlanningBasis {
+    fn basis(&self) -> &PublicationBasis {
+        match self {
+            Self::Loaded(basis) | Self::Position(basis) => basis,
+        }
+    }
+
+    fn into_basis(self) -> PublicationBasis {
+        match self {
+            Self::Loaded(basis) | Self::Position(basis) => basis,
         }
     }
 }
@@ -277,12 +304,7 @@ impl Compactor {
         &self,
         namespace_id: &NamespaceId,
         tail_fold: TailFold,
-    ) -> Result<(
-        Option<PublicationBasis>,
-        Option<u64>,
-        WalFoldStepOutcome,
-        bool,
-    )> {
+    ) -> Result<(Option<PlanningBasis>, Option<u64>, WalFoldStepOutcome, bool)> {
         let TailFold::WhenDue {
             max_wal_tail_objects,
         } = tail_fold
@@ -293,10 +315,10 @@ impl Compactor {
             // position shows folded is folded into that manifest.
             let position = self.publisher.wal_fold_input(namespace_id).await;
             let manifest = match self.load_position_basis(position.as_ref()).await? {
-                Some(basis) => basis,
-                None => self.load_live_basis(namespace_id).await?,
+                Some(basis) => PlanningBasis::Position(basis),
+                None => PlanningBasis::Loaded(self.load_live_basis(namespace_id).await?),
             };
-            let manifest_no = manifest.manifest.manifest().manifest_no;
+            let manifest_no = manifest.basis().manifest.manifest().manifest_no;
             let behind = position
                 .as_ref()
                 .map(|position| position.read_basis.basis.manifest_no())
@@ -356,7 +378,7 @@ impl Compactor {
             || idle_fold_due_at_ms.is_some_and(|due_at_ms| self.core.now_ms() >= due_at_ms);
         if !fold {
             return Ok((
-                Some(anchor.publication_basis()),
+                Some(PlanningBasis::Loaded(anchor.publication_basis())),
                 Some(status.wal_tail_objects),
                 WalFoldStepOutcome::NotNeeded,
                 idle_fold_due_at_ms.is_none(),
@@ -385,16 +407,24 @@ impl Compactor {
         Ok((None, Some(status.wal_tail_objects), wal_fold, folded))
     }
 
-    /// Folds the WAL tail when the fold trigger or the idle fold age makes a
-    /// fold due, as a metadata step with `TailFold::WhenDue` does, and
-    /// returns whether the tail that it leaves keeps metadata caught up.
+    /// Folds the WAL tail when a fold is due, as a metadata step with
+    /// `TailFold::WhenDue` does, and returns whether the tail that the call
+    /// leaves keeps metadata caught up.
+    ///
+    /// A fold is due when the tail reaches `max_wal_tail_objects` WAL objects
+    /// or the runtime's inline fold size, or when it reaches the idle fold
+    /// age.
     ///
     /// The decision reads the tail from the store, so it suits a writer
     /// session that has no position, which then compacts with
     /// `TailFold::Folded`.
-    pub(crate) async fn fold_when_due(&self, namespace_id: &NamespaceId) -> Result<bool> {
+    pub(crate) async fn fold_when_due(
+        &self,
+        namespace_id: &NamespaceId,
+        max_wal_tail_objects: u64,
+    ) -> Result<bool> {
         let tail_fold = TailFold::WhenDue {
-            max_wal_tail_objects: FOLD_AT_WAL_OBJECTS.get(),
+            max_wal_tail_objects,
         };
         let (_, _, _, caught_up) = self.fold_if_due(namespace_id, tail_fold).await?;
         Ok(caught_up)
@@ -495,6 +525,106 @@ impl Compactor {
         Ok(claimed.response)
     }
 
+    /// Returns the manifest that a unit plans from (`None` when the unit
+    /// loads the current manifest itself), or how the unit ends before it
+    /// runs.
+    ///
+    /// The basis is `observed` when it's given. Otherwise the basis is this
+    /// runtime's writer position while the position's last check is within
+    /// the revalidation bound, and without such a position, it's the current
+    /// manifest when this runtime has no claim to plan under. Before a due
+    /// unit plans from a position, the call sends one HEAD to check whether
+    /// the position's manifest has a successor, and when it does, the unit
+    /// plans from the current manifest instead.
+    async fn planning_basis(
+        &self,
+        namespace_id: &NamespaceId,
+        claimed: Option<CompactorEpoch>,
+        observed: Option<PlanningBasis>,
+        compaction_policy: loonfs_core::MetadataCompactionPolicy,
+    ) -> Result<ControlFlow<MetadataCompactionOutcome, Option<PublicationBasis>>> {
+        let observed = match observed {
+            Some(basis) => Some(basis),
+            None => {
+                let position = self.publisher.read_position_fold_input(namespace_id);
+                self.load_position_basis(position.as_ref())
+                    .await?
+                    .map(PlanningBasis::Position)
+            }
+        };
+        let basis = match observed {
+            Some(basis) => Some(basis),
+            // With a claim, the call skips the check that a unit is due,
+            // because the unit loads the manifest itself, and checking here
+            // first would load the manifest twice.
+            None if claimed.is_some() => None,
+            None => Some(PlanningBasis::Loaded(
+                self.load_live_basis(namespace_id).await?,
+            )),
+        };
+        let screened = self
+            .screen(
+                namespace_id,
+                claimed,
+                basis.as_ref().map(PlanningBasis::basis),
+                compaction_policy,
+            )
+            .await;
+        if let Some(outcome) = screened {
+            return Ok(ControlFlow::Break(outcome));
+        }
+        // A position doesn't show another process's publications, such as a
+        // newer compactor claim. A unit planned from it would read its inputs
+        // and write its outputs before its manifest put found the claim, so
+        // the unit plans from the current manifest when the position's
+        // manifest has a successor.
+        let basis = match basis {
+            Some(PlanningBasis::Position(basis))
+                if self
+                    .core
+                    .namespace_store(namespace_id)
+                    .manifest_has_successor(basis.manifest.manifest().manifest_no)
+                    .await
+                    .map_err(CoreError::from)? =>
+            {
+                let current = self.load_live_basis(namespace_id).await?;
+                let screened = self
+                    .screen(namespace_id, claimed, Some(&current), compaction_policy)
+                    .await;
+                if let Some(outcome) = screened {
+                    return Ok(ControlFlow::Break(outcome));
+                }
+                Some(current)
+            }
+            basis => basis.map(PlanningBasis::into_basis),
+        };
+        Ok(ControlFlow::Continue(basis))
+    }
+
+    /// Returns how a unit that plans from `basis` ends before it runs, or
+    /// `None` when the unit runs.
+    ///
+    /// The unit is fenced when `basis` has a compactor epoch other than
+    /// `claimed` (this runtime's claim), and the call then forgets that
+    /// claim. The unit isn't needed when no unit is due on `basis`. Without
+    /// a `basis`, the unit runs.
+    async fn screen(
+        &self,
+        namespace_id: &NamespaceId,
+        claimed: Option<CompactorEpoch>,
+        basis: Option<&PublicationBasis>,
+        compaction_policy: loonfs_core::MetadataCompactionPolicy,
+    ) -> Option<MetadataCompactionOutcome> {
+        let basis = basis?;
+        if let Some(epoch) = claimed.filter(|epoch| *epoch != basis.manifest.compactor_epoch()) {
+            self.forget_fenced_compactor_epoch(namespace_id, epoch)
+                .await;
+            return Some(MetadataCompactionOutcome::Fenced);
+        }
+        (!loonfs_core::metadata_compaction_due(&basis.manifest, compaction_policy))
+            .then_some(MetadataCompactionOutcome::NotNeeded)
+    }
+
     async fn forget_fenced_compactor_epoch(
         &self,
         namespace_id: &NamespaceId,
@@ -509,18 +639,17 @@ impl Compactor {
 
     /// Runs one compaction unit under this runtime's compactor epoch.
     ///
-    /// `observed`, when given, was loaded after anything this call published.
-    /// Without `observed`, the unit plans from this runtime's writer position
-    /// while the position's last check is within the revalidation bound, and
-    /// from the current manifest otherwise. The unit waits for a compaction
-    /// permit from the runtime's execution budget, and `cancellation` ends
-    /// that wait or stops the compaction at its next block.
+    /// `observed`, when given, was read after anything this call published,
+    /// and [`Self::planning_basis`] returns the manifest that the unit plans
+    /// from, starting with `observed`. The unit waits for a compaction permit
+    /// from the runtime's execution budget, and `cancellation` ends that wait
+    /// or stops the compaction at its next block.
     pub(crate) async fn compact_once(
         &self,
         namespace_id: &NamespaceId,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
         admission: loonfs_core::CompactionAdmission,
-        observed: Option<PublicationBasis>,
+        observed: Option<PlanningBasis>,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<MetadataCompactionOutcome> {
         if cancellation.is_cancelled() {
@@ -533,37 +662,13 @@ impl Compactor {
             .await
             .get(namespace_id)
             .copied();
-        let observed = match observed {
-            Some(basis) => Some(basis),
-            None => {
-                let position = self.publisher.read_position_fold_input(namespace_id);
-                self.load_position_basis(position.as_ref()).await?
-            }
+        let basis = match self
+            .planning_basis(namespace_id, claimed, observed, compaction_policy)
+            .await?
+        {
+            ControlFlow::Continue(basis) => basis,
+            ControlFlow::Break(outcome) => return Ok(outcome),
         };
-        if let Some(epoch) = claimed {
-            if observed
-                .as_ref()
-                .is_some_and(|basis| epoch != basis.manifest.compactor_epoch())
-            {
-                self.forget_fenced_compactor_epoch(namespace_id, epoch)
-                    .await;
-                return Ok(MetadataCompactionOutcome::Fenced);
-            }
-        }
-        let due = |manifest: &LoadedManifest| {
-            loonfs_core::metadata_compaction_due(manifest, compaction_policy)
-        };
-        let basis = match observed {
-            Some(basis) => Some(basis),
-            // With a claim, the call skips the check that a unit is due,
-            // because the unit loads the manifest itself, and checking here
-            // first would load the manifest twice.
-            None if claimed.is_some() => None,
-            None => Some(self.load_live_basis(namespace_id).await?),
-        };
-        if basis.as_ref().is_some_and(|basis| !due(&basis.manifest)) {
-            return Ok(MetadataCompactionOutcome::NotNeeded);
-        }
         let _permit = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Ok(MetadataCompactionOutcome::Cancelled),
@@ -650,21 +755,22 @@ impl Compactor {
     /// Folds the WAL tail for metadata maintenance and
     /// [`Maintenance::fold_wal`](crate::Maintenance::fold_wal).
     ///
-    /// In a runtime with the namespace's writer session, the fold folds the
-    /// tail of the position that reads start from, so it reads no WAL
-    /// objects, and it publishes on the position's manifest. A position
-    /// whose last check is at the revalidation bound is discarded, and the
-    /// fold loads the tail from the store. A commit that the session
-    /// publishes while the fold runs isn't in that position, so the commit
-    /// stays in the WAL tail above the fold's manifest.
+    /// In a runtime with the namespace's writer session, the session folds
+    /// the tail after any fold that it's already running, from its position
+    /// (see [`PublisherRegistry::fold_wal_through_session`]), so the fold
+    /// reads no WAL objects and publishes on the position's manifest. A
+    /// position whose last check is at the revalidation bound is discarded,
+    /// and the fold loads the tail from the store. A namespace without a
+    /// session, or whose session is fenced, is folded from the store.
     pub(super) async fn run_wal_fold(&self, namespace_id: &NamespaceId) -> Result<FoldWalResponse> {
+        if let Some(folded) = self.publisher.fold_wal_through_session(namespace_id).await {
+            return folded;
+        }
         async {
             let _permit = self.core.fold_permit().await;
-            let engine = self.engine(namespace_id);
-            let engine = match self.publisher.read_position_fold_input(namespace_id) {
-                Some(position) => engine.with_writer_position(position),
-                None => engine,
-            };
+            let engine = self
+                .engine(namespace_id)
+                .with_writer_position(self.publisher.read_position_fold_input(namespace_id));
             let result = engine.fold_wal().await.map_err(Error::from);
             self.publisher
                 .finish_publication(namespace_id, result)

@@ -2609,8 +2609,10 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         .expect("publish across the fold threshold");
     recording.inner().wait_until_blocked().await;
 
-    // An explicit fold takes a fold permit too, so it queues ahead of the
-    // fold that the next publication starts, and folds that tail first.
+    // An explicit fold of a namespace with a session is the session's fold,
+    // so it takes the session's fold turn before it waits for a permit. The
+    // fold that the next publication starts waits for that turn, and finds
+    // the tail folded.
     let explicit_fold = tokio::spawn({
         let maintenance =
             writer.maintenance(loonfs_test_support::ids::writer_id("late-fold-maintenance"));
@@ -2624,7 +2626,6 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         )))
         .await
         .expect("publish across the fold threshold");
-    wait_for_fold_waiters(&writer, 2).await;
 
     recording.reset();
     recording.inner().release();

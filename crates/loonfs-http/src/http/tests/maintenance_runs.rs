@@ -6,8 +6,12 @@ use loonfs::MetadataCompactionOutcome;
 use loonfs::{MaintainMetadataOptions, MaintenanceCancellation};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::ids::writer_id;
-use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
+use loonfs_test_support::stores::{
+    write_keys, BlockingStore, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
+};
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
+use loonfs_types::ChecksumAlgorithm;
+use std::collections::BTreeSet;
 use tower::ServiceExt;
 
 async fn run(
@@ -181,6 +185,101 @@ async fn one_metadata_run_does_the_work_of_the_step_and_compaction_runs() {
         "both histories end on the same manifest"
     );
     state.runtime.shutdown().await.expect("shutdown writer");
+}
+
+/// Checks that a `metadata` run on a namespace whose writer session is
+/// folding waits for that fold instead of folding the same tail at the same
+/// time, so each of the tail's content objects is written once and no
+/// manifest put fails, and that a run on a namespace without a session folds
+/// the tail itself, once.
+#[tokio::test]
+async fn a_metadata_run_folds_each_tail_once_with_or_without_a_session() {
+    const FILES: usize = 8;
+    const FILE_BYTES: usize = 1024;
+    let actor = loonfs_test_support::test_actor();
+    for held in [true, false] {
+        let directory = tempdir().expect("tempdir");
+        let blocking = Arc::new(BlockingStore::new(
+            MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
+            KeyPredicate::content_blob(),
+            OperationSelector::Put,
+        ));
+        let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
+        let mut options = test_options(directory.path(), "metadata-session");
+        options.grep = JobMode::Disabled;
+        options.inline_content.inline_content_fold_at_bytes = FILES * FILE_BYTES;
+        let (router, state) = test_app(
+            options,
+            TestAppOptions {
+                store: Some(store.clone()),
+                ..TestAppOptions::default()
+            },
+        )
+        .await
+        .expect("app");
+        let namespace_id = namespace_id("held");
+        state
+            .runtime
+            .create_namespace(&namespace_id, &actor)
+            .await
+            .expect("create namespace");
+        let namespace = state
+            .runtime
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
+        // While the session stays open, the last write starts the session's
+        // fold, which parks at its first content write. When the session
+        // ends, its tail stays one file under the fold trigger.
+        let files = if held { FILES } else { FILES - 1 };
+        store.reset();
+        if held {
+            blocking.block_next();
+        }
+        for index in 0..files {
+            let fill = b'a' + u8::try_from(index).expect("a small index");
+            namespace
+                .put_file(&format!("/file-{index}"), &[fill; FILE_BYTES], &actor)
+                .await
+                .expect("put a file");
+        }
+        if held {
+            blocking.wait_until_blocked().await;
+        } else {
+            namespace.clone().close().await.expect("end the session");
+            store.reset();
+        }
+        let release = async {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+            blocking.release();
+        };
+        let ((status, body), ()) = tokio::join!(
+            run(
+                &router,
+                &namespace_id,
+                r#"{"kind":"metadata","max_wal_tail_objects":1}"#
+            ),
+            release
+        );
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let operations = store.take();
+        let content_puts = write_keys(&operations, &KeyPredicate::content_blob());
+        let distinct: BTreeSet<_> = content_puts.iter().collect();
+        assert_eq!(content_puts.len(), files, "held {held}: {content_puts:#?}");
+        assert_eq!(distinct.len(), files, "held {held}: {content_puts:#?}");
+        let manifest_puts = write_keys(&operations, &KeyPredicate::manifest(&namespace_id));
+        let distinct: BTreeSet<_> = manifest_puts.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            manifest_puts.len(),
+            "held {held}: a manifest put failed its precondition: {manifest_puts:#?}"
+        );
+        if !held {
+            assert_eq!(manifest_puts.len(), 1, "one fold");
+        }
+        state.runtime.shutdown().await.expect("shutdown writer");
+    }
 }
 
 #[tokio::test]

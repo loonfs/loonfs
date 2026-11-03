@@ -7,8 +7,8 @@ use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
-    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode,
-    MetadataMaintenanceResponse, Result, SharedObjectStore, WriterState,
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, FoldWalResponse,
+    MaintainMetadataOptions, MetadataMaintenanceResponse, Result, SharedObjectStore, WriterState,
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
@@ -18,6 +18,7 @@ use loonfs_types::Commit;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::runtime::Handle;
@@ -211,7 +212,7 @@ impl NamespaceSession {
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<MetadataMaintenanceResponse> {
         self.publisher
-            .maintain_metadata_while_due(cancellation)
+            .maintain_metadata_while_due(cancellation, &MaintainMetadataOptions::default())
             .await
     }
 
@@ -527,10 +528,95 @@ impl PublisherRegistry {
         &self,
         namespace_id: &NamespaceId,
     ) -> Option<Result<()>> {
+        Some(self.folding_session(namespace_id)?.fold_any_tail().await)
+    }
+
+    /// Folds the WAL tail of `namespace_id` through the namespace's writer
+    /// session, after any fold that the session is already running, and
+    /// returns what [`Maintenance::fold_wal`](crate::Maintenance::fold_wal)
+    /// returns, or `None` when this runtime has no session for the namespace
+    /// or the session is fenced.
+    pub(crate) async fn fold_wal_through_session(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Option<Result<FoldWalResponse>> {
+        Some(self.folding_session(namespace_id)?.fold_wal().await)
+    }
+
+    /// Runs a host's metadata call on `namespace_id` through the namespace's
+    /// writer session (see [`NamespacePublisher::maintain_metadata_while_due`]),
+    /// or returns `None` when this runtime has no session for the namespace
+    /// that admits work and isn't fenced.
+    pub(crate) async fn maintain_metadata_through_session(
+        &self,
+        namespace_id: &NamespaceId,
+        cancellation: &MetadataCompactionCancellation,
+        options: &MaintainMetadataOptions,
+    ) -> Option<Result<MetadataMaintenanceResponse>> {
         let publisher = self
             .live_publisher(namespace_id)
-            .filter(|publisher| !publisher.session_is_fenced())?;
-        Some(publisher.fold_any_tail().await)
+            .filter(|publisher| publisher.session_status() == NamespaceSessionStatus::Open)?;
+        Some(
+            publisher
+                .maintain_metadata_while_due(cancellation, options)
+                .await,
+        )
+    }
+
+    /// Runs `pin` under a fold permit, and records the change that `change`
+    /// returns (see [`Self::finish_namespace_mutation`]).
+    ///
+    /// `pin` folds `namespace_id`'s WAL tail from the position that the call
+    /// passes it, and then pins the manifest that covers the tail. When this
+    /// runtime has a session for the namespace that isn't fenced, the fold
+    /// is the session's (see [`NamespacePublisher::fold_and_pin`]), so it
+    /// starts from the session's position after any fold that the session is
+    /// already running. Otherwise `pin` is given no position, and it loads
+    /// the tail from the store. Neither path starts a compaction.
+    pub(crate) async fn fold_and_pin<T, Pin>(
+        &self,
+        namespace_id: &NamespaceId,
+        change: impl FnOnce(&PublicationReport<T>) -> NamespaceChange,
+        pin: impl FnOnce(Option<WriterPosition>) -> Pin,
+    ) -> Result<PublicationReport<T>>
+    where
+        Pin: Future<Output = loonfs_core::Result<PublicationReport<T>>>,
+    {
+        if let Some(publisher) = self.folding_session(namespace_id) {
+            return publisher.fold_and_pin(self, change, pin).await;
+        }
+        let pinned = {
+            let _permit = self.shared.context.runtime_core.fold_permit().await;
+            pin(None).await.map_err(Error::from)
+        };
+        self.finish_pin(namespace_id, pinned, change).await
+    }
+
+    /// Raises the namespace's hint to the manifest that a pin's fold
+    /// published, and records the change that `change` returns.
+    pub(super) async fn finish_pin<T>(
+        &self,
+        namespace_id: &NamespaceId,
+        pinned: Result<PublicationReport<T>>,
+        change: impl FnOnce(&PublicationReport<T>) -> NamespaceChange,
+    ) -> Result<PublicationReport<T>> {
+        if let Some(published) = pinned
+            .as_ref()
+            .ok()
+            .and_then(|report| report.published.as_ref())
+        {
+            self.raise_hint(namespace_id, published.manifest.manifest_no)
+                .await;
+        }
+        self.finish_namespace_mutation(namespace_id, pinned, change)
+            .await
+    }
+
+    /// Returns the namespace's writer session when it isn't fenced, so that
+    /// a fold of the namespace runs as the session's fold.
+    fn folding_session(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
+        self.live_publisher(namespace_id)
+            .filter(|publisher| !publisher.session_is_fenced())
     }
 
     /// Returns the namespace's writer position that reads in this runtime
@@ -673,7 +759,7 @@ pub(crate) enum NamespaceChange {
 
 impl NamespaceChange {
     /// Returns the change that a maintenance call's report describes.
-    fn of_report<T>(report: &PublicationReport<T>) -> Self {
+    pub(crate) fn of_report<T>(report: &PublicationReport<T>) -> Self {
         report
             .published
             .clone()

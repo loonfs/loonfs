@@ -32,6 +32,7 @@ use crate::{
     ForkNamespaceOptions, InlineContentPolicy, Maintenance, MetadataCache, Namespace, NamespaceId,
     Result, SharedObjectStore, StoreConfig,
 };
+use loonfs_core::publish::WriterPosition;
 use loonfs_core::NamespaceWriterEngine;
 use loonfs_types::{
     u64_from_usize, CompactorEpoch, Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
@@ -415,9 +416,11 @@ impl LoonFs<Writable> {
     /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or unexpired snapshot.
     ///
     /// A fork of the current head folds the source's WAL tail first when it
-    /// is not folded, and waits for a fold permit from the runtime's
-    /// execution budget either way. A fork of a snapshot never folds and
-    /// takes no fold permit.
+    /// isn't folded, and waits for a fold permit from the runtime's
+    /// execution budget either way. When this runtime has a writer session
+    /// for the source, the fold runs as one of the session's folds, after any
+    /// fold that the session is already running. A fork of a snapshot never
+    /// folds and takes no fold permit.
     pub async fn fork_namespace_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -437,8 +440,9 @@ impl LoonFs<Writable> {
                     source_namespace_id,
                     new_namespace_id,
                     snapshot_id.is_none(),
-                    async move {
+                    move |position| async move {
                         engine
+                            .with_writer_position(position)
                             .fork_namespace(new_namespace_id, actor, snapshot_id)
                             .await
                     },
@@ -450,47 +454,47 @@ impl LoonFs<Writable> {
     }
 
     /// Installs the fork of `source_namespace_id` into `new_namespace_id`
-    /// that `fork` makes, under a fold permit from the runtime's execution
-    /// budget when `fold` says that the fork folds the source's WAL tail,
-    /// and moves this runtime's views of both namespaces past the fork.
-    pub(crate) async fn install_fork(
+    /// that `fork` makes, and moves this runtime's views of both namespaces
+    /// past the fork.
+    ///
+    /// When `fold` says that the fork folds the source's WAL tail, the fork
+    /// runs under a fold permit from the runtime's execution budget. If this
+    /// runtime has a writer session for the source that isn't fenced, the
+    /// fold is one of that session's folds (see
+    /// [`PublisherRegistry::fold_and_pin`](crate::publisher::PublisherRegistry::fold_and_pin)),
+    /// and `fork` is given the session's position to fold from. In every
+    /// other case, `fork` is given no position.
+    pub(crate) async fn install_fork<Fork>(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         fold: bool,
-        fork: impl std::future::Future<
+        fork: impl FnOnce(Option<WriterPosition>) -> Fork,
+    ) -> Result<crate::NamespaceMetadata>
+    where
+        Fork: std::future::Future<
             Output = loonfs_core::Result<loonfs_core::PublicationReport<crate::NamespaceMetadata>>,
         >,
-    ) -> Result<crate::NamespaceMetadata> {
-        let result = {
-            let _permit = if fold {
-                Some(self.core.fold_permit().await)
-            } else {
-                None
-            };
-            fork.await
-        }
-        .map_err(Error::from);
-        if let Some(published) = result
-            .as_ref()
-            .ok()
-            .and_then(|report| report.published.as_ref())
-        {
-            self.mode
-                .publisher
-                .raise_hint(source_namespace_id, published.manifest.manifest_no)
-                .await;
-        }
+    {
         // The runtime drops its view of the source after a fork, as it does
         // after a creation or a deletion (see the read freshness design
         // note), so the source's publisher drops its position instead of
         // moving onto the fork's fold.
-        let result = self
-            .mode
-            .publisher
-            .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unknown)
-            .await
-            .map(|report| report.response);
+        let change =
+            |_: &loonfs_core::PublicationReport<crate::NamespaceMetadata>| NamespaceChange::Unknown;
+        let result = if fold {
+            self.mode
+                .publisher
+                .fold_and_pin(source_namespace_id, change, fork)
+                .await
+        } else {
+            let result = fork(None).await.map_err(Error::from);
+            self.mode
+                .publisher
+                .finish_namespace_mutation(source_namespace_id, result, change)
+                .await
+        }
+        .map(|report| report.response);
         if result.is_ok() {
             self.mode
                 .publisher

@@ -70,7 +70,9 @@ impl Maintenance {
     /// fence that records the floor, and folds again (format spec, "Writer
     /// ownership"). A writer session of the namespace, in this runtime or
     /// another, then returns `writer_fenced` to its next publication, and a
-    /// later write opens a new session. Each fold waits for a fold permit
+    /// later write opens a new session. Each fold runs through the
+    /// namespace's writer session in this runtime when it has one that isn't
+    /// fenced, as [`Self::fold_wal`]'s does. Each fold waits for a fold permit
     /// from the runtime's execution budget.
     ///
     /// The runtime doesn't schedule this call. The reference server makes

@@ -28,9 +28,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates a new namespace at this namespace's current head or an unexpired snapshot.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
-    /// Returns the target's status at the fork point. The report includes the
-    /// manifest of this namespace that the fork's fold published, if it
-    /// published one.
+    /// Returns the target's status at the fork point. A fork of the current
+    /// head first folds this namespace's WAL tail, starting from the writer
+    /// position that [`Self::with_writer_position`] set, if the caller set a
+    /// position. The report
+    /// includes the manifest of this namespace that the fork's fold
+    /// published, if it published one.
     pub async fn fork_namespace(
         &self,
         new_namespace_id: &NamespaceId,
@@ -91,7 +94,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 published: None,
             }
         } else {
-            self.namespace.create_pin(owner, &clock).await?
+            self.namespace
+                .create_pin(owner, self.writer_position.clone(), &clock)
+                .await?
         };
         let source_manifest = load_namespace_manifest_envelope(
             &self.namespace.store,

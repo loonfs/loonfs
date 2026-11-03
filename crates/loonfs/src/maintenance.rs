@@ -187,7 +187,9 @@ impl Maintenance {
     /// policy's `max_decoded_input_rows_per_step` rows, and reports a larger
     /// window as [`MetadataCompactionOutcome::MetadataCompactionRequired`]. A
     /// fold waits for a fold permit from the runtime's execution budget, and a
-    /// unit that finds work waits for a compaction permit from it.
+    /// unit that finds work waits for a compaction permit from it. When this
+    /// runtime has a writer session for the namespace that isn't fenced, the
+    /// fold runs through the session, as [`Self::fold_wal`]'s does.
     pub async fn maintain_metadata_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -251,18 +253,34 @@ impl Maintenance {
     /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after lost races,
     /// on fencing or cancellation, when a compaction unit does not finish,
     /// or while a tail waits for the idle fold age.
+    ///
+    /// When this runtime has a writer session for the namespace that admits
+    /// work and isn't fenced, the call runs through the session, as
+    /// [`Namespace::maintain_metadata_while_due`](crate::Namespace::maintain_metadata_while_due)
+    /// does. The call then never repeats a fold or a compaction unit that the
+    /// session is running, and with the default options it can return the
+    /// caught-up answer that the session keeps.
     pub async fn maintain_metadata_while_due_with_options(
         &self,
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
         options: &MaintainMetadataOptions,
     ) -> Result<MetadataMaintenanceResponse> {
+        let cancellation = cancellation.metadata_compaction();
+        if let Some(maintained) = self
+            .compactor
+            .publisher
+            .maintain_metadata_through_session(namespace_id, cancellation, options)
+            .await
+        {
+            return maintained;
+        }
         // Boxing erases the loop's nested step futures. Without it, a host
         // that awaits this call inside its own scheduling futures exceeds
         // rustc's type-recursion depth.
         Box::pin(self.compactor.metadata_while_due(
             namespace_id,
-            cancellation.metadata_compaction(),
+            cancellation,
             TailFold::from_options(options),
             options.compaction_policy,
         ))
@@ -405,9 +423,11 @@ impl Maintenance {
     ///
     /// A namespace with no unfolded tail reports
     /// [`FoldWalOutcome::AlreadyCurrent`] and publishes nothing. The fold
-    /// waits for a fold permit from the runtime's execution budget. This runs
-    /// no compaction; [`Self::maintain_metadata`] folds and then runs one
-    /// compaction unit.
+    /// waits for a fold permit from the runtime's execution budget. When this
+    /// runtime has a writer session for the namespace that isn't fenced, the
+    /// session folds the tail after any fold that it's already running. This
+    /// call runs no compaction, but [`Self::maintain_metadata`] folds and
+    /// then runs one compaction unit.
     pub async fn fold_wal(&self, namespace_id: &NamespaceId) -> Result<FoldWalResponse> {
         trace::in_operation(
             operation_span!(self.compactor.core, "fold_wal", namespace_id),

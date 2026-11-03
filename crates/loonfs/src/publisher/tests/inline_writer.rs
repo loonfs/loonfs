@@ -1394,18 +1394,24 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             "one windowed WAL discovery without a byte-count replay"
         );
         if mode == "explicit" {
+            store.reset();
             let (step, ()) = tokio::join!(
                 maintenance.maintain_metadata_with_options(&namespace, &options),
                 async {
-                    // The explicit step decides to fold before it waits for a
-                    // permit, so the session's fold can't empty the tail first.
+                    // The explicit step reads the WAL tail and decides to fold
+                    // while the session's fold waits for a permit, so the
+                    // session's fold can't empty the tail first. The step's
+                    // fold then waits for the session's fold turn.
                     bounded(Duration::from_secs(10), async {
-                        while writer.execution_budget().stats().folds_waiting < 2 {
+                        while family_requests(&store, DurableObjectFamily::WalObject) < 7 {
                             tokio::task::yield_now().await;
                         }
                     })
                     .await
-                    .expect("the session's fold and the explicit fold wait for permits");
+                    .expect("the explicit step reads the WAL tail");
+                    for _ in 0..100 {
+                        tokio::task::yield_now().await;
+                    }
                     drop(permits);
                 }
             );

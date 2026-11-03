@@ -11,7 +11,7 @@ Pins, forks, and namespace creation belong to no role. Every other publication i
 
 A manifest is created at its predecessor's number plus one with put-if-absent, so two publishers can't both create the same number. The manifest records the writer epoch and the compactor epoch, so a publisher can check whether it still has the role it acts under. Compaction uses both mechanisms. A runtime claims the compactor epoch before its first compaction, every compaction publication has to match the current epoch, and a newer claim stops an older compactor at its next check.
 
-Folds start in several places. A writer's host folds its session's tail after a commit that reaches the fold thresholds or when the tail reaches the idle fold age, a maintenance call or the host's daily pass runs an explicit fold, and a pin from the current head or a namespace deletion folds the tail first. Two folds of one namespace can run at once, in one process or in two. If a session's fold were bound to the writer epoch and the other folds weren't, LoonFS would have fold paths with different rules. The binding would exist to keep the session's position off a manifest published after another writer's claim, and the writer position's epoch rule (the position never moves onto a manifest with a newer writer epoch) already does that job.
+Folds start in several places. A writer's host folds its session's tail after a commit that reaches the fold thresholds or when the tail reaches the idle fold age, a maintenance call or the host's daily pass runs an explicit fold, and a pin from the current head or a namespace deletion folds the tail first. Two folds of one namespace can run at once in two processes, or in one process that has no writer session for the namespace. If a session's fold were bound to the writer epoch and the other folds weren't, LoonFS would have fold paths with different rules. The binding would exist to keep the session's position off a manifest published after another writer's claim, and the writer position's epoch rule (the position never moves onto a manifest with a newer writer epoch) already does that job.
 
 ## Two roles
 
@@ -40,7 +40,16 @@ Why two epochs and not one? The two roles have different lifetimes and can belon
 
 A [fold](../specs/glossary.md#fold) moves the WAL objects after the current manifest's folded boundary into metadata segments, and publishes the next manifest as the maintainer's publication, with both epochs copied from its predecessor. The writer's host folds its own sessions' tails as the maintainer, after a commit that reaches the fold thresholds and when a tail reaches the idle fold age. A maintenance runtime folds a tail that no host is maintaining, such as a crashed writer's, with no claim on the writer role and no fence on a writer. A snapshot from any process folds the tail the same way, and then pins the resulting manifest.
 
-A writer session runs one fold at a time. A merge or a rebase of a namespace, and the host's metadata step, fold the namespace's tail through the namespace's writer session when the process has one open, so their folds wait for the session's fold instead of running beside it. Any other maintenance call's fold can run beside the session's fold, in the same process or in another one, and the numbered create resolves the two. A fold whose create loses reloads the current manifest and rebuilds against it, and the rebuild has four outcomes:
+A writer session runs one fold at a time. While a process has a writer session open for a namespace, every fold of that namespace in the process runs as one of the session's folds, so each fold waits for any fold that the session is already running instead of running beside it. The session runs these folds:
+
+- Its own folds, at the fold thresholds and at the idle fold age.
+- The fold of a merge or a rebase of the namespace.
+- The fold of the host's metadata step, and of a `metadata` maintenance call.
+- An explicit fold, and the folds of a retention floor acknowledgment.
+- The fold before a snapshot or a fork of the current head.
+- The fold before the namespace's deletion.
+
+Folds don't go through a fenced session, so a process whose session is fenced folds the namespace as a process without a session does. A fold in another process can run beside the session's fold, and the numbered create resolves the two. A fold whose create loses reloads the current manifest and rebuilds against it, and the rebuild has four outcomes:
 
 - **The tail is already folded.** The current manifest's folded boundary is at or past the fold's tip, and its head and number are at or past the fold's, so there's nothing to publish.
 - **The winner is at the same head.** The winner is a compaction, a compactor claim, or a retention advance, so the rebuild keeps the tail it read.
@@ -61,7 +70,7 @@ Compaction claims the compactor epoch before a runtime's first compaction of the
 
 Garbage collection publishes nothing and claims nothing. A pass establishes its roots from the current manifest, the upload sessions, the WAL tail, and the complete pin listing, and deletes each object that no root references once the object is older than the grace. Two passes over one namespace delete the same objects, and the second finds them gone. The maintainer runs garbage collection because it runs the other passes, not because a fence requires it.
 
-A host that has both roles for a namespace folds and compacts. A separate maintenance host that visits the same namespace claims the compactor epoch when it compacts, which stops the writer host's next compaction at its check, and the writer host claims again when it next compacts. The two hosts' folds coexist. The host's daily pass visits every listed namespace, but a visit folds a tail only when a fold is due (at the fold thresholds or the idle fold age, as on a tick). Two hosts that maintain one namespace alternate claims for compaction only, and each lost claim costs the loser one compaction. An unfinished metadata visit that finds another process's compactor claim retries on an interval, at six requests per retry.
+A host that has both roles for a namespace folds and compacts. A separate maintenance host that visits the same namespace claims the compactor epoch when it compacts, which stops the writer host's next compaction at its check, and the writer host claims again when it next compacts. The two hosts' folds coexist. The host's daily pass visits every listed namespace, but a visit folds a tail only when a fold is due (at the fold thresholds or the idle fold age, as on a tick). Two hosts that maintain one namespace alternate claims for compaction only, and each lost claim costs the loser at most the one compaction unit that the claim interrupts. An unfinished metadata visit that finds another process's compactor claim retries on an interval, at six requests per retry.
 
 ## Pins and forks
 
@@ -69,7 +78,7 @@ A [pin](../specs/glossary.md#pin) is a record under the namespace's pins prefix,
 
 ## Costs
 
-Folds, pins, retention advances, and deletions make no claim, so they send no request beyond their own publications. A runtime claims the compactor epoch before its first compaction of a namespace, and again after another runtime's claim, and each claim is one manifest publication. Two hosts that maintain one namespace alternate claims, and each lost claim costs the loser one compaction.
+Folds, pins, retention advances, and deletions make no claim, so they send no request beyond their own publications. A runtime claims the compactor epoch before its first compaction of a namespace, and again after another runtime's claim, and each claim is one manifest publication. A writer session's position doesn't show another runtime's claim, so before the session plans a compaction unit from its position, it sends one HEAD for the manifest after the position's manifest, and when another runtime has claimed the compactor epoch, the session finds the claim and stops before the unit reads its inputs. Two hosts that maintain one namespace alternate claims, and each lost claim costs the loser at most the one compaction unit that the claim interrupts.
 
 ## What the format and API specs say
 

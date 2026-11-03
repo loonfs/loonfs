@@ -1546,6 +1546,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
                 name: "test-pin".to_owned(),
                 expires_at_ms: None,
             },
+            None,
             &writer.clock(),
         )
         .await

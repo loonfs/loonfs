@@ -55,10 +55,11 @@
 //! folding idle tails, finishing compaction a session left due after its
 //! last fold, or collecting garbage, calls the operations on
 //! [`LoonFs::maintenance`] on a schedule of its own. For a namespace that
-//! the host keeps a session open for, the host runs metadata maintenance
-//! through [`Namespace::maintain_metadata_while_due`] instead, so that the
-//! host's calls don't repeat a fold or a compaction that the session is
-//! already running.
+//! has a session open in the runtime, those calls fold through the session,
+//! and [`Maintenance::maintain_metadata_while_due`] also compacts through
+//! the session, as [`Namespace::maintain_metadata_while_due`] does. So a
+//! host's fold, and that call's compaction, wait for a fold or a compaction
+//! unit that the session is already running instead of repeating that work.
 
 #![warn(missing_docs)]
 

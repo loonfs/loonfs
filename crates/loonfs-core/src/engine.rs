@@ -115,7 +115,8 @@ pub struct NamespaceEngine<S, M> {
     pub(crate) subject: Option<Subject>,
     read_authority: ReadAuthority,
     /// The writer session's position that [`NamespaceEngine::fold_wal`]
-    /// folds, or `None` to load the tail from the store.
+    /// folds, and that the fold before a pin of the current head folds
+    /// first, or `None` to load the tail from the store.
     pub(crate) writer_position: Option<WriterPosition>,
 }
 
@@ -815,11 +816,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self.mode.writer_id
     }
 
-    /// Sets a writer session's position for [`Self::fold_wal`] to fold, so
-    /// the fold takes the tail from the position instead of loading it from
-    /// the store, and publishes on the position's manifest.
-    pub fn with_writer_position(mut self, position: WriterPosition) -> Self {
-        self.writer_position = Some(position);
+    /// Sets a writer session's position for [`Self::fold_wal`] to fold, and
+    /// for the fold before a snapshot or a fork of the current head, so the
+    /// fold takes the tail from the position instead of loading it from the
+    /// store, and publishes on the position's manifest. `None` loads the tail
+    /// from the store.
+    pub fn with_writer_position(mut self, position: Option<WriterPosition>) -> Self {
+        self.writer_position = position;
         self
     }
 

@@ -8,10 +8,10 @@ use super::{FoldTrigger, NamespacePublisher, NamespacePublisherState};
 use crate::maintenance::{Compactor, TailFold};
 use crate::trace::{phase_event, phase_span};
 use crate::MaintainMetadataOptions;
-use crate::{Error, FoldWalOutcome, Result, SharedObjectStore};
+use crate::{Error, FoldWalOutcome, FoldWalResponse, Result, SharedObjectStore};
 use futures::FutureExt;
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
-use loonfs_core::publish::NamespaceCommitEngine;
+use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
 use loonfs_core::time::OperationClock;
 use loonfs_core::Phase;
 use std::panic::AssertUnwindSafe;
@@ -26,10 +26,11 @@ pub(super) enum FoldRule {
     /// A tail at the fold trigger. The session's fold task uses this rule
     /// after a publish.
     AtTrigger,
-    /// A tail at the fold trigger, or any tail once this session's last
-    /// publication has reached the runtime's idle fold age. A host's
-    /// metadata step uses this rule.
-    WhenDue,
+    /// A tail that reaches `max_wal_tail_objects` WAL objects or the
+    /// runtime's inline fold size, or any tail once this session's last
+    /// publication has reached the runtime's idle fold age. A metadata call
+    /// through the session, such as a host's metadata step, uses this rule.
+    WhenDue { max_wal_tail_objects: u64 },
     /// Any tail with at least one WAL object. A merge or a rebase of the
     /// namespace uses this rule.
     Any,
@@ -173,23 +174,23 @@ impl NamespacePublisher {
     ) -> bool {
         match engine.and_then(position_tail) {
             Some((objects, inline_bytes)) => self.fold_is_due(rule, objects, inline_bytes),
-            None => rule != FoldRule::WhenDue,
+            None => !matches!(rule, FoldRule::WhenDue { .. }),
         }
     }
 
     /// Returns whether `rule` applies to a tail of `objects` WAL objects
     /// and `inline_bytes` bytes of inline content.
     fn fold_is_due(&self, rule: FoldRule, objects: u64, inline_bytes: usize) -> bool {
-        let at_trigger = FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
-            FOLD_AT_WAL_OBJECTS.get(),
-            objects,
-            inline_bytes,
-        );
+        let trigger = FoldTrigger::new(self.context.runtime_core.config());
         match rule {
-            FoldRule::AtTrigger => at_trigger,
-            FoldRule::WhenDue => {
+            FoldRule::AtTrigger => {
+                trigger.fold_is_due(FOLD_AT_WAL_OBJECTS.get(), objects, inline_bytes)
+            }
+            FoldRule::WhenDue {
+                max_wal_tail_objects,
+            } => {
                 let now_ms = self.context.runtime_core.timer().monotonic_now_ms();
-                at_trigger
+                trigger.fold_is_due(max_wal_tail_objects, objects, inline_bytes)
                     || (objects > 0
                         && self
                             .idle_fold_due_at_ms()
@@ -294,8 +295,7 @@ impl NamespacePublisher {
     /// that the session's previous fold left. A session without a
     /// position loads its tail from the store and folds it, except under
     /// [`FoldRule::WhenDue`], which can't tell the age of a tail that it
-    /// hasn't read. A fold that publishes wakes the commits that wait at the
-    /// write stop. A fold that fails leaves the position where it was.
+    /// hasn't read.
     pub(super) async fn fold(&self, rule: FoldRule) -> Result<bool> {
         let Some(_writer) = self.context.writer.upgrade() else {
             return Ok(false);
@@ -317,6 +317,23 @@ impl NamespacePublisher {
             }
             engine.and_then(NamespaceCommitEngine::writer_position)
         };
+        let published = self.fold_tail(input).await?.outcome == FoldWalOutcome::Published;
+        if published {
+            self.context.runtime_core.instruments().publisher.wal_fold();
+        }
+        Ok(published)
+    }
+
+    /// Folds the WAL tail above `input` (a position of this session), or the
+    /// tail that the store shows when `input` is `None`, and moves the
+    /// engine's position onto the manifest that covers the tail, whether the
+    /// fold published that manifest or found it current.
+    ///
+    /// The caller has the session's fold turn and a fold permit. A fold
+    /// that publishes raises the namespace's hint and wakes the commits that
+    /// wait at the write stop. A fold that fails leaves the position where it
+    /// was.
+    pub(super) async fn fold_tail(&self, input: Option<WriterPosition>) -> Result<FoldWalResponse> {
         let started_at_ms = self.context.runtime_core.timer().monotonic_now_ms();
         let folded = self
             .context
@@ -342,13 +359,9 @@ impl NamespacePublisher {
             .publisher
             .wal_fold_duration(self.elapsed_ms_since(started_at_ms));
         let folded = folded?;
-        // The fold moves the position onto the manifest that covers its tail,
-        // whether it published that manifest or found it current.
         self.change_position(PositionChange::Move(folded.manifest.clone()))
             .await;
-        let published = folded.response.outcome == FoldWalOutcome::Published;
-        if published {
-            self.context.runtime_core.instruments().publisher.wal_fold();
+        if folded.response.outcome == FoldWalOutcome::Published {
             if let Some(shared) = self.shared.upgrade() {
                 shared
                     .raise_hint(&self.namespace_id, folded.response.manifest_no)
@@ -356,7 +369,7 @@ impl NamespacePublisher {
             }
             self.fold_published.send_replace(());
         }
-        Ok(published)
+        Ok(folded.response)
     }
 
     /// Spawns `work` as the session's worker, whose exit the drain and close

@@ -97,17 +97,19 @@ impl Fixture {
 }
 
 /// Checks that after a fold, each snapshot creation on the writer's runtime
-/// costs 11 store requests, and each read at a snapshot and each deletion
+/// costs 5 store requests, and each read at a snapshot and each deletion
 /// costs 2, whichever fold folded the tail.
 ///
-/// A creation loads the current manifest and probes the WAL (6 requests),
-/// finds nothing to fold, writes the pin, and loads the current manifest
-/// again to verify the pin (4 requests). A read at a snapshot checks the
+/// A creation folds from the session's position and finds nothing to fold,
+/// so it writes the pin and then loads the current manifest to verify the
+/// pin (4 requests). The first creation after an explicit fold also reads
+/// the fold's manifest into the segment cache with one GET, because no
+/// compaction of the session has read it yet. A read at a snapshot checks the
 /// writer position's manifest for a successor with one HEAD and loads the
 /// pin, and the pinned manifest's segments are cached. A deletion loads the
 /// pin and deletes it.
 #[tokio::test]
-async fn snapshot_calls_after_a_fold_cost_the_same_whichever_fold_ran() {
+async fn snapshot_calls_after_a_fold_cost_a_pin_and_its_verification() {
     for fold in [Fold::Session, Fold::Explicit] {
         let fixture = fixture(fold).await;
         let mut snapshots = Vec::new();
@@ -121,7 +123,8 @@ async fn snapshot_calls_after_a_fold_cost_the_same_whichever_fold_ran() {
                 .await;
             snapshots.push(created.expect("create").snapshot_id);
             fixture.namespace.wait_for_fold().await.expect("settle");
-            fixture.assert_requests(&format!("{fold:?}: create {index}"), 11);
+            let manifest_read = usize::from(matches!(fold, Fold::Explicit) && index == 0);
+            fixture.assert_requests(&format!("{fold:?}: create {index}"), 5 + manifest_read);
         }
         let reader = fixture.namespace.read_only();
         for (index, snapshot) in snapshots.iter().enumerate() {
