@@ -6,6 +6,7 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PutMode;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
@@ -30,12 +31,15 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .await
         .expect("namespace");
     creator.shutdown().await.expect("shutdown creator");
+    // The writer's timer doesn't move, so the fold's hint raise is skipped
+    // and no trailing raise starts while the test counts requests.
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
             ..loonfs::RuntimeConfig::default()
         })
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()
         .await
         .expect("fresh writer");
@@ -154,6 +158,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
             min_publish_interval_ms: 0,
             ..loonfs::RuntimeConfig::default()
         })
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()
         .await
         .expect("writer");
@@ -207,8 +212,9 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
     store.inner().release();
     namespace_writer.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("the fold's compaction settles");
-    // The fold's hint raise can come less than a second after the claim's,
-    // which skips it, so the test raises the hint to the fold's manifest.
+    // The writer's timer doesn't move, so the fold's hint raise is skipped,
+    // and no trailing raise starts while the test counts requests. The test
+    // raises the hint to the fold's manifest.
     loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .raise_hint_to_current_manifest()
         .await;

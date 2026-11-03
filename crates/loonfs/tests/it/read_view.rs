@@ -1,6 +1,8 @@
 //! Read views that keep related reads on one captured namespace state.
 
-use crate::common::{assert_core_error_kind, metadata_options, open_runtime_async, store};
+use crate::common::{
+    assert_core_error_kind, metadata_options, open_runtime_async, open_runtime_with_async, store,
+};
 use loonfs::{
     ChangeSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, LoonFs,
     NamespaceId, PutFileOptions, RevisionNo,
@@ -1219,7 +1221,10 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         InjectedError::Transport("manifest read failed".to_owned()),
     ));
     let store = Arc::new(RecordingStore::new(failures.clone(), KeyPredicate::any()));
-    let runtime = open_runtime_async(store.clone(), "missing-current-segment").await;
+    let runtime = open_runtime_with_async(store.clone(), "missing-current-segment", |builder| {
+        builder.monotonic_timer(Arc::new(loonfs_test_support::clock::ManualClock::new(0)))
+    })
+    .await;
     runtime
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -1241,9 +1246,10 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .fold_wal(&namespace_id)
         .await
         .expect("fold");
-    // A runtime skips a hint raise less than a second after its last raise
-    // of the same hint, so the test raises the hint to the fold's manifest
-    // before it counts the reader's hint reads.
+    // The writer's timer doesn't move, so the fold's hint raise is skipped,
+    // and no trailing raise starts while the test counts requests. The test
+    // raises the hint to the fold's manifest before it counts the reader's
+    // hint reads.
     runtime.writer.drain().await.expect("drain");
     loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .raise_hint_to_current_manifest()

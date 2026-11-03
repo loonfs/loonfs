@@ -4,18 +4,19 @@
 use super::*;
 use crate::InlineContentPolicy;
 use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
+use loonfs_test_support::clock::TokioClock;
+use loonfs_types::MonotonicTimer;
 
 /// The store under a raise fixture: it parks the requests for the hint once
 /// a test arms it, records the requests for the hint, and fails the
 /// compare-and-swap writes of the hint that a test asks it to fail.
 type RaiseStore = BlockingStore<RecordingStore<FailStore<LocalFsStore>>>;
 
-/// A writer whose monotonic timer moves only when a test moves it, with one
-/// namespace that it created and opened.
+/// A writer whose monotonic timer is a test clock, with one namespace that it
+/// created and opened.
 struct RaiseFixture {
     _directory: tempfile::TempDir,
     store: Arc<RaiseStore>,
-    timer: Arc<ManualClock>,
     writer: crate::LoonFs<crate::Writable>,
     namespace_id: NamespaceId,
     namespace: crate::Namespace<crate::Writable>,
@@ -23,7 +24,7 @@ struct RaiseFixture {
 }
 
 impl RaiseFixture {
-    async fn new() -> Self {
+    async fn new(timer: Arc<dyn MonotonicTimer>) -> Self {
         let directory = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("raised").expect("namespace id");
         let store = Arc::new(BlockingStore::new(
@@ -39,14 +40,13 @@ impl RaiseFixture {
             KeyPredicate::hint(&namespace_id),
             OperationSelector::Any,
         ));
-        let timer = Arc::new(ManualClock::new(0));
         let writer = crate::LoonFs::builder_with_store(store.clone() as SharedStore)
             .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
             .config(crate::RuntimeConfig {
                 min_publish_interval_ms: 0,
                 ..crate::RuntimeConfig::default()
             })
-            .monotonic_timer(timer.clone())
+            .monotonic_timer(timer)
             .build()
             .await
             .expect("build writer");
@@ -60,7 +60,6 @@ impl RaiseFixture {
         Self {
             _directory: directory,
             store,
-            timer,
             writer,
             namespace_id,
             namespace,
@@ -109,16 +108,35 @@ impl RaiseFixture {
     fn hint_writes(&self) -> usize {
         self.store.inner().counts().compare_and_swaps
     }
+
+    /// Waits until the hint reaches `manifest_no`, and reads the hint once
+    /// for each millisecond of the paused test clock until then.
+    async fn wait_for_hint(&self, manifest_no: u64) {
+        bounded(Duration::from_secs(10), async {
+            while self.hint().await != manifest_no {
+                sleep_ms(1).await;
+            }
+        })
+        .await
+        .expect("the hint reaches the manifest");
+    }
 }
 
-/// Checks that a publication less than `HINT_RAISE_INTERVAL_MS` after the
-/// runtime's last raise of the namespace's hint returns without a request
-/// for the hint, so it doesn't wait for a raise, and that the first
-/// publication an interval after that raise raises the hint to its own
-/// manifest.
-#[tokio::test]
-async fn publications_less_than_an_interval_apart_raise_the_hint_once() {
-    let mut fixture = RaiseFixture::new().await;
+/// Moves the paused test clock, and with it a [`TokioClock`], forward by
+/// `elapsed_ms`.
+async fn advance_ms(elapsed_ms: u64) {
+    tokio::time::advance(Duration::from_millis(elapsed_ms)).await;
+}
+
+/// Checks that publications less than `HINT_RAISE_INTERVAL_MS` after the
+/// runtime's last raise of the namespace's hint return without a request for
+/// the hint, so they don't wait for a raise, that one trailing raise raises
+/// the hint to the newest of their manifests once the interval ends, and that
+/// a publication an interval after the trailing raise raises the hint at
+/// once.
+#[tokio::test(start_paused = true)]
+async fn the_raises_an_interval_skips_share_one_trailing_raise_when_it_ends() {
+    let mut fixture = RaiseFixture::new(Arc::new(TokioClock::start())).await;
     fixture.commit().await;
     fixture.writer.drain().await.expect("drain");
     assert_eq!(fixture.hint().await, 2, "the claim raises the hint");
@@ -127,14 +145,19 @@ async fn publications_less_than_an_interval_apart_raise_the_hint_once() {
     // wrote the hint wouldn't return.
     fixture.store.arm();
     assert_eq!(fixture.commit_and_fold().await, 3);
-    fixture.timer.advance_ms(HINT_RAISE_INTERVAL_MS - 1);
+    advance_ms(HINT_RAISE_INTERVAL_MS / 2).await;
     assert_eq!(fixture.commit_and_fold().await, 4);
+    advance_ms(HINT_RAISE_INTERVAL_MS / 2 - 1).await;
+    assert_eq!(fixture.commit_and_fold().await, 5);
     assert_eq!(fixture.hint().await, 2);
     fixture.store.release();
-    fixture.timer.advance_ms(1);
-    assert_eq!(fixture.commit_and_fold().await, 5);
-    assert_eq!(fixture.hint().await, 5);
-    assert_eq!(fixture.hint_writes(), 2);
+    advance_ms(1).await;
+    fixture.wait_for_hint(5).await;
+    assert_eq!(fixture.hint_writes(), 2, "one trailing raise");
+    advance_ms(HINT_RAISE_INTERVAL_MS).await;
+    assert_eq!(fixture.commit_and_fold().await, 6);
+    assert_eq!(fixture.hint().await, 6);
+    assert_eq!(fixture.hint_writes(), 3);
     fixture.writer.shutdown().await.expect("shut down");
 }
 
@@ -143,7 +166,8 @@ async fn publications_less_than_an_interval_apart_raise_the_hint_once() {
 /// an interval later raises the hint.
 #[tokio::test]
 async fn a_failed_raise_is_ignored_and_a_publication_an_interval_later_raises_the_hint() {
-    let mut fixture = RaiseFixture::new().await;
+    let timer = Arc::new(ManualClock::new(0));
+    let mut fixture = RaiseFixture::new(timer.clone()).await;
     fixture.store.inner().inner().fail_next(1);
     fixture.commit().await;
     fixture.writer.drain().await.expect("drain");
@@ -151,7 +175,7 @@ async fn a_failed_raise_is_ignored_and_a_publication_an_interval_later_raises_th
     assert_eq!(fixture.commit_and_fold().await, 3);
     assert_eq!(fixture.hint().await, 1);
     assert_eq!(fixture.hint_writes(), 1);
-    fixture.timer.advance_ms(HINT_RAISE_INTERVAL_MS);
+    timer.advance_ms(HINT_RAISE_INTERVAL_MS);
     assert_eq!(fixture.commit_and_fold().await, 4);
     assert_eq!(fixture.hint().await, 4);
     assert_eq!(fixture.hint_writes(), 2);
@@ -162,7 +186,7 @@ async fn a_failed_raise_is_ignored_and_a_publication_an_interval_later_raises_th
 /// leaves the hint where it was.
 #[tokio::test]
 async fn a_reader_never_writes_the_hint() {
-    let mut fixture = RaiseFixture::new().await;
+    let mut fixture = RaiseFixture::new(Arc::new(ManualClock::new(0))).await;
     fixture.commit().await;
     assert_eq!(fixture.commit_and_fold().await, 3);
     fixture.writer.drain().await.expect("drain");

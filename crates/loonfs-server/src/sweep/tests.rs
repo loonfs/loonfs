@@ -6,6 +6,7 @@ use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
 use loonfs::{LoonFs, Maintenance, Namespace, NamespaceId, SharedObjectStore, Writable};
+use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
 use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
 use loonfs_http::{HeldNamespace, Namespaces, WriterSessions};
@@ -19,7 +20,8 @@ use loonfs_test_support::stores::{
     RecordedOperation, RecordingStore,
 };
 use loonfs_test_support::test_actor;
-use loonfs_types::EffectiveLimit;
+use loonfs_types::format::control::{decode_control_object, ControlObjectKind, HintPayload};
+use loonfs_types::{EffectiveLimit, ManifestNo};
 use std::assert_matches;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -267,6 +269,38 @@ async fn raise_hint_to_current_manifest(store: &dyn ObjectStore, namespace_id: &
         .raise_hint(current, None)
         .await
         .expect("raise the hint");
+}
+
+/// Returns the manifest number that the namespace's hint records.
+async fn hint_manifest_no(store: &dyn ObjectStore, namespace_id: &NamespaceId) -> ManifestNo {
+    let bytes = store
+        .get(&loonfs_objectstore::keys::hint(namespace_id), None)
+        .await
+        .expect("read the hint")
+        .expect("the hint exists");
+    decode_control_object::<HintPayload>(&bytes, ControlObjectKind::Hint)
+        .expect("decode the hint")
+        .payload()
+        .manifest_no
+}
+
+/// Waits until the namespace's hint records the current manifest, and moves
+/// the paused test clock forward a millisecond at a time until then, so a
+/// runtime's trailing hint raise can run.
+async fn wait_for_current_hint(store: &dyn ObjectStore, namespace_id: &NamespaceId) {
+    let current = loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("load the current manifest")
+        .manifest()
+        .manifest_no;
+    loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
+        while hint_manifest_no(store, namespace_id).await != current {
+            tokio::time::advance(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the runtime raises the hint to the current manifest");
 }
 
 async fn keys_under(store: &dyn ObjectStore, prefix: &str) -> Vec<String> {
@@ -1001,7 +1035,7 @@ const IDLE_VISIT_REQUESTS: [(Grep, usize, usize, usize); 3] = [
     (Grep::Enabled, 19, 37, 11),
 ];
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_per_namespace() {
     for (grep, visit, collecting_visit, collecting_lists) in IDLE_VISIT_REQUESTS {
         let directory = tempdir().expect("tempdir");
@@ -1016,6 +1050,8 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
                 .await
                 .expect("fold the tail");
         }
+        // The seed's fold publishes less than a second after its claim, and
+        // shutting the writer down drops the fold's trailing hint raise.
         writer.shutdown().await.expect("stop the writer");
         for namespace_id in &names {
             loonfs_core::test_support::namespace_store(base.as_ref(), namespace_id)
@@ -1046,13 +1082,13 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
             .run_pass(GarbageCollection::Collect)
             .await
             .expect("list namespaces");
-        // The first pass publishes each index's build, and a runtime raises a
-        // namespace's hint at most once a second, so the passes below start
-        // from hints at the current manifests, as the seed's do.
+        // Enabling each index and the first pass's build of it publish less
+        // than a second apart, so the runtime raises each hint to the build's
+        // manifest when that second ends, and the passes below start from
+        // hints at the current manifests, as the seed's do.
+        server.clock.advance_ms(HINT_RAISE_INTERVAL_MS);
         for namespace_id in &names {
-            loonfs_core::test_support::namespace_store(base.as_ref(), namespace_id)
-                .raise_hint_to_current_manifest()
-                .await;
+            wait_for_current_hint(base.as_ref(), namespace_id).await;
         }
         // An index's publication drops the runtime's cached head, so this
         // pass loads each head again, and the passes below find it cached,

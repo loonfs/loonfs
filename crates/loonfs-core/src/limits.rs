@@ -144,8 +144,9 @@ pub const MANIFEST_PROBE_WINDOW: usize = 8;
 /// Every raise writes the same hint object with compare-and-swap, and some
 /// providers accept about one write per second to one object (see the
 /// provider reference, "Frequently used data points"). A runtime skips a
-/// raise that would start sooner, and doesn't wait, so the hint can lag the
-/// newest manifest by the publications of the last interval.
+/// raise that would start sooner instead of waiting, and raises the hint once
+/// more when the interval ends, so the hint can lag the newest manifest by
+/// the publications of the last interval.
 pub const HINT_RAISE_INTERVAL_MS: u64 = 1_000;
 
 /// Longest visible WAL tail, in WAL objects, a namespace may have unfolded.
