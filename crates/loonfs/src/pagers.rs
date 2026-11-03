@@ -23,6 +23,8 @@ pub type TrashPager = loonfs_types::Pager<loonfs_types::ListTrashResponse, Error
 pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, Error>;
 /// A pager over the files a snapshot pins.
 pub type CheckpointFilesPager = loonfs_types::Pager<CheckpointFilesPage, Error>;
+/// A pager over every retained file revision in a read view.
+pub type RetainedRevisionsPager = loonfs_types::Pager<loonfs_core::RetainedRevisionsPage, Error>;
 /// A pager over existing checkpoints.
 pub type CheckpointsPager = loonfs_types::Pager<ListCheckpointsResponse, Error>;
 /// A pager over snapshots.

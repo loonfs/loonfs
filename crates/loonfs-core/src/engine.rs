@@ -15,7 +15,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
-    LoadedMetadataView,
+    LoadedMetadataView, RetainedRevisionsPage, RetainedRevisionsPageCursor,
 };
 use crate::storage::content::DurableContentValidationError;
 use crate::storage::content_admission::PreparedContent;
@@ -47,6 +47,16 @@ pub struct RuntimeReadContext {
     /// starts from a writer session's position. Reads then take this tail
     /// and don't look one up in the namespace's WAL tail cache.
     pub tail: Option<Arc<ProjectedWalTail>>,
+    /// The sequence that reads see: a retained sequence below the head, or
+    /// `None` to read at the head.
+    pub visible_seq: Option<ChangeSeq>,
+}
+
+impl RuntimeReadContext {
+    /// Returns the sequence that reads of this context see.
+    pub fn visible_seq(&self) -> ChangeSeq {
+        self.visible_seq.unwrap_or(self.read_basis.head.seq)
+    }
 }
 
 /// Marks an engine that exposes read operations only.
@@ -76,6 +86,23 @@ pub struct RootAccess {
     pub access_revision_no: loonfs_types::AccessRevisionNo,
 }
 
+/// Whose rights an engine's per-subject reads check.
+#[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value per engine, moved once: indirection would buy an allocation and save nothing"
+)]
+enum ReadAuthority {
+    /// Reads check the subject's rights at the state they read.
+    Subject,
+    /// Reads of an earlier state check the subject's rights at this
+    /// context, the namespace's current head.
+    SubjectAtHead(RuntimeReadContext),
+    /// Reads check no rights, as reads of an unrestricted namespace do, for
+    /// a reader that administers the namespace or has no subject.
+    Administrator,
+}
+
 /// A namespace-scoped core API.
 ///
 /// `NamespaceEngine` owns one namespace's [`NamespaceStore`] and exposes
@@ -86,7 +113,7 @@ pub struct NamespaceEngine<S, M> {
     pub(crate) namespace: NamespaceStore<S>,
     mode: M,
     pub(crate) subject: Option<Subject>,
-    authorization_head: Option<RuntimeReadContext>,
+    read_authority: ReadAuthority,
     /// The writer session's position that [`NamespaceEngine::fold_wal`]
     /// folds, or `None` to load the tail from the store.
     pub(crate) writer_position: Option<WriterPosition>,
@@ -98,7 +125,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             namespace,
             mode,
             subject: None,
-            authorization_head: None,
+            read_authority: ReadAuthority::Subject,
             writer_position: None,
         }
     }
@@ -124,7 +151,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Sets the current head used to authorize historical reads.
     pub fn with_authorization_head(mut self, head: RuntimeReadContext) -> Self {
-        self.authorization_head = Some(head);
+        self.read_authority = ReadAuthority::SubjectAtHead(head);
+        self
+    }
+
+    /// Makes this engine's per-subject reads check no rights, as reads of an
+    /// unrestricted namespace do. The caller first checks that the reader is
+    /// the namespace administrator or has no subject, with
+    /// [`NamespaceEngine::ensure_administrator`].
+    pub fn with_administrator_reads(mut self) -> Self {
+        self.read_authority = ReadAuthority::Administrator;
         self
     }
 
@@ -135,13 +171,23 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &'a self,
         context: &'a RuntimeReadContext,
     ) -> Result<AuthorizedRead<'a, S>> {
-        let head_view = match &self.authorization_head {
-            Some(head) => Some(
+        let head_view = match &self.read_authority {
+            ReadAuthority::Administrator => {
+                return Ok(AuthorizedRead {
+                    view: self
+                        .load_read_view(context)
+                        .instrument(crate::phase_span!(crate::Phase::LoadView))
+                        .await?,
+                    head_view: None,
+                    authorizer: Authorizer::Unrestricted,
+                });
+            }
+            ReadAuthority::Subject => None,
+            ReadAuthority::SubjectAtHead(head) => Some(
                 self.load_read_view(head)
                     .instrument(crate::phase_span!(crate::Phase::LoadView))
                     .await?,
             ),
-            None => None,
         };
         let authorizer = Authorizer::for_request(
             &self.namespace.namespace_id,
@@ -162,6 +208,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Refuses a reader with no subject on an ACL namespace, for callers
     /// that could otherwise return before any per-subject read.
     pub fn ensure_subject(&self, context: &RuntimeReadContext) -> Result<()> {
+        if matches!(self.read_authority, ReadAuthority::Administrator) {
+            return Ok(());
+        }
         Authorizer::for_request(
             &self.namespace.namespace_id,
             &context.read_basis.head.access,
@@ -170,14 +219,26 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         .map(|_| ())
     }
 
+    /// Checks that the sequence `context` reads at is at or above the
+    /// retention floor of its metadata, and returns `rebootstrap_required`
+    /// otherwise.
+    pub async fn ensure_retained(&self, context: &RuntimeReadContext) -> Result<()> {
+        self.load_read_view(context).await.map(drop)
+    }
+
     /// The change feed and bare content reference reads and imports work for
     /// the token holder and for an administrator; any other subject is refused.
     pub async fn ensure_administrator(&self, context: &RuntimeReadContext) -> Result<()> {
         let Some(subject) = &self.subject else {
             return Ok(());
         };
-        // Historical data does not restore historical administrator grants.
-        let context = self.authorization_head.as_ref().unwrap_or(context);
+        let context = match &self.read_authority {
+            // The caller made this check when it granted administrator reads.
+            ReadAuthority::Administrator => return Ok(()),
+            ReadAuthority::Subject => context,
+            // Historical data does not restore historical administrator grants.
+            ReadAuthority::SubjectAtHead(head) => head,
+        };
         let authorizer = Authorizer::for_request(
             &self.namespace.namespace_id,
             &context.read_basis.head.access,
@@ -624,6 +685,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .await
     }
 
+    /// Lists one page of every file revision that the pinned runtime read
+    /// context retains, ordered by inode and newest first within each inode.
+    /// The listing includes the revisions of deleted files, and it requires
+    /// namespace administrator access, as the change feed does.
+    pub async fn retained_revisions_page(
+        &self,
+        request: PageRequest<RetainedRevisionsPageCursor>,
+        context: &RuntimeReadContext,
+    ) -> Result<RetainedRevisionsPage> {
+        self.ensure_administrator(context).await?;
+        let view = self.load_read_view(context).await?;
+        view.retained_revisions_page(request).await
+    }
+
     /// Reads one revision's content by path against the pinned runtime
     /// read context.
     pub async fn read_file_revision(
@@ -832,6 +907,7 @@ mod tests {
                 head: loaded.read_state,
             },
             tail: None,
+            visible_seq: None,
         };
         let changes = reader
             .list_changes_after(

@@ -161,7 +161,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, ListPageCursor>> {
         validate_cursor_head(
-            self.head.seq,
+            self.visible_seq,
             request.cursor.as_ref().map(ListPageCursor::head_seq),
         )?;
 
@@ -237,7 +237,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, ListPageCursor>> {
         validate_cursor_head(
-            self.head.seq,
+            self.visible_seq,
             request.cursor.as_ref().map(ListPageCursor::head_seq),
         )?;
 
@@ -326,7 +326,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let next_cursor = request
             .limit
             .finish_page(&mut children, |last| DirectoryPageCursor {
-                head_seq: self.head.seq,
+                head_seq: self.visible_seq,
                 pin_id: None,
                 directory_inode_id: resolved.inode_id,
                 last_name_key: last.binding.name_key.clone(),
@@ -556,7 +556,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             created_by: resolved.created_by.clone(),
             created_at_ms: resolved.created_at_ms,
             kind,
-            head_seq: self.head.seq,
+            head_seq: self.visible_seq,
             parent_inode_id: resolved.parent_inode_id,
             display_name,
             binding_version,

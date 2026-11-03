@@ -3,7 +3,10 @@
 
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::execution_budget::BudgetPermit;
-use crate::pagers::{decode_list_page_request, ChangesPager, InodeChildrenPager, PathEntriesPager};
+use crate::pagers::{
+    decode_list_page_request, ChangesPager, InodeChildrenPager, PathEntriesPager,
+    RetainedRevisionsPager,
+};
 use crate::pinned_read::PinnedRead;
 use crate::runtime_core::{classify_read_result, RuntimeCore};
 use crate::{
@@ -12,6 +15,7 @@ use crate::{
     ListPathEntriesResponse, NamespaceId, PathEntry, PinId, ReadAt, ReadFileStreamOptions, Result,
     RevisionNo, SharedObjectStore, StatOptions,
 };
+use loonfs_core::RuntimeReadContext;
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest};
 use std::sync::Arc;
@@ -100,9 +104,86 @@ impl ReadView {
         self.pinned.namespace_id()
     }
 
-    /// Returns the head sequence this view captured.
+    /// Returns the head sequence this view captured, or the sequence that a
+    /// view from [`Self::at_seq`] reads at.
     pub fn head_seq(&self) -> ChangeSeq {
         self.pinned.head_seq()
+    }
+
+    /// Returns a view of this view's head at `seq`, a retained sequence at or
+    /// below the head.
+    ///
+    /// Reads through the returned view see the commits at or below `seq`,
+    /// and they check the subject's rights at this view's head, as reads of
+    /// a snapshot do. A sequence above the head, or a view of a snapshot,
+    /// returns `invalid_request`, and a sequence below the retention floor
+    /// returns `rebootstrap_required`.
+    pub async fn at_seq(&self, seq: ChangeSeq) -> Result<ReadView> {
+        if let Some(snapshot_id) = self.snapshot_id() {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "a read view of snapshot {:?} reads only the snapshot's sequence",
+                    snapshot_id.as_str()
+                ),
+                param: "seq",
+            });
+        }
+        let head = RuntimeReadContext {
+            visible_seq: None,
+            ..self.pinned.context.clone()
+        };
+        let head_seq = head.read_basis.head.seq;
+        if seq > head_seq {
+            return Err(Error::InvalidRequest {
+                message: format!("sequence `{seq}` is ahead of the read view's head `{head_seq}`"),
+                param: "seq",
+            });
+        }
+        let pinned = PinnedRead {
+            engine: self
+                .core
+                .reader_engine(self.namespace_id())
+                .with_authorization_head(head.clone()),
+            context: RuntimeReadContext {
+                visible_seq: Some(seq),
+                ..head
+            },
+        };
+        let _permit = self.core.read_permit().await;
+        self.read(async { Ok(pinned.engine.ensure_retained(&pinned.context).await?) })
+            .await?;
+        Ok(ReadView::new(self.core.clone(), pinned, ReadSource::Head))
+    }
+
+    /// Returns a view of the same state whose reads check no subject's
+    /// rights, for an extension that decides what its results contain before
+    /// it applies a subject's rights, such as `loonfs-grep`.
+    ///
+    /// Requires what the change feed requires: a handle with no subject, or
+    /// a subject that administers the namespace at its current head.
+    /// Otherwise it returns `forbidden`.
+    pub async fn as_administrator(&self) -> Result<ReadView> {
+        let _permit = self.core.read_permit().await;
+        self.read(async {
+            Ok(self
+                .pinned
+                .engine
+                .ensure_administrator(&self.pinned.context)
+                .await?)
+        })
+        .await?;
+        let pinned = PinnedRead {
+            engine: self
+                .core
+                .reader_engine(self.namespace_id())
+                .with_administrator_reads(),
+            context: self.pinned.context.clone(),
+        };
+        Ok(ReadView::new(
+            self.core.clone(),
+            pinned,
+            self.source.clone(),
+        ))
     }
 
     /// Rejects read options that ask for a state other than the one this
@@ -142,6 +223,18 @@ impl ReadView {
                     .await
             },
         )
+    }
+
+    /// Lists every file revision this view's metadata retains, ordered by
+    /// inode and newest first within each inode, including the revisions of
+    /// deleted files. The listing requires namespace administrator access, as
+    /// the change feed does.
+    pub fn list_retained_revisions(&self) -> RetainedRevisionsPager {
+        loonfs_types::Pager::with_state(self.clone(), |view, request| async move {
+            let _permit = view.core.read_permit().await;
+            view.read(view.pinned.retained_revisions_page(request))
+                .await
+        })
     }
 
     pub(crate) async fn changes_page(

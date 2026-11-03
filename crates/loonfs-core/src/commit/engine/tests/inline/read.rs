@@ -21,6 +21,7 @@ fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadCo
     RuntimeReadContext {
         read_basis: crate::control::ReadBasis { head, basis },
         tail: None,
+        visible_seq: None,
     }
 }
 
@@ -201,6 +202,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     let context = RuntimeReadContext {
         read_basis: state.read_basis,
         tail: Some(Arc::clone(&tail)),
+        visible_seq: None,
     };
     let tail_bytes = tail.decoded_bytes();
     assert_eq!(tail.inline_bytes(), value.bytes().len());

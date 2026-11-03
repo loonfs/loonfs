@@ -31,6 +31,8 @@ pub struct CheckpointFile {
     pub inode_id: InodeId,
     /// The file revision at the snapshot's captured sequence.
     pub revision_no: RevisionNo,
+    /// The sequence of the commit that published the revision.
+    pub committed_seq: ChangeSeq,
     /// The revision's content reference.
     pub content_ref: ContentRef,
     /// The file size in bytes.
@@ -182,6 +184,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 files.push(CheckpointFile {
                     inode_id,
                     revision_no: revision.revision_no,
+                    committed_seq: revision.committed_seq,
                     size_bytes: revision.content_ref.size_bytes,
                     content_ref: revision.content_ref,
                 });

@@ -1201,6 +1201,7 @@ async fn fresh_read_context<S: ObjectStore + ?Sized>(
             head: loaded.read_state,
         },
         tail: None,
+        visible_seq: None,
     }
 }
 

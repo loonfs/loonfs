@@ -528,46 +528,49 @@ pub fn decode_filter_block(
     stored: &[u8],
     handle: &BlockHandle,
 ) -> Result<SegmentFilter, SegmentBlockCodecError> {
-    let payload = decode_section(stored, handle, false)?;
-    if payload.len() < 12 {
-        return Err(SegmentBlockCodecError::Malformed(
-            "filter block shorter than its header".to_owned(),
-        ));
-    }
-    let n_hashes = u32::from_le_bytes(
-        payload[0..4]
-            .try_into()
-            .expect("the filter header length check should leave four bytes for the hash count"),
-    );
-    let bit_len = u64::from_le_bytes(
-        payload[4..12]
-            .try_into()
-            .expect("the filter header length check should leave eight bytes for the bit length"),
-    );
-    if n_hashes != FILTER_HASH_COUNT {
-        return Err(SegmentBlockCodecError::Malformed(
-            "filter hash count must be seven".to_owned(),
-        ));
-    }
-    if bit_len < 64 {
-        return Err(SegmentBlockCodecError::Malformed(
-            "filter bit length must be at least 64".to_owned(),
-        ));
-    }
-    let bits = &payload[12..];
-    if bit_len.div_ceil(8) != bits.len() as u64 {
-        return Err(SegmentBlockCodecError::Malformed(
-            "filter bit length disagrees with its bytes".to_owned(),
-        ));
-    }
-    Ok(SegmentFilter {
-        n_hashes,
-        bit_len,
-        bits: bits.to_vec(),
-    })
+    SegmentFilter::from_payload(&decode_section(stored, handle, false)?)
 }
 
 impl SegmentFilter {
+    /// Decodes a filter from the payload of a filter block, which is how a
+    /// filter that's stored outside a segment's filter block is read.
+    pub fn from_payload(payload: &[u8]) -> Result<Self, SegmentBlockCodecError> {
+        if payload.len() < 12 {
+            return Err(SegmentBlockCodecError::Malformed(
+                "filter block shorter than its header".to_owned(),
+            ));
+        }
+        let n_hashes =
+            u32::from_le_bytes(payload[0..4].try_into().expect(
+                "the filter header length check should leave four bytes for the hash count",
+            ));
+        let bit_len =
+            u64::from_le_bytes(payload[4..12].try_into().expect(
+                "the filter header length check should leave eight bytes for the bit length",
+            ));
+        if n_hashes != FILTER_HASH_COUNT {
+            return Err(SegmentBlockCodecError::Malformed(
+                "filter hash count must be seven".to_owned(),
+            ));
+        }
+        if bit_len < 64 {
+            return Err(SegmentBlockCodecError::Malformed(
+                "filter bit length must be at least 64".to_owned(),
+            ));
+        }
+        let bits = &payload[12..];
+        if bit_len.div_ceil(8) != bits.len() as u64 {
+            return Err(SegmentBlockCodecError::Malformed(
+                "filter bit length disagrees with its bytes".to_owned(),
+            ));
+        }
+        Ok(SegmentFilter {
+            n_hashes,
+            bit_len,
+            bits: bits.to_vec(),
+        })
+    }
+
     /// Includes the filter value and the allocated capacity of its bit vector.
     pub fn decoded_bytes(&self) -> usize {
         std::mem::size_of::<Self>() + self.bits.capacity()
@@ -699,20 +702,54 @@ fn decode_section(
 }
 
 fn build_filter_payload(hashes: &[(u64, u64)]) -> Vec<u8> {
-    let bits_len = (hashes.len() * FILTER_BITS_PER_KEY).max(64);
-    let mut bits = vec![0u8; bits_len.div_ceil(8)];
-    let bit_len = bits_len as u64;
-    for (h1, h2) in hashes {
-        for probe in 0..u64::from(FILTER_HASH_COUNT) {
-            let bit = h1.wrapping_add(probe.wrapping_mul(*h2)) % bit_len;
-            bits[crate::usize_from_u64(bit / 8)] |= 1 << (bit % 8);
+    let mut builder = SegmentFilterBuilder::new(hashes.len());
+    for hash in hashes {
+        builder.insert_hashes(*hash);
+    }
+    builder.finish()
+}
+
+/// Builds the payload of a filter block, for a filter that's stored outside
+/// a segment's filter block.
+#[derive(Debug)]
+pub struct SegmentFilterBuilder {
+    bit_len: u64,
+    bits: Vec<u8>,
+}
+
+impl SegmentFilterBuilder {
+    /// Returns a builder with [`FILTER_BITS_PER_KEY`] bits for each of
+    /// `expected_keys` keys, and at least 64 bits. Inserting more keys than
+    /// expected raises the filter's false positive rate.
+    pub fn new(expected_keys: usize) -> Self {
+        let bit_len = expected_keys.saturating_mul(FILTER_BITS_PER_KEY).max(64);
+        Self {
+            bit_len: bit_len as u64,
+            bits: vec![0; bit_len.div_ceil(8)],
         }
     }
-    let mut payload = Vec::with_capacity(12 + bits.len());
-    payload.extend_from_slice(&FILTER_HASH_COUNT.to_le_bytes());
-    payload.extend_from_slice(&bit_len.to_le_bytes());
-    payload.extend_from_slice(&bits);
-    payload
+
+    /// Inserts `filter_key`, so the filter may contain it.
+    pub fn insert(&mut self, filter_key: &str) {
+        self.insert_hashes(filter_key_hashes(filter_key));
+    }
+
+    fn insert_hashes(&mut self, (h1, h2): (u64, u64)) {
+        for probe in 0..u64::from(FILTER_HASH_COUNT) {
+            let bit = h1.wrapping_add(probe.wrapping_mul(h2)) % self.bit_len;
+            self.bits[crate::usize_from_u64(bit / 8)] |= 1 << (bit % 8);
+        }
+    }
+
+    /// Returns the filter block payload: the hash count, the bit length, and
+    /// the bits.
+    pub fn finish(self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(12 + self.bits.len());
+        payload.extend_from_slice(&FILTER_HASH_COUNT.to_le_bytes());
+        payload.extend_from_slice(&self.bit_len.to_le_bytes());
+        payload.extend_from_slice(&self.bits);
+        payload
+    }
 }
 
 fn filter_key_hashes(filter_key: &str) -> (u64, u64) {

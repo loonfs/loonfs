@@ -10,7 +10,10 @@ use crate::{
     ListOptions, ListPathEntriesResponse, NamespaceId, PathEntry, PinId, ReadFileStreamOptions,
     Result, RevisionNo, SharedObjectStore, StatOptions,
 };
-use loonfs_core::{DiffPage, NamespaceReaderEngine, RuntimeReadContext};
+use loonfs_core::{
+    DiffPage, NamespaceReaderEngine, RetainedRevisionsPage, RetainedRevisionsPageCursor,
+    RuntimeReadContext,
+};
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest};
 
@@ -26,9 +29,10 @@ impl PinnedRead {
         self.engine.namespace_id()
     }
 
-    /// Returns the head sequence that this read reads at.
+    /// Returns the sequence that this read reads at: the head, or the
+    /// retained sequence below the head that the read's context sets.
     pub(crate) fn head_seq(&self) -> ChangeSeq {
-        self.context.read_basis.head.seq
+        self.context.visible_seq()
     }
 
     /// Reads one page of the change feed. The feed's position is `position`,
@@ -136,6 +140,18 @@ impl PinnedRead {
             entries: page.items,
             next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
         })
+    }
+
+    /// Lists one page of every retained file revision. A read with a subject
+    /// requires an administrator, as the change feed does.
+    pub(crate) async fn retained_revisions_page(
+        &self,
+        request: PageRequest<RetainedRevisionsPageCursor>,
+    ) -> Result<RetainedRevisionsPage> {
+        Ok(self
+            .engine
+            .retained_revisions_page(request, &self.context)
+            .await?)
     }
 
     pub(crate) async fn stat_current_files_by_inode(

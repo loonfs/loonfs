@@ -11,10 +11,11 @@ use crate::path::read::file_reads::file_content_ref;
 use crate::path::read::file_reads::FileBytes;
 use crate::path::read::loaded_view::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
     AccessRight, ChangeSeq, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, Page,
-    PageRequest, PathEntryKind, RevisionNo,
+    PageRequest, PagedResponse, PathEntryKind, RevisionNo,
 };
 use std::collections::HashMap;
 
@@ -27,7 +28,76 @@ pub struct FileRevisionsPage {
     pub page: Page<FileRevision, FileRevisionsPageCursor>,
 }
 
+/// Resumes a listing of every retained file revision after the last
+/// revision of the previous page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedRevisionsPageCursor {
+    after_row_key: String,
+}
+
+/// One page of every retained file revision in a view, ordered by inode and
+/// newest first within each inode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedRevisionsPage {
+    /// The revisions, including the revisions of deleted files.
+    pub revisions: Vec<FileRevision>,
+    /// Resume position when more revisions remain.
+    pub next_cursor: Option<RetainedRevisionsPageCursor>,
+}
+
+impl PagedResponse for RetainedRevisionsPage {
+    type Item = FileRevision;
+    type Cursor = RetainedRevisionsPageCursor;
+
+    fn items_mut(&mut self) -> &mut Vec<FileRevision> {
+        &mut self.revisions
+    }
+
+    fn items(&self) -> &[FileRevision] {
+        &self.revisions
+    }
+
+    fn next_cursor(&self) -> Option<RetainedRevisionsPageCursor> {
+        self.next_cursor.clone()
+    }
+
+    fn absorb(&mut self, mut later: Self) {
+        self.revisions.append(&mut later.revisions);
+        self.next_cursor = later.next_cursor;
+    }
+}
+
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
+    /// Lists one page of every file revision that this view's metadata
+    /// retains, whether or not its file is visible, for a caller that has
+    /// already authorized the listing.
+    pub(crate) async fn retained_revisions_page(
+        &self,
+        request: PageRequest<RetainedRevisionsPageCursor>,
+    ) -> Result<RetainedRevisionsPage> {
+        let lower_bound = match request.cursor {
+            Some(cursor) => lookup_keys::after_row_key(&cursor.after_row_key),
+            None => lookup_keys::REVISION_ROW_PREFIX.to_owned(),
+        };
+        let mut rows = self
+            .metadata_view()
+            .revisions_page(&lower_bound, request.limit.limit_plus_one())
+            .await?;
+        let next_cursor =
+            request
+                .limit
+                .finish_page(&mut rows, |(row_key, _)| RetainedRevisionsPageCursor {
+                    after_row_key: row_key.clone(),
+                });
+        Ok(RetainedRevisionsPage {
+            revisions: rows
+                .into_iter()
+                .map(|(_, revision)| file_revision(revision))
+                .collect(),
+            next_cursor,
+        })
+    }
+
     /// Resolves one retained revision after the access checks a direct read
     /// of it needs: `read` on the inode, and `history` when the revision is
     /// not the current one.
@@ -174,7 +244,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             });
         }
         if let Some(cursor) = request.cursor.as_ref() {
-            validate_file_revisions_cursor(cursor, self.head.seq, inode_id)?;
+            validate_file_revisions_cursor(cursor, self.visible_seq, inode_id)?;
         }
 
         let start_after = request.cursor.as_ref().map(|cursor| {
@@ -193,24 +263,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             request
                 .limit
                 .finish_page(&mut revision_records, |last| FileRevisionsPageCursor {
-                    head_seq: self.head.seq,
+                    head_seq: self.visible_seq,
                     inode_id,
                     last_revision_no: last.revision_no,
                     last_committed_seq: last.committed_seq,
                     last_revision_delta_index: last.delta_index,
                 });
-        let revisions = revision_records
-            .into_iter()
-            .map(|revision| FileRevision {
-                inode_id: revision.inode_id,
-                revision_no: revision.revision_no,
-                committed_seq: revision.committed_seq,
-                commit_id: revision.commit_id,
-                committed_at_ms: revision.committed_at_ms,
-                committed_by: revision.committed_by,
-                content_ref: revision.content_ref,
-            })
-            .collect();
+        let revisions = revision_records.into_iter().map(file_revision).collect();
 
         Ok(Page {
             items: revisions,
@@ -268,6 +327,19 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         self.metadata_view()
             .revision_by_inode(inode_id, revision_no)
             .await
+    }
+}
+
+/// Returns the API's description of a revision row.
+fn file_revision(revision: RevisionRecord) -> FileRevision {
+    FileRevision {
+        inode_id: revision.inode_id,
+        revision_no: revision.revision_no,
+        committed_seq: revision.committed_seq,
+        commit_id: revision.commit_id,
+        committed_at_ms: revision.committed_at_ms,
+        committed_by: revision.committed_by,
+        content_ref: revision.content_ref,
     }
 }
 

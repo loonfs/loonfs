@@ -221,7 +221,7 @@ pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
-    FileRevisionsPage, GrantedRange,
+    FileRevisionsPage, GrantedRange, RetainedRevisionsPage, RetainedRevisionsPageCursor,
 };
 pub use permit_pool::{BudgetPermit, PermitPool, PermitPoolObserver, PoolCounts};
 pub use phase::Phase;
