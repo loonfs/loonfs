@@ -4,9 +4,7 @@
 use crate::publisher::{NamespaceSession, NamespaceSessionStatus};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
-use crate::{
-    ChangeSeq, LoonFs, MetadataMaintenanceOutcome, Mode, NamespaceId, ReadOnly, Result, Writable,
-};
+use crate::{ChangeSeq, LoonFs, Mode, NamespaceId, ReadOnly, Result, Writable};
 use loonfs_core::NamespaceWriterEngine;
 use loonfs_types::Subject;
 use std::fmt;
@@ -154,14 +152,17 @@ impl Namespace<Writable> {
         self.session().last_published_seq()
     }
 
-    /// Reads the last publication time on the runtime's monotonic clock.
-    pub fn last_published_at_ms(&self) -> Option<u64> {
-        self.session().last_published_at_ms()
-    }
-
-    /// Reads whether metadata maintenance found nothing left due for this session.
-    pub fn metadata_caught_up(&self) -> bool {
-        self.session().metadata_caught_up()
+    /// Returns whether this session has a writer position whose last check
+    /// is within the revalidation bound.
+    ///
+    /// A session has no position before its first publish, and loses it
+    /// after a fork of its namespace, a change that it can't follow, or once
+    /// its last check passes the bound. A fold or a compaction that the
+    /// session's position shows to be not due costs no store requests. Reads
+    /// memory only. This is a hook for a host that runs its own maintenance
+    /// sweep, such as the `loonfs-server` sweep.
+    pub fn has_current_writer_position(&self) -> bool {
+        self.session().has_current_writer_position()
     }
 
     /// Returns when this session's last publication reaches the runtime's
@@ -174,19 +175,6 @@ impl Namespace<Writable> {
     /// maintenance sweep, such as the `loonfs-server` sweep.
     pub fn idle_fold_due_at_ms(&self) -> Option<u64> {
         self.session().idle_fold_due_at_ms()
-    }
-
-    /// Records a host's metadata result only if no newer commit has published.
-    ///
-    /// This is a hook for a host that runs its own maintenance sweep, such as
-    /// the `loonfs-server` sweep. Embedded applications don't call it.
-    pub fn record_metadata_maintenance(
-        &self,
-        expected_seq: Option<ChangeSeq>,
-        outcome: MetadataMaintenanceOutcome,
-    ) {
-        self.session()
-            .record_metadata_maintenance(expected_seq, outcome);
     }
 
     /// Returns whether this is the only handle on its writer session.

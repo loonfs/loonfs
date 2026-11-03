@@ -307,6 +307,7 @@ async fn a_fork_pin_whose_target_has_no_manifest_is_skipped() {
             PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("pending").expect("namespace"),
             },
+            None,
             &context(1_000).clock(),
         )
         .await
@@ -407,6 +408,7 @@ async fn a_pass_fails_when_a_members_fork_targets_do_not_fit_the_read_memory() {
                 PinOwner::Fork {
                     target_namespace_id,
                 },
+                None,
                 &context(1_000).clock(),
             )
             .await

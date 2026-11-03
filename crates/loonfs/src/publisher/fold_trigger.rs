@@ -8,8 +8,9 @@ use std::num::NonZeroU64;
 /// A fold is due once the tail reaches a number of WAL objects or the
 /// runtime's inline fold size, or once the tail's newest commit reaches the
 /// runtime's idle fold age. A writer session folds at the sizes after its own
-/// publishes, and [`Maintenance`](crate::Maintenance) also folds a tail that
-/// reaches the idle fold age.
+/// publishes, and a host's metadata call also folds a tail that reaches the
+/// idle fold age (see
+/// [`PublisherRegistry::fold_namespace`](super::PublisherRegistry::fold_namespace)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FoldTrigger {
     inline_content_fold_at_bytes: usize,
@@ -35,6 +36,12 @@ impl FoldTrigger {
         inline_bytes: usize,
     ) -> bool {
         objects >= max_wal_tail_objects || inline_bytes >= self.inline_content_fold_at_bytes
+    }
+
+    /// Returns whether the runtime folds a tail once its newest commit
+    /// reaches the idle fold age.
+    pub(crate) fn folds_idle_tails(&self) -> bool {
+        self.idle_fold_after_ms.is_some()
     }
 
     /// Returns when a tail whose newest commit is at `newest_commit_at_ms`

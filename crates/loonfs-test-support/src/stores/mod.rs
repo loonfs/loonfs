@@ -35,7 +35,8 @@ pub use namespace_overlap_store::{
     NamespaceInFlightGuard, NamespaceOverlapInterceptor, NamespaceOverlapStore,
 };
 pub use operation::{
-    sort_head_runs, OperationContext, OperationKind, OperationSelector, RecordedOperation,
+    sort_head_runs, write_keys, OperationContext, OperationKind, OperationSelector,
+    RecordedOperation,
 };
 pub use recording_store::{RecordedGet, RecordingInterceptor, RecordingStore, StoreCounts};
 pub use replace::replace_object;

@@ -525,7 +525,8 @@ fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> Na
         Arc::downgrade(&runtime.writer),
         tokio::runtime::Handle::current(),
     );
-    NamespacePublisher::new(namespace_id.clone(), &registry.shared)
+    let turns = registry.namespace_turns(namespace_id);
+    NamespacePublisher::new(namespace_id.clone(), &registry.shared, turns)
 }
 
 /// Returns a standalone publisher of `runtime`'s writer whose runtime core,
@@ -2609,8 +2610,9 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         .expect("publish across the fold threshold");
     recording.inner().wait_until_blocked().await;
 
-    // An explicit fold takes a fold permit too, so it queues ahead of the
-    // fold that the next publication starts, and folds that tail first.
+    // An explicit fold takes the namespace's fold lock before it waits for a
+    // permit, so the fold that the next publication starts waits for the
+    // lock, and finds the tail folded.
     let explicit_fold = tokio::spawn({
         let maintenance =
             writer.maintenance(loonfs_test_support::ids::writer_id("late-fold-maintenance"));
@@ -2624,7 +2626,6 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         )))
         .await
         .expect("publish across the fold threshold");
-    wait_for_fold_waiters(&writer, 2).await;
 
     recording.reset();
     recording.inner().release();
@@ -2649,6 +2650,47 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
     );
     assert_eq!(counter(&recorder, "loonfs.publisher.wal_folds"), 1);
     writer.shutdown().await.expect("shut down writer");
+}
+
+/// Checks that a metadata call on a namespace whose session's position
+/// shows nothing to fold takes no fold permit, so the call returns while
+/// every permit is held.
+#[tokio::test]
+async fn a_metadata_call_with_nothing_to_fold_takes_no_fold_permit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("nothing-to-fold").expect("namespace id");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let writer = crate::LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .build()
+        .await
+        .expect("build writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    let namespace = writer.open_namespace(&namespace_id).expect("open");
+    namespace
+        .put_file("/note", b"body", &loonfs_test_support::test_actor())
+        .await
+        .expect("put a file");
+    let permits = hold_every_fold_permit(&writer).await;
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
+    let maintained = bounded(
+        Duration::from_secs(10),
+        maintenance
+            .maintain_metadata_while_due(&namespace_id, &crate::MaintenanceCancellation::new()),
+    )
+    .await
+    .expect("the call doesn't wait for a fold permit")
+    .expect("the metadata call");
+    assert_eq!(
+        maintained.outcome,
+        crate::MetadataMaintenanceOutcome::Due,
+        "the tail waits for its idle fold age"
+    );
+    drop(permits);
+    writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

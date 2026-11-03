@@ -319,7 +319,6 @@ impl NamespacePublisher {
                 seq,
                 at_ms: self.context.runtime_core.timer().monotonic_now_ms(),
             });
-            state.metadata_caught_up = false;
         }
         fold_start
     }

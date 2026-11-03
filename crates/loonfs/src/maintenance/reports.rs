@@ -20,11 +20,21 @@ pub enum WalFoldStepOutcome {
         /// The number of the namespace's current manifest.
         current_manifest_no: ManifestNo,
     },
-    /// Concurrent updates prevented every publication attempt.
-    RetriesExhausted {
-        /// The head sequence observed before the step ran.
-        observed_head_seq: ChangeSeq,
-    },
+}
+
+impl WalFoldStepOutcome {
+    /// Returns the outcome of a fold step whose fold returned `folded`.
+    pub(crate) fn of(folded: &crate::FoldWalResponse) -> Self {
+        match folded.outcome {
+            crate::FoldWalOutcome::Published => Self::Folded {
+                manifest_head_seq: folded.manifest_head_seq,
+            },
+            crate::FoldWalOutcome::AlreadyCurrent => Self::AlreadyPublished {
+                attempted_seq: folded.target_head_seq,
+                current_manifest_no: folded.manifest_no,
+            },
+        }
+    }
 }
 
 /// What the WAL fold and the compaction unit of one metadata maintenance

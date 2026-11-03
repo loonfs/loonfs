@@ -9,7 +9,7 @@ use crate::manifest::PublicationReport;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{PinOwner, PinPayload};
+use loonfs_types::format::control::{ManifestRef, PinOwner, PinPayload};
 use loonfs_types::{PinId, Snapshot};
 
 /// Longest accepted snapshot name. A label bound, not a durable format
@@ -22,10 +22,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Every call generates a fresh `PinId`, and `name` is a label, not a
     /// key. When WAL objects follow the current manifest's `folded_wal_no`,
     /// the method first folds them into a new manifest without compacting
-    /// metadata. A snapshot with `expires_at_ms` can't be read after that
-    /// time, and it stays listed until collection deletes it. `None` keeps
-    /// the snapshot until it's deleted. The report includes the manifest the
-    /// fold published.
+    /// metadata, unless [`Self::with_folded_manifest`] set the manifest of
+    /// the caller's own fold, and then a manifest that stopped being current
+    /// before the snapshot's verification returns `checkpoint_unavailable`.
+    /// A snapshot with `expires_at_ms` can't be read after that time, and it
+    /// stays listed until collection deletes it. `None` keeps the snapshot
+    /// until it's deleted. The report includes the manifest the fold
+    /// published.
     pub async fn create_snapshot(
         &self,
         name: String,
@@ -37,6 +40,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     name,
                     expires_at_ms,
                 },
+                self.folded_manifest.clone(),
                 &self.namespace.start_clock(),
             )
             .await
@@ -47,12 +51,25 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Folds the WAL tail and creates a verified pin of the manifest that
     /// covers it, for `owner`.
+    ///
+    /// When the caller passes `folded`, the manifest that its own fold
+    /// published or found current, the call pins that manifest without a
+    /// fold, and returns `checkpoint_unavailable` when the manifest stopped
+    /// being current before the pin's verification, so the caller can fold
+    /// and pin again.
     pub(crate) async fn create_pin(
         &self,
         owner: PinOwner,
+        folded: Option<ManifestRef>,
         clock: &OperationClock,
     ) -> Result<PublicationReport<PinPayload>> {
         validate_pin_owner(&owner)?;
+        if let Some(manifest) = folded {
+            return Ok(PublicationReport {
+                response: self.create_pin_at_basis(owner, manifest, clock).await?,
+                published: None,
+            });
+        }
         let owner = &owner;
         // An attempt can publish its fold and then fail to write the pin, so the
         // report keeps the newest fold any attempt published.
@@ -89,7 +106,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn create_pin_at_basis(
         &self,
         owner: PinOwner,
-        manifest: loonfs_types::format::control::ManifestRef,
+        manifest: ManifestRef,
         clock: &OperationClock,
     ) -> Result<PinPayload> {
         validate_pin_owner(&owner)?;

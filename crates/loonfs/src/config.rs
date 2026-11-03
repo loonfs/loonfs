@@ -258,10 +258,12 @@ pub struct RuntimeConfig {
     /// to turn that rule off.
     ///
     /// Defaults to [`DEFAULT_IDLE_FOLD_AFTER_MS`], 15 minutes.
-    /// [`Maintenance`](crate::Maintenance) measures the age on the runtime's
+    /// [`Maintenance`](crate::Maintenance) measures the age from the writer
+    /// session's last publish on the runtime's monotonic clock while the
+    /// session has a current writer position, and otherwise on the runtime's
     /// wall clock from the newest commit's `committed_at_ms`. A writer
-    /// session doesn't fold on age. A host that sweeps its sessions reads
-    /// when a session reaches the age with
+    /// session doesn't fold on age by itself. A host that sweeps its sessions
+    /// reads when a session reaches the age with
     /// [`Namespace::idle_fold_due_at_ms`](crate::Namespace::idle_fold_due_at_ms).
     pub idle_fold_after_ms: Option<NonZeroU64>,
 }

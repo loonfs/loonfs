@@ -93,7 +93,9 @@ impl Namespace<Writable> {
     /// TTL doesn't expire.
     ///
     /// Folds the WAL tail first when it isn't folded, and waits for a fold
-    /// permit from the runtime's execution budget either way.
+    /// permit from the runtime's execution budget either way. The fold is the
+    /// namespace's one fold path, so it waits for a fold in progress, such as
+    /// the session's own, and it starts from the session's position.
     pub async fn create_snapshot_with_options(
         &self,
         name: &str,
@@ -106,12 +108,14 @@ impl Namespace<Writable> {
                     .ttl_ms
                     .map(|ttl_ms| expires_at_ms(self.core.now_ms(), ttl_ms));
                 self.ensure_administrator().await?;
-                let engine = self.engine();
-                let result = {
-                    let _permit = self.core.fold_permit().await;
-                    engine.create_snapshot(name.to_owned(), expires_at_ms).await
-                }
-                .map_err(Error::from);
+                let result = self
+                    .mode
+                    .publisher
+                    .pin_after_fold(&self.namespace_id, |manifest| {
+                        let engine = self.engine().with_folded_manifest(manifest);
+                        async move { engine.create_snapshot(name.to_owned(), expires_at_ms).await }
+                    })
+                    .await;
                 self.mode
                     .publisher
                     .finish_publication(&self.namespace_id, result)

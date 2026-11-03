@@ -5,7 +5,6 @@
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
 use crate::commit::engine::NamespaceCommitEngine;
-use crate::commit::publish_view::WriterPosition;
 use crate::diff::DiffPage;
 use crate::error::{CoreError, Result};
 use crate::limits::DIRECT_TRANSFER_URL_TTL_MS;
@@ -23,6 +22,7 @@ use crate::storage::content_location::ContentLocation;
 use crate::storage::content_stream::{verify_content_import, FileContentStream, StreamRange};
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::ManifestRef;
 use loonfs_types::options::{AccessState, CommitSplitting, DiffOptions, ListOptions, StatOptions};
 use loonfs_types::ListChangesResponse;
 use loonfs_types::{ChangeFeedPosition, EffectiveLimit};
@@ -114,9 +114,10 @@ pub struct NamespaceEngine<S, M> {
     mode: M,
     pub(crate) subject: Option<Subject>,
     read_authority: ReadAuthority,
-    /// The writer session's position that [`NamespaceEngine::fold_wal`]
-    /// folds, or `None` to load the tail from the store.
-    pub(crate) writer_position: Option<WriterPosition>,
+    /// The manifest that a caller's fold of the WAL tail published or found
+    /// current, which a snapshot or a fork of the current head pins first,
+    /// or `None` to fold the tail before the pin.
+    pub(crate) folded_manifest: Option<ManifestRef>,
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
@@ -126,7 +127,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             mode,
             subject: None,
             read_authority: ReadAuthority::Subject,
-            writer_position: None,
+            folded_manifest: None,
         }
     }
 
@@ -815,11 +816,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self.mode.writer_id
     }
 
-    /// Sets a writer session's position for [`Self::fold_wal`] to fold, so
-    /// the fold takes the tail from the position instead of loading it from
-    /// the store, and publishes on the position's manifest.
-    pub fn with_writer_position(mut self, position: WriterPosition) -> Self {
-        self.writer_position = Some(position);
+    /// Sets the manifest that the caller's fold of the WAL tail published or
+    /// found current, so a snapshot or a fork of the current head pins that
+    /// manifest instead of folding the tail first.
+    pub fn with_folded_manifest(mut self, manifest: ManifestRef) -> Self {
+        self.folded_manifest = Some(manifest);
         self
     }
 

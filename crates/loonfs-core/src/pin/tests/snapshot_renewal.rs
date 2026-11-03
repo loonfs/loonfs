@@ -22,6 +22,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
                     name: "short lease".to_owned(),
                     expires_at_ms: Some(1_001),
                 },
+                None,
                 &context.clock(),
             )
             .await
@@ -96,6 +97,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
                     name: "short lease".to_owned(),
                     expires_at_ms: Some(1_001),
                 },
+                None,
                 &context.clock(),
             )
             .await
@@ -160,6 +162,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
                 name: "short lease".to_owned(),
                 expires_at_ms: Some(1_001),
             },
+            None,
             &context.clock(),
         )
         .await

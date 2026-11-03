@@ -28,7 +28,7 @@ impl CallFailure {
         }
     }
 
-    fn code(&self) -> ErrorCode {
+    pub(super) fn code(&self) -> ErrorCode {
         match self {
             Self::Error { code, .. } => *code,
             Self::Panic { .. } => ErrorCode::ServerError,
@@ -38,9 +38,15 @@ impl CallFailure {
     /// Whether the failure counts against the call. A namespace that is
     /// gone, or a server that is shutting down, doesn't.
     fn counts(&self) -> bool {
-        !matches!(
+        !self.namespace_gone() && self.code() != ErrorCode::ShuttingDown
+    }
+
+    /// Whether the failure says that the namespace is gone, which ends a
+    /// held session's maintenance of it.
+    pub(super) fn namespace_gone(&self) -> bool {
+        matches!(
             self.code(),
-            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted | ErrorCode::ShuttingDown
+            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted
         )
     }
 }

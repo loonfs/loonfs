@@ -14,8 +14,8 @@ use crate::sweep::MAX_GREP_BUILD_STEPS_PER_VISIT;
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
-    AdvanceRetentionFloorOptions, ChangeSeq, GcOptions, MetadataMaintenanceOutcome, NamespaceId,
-    RetentionTarget,
+    AdvanceRetentionFloorOptions, ChangeSeq, ErrorCode, GcOptions, MetadataMaintenanceOutcome,
+    NamespaceId, RetentionTarget,
 };
 use loonfs_grep::{
     GrepBuildOutcome, GrepError, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
@@ -27,6 +27,9 @@ use std::sync::Mutex;
 use tokio::sync::SemaphorePermit;
 
 impl Sweep {
+    /// Visits one namespace for a full pass. The visit leaves the metadata
+    /// step of a namespace whose held session has a current writer position
+    /// to the ticks, and makes it for every other namespace.
     pub(super) async fn visit(&self, namespace_id: NamespaceId, garbage: GarbageCollection) {
         let inner = &self.inner;
         let Some((visit, _permit)) = self
@@ -37,13 +40,24 @@ impl Sweep {
         };
         let entry = inner.namespaces.entry(&namespace_id);
         let entry = entry.as_deref();
-        let seq = entry.and_then(|entry| lock(entry).handle.last_published_seq());
-        self.maintain_metadata(&namespace_id, entry, seq).await;
+        let (seq, positioned) = entry.map_or((None, false), |entry| {
+            let held = lock(entry);
+            (
+                held.handle.last_published_seq(),
+                held.handle.has_current_writer_position(),
+            )
+        });
+        if !positioned {
+            // The call records its own failure, and the pass makes the
+            // visit's other calls whatever it returns.
+            let _ = self.maintain_metadata(&namespace_id, entry).await;
+        }
         if let Some(grep) = &inner.grep {
             self.maintain_index(grep, &namespace_id, entry, seq).await;
         }
         // The advance reads only folded commits, so it runs after the
-        // metadata call, which can fold an idle tail.
+        // metadata call, which can fold an idle tail. On a namespace that the
+        // ticks maintain, a tick's metadata step folds the idle tail.
         self.advance_retention(&namespace_id, entry).await;
         if garbage == GarbageCollection::Collect {
             self.gc(&namespace_id, entry, seq).await;
@@ -51,14 +65,14 @@ impl Sweep {
         self.finish_visit(visit).await;
     }
 
-    /// Makes one metadata call. Unfinished work, or a failure, leaves the
-    /// call due again after `maintenance_interval_ms`.
+    /// Makes one metadata call, and returns its outcome, or the code that it
+    /// failed with. Unfinished work, or a failure, leaves the call due again
+    /// after `maintenance_interval_ms`.
     pub(super) async fn maintain_metadata(
         &self,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SweepState>>>,
-        seq: Option<ChangeSeq>,
-    ) {
+    ) -> Result<MetadataMaintenanceOutcome, ErrorCode> {
         let inner = &self.inner;
         let result = contain(
             inner
@@ -67,13 +81,16 @@ impl Sweep {
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
-        let outcome = result
-            .as_ref()
-            .map_or(MetadataMaintenanceOutcome::Due, |response| response.outcome);
-        if let Some(entry) = entry {
-            lock(entry).handle.record_metadata_maintenance(seq, outcome);
-        }
-        let work_wait_ms = if outcome == MetadataMaintenanceOutcome::CaughtUp {
+        let outcome = match &result {
+            Ok(response) => Ok(response.outcome),
+            Err(failure) => Err(failure.code()),
+        };
+        // A caught-up session whose position shows nothing due costs nothing
+        // to ask again. A step without a current position read the store, so
+        // it waits for the interval.
+        let work_wait_ms = if outcome == Ok(MetadataMaintenanceOutcome::CaughtUp)
+            && entry.is_some_and(|entry| lock(entry).handle.has_current_writer_position())
+        {
             0
         } else {
             inner.config.maintenance_interval_ms
@@ -85,15 +102,18 @@ impl Sweep {
             result,
             work_wait_ms,
         );
+        outcome
     }
 
+    /// Makes one index call, and returns whether it found the namespace
+    /// gone.
     pub(super) async fn maintain_index(
         &self,
         grep: &GrepIndexing,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SweepState>>>,
         seq: Option<ChangeSeq>,
-    ) {
+    ) -> bool {
         if let Some(entry) = entry {
             lock(entry).index_dirty = false;
         }
@@ -109,6 +129,10 @@ impl Sweep {
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
+        let gone = result
+            .as_ref()
+            .err()
+            .is_some_and(CallFailure::namespace_gone);
         build.caught_up = self
             .record_call(namespace_id, entry, SweepCall::GrepIndex, result, 0)
             .unwrap_or(false);
@@ -117,6 +141,7 @@ impl Sweep {
                 lock(entry).host_state.indexed_seq = seq;
             }
         }
+        gone
     }
 
     /// Claims the namespace for one visit and waits for a visit slot.
@@ -167,15 +192,17 @@ impl Sweep {
         }
     }
 
+    /// Makes one collection call, and returns whether it found the
+    /// namespace gone.
     pub(super) async fn gc(
         &self,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SweepState>>>,
         seq: Option<ChangeSeq>,
-    ) {
+    ) -> bool {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
-            return;
+            return false;
         }
         let options = GcOptions::default();
         let result = contain(
@@ -185,12 +212,17 @@ impl Sweep {
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
+        let gone = result
+            .as_ref()
+            .err()
+            .is_some_and(CallFailure::namespace_gone);
         let collected = self.record_call(namespace_id, entry, SweepCall::Gc, result, 0);
         if let (Some(_), Some(entry)) = (collected, entry) {
             let mut held = lock(entry);
             held.host_state.collected_seq = seq;
             held.host_state.collected_at_ms = inner.timer.monotonic_now_ms();
         }
+        gone
     }
 
     /// Acknowledges the namespace's current retention floor, and then

@@ -1394,26 +1394,21 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             "one windowed WAL discovery without a byte-count replay"
         );
         if mode == "explicit" {
-            let (step, ()) = tokio::join!(
-                maintenance.maintain_metadata_with_options(&namespace, &options),
-                async {
-                    // The explicit step decides to fold before it waits for a
-                    // permit, so the session's fold can't empty the tail first.
-                    bounded(Duration::from_secs(10), async {
-                        while writer.execution_budget().stats().folds_waiting < 2 {
-                            tokio::task::yield_now().await;
-                        }
-                    })
-                    .await
-                    .expect("the session's fold and the explicit fold wait for permits");
-                    drop(permits);
-                }
-            );
-            assert_ne!(
-                step.expect("explicit fold").wal_fold,
-                crate::WalFoldStepOutcome::NotNeeded,
-                "the runtime's inline fold size makes the explicit fold due"
-            );
+            // The session's position shows the tail's inline bytes, so the
+            // explicit step finds a fold due, and it waits for the
+            // namespace's fold lock or for a permit, behind the session's
+            // fold. A step that found nothing due would return at once.
+            let step = maintenance.maintain_metadata_with_options(&namespace, &options);
+            tokio::pin!(step);
+            for _ in 0..100 {
+                assert!(
+                    futures::poll!(step.as_mut()).is_pending(),
+                    "the runtime's inline fold size makes the explicit fold due"
+                );
+                tokio::task::yield_now().await;
+            }
+            drop(permits);
+            step.await.expect("explicit fold");
         } else {
             drop(permits);
         }

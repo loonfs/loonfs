@@ -50,11 +50,14 @@
 //!
 //! A writable session keeps its own namespace's metadata compact: it folds
 //! its WAL tail at a threshold, and after each fold it publishes, it runs
-//! [`Maintenance::maintain_metadata_while_due`] over its namespace. A runtime
-//! starts no other maintenance by itself. A host that wants more, such as
-//! folding idle tails, finishing compaction a session left due after its
-//! last fold, or collecting garbage, calls the operations on
-//! [`LoonFs::maintenance`] on a schedule of its own.
+//! compaction units over its namespace while a unit is due. A runtime starts
+//! no other maintenance by itself. A host that wants more, such as folding
+//! idle tails, finishing compaction a session left due after its last fold,
+//! or collecting garbage, calls the operations on [`LoonFs::maintenance`] on
+//! a schedule of its own. Each namespace has one fold path and one
+//! compaction path in a runtime, which the session and every maintenance
+//! call share, so a call waits for a fold or a compaction unit in progress
+//! instead of repeating it.
 
 #![warn(missing_docs)]
 

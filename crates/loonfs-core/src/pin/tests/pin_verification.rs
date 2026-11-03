@@ -343,7 +343,7 @@ async fn a_fork_pin_id_is_read_like_a_snapshot_and_refused_by_every_other_snapsh
         },
     ] {
         let pin = crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(owner, &setup.clock())
+            .create_pin(owner, None, &setup.clock())
             .await
             .expect("pin")
             .response;

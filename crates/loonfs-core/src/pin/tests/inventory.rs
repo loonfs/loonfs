@@ -51,6 +51,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
                 name: name.to_owned(),
                 expires_at_ms,
             },
+            None,
             &context.clock(),
         )
         .await
@@ -498,7 +499,7 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
             .await,
         );
         crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(fork_owner.clone(), &context.clock())
+            .create_pin(fork_owner.clone(), None, &context.clock())
             .await
             .expect("create fork pin");
     }
@@ -558,7 +559,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
     ];
     for owner in refused {
         let error = crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(owner.clone(), &context.clock())
+            .create_pin(owner.clone(), None, &context.clock())
             .await
             .map(|report| crate::pin::checkpoint_summary(report.response))
             .expect_err("the owner is not creatable");
@@ -591,6 +592,7 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
             PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
             },
+            None,
             &context.clock(),
         )
         .await
@@ -686,6 +688,7 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
             PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
             },
+            None,
             &context.clock(),
         )
         .await
