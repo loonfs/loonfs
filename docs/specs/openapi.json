@@ -1560,7 +1560,7 @@
           },
           "split_at_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The fork sequence that a shorter merge can end at, for a merge that\nexceeded a bound."
+            "description": "The split hint of a merge that exceeded a bound: a fork sequence such that a merge of the\nfork's commits through it fits. It's absent when no shorter range fits."
           }
         },
         "type": "object"
@@ -3671,6 +3671,134 @@
           "resume_after_seq"
         ],
         "type": "object"
+      },
+      "NextMergeRangeOutcomeForkPointBelowFloor": {
+        "description": "The fork point is below the namespace's retention floor, so a merge of the fork returns\n`rebootstrap_required`. The outcome doesn't say where the next merge would start, because\na compaction might have removed the fork's newest merge from the namespace's merge index.",
+        "properties": {
+          "fork_point_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of\nthe namespace that the rebase forked."
+          },
+          "outcome": {
+            "description": "Whether the retention floors allow the fork's next merge, and where that merge starts.",
+            "enum": [
+              "fork_point_below_floor"
+            ],
+            "type": "string"
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The namespace's retention floor, which is above the fork point (for a rebase's new\nfork, above the new fork's own fork point)."
+          },
+          "source_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork's head sequence when the server read it."
+          }
+        },
+        "required": [
+          "retention_floor_seq",
+          "outcome",
+          "fork_point_seq",
+          "source_head_seq"
+        ],
+        "type": "object"
+      },
+      "NextMergeRangeOutcomeOpen": {
+        "description": "The floors allow the next merge.",
+        "properties": {
+          "fork_point_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of\nthe namespace that the rebase forked."
+          },
+          "merge": {
+            "$ref": "#/components/schemas/Merge",
+            "description": "The fork's newest merge into the namespace, which the next merge continues. It's\nabsent before the fork's first merge. In a rebase's new fork, it's the fork's newest\nreplay commit, never a merge that the new fork inherited."
+          },
+          "next_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork sequence that the next merge starts after: the newest merge's\n`source_through_seq`, or the fork point before the fork's first merge. In a rebase's\nnew fork, it's the new fork's `resume_after_seq` before the first replay commit."
+          },
+          "outcome": {
+            "description": "Whether the retention floors allow the fork's next merge, and where that merge starts.",
+            "enum": [
+              "open"
+            ],
+            "type": "string"
+          },
+          "source_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork's head sequence when the server read it."
+          }
+        },
+        "required": [
+          "next_after_seq",
+          "outcome",
+          "fork_point_seq",
+          "source_head_seq"
+        ],
+        "type": "object"
+      },
+      "NextMergeRangeOutcomeRangeStartBelowFloor": {
+        "description": "The range starts below the fork's own retention floor, so a merge of the fork returns\n`rebootstrap_required`, because the fork no longer keeps the history that the merge's net\nchange needs.",
+        "properties": {
+          "fork_point_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of\nthe namespace that the rebase forked."
+          },
+          "merge": {
+            "$ref": "#/components/schemas/Merge",
+            "description": "The fork's newest merge into the namespace, as for `open`. It's absent before the\nfork's first merge."
+          },
+          "next_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork sequence that the next merge would start after, as for `open`."
+          },
+          "outcome": {
+            "description": "Whether the retention floors allow the fork's next merge, and where that merge starts.",
+            "enum": [
+              "range_start_below_floor"
+            ],
+            "type": "string"
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork's retention floor, which is above `next_after_seq`."
+          },
+          "source_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork's head sequence when the server read it."
+          }
+        },
+        "required": [
+          "next_after_seq",
+          "retention_floor_seq",
+          "outcome",
+          "fork_point_seq",
+          "source_head_seq"
+        ],
+        "type": "object"
+      },
+      "NextMergeRangeResponse": {
+        "description": "Where a fork's next merge into a namespace starts.",
+        "discriminator": {
+          "mapping": {
+            "fork_point_below_floor": "#/components/schemas/NextMergeRangeOutcomeForkPointBelowFloor",
+            "open": "#/components/schemas/NextMergeRangeOutcomeOpen",
+            "range_start_below_floor": "#/components/schemas/NextMergeRangeOutcomeRangeStartBelowFloor"
+          },
+          "propertyName": "outcome"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/NextMergeRangeOutcomeOpen"
+          },
+          {
+            "$ref": "#/components/schemas/NextMergeRangeOutcomeRangeStartBelowFloor"
+          },
+          {
+            "$ref": "#/components/schemas/NextMergeRangeOutcomeForkPointBelowFloor"
+          }
+        ]
       },
       "ObjectTransferAccess": {
         "description": "A capability that lets a client transfer bytes directly to or from object storage.",
@@ -8911,6 +9039,115 @@
       }
     },
     "/v0/namespaces/{namespace_id}/merges": {
+      "get": {
+        "description": "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `rebootstrap_required`, the response's `outcome` says which floor instead of failing.",
+        "operationId": "get_next_merge_range",
+        "parameters": [
+          {
+            "description": "The namespace that the fork merges into.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The fork whose next merge into the namespace the query reads. It has to be a fork of the\nnamespace, or the fork that a rebase replays into the namespace.",
+            "in": "query",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NamespaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NextMergeRangeResponse"
+                }
+              }
+            },
+            "description": "The fork's next merge range"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request, or the source isn't a fork of this namespace"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace not found"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Merges are disabled"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Get a fork's next merge range",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-request-name": "GetNextMergeRangeRequest",
+        "x-fern-sdk-group-name": [
+          "namespaces"
+        ],
+        "x-fern-sdk-method-name": "nextMergeRange",
+        "x-loonfs-retry": "idempotent"
+      },
       "post": {
         "description": "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. After the commit, the server folds the namespace's WAL tail through it, unless the merge has already run for half of the request deadline, in which case the next maintenance pass folds the tail.",
         "operationId": "merge_fork",

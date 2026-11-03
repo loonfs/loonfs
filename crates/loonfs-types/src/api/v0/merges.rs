@@ -1,8 +1,9 @@
-//! Merging a fork into a namespace, and rebasing a fork: the requests, the
-//! conflict that a refused merge reports, and a rebase's conflict report.
+//! Merging a fork into a namespace, and rebasing a fork: the requests, where
+//! a fork's next merge starts, the conflict that a refused merge reports, and
+//! a rebase's conflict report.
 
 use crate::{
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, NamespaceId, NamespaceMetadata,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, Merge, NamespaceId, NamespaceMetadata,
     RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,68 @@ pub struct RebaseForkResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub conflicts: Option<Vec<MergeConflict>>,
+}
+
+/// Where a fork's next merge into a namespace starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NextMergeRangeResponse {
+    /// The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of
+    /// the namespace that the rebase forked.
+    pub fork_point_seq: ChangeSeq,
+    /// The fork's head sequence when the server read it.
+    pub source_head_seq: ChangeSeq,
+    /// Whether the retention floors allow the fork's next merge, and where that merge starts.
+    #[serde(flatten)]
+    pub outcome: NextMergeRangeOutcome,
+}
+
+/// Whether the retention floors allow a fork's next merge into a namespace, and where that merge
+/// starts.
+///
+/// A newer server can return an outcome that isn't listed here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum NextMergeRangeOutcome {
+    /// The floors allow the next merge.
+    Open {
+        /// The fork's newest merge into the namespace, which the next merge continues. It's
+        /// absent before the fork's first merge. In a rebase's new fork, it's the fork's newest
+        /// replay commit, never a merge that the new fork inherited.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        merge: Option<Merge>,
+        /// The fork sequence that the next merge starts after: the newest merge's
+        /// `source_through_seq`, or the fork point before the fork's first merge. In a rebase's
+        /// new fork, it's the new fork's `resume_after_seq` before the first replay commit.
+        next_after_seq: ChangeSeq,
+    },
+    /// The range starts below the fork's own retention floor, so a merge of the fork returns
+    /// `rebootstrap_required`, because the fork no longer keeps the history that the merge's net
+    /// change needs.
+    RangeStartBelowFloor {
+        /// The fork's newest merge into the namespace, as for `open`. It's absent before the
+        /// fork's first merge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        merge: Option<Merge>,
+        /// The fork sequence that the next merge would start after, as for `open`.
+        next_after_seq: ChangeSeq,
+        /// The fork's retention floor, which is above `next_after_seq`.
+        retention_floor_seq: ChangeSeq,
+    },
+    /// The fork point is below the namespace's retention floor, so a merge of the fork returns
+    /// `rebootstrap_required`. The outcome doesn't say where the next merge would start, because
+    /// a compaction might have removed the fork's newest merge from the namespace's merge index.
+    ForkPointBelowFloor {
+        /// The namespace's retention floor, which is above the fork point (for a rebase's new
+        /// fork, above the new fork's own fork point).
+        retention_floor_seq: ChangeSeq,
+    },
+    /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One inode whose change a merge can't apply, because the namespace being merged into changed
@@ -187,5 +250,90 @@ impl MergeBound {
             Self::TouchedInodes => "the inodes that one WAL object can change",
             Self::Unknown => "a bound of the server",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Checks that each outcome of the next-range query is tagged with `outcome` beside the
+    /// fields that every response has, and that each response round-trips.
+    #[test]
+    fn a_next_range_outcome_is_tagged_beside_the_common_fields() {
+        let merge = Merge {
+            source_namespace_id: NamespaceId::parse("demo-branch").expect("namespace id"),
+            source_after_seq: ChangeSeq(418),
+            source_through_seq: ChangeSeq(425),
+        };
+        let merge_json = serde_json::json!({
+            "source_namespace_id": "demo-branch",
+            "source_after_seq": 418,
+            "source_through_seq": 425
+        });
+        let cases = [
+            (
+                NextMergeRangeOutcome::Open {
+                    merge: Some(merge.clone()),
+                    next_after_seq: ChangeSeq(425),
+                },
+                serde_json::json!({"outcome": "open", "merge": merge_json, "next_after_seq": 425}),
+            ),
+            (
+                NextMergeRangeOutcome::Open {
+                    merge: None,
+                    next_after_seq: ChangeSeq(418),
+                },
+                serde_json::json!({"outcome": "open", "next_after_seq": 418}),
+            ),
+            (
+                NextMergeRangeOutcome::RangeStartBelowFloor {
+                    merge: Some(merge),
+                    next_after_seq: ChangeSeq(425),
+                    retention_floor_seq: ChangeSeq(430),
+                },
+                serde_json::json!({
+                    "outcome": "range_start_below_floor",
+                    "merge": merge_json,
+                    "next_after_seq": 425,
+                    "retention_floor_seq": 430
+                }),
+            ),
+            (
+                NextMergeRangeOutcome::ForkPointBelowFloor {
+                    retention_floor_seq: ChangeSeq(450),
+                },
+                serde_json::json!({"outcome": "fork_point_below_floor", "retention_floor_seq": 450}),
+            ),
+        ];
+        for (outcome, mut expected) in cases {
+            let response = NextMergeRangeResponse {
+                fork_point_seq: ChangeSeq(418),
+                source_head_seq: ChangeSeq(440),
+                outcome,
+            };
+            expected["fork_point_seq"] = serde_json::json!(418);
+            expected["source_head_seq"] = serde_json::json!(440);
+            let encoded = serde_json::to_value(&response).expect("serialize the next range");
+            assert_eq!(encoded, expected);
+            let decoded: NextMergeRangeResponse =
+                serde_json::from_value(encoded).expect("decode the next range");
+            assert_eq!(decoded, response);
+        }
+    }
+
+    /// Checks that a client decodes an outcome from a newer server as `Unknown`, with the fields
+    /// that every response has.
+    #[test]
+    fn a_next_range_outcome_from_a_newer_server_decodes_as_unknown() {
+        let response: NextMergeRangeResponse = serde_json::from_value(serde_json::json!({
+            "fork_point_seq": 418,
+            "source_head_seq": 440,
+            "outcome": "paused",
+            "until_seq": 450
+        }))
+        .expect("a newer outcome decodes");
+        assert_eq!(response.outcome, NextMergeRangeOutcome::Unknown);
+        assert_eq!(response.source_head_seq, ChangeSeq(440));
     }
 }

@@ -1,6 +1,7 @@
 //! Merging a fork into a writable [`Namespace`]: the receipt lookup, the
 //! merge slot, the checks, the fork's fold, the plan, the commit, and the
-//! fold of the namespace.
+//! fold of the namespace. Also the next-range query, which reads where a
+//! fork's next merge starts.
 
 use crate::pinned_read::PinnedRead;
 use crate::publish::CommitCandidate;
@@ -8,7 +9,7 @@ use crate::publisher::MergeSlot;
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, Commit, CommitId, Consistency, CoreError, Error, ErrorCode, Maintenance,
-    MergeForkOptions, Namespace, NamespaceId, Result, Writable,
+    MergeForkOptions, Mode, Namespace, NamespaceId, NextMergeRangeResponse, Result, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::MergeRequest;
@@ -47,6 +48,51 @@ pub(crate) enum MergeOutcome<R = ()> {
     Found(Commit),
     /// This request committed the merge, from a plan that reported `report`.
     Committed { commit: Commit, report: R },
+}
+
+impl<M: Mode> Namespace<M> {
+    /// Returns where the fork `source_namespace_id`'s next merge into this
+    /// namespace starts, without planning the merge
+    /// ([API section 6.15](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#615-get-merges)).
+    ///
+    /// The response has the fork point, the fork's head, the fork's newest
+    /// merge into this namespace, and the fork sequence that the next merge
+    /// starts after, as [`Namespace::merge_fork`] finds it. When this
+    /// namespace is a rebase's new fork for `source_namespace_id`, the start
+    /// comes from the new fork's replay commits or its `resume_after_seq`, as
+    /// it does for a rebase. When a retention floor would refuse the merge
+    /// with `rebootstrap_required`, the response's outcome says which floor
+    /// instead of returning the error. A handle with a subject needs an
+    /// administrator in both namespaces, as the change feed does. A source
+    /// that doesn't exist, was deleted, or isn't a fork of this namespace
+    /// returns `invalid_request`.
+    pub async fn next_merge_range(
+        &self,
+        source_namespace_id: &NamespaceId,
+    ) -> Result<NextMergeRangeResponse> {
+        trace::in_operation(
+            operation_span!(self.core, "next_merge_range", self.namespace_id),
+            async {
+                let _permit = self.core.read_permit().await;
+                let main = self
+                    .core
+                    .pinned_read(&self.namespace_id, Consistency::Strong)
+                    .await?;
+                main.engine.ensure_administrator(&main.context).await?;
+                let fork = self
+                    .core
+                    .pinned_read(source_namespace_id, Consistency::Strong)
+                    .await
+                    .map_err(|error| missing_fork(source_namespace_id, error))?;
+                fork.engine.ensure_administrator(&fork.context).await?;
+                Ok(main
+                    .engine
+                    .next_merge_range(&main.context, &fork.engine, &fork.context)
+                    .await?)
+            },
+        )
+        .await
+    }
 }
 
 impl Namespace<Writable> {

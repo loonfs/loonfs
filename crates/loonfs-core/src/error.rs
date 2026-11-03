@@ -90,8 +90,8 @@ pub enum CoreError {
         bound: MergeBound,
         estimated_bytes: usize,
         max_bytes: usize,
-        /// The fork sequence that a shorter range can end at, when the
-        /// caller can narrow the range.
+        /// The split hint: a fork sequence such that a merge of the fork's
+        /// commits through it fits, or `None` when no shorter range fits.
         split_at_seq: Option<ChangeSeq>,
     },
     #[error("an append carries {size_bytes} bytes; one append carries at most {max_bytes}")]

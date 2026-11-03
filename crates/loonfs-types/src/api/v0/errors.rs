@@ -196,8 +196,8 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub merge_bound: Option<MergeBound>,
-    /// The fork sequence that a shorter merge can end at, for a merge that
-    /// exceeded a bound.
+    /// The split hint of a merge that exceeded a bound: a fork sequence such that a merge of the
+    /// fork's commits through it fits. It's absent when no shorter range fits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub split_at_seq: Option<ChangeSeq>,

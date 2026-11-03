@@ -4,7 +4,7 @@
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::manifest::{load_namespace_manifest_envelope, PublicationReport};
-use crate::merge::merge_after_seq;
+use crate::merge::merge_start;
 use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -162,7 +162,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Returns the `rebased_from` of a rebase's new fork whose fork pin is
     /// `record`, with the fork sequence that the next merge of `rebase`'s
     /// fork into this namespace starts after in the pinned manifest (see
-    /// [`merge_after_seq`]), or `rebootstrap_required` when the fork point is
+    /// [`merge_start`]), or `rebootstrap_required` when the fork point is
     /// below the pinned manifest's retention floor.
     ///
     /// The pin keeps the manifest that the new fork starts from, so the
@@ -172,13 +172,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let pinned = load_pin_basis(&self.store, &self.segment_cache, record.clone()).await?;
         let head = NamespaceReadState::from(pinned.segments.manifest().payload());
         let view = MetadataView::over_manifest_segments(&pinned.segments, pinned.manifest.head_seq);
-        let resume_after_seq = merge_after_seq(
+        let resume_after_seq = merge_start(
             &view,
             &head,
             rebase.source_namespace_id,
             rebase.fork_point_seq,
         )
-        .await?;
+        .await?
+        .after_seq;
         Ok(RebasedFrom {
             source_namespace_id: rebase.source_namespace_id.clone(),
             resume_after_seq,

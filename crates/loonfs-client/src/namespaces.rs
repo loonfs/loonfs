@@ -9,8 +9,8 @@ use loonfs_types::options::{
 };
 use loonfs_types::{
     headers, ActorId, Commit, CommitId, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
-    ForkNamespaceRequest, MergeForkRequest, NamespaceId, NamespaceMetadata, RebaseForkRequest,
-    RebaseForkResponse,
+    ForkNamespaceRequest, MergeForkRequest, NamespaceId, NamespaceMetadata, NextMergeRangeResponse,
+    RebaseForkRequest, RebaseForkResponse,
 };
 
 impl Client {
@@ -178,6 +178,21 @@ impl Client {
                 })?,
         )
         .await
+    }
+
+    /// Returns where the fork `source_namespace_id`'s next merge into
+    /// `namespace_id` starts, without planning the merge. When a retention
+    /// floor would refuse the merge with `rebootstrap_required`, the
+    /// response's outcome says which floor.
+    pub async fn next_merge_range(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+    ) -> Result<NextMergeRangeResponse> {
+        let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/merges"));
+        query.push("source", source_namespace_id.as_str());
+        self.send_json(self.request(operations::GET_NEXT_MERGE_RANGE, &query.build()))
+            .await
     }
 
     /// Rebases the fork `source_namespace_id` of `namespace_id`: replays

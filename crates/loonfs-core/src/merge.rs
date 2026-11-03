@@ -4,10 +4,13 @@
 //! ([format section 6.2](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#62-validation)).
 
 mod classify;
+mod net_change;
+mod next_range;
 mod operations;
 mod order;
 mod plan;
 mod replay;
+mod size;
 mod state;
 mod targets;
 
@@ -22,6 +25,8 @@ use crate::path::read::LoadedMetadataView;
 use crate::path::write::{merge_fingerprint, CommitIntent, PublishPlanningSession};
 use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{ForkBasis, RebasedFrom};
+use loonfs_types::format::manifest::MergeIndexRecord;
 use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::{
     ActorId, ChangeSeq, Commit, CommitId, CommitPrecondition, FilesystemOperation, MergeConflict,
@@ -312,9 +317,19 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 }
 
-/// Returns the fork sequence that the next merge from `source_namespace_id`,
-/// a fork made at `fork_point_seq`, into the namespace that `head` and `view`
-/// describe starts after, under the range rule and the floor rule
+/// Where the next merge from a fork into a namespace starts, under the range
+/// rule.
+pub(crate) struct MergeStart {
+    /// The fork sequence that the next merge starts after.
+    pub(crate) after_seq: ChangeSeq,
+    /// The fork's newest merge that the range rule reads, or `None` before
+    /// the fork's first merge, or before a rebase's first replay commit.
+    pub(crate) previous: Option<MergeIndexRecord>,
+}
+
+/// Returns where the next merge from `source_namespace_id`, a fork made at
+/// `fork_point_seq`, into the namespace that `head` and `view` describe
+/// starts, under the range rule and the floor rule
 /// ([format section 6.2](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#merges)).
 ///
 /// The merge starts after the fork's newest merge in the merge index, or
@@ -325,21 +340,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 /// fork's: only the merge index rows above it count, the first replay commit
 /// starts after `resume_after_seq`, and the namespace's own fork point has to
 /// be at or above its floor.
-pub(crate) async fn merge_after_seq<S: ObjectStore + ?Sized>(
+pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
     view: &MetadataView<'_, '_, S>,
     head: &NamespaceReadState,
     source_namespace_id: &NamespaceId,
     fork_point_seq: ChangeSeq,
-) -> Result<ChangeSeq> {
-    let rebase = head.fork_basis.as_ref().and_then(|basis| {
-        basis
-            .rebased_from
-            .as_ref()
-            .filter(|rebased_from| rebased_from.source_namespace_id == *source_namespace_id)
-            .map(|rebased_from| (basis.manifest.head_seq, rebased_from.resume_after_seq))
-    });
+) -> Result<MergeStart> {
+    let rebase = rebase_basis(head, source_namespace_id);
     let checked_fork_point_seq =
-        rebase.map_or(fork_point_seq, |(own_fork_point_seq, _)| own_fork_point_seq);
+        rebase.map_or(fork_point_seq, |(basis, _)| basis.manifest.head_seq);
     let retention_floor_seq = view.retention_floor_seq();
     if checked_fork_point_seq < retention_floor_seq {
         return Err(CoreError::MergeRebootstrapRequired {
@@ -350,20 +359,42 @@ pub(crate) async fn merge_after_seq<S: ObjectStore + ?Sized>(
         });
     }
     let newest = view.newest_merge(source_namespace_id).await?;
-    Ok(match rebase {
+    let (previous, first_after_seq) = match rebase {
         // The new fork inherited the source's merge index rows at or below
         // its own fork point, and only its own replay rows count.
-        Some((own_fork_point_seq, resume_after_seq)) => newest
-            .filter(|previous| previous.committed_seq > own_fork_point_seq)
-            .map_or(resume_after_seq, |previous| previous.source_through_seq),
-        None => newest.map_or(fork_point_seq, |previous| previous.source_through_seq),
+        Some((basis, rebased_from)) => (
+            newest.filter(|previous| previous.committed_seq > basis.manifest.head_seq),
+            rebased_from.resume_after_seq,
+        ),
+        None => (newest, fork_point_seq),
+    };
+    Ok(MergeStart {
+        after_seq: previous
+            .as_ref()
+            .map_or(first_after_seq, |previous| previous.source_through_seq),
+        previous,
     })
+}
+
+/// Returns the fork basis of the namespace whose head is `head`, with the
+/// basis's `rebased_from`, when the namespace is a rebase's new fork for
+/// `fork`.
+fn rebase_basis<'a>(
+    head: &'a NamespaceReadState,
+    fork: &NamespaceId,
+) -> Option<(&'a ForkBasis, &'a RebasedFrom)> {
+    let basis = head.fork_basis.as_ref()?;
+    let rebased_from = basis
+        .rebased_from
+        .as_ref()
+        .filter(|rebased_from| rebased_from.source_namespace_id == *fork)?;
+    Some((basis, rebased_from))
 }
 
 /// Returns the fork point and the start of the range of a merge into `main`.
 /// The fork point is the sequence of `source` that `fork_view`'s namespace
 /// was made at, where `source` is `main` itself, or the namespace that a
-/// rebase made `main` from. The range starts where [`merge_after_seq`] says,
+/// rebase made `main` from. The range starts where [`merge_start`] says,
 /// and that start has to be at or above the fork's own floor, and equal to
 /// the request's `after_seq` when the request sets one.
 async fn range_start<S: ObjectStore + ?Sized>(
@@ -375,13 +406,14 @@ async fn range_start<S: ObjectStore + ?Sized>(
     let fork_head = fork_view.head();
     let fork_point_seq = fork_point(fork_head, source)?;
     let source_namespace_id = &fork_head.namespace_id;
-    let source_after_seq = merge_after_seq(
+    let source_after_seq = merge_start(
         &main.metadata_view(),
         main.head(),
         source_namespace_id,
         fork_point_seq,
     )
-    .await?;
+    .await?
+    .after_seq;
     if let Some(planned_after_seq) = request.after_seq {
         if planned_after_seq != source_after_seq {
             return Err(CoreError::MergeRangeConflict {
@@ -391,17 +423,29 @@ async fn range_start<S: ObjectStore + ?Sized>(
             });
         }
     }
+    ensure_range_start_retained(fork_view, source_after_seq)?;
+    Ok((fork_point_seq, source_after_seq))
+}
+
+/// Refuses a range that starts after `source_after_seq` below the fork's own
+/// retention floor, in the fork that `fork_view` reads, with
+/// `rebootstrap_required`, because the fork's net change over the range
+/// can't be computed from history that the fork no longer keeps.
+fn ensure_range_start_retained<S: ObjectStore + ?Sized>(
+    fork_view: &LoadedMetadataView<'_, S>,
+    source_after_seq: ChangeSeq,
+) -> Result<()> {
     let fork_floor_seq = fork_view.retention_floor_seq();
     if source_after_seq < fork_floor_seq {
         return Err(CoreError::MergeRebootstrapRequired {
             below: MergeHistory::RangeStart {
-                source_namespace_id: source_namespace_id.clone(),
+                source_namespace_id: fork_view.head().namespace_id.clone(),
                 source_after_seq,
             },
             retention_floor_seq: fork_floor_seq,
         });
     }
-    Ok((fork_point_seq, source_after_seq))
+    Ok(())
 }
 
 /// Returns the fork point of the fork whose head is `fork_head`, which is the

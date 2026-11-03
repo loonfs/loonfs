@@ -1,6 +1,6 @@
 //! Merging and rebasing a fork through the HTTP routes and the client: the
-//! merge's commit, its conflicts, its retries, the history it needs, and a
-//! rebase's new fork and conflict report.
+//! merge's commit, its conflicts, its retries, the history it needs, where
+//! the next merge starts, and a rebase's new fork and conflict report.
 
 use crate::common::http_split_support::test_config;
 use crate::common::{start_server, TestServer};
@@ -9,7 +9,8 @@ use loonfs_client::{ClientError, MergeForkOptions, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     ActorId, ChangeSeq, Commit, CommitId, ErrorDetails, MergeConflictKind, NamespaceId,
-    NamespaceRebasedFrom, RebaseForkResponse, FEATURE_MERGES,
+    NamespaceRebasedFrom, NextMergeRangeOutcome, NextMergeRangeResponse, RebaseForkResponse,
+    FEATURE_MERGES,
 };
 use tempfile::{tempdir, TempDir};
 
@@ -216,11 +217,11 @@ async fn a_merge_commits_the_forks_change_and_a_retry_returns_it() {
 }
 
 /// Checks that a merge allowance of zero turns merges off. The capability
-/// document leaves out `filesystem.merges`, and the merge and rebase routes
-/// return 501 `not_supported` with that key in its `feature` field, and the
-/// rebase route creates no new fork.
+/// document leaves out `filesystem.merges`, and the merge, rebase, and
+/// next-range routes return 501 `not_supported` with that key in its
+/// `feature` field, and the rebase route creates no new fork.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_zero_allowance_turns_the_merge_and_rebase_routes_and_their_key_off() {
+async fn a_zero_allowance_turns_the_merge_routes_and_their_key_off() {
     let family = Family::with_merge_allowance("http-merge-off", Some(0)).await;
     let capabilities = family
         .harness
@@ -241,6 +242,13 @@ async fn a_zero_allowance_turns_the_merge_and_rebase_routes_and_their_key_off() 
             .await
             .map(drop)
             .expect_err("rebases are off"),
+        family
+            .harness
+            .client
+            .next_merge_range(&family.main, &family.fork)
+            .await
+            .map(drop)
+            .expect_err("the next-range query is off"),
     ];
     for error in refused {
         match error {
@@ -355,6 +363,75 @@ async fn a_merge_below_either_floor_returns_rebootstrap_required() {
     assert_eq!(details.actual_after_seq, Some(fork_point));
     assert_eq!(details.retention_floor_seq, Some(floor));
     assert_eq!(details.fork_point_seq, None);
+    family.harness.server.abort();
+}
+
+/// Checks the next-range query route. Before a merge, the next merge starts
+/// after the fork point, and after a merge, it starts after the merge's
+/// range. Once `main`'s floor is above the fork point, the response reports
+/// that floor in place of a start. A source that isn't a fork of `main`
+/// returns `invalid_request` with `param` set to `source`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_next_range_query_reports_where_the_next_merge_starts() {
+    let family = Family::new("http-merge-next-range").await;
+    let client = &family.harness.client;
+    let fork_point = family.fork_point().await;
+    let written = client
+        .put_file(&path(&family.fork, "/f.txt"), b"f", &actor())
+        .await
+        .expect("fork");
+    let range = client
+        .next_merge_range(&family.main, &family.fork)
+        .await
+        .expect("the range before a merge");
+    assert_eq!(
+        range,
+        NextMergeRangeResponse {
+            fork_point_seq: fork_point,
+            source_head_seq: written.committed_seq,
+            outcome: NextMergeRangeOutcome::Open {
+                merge: None,
+                next_after_seq: fork_point,
+            },
+        }
+    );
+
+    let merged = family.merge("merge").await.expect("merge");
+    let range = client
+        .next_merge_range(&family.main, &family.fork)
+        .await
+        .expect("the range after a merge");
+    assert_eq!(
+        range.outcome,
+        NextMergeRangeOutcome::Open {
+            merge: merged.merge,
+            next_after_seq: written.committed_seq,
+        }
+    );
+
+    let floor = family.advance_floor(&family.main).await;
+    assert!(floor > fork_point);
+    let range = client
+        .next_merge_range(&family.main, &family.fork)
+        .await
+        .expect("the range below main's floor");
+    assert_eq!(
+        range.outcome,
+        NextMergeRangeOutcome::ForkPointBelowFloor {
+            retention_floor_seq: floor,
+        }
+    );
+
+    let (code, param) = match client
+        .next_merge_range(&family.main, &family.main)
+        .await
+        .expect_err("main isn't a fork of itself")
+    {
+        ClientError::Api { response, .. } => (response.code, response.param),
+        other => panic!("expected an API error, got {other:?}"),
+    };
+    assert_eq!(code, "invalid_request");
+    assert_eq!(param.as_deref(), Some("source"));
     family.harness.server.abort();
 }
 

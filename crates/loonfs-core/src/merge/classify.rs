@@ -3,60 +3,28 @@
 //! ([format section 6.2](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#62-validation)),
 //! and plans what the merge's commit does to each inode.
 
-use super::operations::{access_update, attributes_update, display_name, BindingChange, InodePlan};
+use super::net_change::{fork_layout, inode_change, touched_inodes, Changed, InodeChange};
+use super::operations::{
+    access_update, attributes_update, binding_change, create_plan, revision_update, BindingChange,
+    InodePlan,
+};
 use super::replay::Replay;
+use super::size::check_planned_bytes;
 use super::state::{Edge, InodeState, StateReader};
 use super::MergeAllowance;
 use crate::authorize::{require, Absence, Authorizer};
-use crate::commit::wal_size::{
-    merge_operation_bytes, MAX_MERGED_INODES, MIN_MERGE_OPERATION_BYTES,
-};
-use crate::error::{CoreError, MergeBound, Result};
+use crate::commit::wal_size::merge_operation_bytes;
+use crate::error::{CoreError, Result};
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
+use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::options::DiffOptions;
 use loonfs_types::{
-    AbsolutePath, AccessRight, ChangeSeq, ContentLayout, ContentRef, DisplayName,
-    FilesystemOperation, InodeId, InodeKind, MergeConflict, MergeConflictKind,
-    MergeConflictVersion, NameKey, MAX_PATH_DEPTH, ROOT_INODE_ID,
+    AbsolutePath, AccessRight, ChangeSeq, ContentLayout, ContentRef, DisplayName, InodeId,
+    InodeKind, MergeConflict, MergeConflictKind, MergeConflictVersion, NameKey, MAX_PATH_DEPTH,
+    ROOT_INODE_ID,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
-
-/// The most of the fork's commits that one read of a merge's range returns.
-/// A page includes each commit's deltas, so it stays at tens of commits.
-const MERGE_COMMITS_PAGE: usize = 64;
-
-/// Which components of an inode's state the fork changed in the range.
-struct Changed {
-    binding: bool,
-    content: bool,
-    attributes: bool,
-    access: bool,
-}
-
-impl Changed {
-    /// Compares the inode's state at the range's start, or `None` when the
-    /// fork created it in the range, with its state at the end.
-    fn between(before: Option<&InodeState>, after: &InodeState) -> Option<Self> {
-        let changed = match before {
-            None => Self {
-                binding: true,
-                content: true,
-                attributes: true,
-                access: true,
-            },
-            Some(before) => Self {
-                binding: !before.same_binding(after),
-                content: !before.same_content(after),
-                attributes: !before.same_attributes(after),
-                access: !before.same_access(after),
-            },
-        };
-        (changed.binding || changed.content || changed.attributes || changed.access)
-            .then_some(changed)
-    }
-}
 
 /// A directory that the fork deleted or moved, whose subtree in the
 /// merged-into namespace a merge checks for changes that aren't the fork's
@@ -126,56 +94,22 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Classifies each inode that the fork's commits in the range touched,
     /// in inode ID order.
     pub(super) async fn classify(&mut self) -> Result<()> {
-        for inode_id in self.touched_inodes().await? {
+        let touched = touched_inodes(self.ours.view(), self.record.source_after_seq).await?;
+        for inode_id in touched {
             self.classify_inode(inode_id).await?;
         }
         self.check_subtrees().await
     }
 
-    /// Lists the inodes that the fork's commits in the range touched.
-    ///
-    /// [`MAX_MERGED_INODES`] bounds the set. A range that touched more inodes
-    /// than one WAL object could contain operations for fails with
-    /// `merge_too_large`, even if some of those inodes drop out of the net
-    /// change. The error's `split_at_seq` is the last commit before the one
-    /// that crossed the bound, so the caller can merge the range through
-    /// that commit, unless the first commit of the range crossed it.
-    async fn touched_inodes(&self) -> Result<BTreeSet<InodeId>> {
-        let view = self.ours.view();
-        let mut touched = BTreeSet::new();
-        let mut after_seq = self.record.source_after_seq;
-        // Each pass reads the next page of the range's commits, and the view
-        // ends at the range's end, so the loop ends when a page is empty.
-        loop {
-            let page = view.commits_after(after_seq, MERGE_COMMITS_PAGE).await?;
-            if page.is_empty() {
-                return Ok(touched);
-            }
-            for commit in &page {
-                touched.extend(crate::diff::touched_inodes(&commit.deltas));
-                if touched.len() > MAX_MERGED_INODES {
-                    return Err(CoreError::MergeTooLarge {
-                        bound: MergeBound::TouchedInodes,
-                        estimated_bytes: touched.len().saturating_mul(MIN_MERGE_OPERATION_BYTES),
-                        max_bytes: MAX_WAL_OBJECT_BYTES,
-                        split_at_seq: (after_seq > self.record.source_after_seq)
-                            .then_some(after_seq),
-                    });
-                }
-                after_seq = commit.committed_seq;
-            }
-        }
-    }
-
     async fn classify_inode(&mut self, inode_id: InodeId) -> Result<()> {
-        let ours = self.ours.state(inode_id).await?.ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "a commit of fork `{}` touched inode `{inode_id}`, which the fork doesn't have",
-                self.record.source_namespace_id
-            ))
-        })?;
-        let before = self.before.state(inode_id).await?;
-        let Some(changed) = Changed::between(before.as_ref(), &ours) else {
+        let Some(InodeChange { ours, changed, .. }) = inode_change(
+            &mut self.ours,
+            &mut self.before,
+            &self.record.source_namespace_id,
+            inode_id,
+        )
+        .await?
+        else {
             return Ok(());
         };
         if ours.visible.is_some() {
@@ -197,21 +131,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Plans the create of an inode that the merged-into namespace doesn't
     /// have, with its attributes and access.
     async fn plan_create(&mut self, inode_id: InodeId, ours: &InodeState) -> Result<()> {
-        let Some(edge) = ours.edge() else {
-            return Ok(());
-        };
-        let content_ref = ours.revision.as_ref().map(|row| row.content_ref.clone());
-        let plan = InodePlan {
-            inode_id,
-            kind: ours.kind,
-            binding: Some(BindingChange::Create {
-                parent_inode_id: edge.parent_inode_id,
-                display_name: display_name(&edge.display_name)?,
-                content_ref,
-            }),
-            updates: Vec::new(),
-        };
-        self.add_plan(plan, ours, None).await
+        match create_plan(inode_id, ours)? {
+            Some(plan) => self.add_plan(plan).await,
+            None => Ok(()),
+        }
     }
 
     /// Plans the change of an inode that the merged-into namespace has, and
@@ -238,21 +161,21 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             // A deletion that an earlier merge of this fork made, and that
             // the fork has since undone, is undone by this merge too, while
             // the deletion is recoverable here. Any other deletion conflicts.
-            if let Some(deletion_seq) = self.undeletion(inode_id).await? {
-                plan.binding = Some(BindingChange::Undelete {
-                    deletion_seq,
-                    parent_inode_id: edge.parent_inode_id,
-                    display_name: display_name(&edge.display_name)?,
-                });
-            } else if !self.hidden_by_undeleted_ancestor(inode_id, edge).await? {
+            let deletion_seq = self.undeletion(inode_id).await?;
+            if deletion_seq.is_none() && !self.hidden_by_undeleted_ancestor(inode_id, edge).await? {
                 self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
                     .await?;
                 return Ok(());
             }
-        } else if changed.binding && !ours.same_binding(theirs) {
-            let (binding, kind) = self.plan_binding(inode_id, ours, theirs).await?;
-            plan.binding = Some(binding);
-            conflict = conflict.or(kind);
+            plan.binding =
+                binding_change(&self.main.head().namespace_id, ours, theirs, deletion_seq)?;
+        } else if changed.binding {
+            plan.binding = binding_change(&self.main.head().namespace_id, ours, theirs, None)?;
+            if let Some(binding) = &plan.binding {
+                conflict = self
+                    .binding_conflict(inode_id, ours, theirs, binding)
+                    .await?;
+            }
         }
         if ours.visible.is_some() {
             conflict = conflict.or(self.plan_updates(&mut plan, ours, theirs, changed).await?);
@@ -261,7 +184,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             self.conflict(inode_id, kind, ours, theirs.conflict_version())
                 .await?;
         }
-        self.add_plan(plan, ours, Some(theirs)).await
+        self.add_plan(plan).await
     }
 
     /// Returns the sequence of the deletion that hides `inode_id` in the
@@ -325,43 +248,29 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         Ok(false)
     }
 
-    /// Plans a move or a delete of a visible inode, and returns the kind of
-    /// conflict when the binding or revision that it replaces isn't the fork's
-    /// own (see [`Self::is_own`]), or
-    /// something below a directory changed.
-    async fn plan_binding(
+    /// Returns the kind of conflict of `binding`, the move or the delete of
+    /// a visible inode, when the binding or the revision that it replaces
+    /// isn't the fork's own (see [`Self::is_own`]), and adds a directory
+    /// with no such conflict to the subtree checks.
+    async fn binding_conflict(
         &mut self,
         inode_id: InodeId,
         ours: &InodeState,
         theirs: &InodeState,
-    ) -> Result<(BindingChange, Option<MergeConflictKind>)> {
+        binding: &BindingChange,
+    ) -> Result<Option<MergeConflictKind>> {
         let their_edge = theirs
             .edge()
             .expect("an inode whose binding differs from a visible one's isn't the root");
-        let expected_binding_version =
-            crate::binding_version::encode(their_edge.binding, &self.main.head().namespace_id);
         let mut conflict = None;
         if !self.is_own(their_edge.binding.seq).await? {
             conflict = Some(MergeConflictKind::Binding);
         }
-        let binding = match ours.edge() {
-            Some(edge) => BindingChange::Move {
-                expected_binding_version,
-                parent_inode_id: edge.parent_inode_id,
-                display_name: display_name(&edge.display_name)?,
-            },
-            None => {
-                if let Some(revision) = &theirs.revision {
-                    if conflict.is_none() && !self.is_own(revision.committed_seq).await? {
-                        conflict = Some(MergeConflictKind::Content);
-                    }
-                }
-                BindingChange::Delete {
-                    expected_binding_version,
-                    expected_revision_no: theirs.revision.as_ref().map(|row| row.revision_no),
-                }
+        if let (BindingChange::Delete { .. }, Some(revision)) = (binding, &theirs.revision) {
+            if conflict.is_none() && !self.is_own(revision.committed_seq).await? {
+                conflict = Some(MergeConflictKind::Content);
             }
-        };
+        }
         if conflict.is_none() && theirs.kind == InodeKind::Directory {
             let path = theirs
                 .visible
@@ -376,7 +285,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 theirs: theirs.conflict_version(),
             });
         }
-        Ok((binding, conflict))
+        Ok(conflict)
     }
 
     /// Plans the revision, attribute, and access updates of a visible inode
@@ -396,15 +305,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 if !self.is_own(their_row.committed_seq).await? {
                     conflict = conflict.or(Some(MergeConflictKind::Content));
                 }
-                plan.updates
-                    .push(FilesystemOperation::PutFileRevisionByInode {
-                        inode_id,
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: row.content_ref.clone(),
-                            source_namespace_id: None,
-                        },
-                        expected_revision_no: their_row.revision_no,
-                    });
+                plan.updates.push(revision_update(inode_id, row, their_row));
             }
         }
         if changed.attributes && !ours.same_attributes(theirs) {
@@ -428,39 +329,18 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         Ok(conflict)
     }
 
-    /// Adds an inode's plan, with the attributes and access of an inode that
-    /// the merge creates, and adds its operations and the layouts that they
-    /// record to the commit's running size bound.
+    /// Adds an inode's plan, and adds its operations and the layouts that
+    /// they record to the commit's running size bound.
     ///
     /// The running bound stops the merge with `merge_too_large` as soon as
-    /// the plans so far exceed one WAL object or the merge allowance, so the
-    /// plans keep at most about that much memory, and a merge that admission
-    /// would refuse isn't planned in full. It adds operations up as the merge
-    /// commit's own bound does. The commit's bound also includes the
-    /// temporary moves that ordering the operations can add, and admission
-    /// checks that bound.
-    async fn add_plan(
-        &mut self,
-        mut plan: InodePlan,
-        ours: &InodeState,
-        theirs: Option<&InodeState>,
-    ) -> Result<()> {
-        if theirs.is_none() {
-            if ours.attributes.is_some() {
-                plan.updates
-                    .push(attributes_update(plan.inode_id, ours, None));
-            }
-            if ours.access.is_some() {
-                plan.updates.push(access_update(plan.inode_id, ours, None));
-            }
-        }
-        let operations: Vec<_> = plan
-            .binding
-            .as_ref()
-            .map(|binding| binding.operation(plan.inode_id, plan.kind))
-            .into_iter()
-            .chain(plan.updates.iter().cloned())
-            .collect();
+    /// the plans so far exceed one WAL object or the merge allowance (see
+    /// [`check_planned_bytes`]), so the plans keep at most about that much
+    /// memory, and a merge that admission would refuse isn't planned in
+    /// full. It adds operations up as the merge commit's own bound does. The
+    /// commit's bound also includes the temporary moves that ordering the
+    /// operations can add, and admission checks that bound.
+    async fn add_plan(&mut self, plan: InodePlan) -> Result<()> {
+        let operations = plan.operations();
         if operations.is_empty() {
             return Ok(());
         }
@@ -473,37 +353,21 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 .planned_bytes
                 .saturating_add(merge_operation_bytes(operation, layout_extents));
         }
-        let document_bytes = self.planned_bytes.saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
-        if document_bytes > MAX_WAL_OBJECT_BYTES {
-            return Err(CoreError::MergeTooLarge {
-                bound: MergeBound::WalObject,
-                estimated_bytes: document_bytes,
-                max_bytes: MAX_WAL_OBJECT_BYTES,
-                split_at_seq: None,
-            });
-        }
-        self.allowance.check(self.planned_bytes)?;
+        check_planned_bytes(self.planned_bytes, self.allowance)?;
         self.plans.push(plan);
         Ok(())
     }
 
-    /// Returns the layout of `content_ref` in the fork's view. The fork's
-    /// fold before planning wrote a layout for each content reference that
-    /// the range's commits made.
+    /// Returns the layout of `content_ref` in the fork's view, which the
+    /// commit's proofs record.
     async fn layout(&mut self, content_ref: &ContentRef) -> Result<&ContentLayout> {
         if !self.layouts.contains_key(content_ref) {
-            let layout = self
-                .ours
-                .view()
-                .content_layout(&content_ref.content_id)
-                .await?
-                .ok_or_else(|| {
-                    CoreError::NamespaceCorrupt(format!(
-                        "fork `{}` has no layout for content `{}` after its fold",
-                        self.record.source_namespace_id, content_ref.content_id
-                    ))
-                })?
-                .layout;
+            let layout = fork_layout(
+                self.ours.view(),
+                &self.record.source_namespace_id,
+                content_ref,
+            )
+            .await?;
             self.layouts.insert(content_ref.clone(), layout);
         }
         Ok(&self.layouts[content_ref])
