@@ -6,8 +6,10 @@
 use super::loaded_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::MAX_CURRENT_FILES_PER_STAT;
 use crate::metadata::{AncestorWalk, MetadataViewSession, ResolvedVisiblePath};
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use std::collections::HashMap;
@@ -54,20 +56,26 @@ pub(crate) fn ensure_stat_batch_within_cap(requested: usize) -> Result<()> {
 
 /// Resolves inode IDs against one loaded view in input order.
 ///
-/// The batch shares one namespace state and caches paths for common ancestors.
+/// Up to [`STORE_READS_IN_FLIGHT`] inodes resolve at once, so their metadata
+/// reads overlap. Each inode resolves in its own session over the same
+/// namespace state, because a session's lookups take it by `&mut`.
 pub(crate) async fn stat_current_files_by_inode<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     inode_ids: &[InodeId],
     access: &ReadAccess<'_, S>,
 ) -> Result<Vec<CurrentFileState>> {
     ensure_stat_batch_within_cap(inode_ids.len())?;
-    let mut session = view.metadata_view().session();
-    let mut ancestor_paths = HashMap::new();
-    let mut states = Vec::with_capacity(inode_ids.len());
-    for &inode_id in inode_ids {
-        states.push(resolve_one(&mut session, &mut ancestor_paths, inode_id, access).await?);
-    }
-    Ok(states)
+    let metadata_view = view.metadata_view();
+    // `buffered` yields results in input order, so the batch returns the
+    // error of the first inode that fails, as a serial loop would.
+    stream::iter(inode_ids.iter().copied())
+        .map(|inode_id| async move {
+            let mut session = metadata_view.session();
+            resolve_one(&mut session, &mut HashMap::new(), inode_id, access).await
+        })
+        .buffered(STORE_READS_IN_FLIGHT)
+        .try_collect()
+        .await
 }
 
 async fn resolve_one<S: ObjectStore + ?Sized>(
