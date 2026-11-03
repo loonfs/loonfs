@@ -2792,14 +2792,15 @@ Representative response:
 
 ```json
 {
+  "fork_point_seq": 418,
+  "source_head_seq": 440,
+  "outcome": "open",
   "merge": {
     "source_namespace_id": "demo-branch",
     "source_after_seq": 418,
     "source_through_seq": 425
   },
-  "next_after_seq": 425,
-  "fork_point_seq": 418,
-  "source_head_seq": 440
+  "next_after_seq": 425
 }
 ```
 
@@ -2809,15 +2810,25 @@ Representative response:
 
 | Response field | Meaning |
 | --- | --- |
-| `merge` | The fork's newest merge into this namespace, which the next merge continues, in the shape of a commit's `merge` record. It's absent before the fork's first merge. |
-| `next_after_seq` | The fork sequence that the next merge starts after: the newest merge's `source_through_seq`, or the fork point before the fork's first merge. |
 | `fork_point_seq` | The fork point, which is the sequence of this namespace that the fork was made at. |
 | `source_head_seq` | The fork's head when the server read it. A merge without `through_seq` applies the fork's commits through the fork's head. |
-| `rebootstrap_required` | The details of the `rebootstrap_required` error that a merge of the fork would return, because history that the merge needs is below a retention floor (see [`POST /merges`](#614-post-merges)). It's absent when the floors allow a merge. |
+| `outcome` | Whether the retention floors allow the fork's next merge: `open`, `range_start_below_floor`, or `fork_point_below_floor` (described below). Clients MUST tolerate other values. |
 
-The query finds the range's start with the checks that a merge makes at steps 3 to 5 of [`POST /merges`](#614-post-merges), but instead of returning `rebootstrap_required` when a retention floor refuses the merge, it reports the refusal in the `rebootstrap_required` field. When the fork point is below this namespace's floor, the response has no `merge` and no `next_after_seq`, because a compaction might have removed the fork's newest merge from the [merge index](glossary.md#merge-index). When the range's start is below the fork's own floor, the response has both, and the details identify the fork's floor.
+The query finds the range's start with the checks that a merge makes at steps 3 to 5 of [`POST /merges`](#614-post-merges). When a retention floor would refuse the merge with `rebootstrap_required`, the query reports which floor in `outcome` instead of returning the error. The fields for each outcome are siblings of `outcome`, not a nested object:
 
-When this namespace is a rebase's new fork, and `source` is the fork that the new fork's `fork_basis.rebased_from` identifies, the query reads where the next replay commit starts, as [`POST /rebases`](#616-post-rebases) does. `merge` is then the new fork's newest replay commit, never a merge that the new fork inherited from the namespace that it was forked from, and `next_after_seq` is `resume_after_seq` before the first replay commit. `fork_point_seq` is the fork's fork point in the namespace that the rebase forked.
+| `outcome` | Fields | Means |
+| --- | --- | --- |
+| `open` | `merge`, `next_after_seq` | The floors allow the next merge. `merge` is the fork's newest merge into this namespace, which the next merge continues, in the shape of a commit's `merge` record. It's absent before the fork's first merge. `next_after_seq` is the fork sequence that the next merge starts after: the newest merge's `source_through_seq`, or the fork point before the fork's first merge. |
+| `range_start_below_floor` | `merge`, `next_after_seq`, `retention_floor_seq` | The range's start is below the fork's own retention floor, which is `retention_floor_seq`, so a merge of the fork returns `rebootstrap_required`. `merge` and `next_after_seq` are as for `open`. |
+| `fork_point_below_floor` | `retention_floor_seq` | The fork point is below this namespace's retention floor, which is `retention_floor_seq`, so a merge of the fork returns `rebootstrap_required`. The response doesn't say where the next merge would start, because a compaction might have removed the fork's newest merge from the [merge index](glossary.md#merge-index). |
+
+For example, once this namespace's retention floor is above the fork point, the query returns:
+
+```json
+{"fork_point_seq":418,"source_head_seq":440,"outcome":"fork_point_below_floor","retention_floor_seq":450}
+```
+
+When this namespace is a rebase's new fork, and `source` is the fork that the new fork's `fork_basis.rebased_from` identifies, the query reads where the next replay commit starts, as [`POST /rebases`](#616-post-rebases) does. `merge` is then the new fork's newest replay commit, never a merge that the new fork inherited from the namespace that it was forked from, and `next_after_seq` is `resume_after_seq` before the first replay commit. `fork_point_seq` is the fork's fork point in the namespace that the rebase forked. The outcome is `fork_point_below_floor` when the new fork's own fork point is below the new fork's retention floor, because the new fork then refuses replay commits.
 
 In an ACL namespace, the query requires an administrator, in this namespace and in the fork, when the request includes subject headers. Without subject headers, the request reads as the token holder, as the change feed does.
 

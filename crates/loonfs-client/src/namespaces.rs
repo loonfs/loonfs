@@ -181,9 +181,9 @@ impl Client {
     }
 
     /// Returns where the fork `source_namespace_id`'s next merge into
-    /// `namespace_id` starts, without planning the merge. When a merge would
-    /// return `rebootstrap_required`, the response's `rebootstrap_required`
-    /// includes that error's details.
+    /// `namespace_id` starts, without planning the merge. When a retention
+    /// floor would refuse the merge with `rebootstrap_required`, the
+    /// response's outcome says which floor.
     pub async fn next_merge_range(
         &self,
         namespace_id: &NamespaceId,

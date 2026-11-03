@@ -5,7 +5,7 @@
 
 use super::net_change::{fork_layout, inode_change, touched_inodes, Changed, InodeChange};
 use super::operations::{
-    access_update, attributes_update, create_plan, display_name, revision_update, BindingChange,
+    access_update, attributes_update, binding_change, create_plan, revision_update, BindingChange,
     InodePlan,
 };
 use super::replay::Replay;
@@ -161,21 +161,21 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             // A deletion that an earlier merge of this fork made, and that
             // the fork has since undone, is undone by this merge too, while
             // the deletion is recoverable here. Any other deletion conflicts.
-            if let Some(deletion_seq) = self.undeletion(inode_id).await? {
-                plan.binding = Some(BindingChange::Undelete {
-                    deletion_seq,
-                    parent_inode_id: edge.parent_inode_id,
-                    display_name: display_name(&edge.display_name)?,
-                });
-            } else if !self.hidden_by_undeleted_ancestor(inode_id, edge).await? {
+            let deletion_seq = self.undeletion(inode_id).await?;
+            if deletion_seq.is_none() && !self.hidden_by_undeleted_ancestor(inode_id, edge).await? {
                 self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
                     .await?;
                 return Ok(());
             }
-        } else if changed.binding && !ours.same_binding(theirs) {
-            let (binding, kind) = self.plan_binding(inode_id, ours, theirs).await?;
-            plan.binding = Some(binding);
-            conflict = conflict.or(kind);
+            plan.binding =
+                binding_change(&self.main.head().namespace_id, ours, theirs, deletion_seq)?;
+        } else if changed.binding {
+            plan.binding = binding_change(&self.main.head().namespace_id, ours, theirs, None)?;
+            if let Some(binding) = &plan.binding {
+                conflict = self
+                    .binding_conflict(inode_id, ours, theirs, binding)
+                    .await?;
+            }
         }
         if ours.visible.is_some() {
             conflict = conflict.or(self.plan_updates(&mut plan, ours, theirs, changed).await?);
@@ -248,43 +248,29 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         Ok(false)
     }
 
-    /// Plans a move or a delete of a visible inode, and returns the kind of
-    /// conflict when the binding or revision that it replaces isn't the fork's
-    /// own (see [`Self::is_own`]), or
-    /// something below a directory changed.
-    async fn plan_binding(
+    /// Returns the kind of conflict of `binding`, the move or the delete of
+    /// a visible inode, when the binding or the revision that it replaces
+    /// isn't the fork's own (see [`Self::is_own`]), and adds a directory
+    /// with no such conflict to the subtree checks.
+    async fn binding_conflict(
         &mut self,
         inode_id: InodeId,
         ours: &InodeState,
         theirs: &InodeState,
-    ) -> Result<(BindingChange, Option<MergeConflictKind>)> {
+        binding: &BindingChange,
+    ) -> Result<Option<MergeConflictKind>> {
         let their_edge = theirs
             .edge()
             .expect("an inode whose binding differs from a visible one's isn't the root");
-        let expected_binding_version =
-            crate::binding_version::encode(their_edge.binding, &self.main.head().namespace_id);
         let mut conflict = None;
         if !self.is_own(their_edge.binding.seq).await? {
             conflict = Some(MergeConflictKind::Binding);
         }
-        let binding = match ours.edge() {
-            Some(edge) => BindingChange::Move {
-                expected_binding_version,
-                parent_inode_id: edge.parent_inode_id,
-                display_name: display_name(&edge.display_name)?,
-            },
-            None => {
-                if let Some(revision) = &theirs.revision {
-                    if conflict.is_none() && !self.is_own(revision.committed_seq).await? {
-                        conflict = Some(MergeConflictKind::Content);
-                    }
-                }
-                BindingChange::Delete {
-                    expected_binding_version,
-                    expected_revision_no: theirs.revision.as_ref().map(|row| row.revision_no),
-                }
+        if let (BindingChange::Delete { .. }, Some(revision)) = (binding, &theirs.revision) {
+            if conflict.is_none() && !self.is_own(revision.committed_seq).await? {
+                conflict = Some(MergeConflictKind::Content);
             }
-        };
+        }
         if conflict.is_none() && theirs.kind == InodeKind::Directory {
             let path = theirs
                 .visible
@@ -299,7 +285,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 theirs: theirs.conflict_version(),
             });
         }
-        Ok((binding, conflict))
+        Ok(conflict)
     }
 
     /// Plans the revision, attribute, and access updates of a visible inode

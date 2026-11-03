@@ -9,7 +9,8 @@ use loonfs_client::{ClientError, MergeForkOptions, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     ActorId, ChangeSeq, Commit, CommitId, ErrorDetails, MergeConflictKind, NamespaceId,
-    NamespaceRebasedFrom, NextMergeRangeResponse, RebaseForkResponse, FEATURE_MERGES,
+    NamespaceRebasedFrom, NextMergeRangeOutcome, NextMergeRangeResponse, RebaseForkResponse,
+    FEATURE_MERGES,
 };
 use tempfile::{tempdir, TempDir};
 
@@ -368,9 +369,8 @@ async fn a_merge_below_either_floor_returns_rebootstrap_required() {
 /// Checks the next-range query route. Before a merge, the next merge starts
 /// after the fork point, and after a merge, it starts after the merge's
 /// range. Once `main`'s floor is above the fork point, the response reports
-/// the `rebootstrap_required` details in place of a start. A source that
-/// isn't a fork of `main` returns `invalid_request` with `param` set to
-/// `source`.
+/// that floor in place of a start. A source that isn't a fork of `main`
+/// returns `invalid_request` with `param` set to `source`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_next_range_query_reports_where_the_next_merge_starts() {
     let family = Family::new("http-merge-next-range").await;
@@ -387,11 +387,12 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
     assert_eq!(
         range,
         NextMergeRangeResponse {
-            merge: None,
-            next_after_seq: Some(fork_point),
             fork_point_seq: fork_point,
             source_head_seq: written.committed_seq,
-            rebootstrap_required: None,
+            outcome: NextMergeRangeOutcome::Open {
+                merge: None,
+                next_after_seq: fork_point,
+            },
         }
     );
 
@@ -400,8 +401,13 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
         .next_merge_range(&family.main, &family.fork)
         .await
         .expect("the range after a merge");
-    assert_eq!(range.merge, merged.merge);
-    assert_eq!(range.next_after_seq, Some(written.committed_seq));
+    assert_eq!(
+        range.outcome,
+        NextMergeRangeOutcome::Open {
+            merge: merged.merge,
+            next_after_seq: written.committed_seq,
+        }
+    );
 
     let floor = family.advance_floor(&family.main).await;
     assert!(floor > fork_point);
@@ -409,10 +415,12 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
         .next_merge_range(&family.main, &family.fork)
         .await
         .expect("the range below main's floor");
-    assert_eq!(range.next_after_seq, None);
-    let details = range.rebootstrap_required.expect("the floor's details");
-    assert_eq!(details.fork_point_seq, Some(fork_point));
-    assert_eq!(details.retention_floor_seq, Some(floor));
+    assert_eq!(
+        range.outcome,
+        NextMergeRangeOutcome::ForkPointBelowFloor {
+            retention_floor_seq: floor,
+        }
+    );
 
     let (code, param) = match client
         .next_merge_range(&family.main, &family.main)

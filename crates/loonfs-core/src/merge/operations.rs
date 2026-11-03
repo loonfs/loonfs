@@ -6,7 +6,8 @@ use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use loonfs_types::{
     AttributesRevisionNo, BindingVersion, ChangeSeq, CommitPrecondition, ContentRef,
-    DeleteDirectoryBehavior, DisplayName, FilesystemOperation, InodeId, InodeKind, RevisionNo,
+    DeleteDirectoryBehavior, DisplayName, FilesystemOperation, InodeId, InodeKind, NamespaceId,
+    RevisionNo,
 };
 
 /// What a merge's commit does to one inode.
@@ -62,6 +63,46 @@ pub(super) fn create_plan(inode_id: InodeId, ours: &InodeState) -> Result<Option
         binding: Some(binding),
         updates,
     }))
+}
+
+/// Returns how a merge changes the binding of an inode that the
+/// merged-into namespace `namespace_id` has, from `theirs`, its state there,
+/// to `ours`, its state in the fork, or `None` when the binding stays.
+///
+/// The merge moves an inode that both states have visible at different
+/// places, and deletes one that only `theirs` has visible. When only `ours`
+/// has the inode visible, the merge undoes the deletion at `deletion_seq`,
+/// which the caller passes when a deletion of the inode itself hides it in
+/// `theirs` and the merge can undo that deletion. Without one, as when only
+/// an ancestor's deletion hides the inode, the binding stays, and undoing
+/// the ancestor's deletion shows the inode again.
+pub(super) fn binding_change(
+    namespace_id: &NamespaceId,
+    ours: &InodeState,
+    theirs: &InodeState,
+    deletion_seq: Option<ChangeSeq>,
+) -> Result<Option<BindingChange>> {
+    if ours.same_binding(theirs) {
+        return Ok(None);
+    }
+    let change = match (theirs.edge(), ours.edge(), deletion_seq) {
+        (Some(from), Some(to), _) => BindingChange::Move {
+            expected_binding_version: crate::binding_version::encode(from.binding, namespace_id),
+            parent_inode_id: to.parent_inode_id,
+            display_name: display_name(&to.display_name)?,
+        },
+        (Some(from), None, _) => BindingChange::Delete {
+            expected_binding_version: crate::binding_version::encode(from.binding, namespace_id),
+            expected_revision_no: theirs.revision.as_ref().map(|row| row.revision_no),
+        },
+        (None, Some(to), Some(deletion_seq)) => BindingChange::Undelete {
+            deletion_seq,
+            parent_inode_id: to.parent_inode_id,
+            display_name: display_name(&to.display_name)?,
+        },
+        (None, _, _) => return Ok(None),
+    };
+    Ok(Some(change))
 }
 
 /// How a merge changes an inode's binding.

@@ -4,8 +4,7 @@
 
 use super::net_change::{fork_layout, inode_change, touched_inodes, InodeChange};
 use super::operations::{
-    access_update, attributes_update, create_plan, display_name, revision_update, BindingChange,
-    InodePlan,
+    access_update, attributes_update, binding_change, create_plan, revision_update, InodePlan,
 };
 use super::state::StateReader;
 use super::MergeAllowance;
@@ -168,9 +167,10 @@ async fn net_change_fits<S: ObjectStore + ?Sized>(
 /// Returns the plan of a merge of the fork's change to one inode into a
 /// namespace whose rows are the fork's own at the range's start, which
 /// `start` reads: the create of an inode that the fork created in the range,
-/// or the inode's move, delete, or undelete, then its revision, attribute,
-/// and access updates. The plan's preconditions are the rows of `fork` at
-/// the range's start.
+/// or the inode's move, delete, or undelete, which the planner's
+/// [`binding_change`] chooses, then its revision, attribute, and access
+/// updates. The plan's preconditions are the rows of `fork` at the range's
+/// start.
 async fn net_change_plan<S: ObjectStore + ?Sized>(
     start: MetadataView<'_, '_, S>,
     fork: &NamespaceId,
@@ -185,29 +185,17 @@ async fn net_change_plan<S: ObjectStore + ?Sized>(
     let Some(before) = before else {
         return create_plan(inode_id, ours);
     };
-    let binding = match (changed.binding, before.edge(), ours.edge()) {
-        (true, Some(from), Some(to)) => Some(BindingChange::Move {
-            expected_binding_version: crate::binding_version::encode(from.binding, fork),
-            parent_inode_id: to.parent_inode_id,
-            display_name: display_name(&to.display_name)?,
-        }),
-        (true, Some(from), None) => Some(BindingChange::Delete {
-            expected_binding_version: crate::binding_version::encode(from.binding, fork),
-            expected_revision_no: before.revision.as_ref().map(|row| row.revision_no),
-        }),
-        // A deletion of the inode itself hid it at the start, and an undelete
-        // reverses that deletion. An ancestor's undelete shows an inode that
-        // only the ancestor's deletion hid, with no change of its own.
-        (true, None, Some(to)) => match start.hiding_subtree_tombstone(inode_id).await? {
-            Some(deletion) => Some(BindingChange::Undelete {
-                deletion_seq: deletion.committed_seq,
-                parent_inode_id: to.parent_inode_id,
-                display_name: display_name(&to.display_name)?,
-            }),
-            None => None,
-        },
+    // An undelete reverses a deletion of the inode itself that hid it at the
+    // start. An inode that only an ancestor's deletion hid comes back with
+    // the ancestor's undelete, with no change of its own.
+    let deletion_seq = match (&before.visible, ours.edge()) {
+        (None, Some(_)) => start
+            .hiding_subtree_tombstone(inode_id)
+            .await?
+            .map(|deletion| deletion.committed_seq),
         _ => None,
     };
+    let binding = binding_change(fork, ours, before, deletion_seq)?;
     let mut updates = Vec::new();
     if ours.visible.is_some() {
         if let (true, Some(row), Some(start_row)) =

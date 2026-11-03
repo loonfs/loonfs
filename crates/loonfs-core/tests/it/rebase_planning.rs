@@ -12,7 +12,7 @@ use loonfs_types::options::StatOptions;
 use loonfs_types::{
     ChangeSeq, Commit, CommitId, InodeId, Merge, MergeConflict, MergeConflictKind,
     MergeConflictRevision, MergeConflictVersion, NamespaceId, NamespaceRebasedFrom,
-    NextMergeRangeResponse, PathEntry, PathEntryKind,
+    NextMergeRangeOutcome, NextMergeRangeResponse, PathEntry, PathEntryKind,
 };
 use tempfile::TempDir;
 
@@ -520,11 +520,12 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
     assert_eq!(
         family.next_range().await,
         NextMergeRangeResponse {
-            merge: None,
-            next_after_seq: Some(ChangeSeq(2)),
             fork_point_seq: ChangeSeq(2),
             source_head_seq: last.committed_seq,
-            rebootstrap_required: None,
+            outcome: NextMergeRangeOutcome::Open {
+                merge: None,
+                next_after_seq: ChangeSeq(2),
+            },
         }
     );
 
@@ -533,15 +534,16 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
         .await
         .expect("the first piece");
     assert_eq!(piece.conflicts, Some(Vec::new()));
-    let range = family.next_range().await;
-    assert_eq!(range.next_after_seq, Some(first.committed_seq));
     assert_eq!(
-        range.merge,
-        Some(Merge {
-            source_namespace_id: family.fork.clone(),
-            source_after_seq: ChangeSeq(2),
-            source_through_seq: first.committed_seq,
-        })
+        family.next_range().await.outcome,
+        NextMergeRangeOutcome::Open {
+            merge: Some(Merge {
+                source_namespace_id: family.fork.clone(),
+                source_after_seq: ChangeSeq(2),
+                source_through_seq: first.committed_seq,
+            }),
+            next_after_seq: first.committed_seq,
+        }
     );
     assert_eq!(
         family.bytes(&family.rebase, "/docs/a.txt").await.as_deref(),

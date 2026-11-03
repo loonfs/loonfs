@@ -36,6 +36,7 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.composite::<UploadSession, UploadSessionStatus>("status", Some("unknown"));
     named.composite::<GrepIndex, GrepIndexStatus>("status", Some("unknown"));
     named.composite::<StoreProbeCheck, StoreProbeCheckOutcome>("outcome", Some("unknown"));
+    named.composite::<NextMergeRangeResponse, NextMergeRangeOutcome>("outcome", Some("unknown"));
     named.plain::<DiffEntryKind>("unknown");
     named.plain::<MergeBound>("unknown");
     named.plain::<MergeConflictKind>("unknown");
@@ -221,6 +222,10 @@ impl NamedSchemas {
                 "StoreProbeCheck" => Some(
                     "Whether the store passed the check, failed it, or doesn't support the \
                      capability.",
+                ),
+                "NextMergeRangeResponse" => Some(
+                    "Whether the retention floors allow the fork's next merge, and where that \
+                     merge starts.",
                 ),
                 _ => None,
             };

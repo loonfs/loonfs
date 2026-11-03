@@ -147,17 +147,15 @@ Why a new fork and not the fork itself? The conflict rule checks which commit wr
 
 ### The next-range query
 
-`GET /v0/namespaces/{ns}/merges?source={fork}` returns where the fork's next merge into `ns` starts, without planning the merge. The response has these fields:
+`GET /v0/namespaces/{ns}/merges?source={fork}` returns where the fork's next merge into `ns` starts, without planning the merge. The response has the fork point (`fork_point_seq`), the fork's head (`source_head_seq`), and an `outcome` that says whether the retention floors allow the merge, with that outcome's own fields beside it:
 
-| Field | Meaning |
-| --- | --- |
-| `merge` | The newest merge from the fork in `ns`'s merge index, in the shape of a commit's merge record. |
-| `next_after_seq` | The fork sequence that the fork's next merge starts after: the newest merge's `source_through_seq`, or the fork point if the fork has never merged. |
-| `fork_point_seq` | The fork point. |
-| `source_head_seq` | The fork's head. |
-| `rebootstrap_required` | The details of the `rebootstrap_required` error that a merge of the fork would return, when a retention floor refuses the merge. |
+| `outcome` | Fields | Meaning |
+| --- | --- | --- |
+| `open` | `merge`, `next_after_seq` | The floors allow the merge. `merge` is the newest merge from the fork in `ns`'s merge index, in the shape of a commit's merge record, and `next_after_seq` is the fork sequence that the fork's next merge starts after: the newest merge's `source_through_seq`, or the fork point if the fork has never merged. |
+| `range_start_below_floor` | `merge`, `next_after_seq`, `retention_floor_seq` | The range's start is below the fork's own retention floor. |
+| `fork_point_below_floor` | `retention_floor_seq` | The fork point is below `ns`'s retention floor. |
 
-The query runs the merge route's checks of the fork point and of the range's start, but instead of failing when a floor refuses the merge, it reports the refusal in `rebootstrap_required`, so the loop reads the refusal and the range in one response. When the fork point is below `ns`'s retention floor, the response has no `merge` and no `next_after_seq`. A base compaction might have removed the fork's newest merge from the merge index by then, so the index no longer says where the next merge would start. The loop reads `next_after_seq` when it resumes, and a client that wants to show what's unmerged reads the fork's change feed from that sequence. When `ns` is a rebase's new fork, the query returns the fork's newest replay row (one of the new fork's own `merges` rows, above its fork point) and never a row that the new fork inherited from main, and `next_after_seq` comes from that row, or from `resume_after_seq` before the first replay commit.
+The query runs the merge route's checks of the fork point and of the range's start, but instead of failing when a floor refuses the merge, it reports the refusal in `outcome`, so the loop reads the refusal and the range in one response. When the fork point is below `ns`'s retention floor, the response has no `merge` and no `next_after_seq`. A base compaction might have removed the fork's newest merge from the merge index by then, so the index no longer says where the next merge would start. The loop reads `next_after_seq` when it resumes, and a client that wants to show what's unmerged reads the fork's change feed from that sequence. When `ns` is a rebase's new fork, the query returns the fork's newest replay row (one of the new fork's own `merges` rows, above its fork point) and never a row that the new fork inherited from main, and `next_after_seq` comes from that row, or from `resume_after_seq` before the first replay commit.
 
 ### The split hint
 

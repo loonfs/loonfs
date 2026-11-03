@@ -6,7 +6,7 @@ use crate::common::{default_writer, namespace_engine, read_context, resolve_path
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
 use loonfs_core::test_support::{NamespaceFixture, WriterAt};
 use loonfs_core::{
-    CoreError, CreateNamespaceOptions, MergeAllowance, MergeBound, MergeRequest,
+    CoreError, CreateNamespaceOptions, MergeAllowance, MergeBound, MergePlan, MergeRequest,
     NamespaceWriterEngine, RetentionTarget,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -14,8 +14,8 @@ use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, ChangeSeq, Commit, CommitId, ErrorCode,
-    InodeId, Merge, MergeConflictKind, NamespaceAccess, NamespaceId, NextMergeRangeResponse,
-    PathEntry, PrincipalId, PrincipalScope, Subject,
+    InodeId, Merge, MergeConflictKind, NamespaceAccess, NamespaceId, NextMergeRangeOutcome,
+    NextMergeRangeResponse, PathEntry, PrincipalId, PrincipalScope, Subject,
 };
 use std::assert_matches;
 use tempfile::TempDir;
@@ -194,6 +194,24 @@ impl Family {
             .await
             .pop()
             .expect("one result")
+    }
+
+    /// Plans a merge of the fork's commits into `main` through `through_seq`,
+    /// after the fork's fold, as [`Self::merge_as`] does, without committing
+    /// it.
+    async fn plan(&self, through_seq: Option<ChangeSeq>) -> Result<MergePlan, CoreError> {
+        let fork = self.engine(&self.fork, self.subject.as_ref());
+        fork.fold_wal().await?;
+        self.engine(&self.main, self.subject.as_ref())
+            .plan_merge(
+                &read_context(&self.store, &self.main).await,
+                &fork,
+                &read_context(&self.store, &self.fork).await,
+                &self.request("plan", through_seq),
+                self.writer.now_ms,
+                self.allowance,
+            )
+            .await
     }
 
     /// Returns where the fork's next merge into `main` starts.
@@ -1049,6 +1067,92 @@ async fn a_first_commit_over_the_allowance_has_no_split_hint() {
     );
 }
 
+/// Checks that the split hint measures a range as the planner plans a merge
+/// of it, when `main`'s rows are the fork's own at the range's start. After
+/// a first merge, three commits of the fork undelete, move, and delete a
+/// file each, update an attribute and a file's content, and create a
+/// directory and a file, and three more commits each create a file. With an
+/// allowance of exactly the planned bytes of a merge of the first three
+/// commits, a merge of all six has the third commit as its hint, and with
+/// one byte less, it doesn't.
+#[tokio::test]
+async fn the_split_hint_measures_a_range_as_the_planner_plans_it() {
+    let mut family = Family::new().await;
+    let undeleted = family.inode(&family.fork, "/old/x.txt").await;
+    let deleted = family
+        .fork()
+        .delete_path("/old/x.txt", None)
+        .await
+        .expect("delete");
+    family
+        .merge("delete", None)
+        .await
+        .expect("merge the delete");
+    let path = |path: &str| AbsolutePath::parse(path).expect("path");
+    let bindings = vec![
+        FilesystemOperation::Undelete {
+            inode_id: undeleted,
+            deletion_seq: deleted.committed_seq,
+            destination_path: None,
+            destination_parent_inode_id: None,
+            destination_display_name: None,
+        },
+        FilesystemOperation::MovePath {
+            source_path: path("/docs/a.txt"),
+            destination_path: path("/docs/a2.txt"),
+            precondition: loonfs_types::DestinationPrecondition::default(),
+        },
+        FilesystemOperation::DeletePath {
+            path: path("/docs/b.txt"),
+            behavior: loonfs_types::DeleteDirectoryBehavior::NonRecursive,
+            expected_inode_id: None,
+        },
+        set_attribute("/p/q", "ours"),
+        create_directory("/n"),
+    ];
+    family
+        .commit_all(&family.fork, bindings)
+        .await
+        .expect("bindings");
+    let fork = family.fork();
+    fork.write_file_bytes("/p/q/f.txt", b"edited", None)
+        .await
+        .expect("content");
+    let through_seq = fork
+        .write_file_bytes("/n/c.txt", b"c", None)
+        .await
+        .expect("create")
+        .committed_seq;
+    for index in 0..3 {
+        fork.write_file_bytes(&format!("/more-{index}.txt"), b"more", None)
+            .await
+            .expect("more");
+    }
+
+    family.allowance.peak_per_planned_byte = 1;
+    let planned_bytes = family
+        .plan(Some(through_seq))
+        .await
+        .and_then(MergePlan::into_candidate)
+        .expect("a merge of the first three commits")
+        .wal_record_bytes_upper_bound();
+    // The first of the hint's probes ends at the third commit, and a range
+    // that ends later creates another file.
+    for (max_bytes, fits) in [(planned_bytes, true), (planned_bytes - 1, false)] {
+        family.allowance.max_bytes = max_bytes;
+        let error = family.plan(None).await.expect_err("too large");
+        let split_at_seq = error.details().and_then(|details| details.split_at_seq);
+        assert_matches!(
+            error,
+            CoreError::MergeTooLarge {
+                bound: MergeBound::MergeAllowance,
+                ..
+            }
+        );
+        assert_eq!(split_at_seq == Some(through_seq), fits, "{max_bytes}");
+    }
+}
+
 /// Checks that a file that the fork replaced with a new file of the same
 /// name merges. The merge deletes the old file before it creates the new
 /// one, so the name is free when the create needs the name.
@@ -1617,11 +1721,12 @@ async fn a_merge_through_a_sequence_below_the_head_leaves_the_rest() {
     assert_eq!(
         family.next_range().await,
         NextMergeRangeResponse {
-            merge: None,
-            next_after_seq: Some(fork_point),
             fork_point_seq: fork_point,
             source_head_seq: second.committed_seq,
-            rebootstrap_required: None,
+            outcome: NextMergeRangeOutcome::Open {
+                merge: None,
+                next_after_seq: fork_point,
+            },
         }
     );
 
@@ -1631,20 +1736,23 @@ async fn a_merge_through_a_sequence_below_the_head_leaves_the_rest() {
         .expect("merge through p");
     assert!(family.entry(&family.main, "/p.txt").await.is_some());
     assert!(family.entry(&family.main, "/q.txt").await.is_none());
-    let range = family.next_range().await;
-    assert_eq!(range.next_after_seq, Some(first.committed_seq));
     assert_eq!(
-        range.merge,
-        Some(Merge {
-            source_namespace_id: family.fork.clone(),
-            source_after_seq: fork_point,
-            source_through_seq: first.committed_seq,
-        })
+        family.next_range().await.outcome,
+        NextMergeRangeOutcome::Open {
+            merge: Some(Merge {
+                source_namespace_id: family.fork.clone(),
+                source_after_seq: fork_point,
+                source_through_seq: first.committed_seq,
+            }),
+            next_after_seq: first.committed_seq,
+        }
     );
     family.merge("rest", None).await.expect("merge the rest");
     assert!(family.entry(&family.main, "/q.txt").await.is_some());
-    let range = family.next_range().await;
-    assert_eq!(range.next_after_seq, Some(second.committed_seq));
+    assert_matches!(
+        family.next_range().await.outcome,
+        NextMergeRangeOutcome::Open { next_after_seq, .. } if next_after_seq == second.committed_seq
+    );
 
     let error = family
         .merge("nothing", None)
@@ -1731,8 +1839,8 @@ async fn a_reused_commit_id_with_another_request_conflicts() {
 /// Checks that a merge that needs history below a retention floor returns
 /// `rebootstrap_required`, and that the details say which floor: `main`'s
 /// floor above the fork point, or the fork's own floor above the range's
-/// start. The next-range query reports the same details, and no start when
-/// the fork point is below `main`'s floor.
+/// start. The next-range query reports which floor refuses the merge, and
+/// no start when the fork point is below `main`'s floor.
 #[tokio::test]
 async fn a_merge_below_either_floor_needs_a_rebootstrap() {
     let family = Family::new().await;
@@ -1760,9 +1868,12 @@ async fn a_merge_below_either_floor_needs_a_rebootstrap() {
     let details = error.details().expect("details");
     assert_eq!(details.fork_point_seq, Some(fork_point));
     assert_eq!(details.retention_floor_seq, Some(floor));
-    let range = family.next_range().await;
-    assert_eq!(range.next_after_seq, None);
-    assert_eq!(range.rebootstrap_required, Some(details));
+    assert_eq!(
+        family.next_range().await.outcome,
+        NextMergeRangeOutcome::ForkPointBelowFloor {
+            retention_floor_seq: floor,
+        }
+    );
 
     let family = Family::new().await;
     let fork_point = resolve_path(&family.store, &family.main, "/")
@@ -1788,9 +1899,14 @@ async fn a_merge_below_either_floor_needs_a_rebootstrap() {
     assert_eq!(details.actual_after_seq, Some(fork_point));
     assert_eq!(details.retention_floor_seq, Some(floor));
     assert_eq!(details.fork_point_seq, None);
-    let range = family.next_range().await;
-    assert_eq!(range.next_after_seq, Some(fork_point));
-    assert_eq!(range.rebootstrap_required, Some(details));
+    assert_eq!(
+        family.next_range().await.outcome,
+        NextMergeRangeOutcome::RangeStartBelowFloor {
+            merge: None,
+            next_after_seq: fork_point,
+            retention_floor_seq: floor,
+        }
+    );
 }
 
 /// Checks that a namespace that isn't a fork of `main` can't be merged into

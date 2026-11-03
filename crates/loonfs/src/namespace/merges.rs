@@ -60,12 +60,12 @@ impl<M: Mode> Namespace<M> {
     /// starts after, as [`Namespace::merge_fork`] finds it. When this
     /// namespace is a rebase's new fork for `source_namespace_id`, the start
     /// comes from the new fork's replay commits or its `resume_after_seq`, as
-    /// it does for a rebase. When a merge would return
-    /// `rebootstrap_required`, the response includes that error's details in
-    /// place of the error. A handle with a subject needs an administrator in
-    /// both namespaces, as the change feed does. A source that doesn't exist,
-    /// was deleted, or isn't a fork of this namespace returns
-    /// `invalid_request`.
+    /// it does for a rebase. When a retention floor would refuse the merge
+    /// with `rebootstrap_required`, the response's outcome says which floor
+    /// instead of returning the error. A handle with a subject needs an
+    /// administrator in both namespaces, as the change feed does. A source
+    /// that doesn't exist, was deleted, or isn't a fork of this namespace
+    /// returns `invalid_request`.
     pub async fn next_merge_range(
         &self,
         source_namespace_id: &NamespaceId,

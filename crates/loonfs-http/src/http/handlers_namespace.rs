@@ -470,7 +470,7 @@ pub(super) async fn merge_fork(
         path = "/v0/namespaces/{namespace_id}/merges",
         tag = "namespaces",
         summary = "Get a fork's next merge range",
-        description = "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a merge would return `rebootstrap_required`, the response includes that error's details in `rebootstrap_required` instead of failing.",
+        description = "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `rebootstrap_required`, the response's `outcome` says which floor instead of failing.",
         params(
             ("namespace_id" = String, Path, description = "The namespace that the fork merges into."),
             NextMergeRangeQuery
