@@ -23,6 +23,7 @@
 mod admission;
 mod delete_barrier;
 mod fold_trigger;
+mod hint_raises;
 mod inline_content;
 pub(crate) mod metrics;
 mod queue;

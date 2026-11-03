@@ -2,6 +2,7 @@
 //! the publisher make to a namespace.
 
 use super::admission::{AdmissionPermit, PublicationAdmission};
+use super::hint_raises::HintRaises;
 use super::{lock_state, FoldTrigger, NamespacePublisher, PublisherContext};
 use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
@@ -11,12 +12,10 @@ use crate::{
     MetadataMaintenanceOutcome, Result, SharedObjectStore, WriterState,
 };
 use futures::future::BoxFuture;
-use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
 use loonfs_core::{Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -68,36 +67,7 @@ pub(super) struct RegistryShared {
     /// contain panics to keep the registry usable, so this — not a task
     /// join error — is what a drain reports.
     pub(super) panicked_units: AtomicUsize,
-    hint_raises: HintRaises,
-}
-
-/// The raises of namespace hints that this runtime started, so it raises
-/// each namespace's hint at most once per `HINT_RAISE_INTERVAL_MS`.
-#[derive(Default)]
-struct HintRaises {
-    /// When each raise that started less than `HINT_RAISE_INTERVAL_MS` ago
-    /// started, on the monotonic timer. Each raise removes the older
-    /// entries, so the map lists at most the namespaces whose hints this
-    /// runtime raised in the last interval.
-    started_at_ms: Mutex<HashMap<NamespaceId, u64>>,
-}
-
-impl HintRaises {
-    /// Records that a raise of the namespace's hint starts at `now_ms`, on
-    /// the monotonic timer, and returns whether it starts: `false` when this
-    /// runtime started a raise of that hint less than `HINT_RAISE_INTERVAL_MS`
-    /// ago.
-    fn start(&self, namespace_id: &NamespaceId, now_ms: u64) -> bool {
-        let mut started_at_ms = lock_state(&self.started_at_ms);
-        started_at_ms.retain(|_, at_ms| now_ms < at_ms.saturating_add(HINT_RAISE_INTERVAL_MS));
-        match started_at_ms.entry(namespace_id.clone()) {
-            Entry::Occupied(_) => false,
-            Entry::Vacant(entry) => {
-                entry.insert(now_ms);
-                true
-            }
-        }
-    }
+    pub(super) hint_raises: HintRaises,
 }
 
 pub(super) struct RegistryState {
@@ -275,38 +245,6 @@ impl RegistryShared {
             .sessions
             .get(namespace_id)
             .map(|live| live.publisher.clone())
-    }
-
-    /// Raises the namespace's hint to `manifest_no`, a manifest that this
-    /// runtime published, with one compare-and-swap, unless this runtime
-    /// started a raise of the namespace's hint less than
-    /// `HINT_RAISE_INTERVAL_MS` ago (format spec, "The current manifest and
-    /// WAL tip").
-    ///
-    /// A skipped raise returns at once, and a failed raise is logged and
-    /// ignored. Either leaves the hint behind the newest manifest until a
-    /// later publication raises it, and discovery probes past a hint that
-    /// lags.
-    pub(super) async fn raise_hint(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
-        let runtime_core = &self.context.runtime_core;
-        if !self
-            .hint_raises
-            .start(namespace_id, runtime_core.timer().monotonic_now_ms())
-        {
-            return;
-        }
-        if let Err(error) = runtime_core
-            .namespace_store(namespace_id)
-            .raise_hint(manifest_no, None)
-            .await
-        {
-            tracing::debug!(
-                namespace_id = %namespace_id,
-                manifest_no = %manifest_no,
-                error = %error,
-                "the namespace hint raise failed, and a later publication raises the hint"
-            );
-        }
     }
 }
 
@@ -584,7 +522,8 @@ impl PublisherRegistry {
     }
 
     /// Waits for all current publisher workers, folds, and compactions to
-    /// finish, and with them the hint raises that their publications started.
+    /// finish, and with them the hint raises that their publications started,
+    /// except a trailing raise that waits for the end of its interval.
     ///
     /// Folds are waited for before compactions, because a fold starts its
     /// session's compaction.
@@ -626,9 +565,9 @@ impl PublisherRegistry {
     }
 
     /// Raises the namespace's hint to `manifest_no`, a manifest that this
-    /// runtime published, after the publication has returned, unless this
-    /// runtime started a raise of that hint less than
-    /// `HINT_RAISE_INTERVAL_MS` ago.
+    /// runtime published, after the publication has returned, or leaves the
+    /// raise to the trailing raise when this runtime started a raise of that
+    /// hint less than `HINT_RAISE_INTERVAL_MS` ago.
     pub(crate) async fn raise_hint(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
         self.shared.raise_hint(namespace_id, manifest_no).await;
     }
